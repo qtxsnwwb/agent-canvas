@@ -13,11 +13,12 @@ import {
   useStore,
   type Edge,
   type NodeHandle,
+  type Viewport,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import './canvas.css';
 import { TURN_HEADER } from './layout';
-import { followTarget } from './follow';
+import { followTarget, viewportMoved } from './follow';
 import { sizeOf } from './sizes';
 import type { CanvasSnapshot } from './useCanvas';
 import type { TurnSummary, ViewEdge } from './view';
@@ -170,11 +171,15 @@ function miniMapColor(n: FlowNode): string {
 const FOLLOW_LIFT = 0.15;
 const FOLLOW_DURATION = 200;
 
+/** Longer than FOLLOW_DURATION: clears the programmatic flag if React Flow emits no move-end event. */
+const PROGRAMMATIC_TIMEOUT = FOLLOW_DURATION + 150;
+
 /**
- * Keeps the latest node in view (slightly below centre) until the user pans or zooms.
- * `onMoveStart` is passed to React Flow: a non-null event means the user moved the viewport.
+ * Keeps the latest node in view (slightly below centre) until the viewport changes for a reason other than our own
+ * setCenter. Move events do not say who moved the viewport (Controls and MiniMap look programmatic, a plain click can
+ * start a zoom gesture), so we compare the viewport against its value at move start while no follow move is running.
  */
-function useFollow(snapshot: CanvasSnapshot): { following: boolean; resume(): void; onMoveStart(event: unknown): void } {
+function useFollow(snapshot: CanvasSnapshot) {
   const { setCenter, getZoom } = useReactFlow();
   const [following, setFollowing] = useState(true);
   const ready = useStore((s) => s.width > 0 && s.height > 0 && s.panZoom !== null);
@@ -182,21 +187,38 @@ function useFollow(snapshot: CanvasSnapshot): { following: boolean; resume(): vo
   const placed = useRef(false);
   const heightRef = useRef(height);
   heightRef.current = height;
+  const programmatic = useRef(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const startVp = useRef<Viewport | null>(null);
   const target = followTarget(snapshot);
   const tx = target?.x;
   const ty = target?.y;
+  useEffect(() => () => clearTimeout(timer.current), []);
   useEffect(() => {
     // `ready` includes the zoom pane, so setCenter takes effect now.
     if (!following || !ready || tx === undefined || ty === undefined) return;
     const first = !placed.current;
     placed.current = true;
     const zoom = first ? 1 : getZoom();
+    programmatic.current = true;
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => { programmatic.current = false; }, PROGRAMMATIC_TIMEOUT);
     void setCenter(tx, ty - (FOLLOW_LIFT * heightRef.current) / zoom, first ? { zoom } : { zoom, duration: FOLLOW_DURATION });
   }, [following, ready, tx, ty, setCenter, getZoom]);
+
+  const check = (vp: Viewport) => {
+    if (!programmatic.current && startVp.current && viewportMoved(startVp.current, vp)) setFollowing(false);
+  };
   return {
     following,
-    resume: () => setFollowing(true),
-    onMoveStart: (event) => { if (event) setFollowing(false); },
+    resume: () => { placed.current = true; setFollowing(true); }, // keep the user's zoom
+    onMoveStart: (_: unknown, vp: Viewport) => { startVp.current = vp; },
+    onMove: (_: unknown, vp: Viewport) => check(vp),
+    onMoveEnd: (_: unknown, vp: Viewport) => {
+      check(vp);
+      programmatic.current = false;
+      clearTimeout(timer.current);
+    },
   };
 }
 
@@ -221,7 +243,9 @@ function CanvasInner({ snapshot, selectedId, onSelect, onToggleTurn }: CanvasPro
           else if (n.type === 'graphNode') onSelect(n.id);
         }}
         onPaneClick={() => onSelect(null)}
-        onMoveStart={(event) => follow.onMoveStart(event)}
+        onMoveStart={follow.onMoveStart}
+        onMove={follow.onMove}
+        onMoveEnd={follow.onMoveEnd}
         nodesDraggable={false}
         nodesConnectable={false}
         elementsSelectable

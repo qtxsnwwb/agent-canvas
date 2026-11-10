@@ -1,7 +1,7 @@
 import { expect, test } from 'vitest';
 import { emptyGraph, type Graph, type GraphNode, type NodeKind } from '@claude-canvas/shared';
 import { buildView } from '../src/canvas/view';
-import { followTarget } from '../src/canvas/follow';
+import { followTarget, viewportMoved } from '../src/canvas/follow';
 
 const EPOCH = Date.parse('2026-01-01T00:00:00Z');
 function node(id: string, kind: NodeKind, turnId: string, tMs: number): GraphNode {
@@ -37,4 +37,12 @@ test('最新节点尚无位置或图为空时返回 null', () => {
   const view = buildView(fiveTurns(), new Map());
   expect(followTarget({ view, positions: {} })).toBeNull();
   expect(followTarget({ view: buildView(emptyGraph(), new Map()), positions: {} })).toBeNull();
+});
+
+test('viewportMoved：相同或亚阈值抖动不算移动，平移或缩放算', () => {
+  const a = { x: 10, y: 20, zoom: 1 };
+  expect(viewportMoved(a, { ...a })).toBe(false);
+  expect(viewportMoved(a, { x: 10.3, y: 19.8, zoom: 1.0005 })).toBe(false);
+  expect(viewportMoved(a, { x: 12, y: 20, zoom: 1 })).toBe(true);
+  expect(viewportMoved(a, { x: 10, y: 20, zoom: 1.2 })).toBe(true);
 });
