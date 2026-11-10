@@ -13,7 +13,7 @@ class FakeWorker implements WorkerLike {
   fail(i: number, error: string): void { this.onmessage?.({ data: { id: this.sent[i]!.id, error } }); }
 }
 const input = (key: string, ids: string[] = ['a']): TurnLayoutInput => ({ key, nodes: ids.map((id) => ({ id, width: 10, height: 10 })), edges: [] });
-const result = (key: string, w = 10): TurnLayout => ({ key, width: w, height: 10, positions: { a: { x: 0, y: 0 } } });
+const result = (key: string, w = 10): TurnLayout => ({ key, width: w, height: 10, anchorX: 5, positions: { a: { x: 0, y: 0 } } });
 
 test('相同签名的请求只计算一次，之后走缓存', async () => {
   const w = new FakeWorker();

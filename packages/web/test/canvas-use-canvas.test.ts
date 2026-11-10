@@ -57,7 +57,7 @@ function fakeLayout() {
   const layoutOf = (r: Req): TurnLayout => {
     const positions: Record<string, { x: number; y: number }> = {};
     r.input.nodes.forEach((n, i) => { positions[n.id] = { x: r.n * 1000, y: i * 100 }; });
-    return { key: r.input.key, width: 300, height: r.input.nodes.length * 100, positions };
+    return { key: r.input.key, width: 300, height: r.input.nodes.length * 100, anchorX: 150, positions };
   };
   const settle = (r: Req, fn: () => void): void => {
     if (r.settled) throw new Error(`request ${r.n} already settled`);

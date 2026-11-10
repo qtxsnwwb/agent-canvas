@@ -25,6 +25,18 @@ export interface CanvasView {
   latestNodeId: string | null;
 }
 
+/** View nodes with two or more outgoing view edges: their outgoing edges are drawn as a fork. */
+export function forkSources(edges: readonly Pick<ViewEdge, 'from'>[]): Set<string> {
+  const out = new Map<string, number>();
+  const forks = new Set<string>();
+  for (const e of edges) {
+    const n = (out.get(e.from) ?? 0) + 1;
+    out.set(e.from, n);
+    if (n >= 2) forks.add(e.from);
+  }
+  return forks;
+}
+
 interface Entry { node: GraphNode; ms: number }
 
 function parseMs(ts: string): number {

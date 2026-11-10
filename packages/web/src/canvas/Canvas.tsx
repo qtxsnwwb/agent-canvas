@@ -21,8 +21,8 @@ import { TURN_HEADER } from './layout';
 import { followTarget, viewportMoved } from './follow';
 import { sizeOf } from './sizes';
 import type { CanvasSnapshot } from './useCanvas';
-import type { TurnSummary, ViewEdge } from './view';
-import { CanvasActions, nodeColor, nodeTypes, summaryColor, type FlowNode } from './nodes';
+import { forkSources, type TurnSummary, type ViewEdge } from './view';
+import { CanvasActions, isActive, nodeColor, nodeTypes, summaryColor, type FlowNode } from './nodes';
 
 export interface CanvasProps {
   snapshot: CanvasSnapshot;
@@ -127,33 +127,39 @@ function useFlowNodes(snapshot: CanvasSnapshot, selectedId: string | null): Flow
   }, [snapshot, selectedId]);
 }
 
-/** React Flow edges between drawn nodes; an edge into a running node is animated. */
+/**
+ * React Flow edges between drawn nodes. An edge out of a node with two or more outgoing edges is drawn in the fork
+ * colour; an edge into a running or awaiting-permission node is animated.
+ */
 function useFlowEdges(snapshot: CanvasSnapshot): Edge[] {
-  const cache = useRef(new Map<string, { src: ViewEdge; animated: boolean; edge: Edge }>());
+  type Cached = { src: ViewEdge; animated: boolean; fork: boolean; edge: Edge };
+  const cache = useRef(new Map<string, Cached>());
   return useMemo(() => {
     const prev = cache.current;
-    const next = new Map<string, { src: ViewEdge; animated: boolean; edge: Edge }>();
+    const next = new Map<string, Cached>();
     const out: Edge[] = [];
     const { view, positions } = snapshot;
+    const forks = forkSources(view.edges);
     for (const e of view.edges) {
       if (!positions[e.from] || !positions[e.to]) continue;
       const target = view.nodes.get(e.to);
-      const animated = target?.type === 'node' && target.node.status === 'running';
+      const animated = target?.type === 'node' && isActive(target.node.status);
+      const fork = forks.has(e.from);
       const old = prev.get(e.id);
       let edge: Edge;
-      if (old && old.animated === animated && old.src.from === e.from && old.src.to === e.to && old.src.kind === e.kind) {
+      if (old && old.animated === animated && old.fork === fork && old.src.from === e.from && old.src.to === e.to) {
         edge = old.edge;
       } else {
-        const color = e.kind === 'fork' ? EDGE_COLOR.fork : EDGE_COLOR.sequence;
+        const color = fork ? EDGE_COLOR.fork : EDGE_COLOR.sequence;
         edge = {
           id: e.id, source: e.from, target: e.to, type: 'smoothstep', animated,
           selectable: false, focusable: false,
-          className: `cc-edge cc-edge-${e.kind}`,
+          className: `cc-edge cc-edge-${fork ? 'fork' : 'sequence'}`,
           style: { stroke: color, strokeWidth: 1.5 },
           markerEnd: { type: MarkerType.ArrowClosed, color, width: 14, height: 14 },
         };
       }
-      next.set(e.id, { src: e, animated, edge });
+      next.set(e.id, { src: e, animated, fork, edge });
       out.push(edge);
     }
     cache.current = next;

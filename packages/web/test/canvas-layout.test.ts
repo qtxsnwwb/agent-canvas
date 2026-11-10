@@ -1,7 +1,7 @@
 import { expect, test } from 'vitest';
 import ELK from 'elkjs/lib/elk.bundled.js';
 import { emptyGraph, type Graph, type GraphEdge, type GraphNode, type NodeKind } from '@claude-canvas/shared';
-import { buildView } from '../src/canvas/view';
+import { buildView, type CanvasView } from '../src/canvas/view';
 import { layoutTurn, stackTurns, turnInput, turnSignature, TURN_GAP, TURN_HEADER, type ElkLike, type TurnLayout } from '../src/canvas/layout';
 
 const EPOCH = Date.parse('2026-01-01T00:00:00Z');
@@ -39,7 +39,7 @@ test('并行分叉的节点在同一层、左右排开且按输入顺序', async
 
 test('单节点不调用 elk', async () => {
   const never: ElkLike = { layout: () => { throw new Error('called'); } };
-  expect(await layoutTurn(never, { key: 't', nodes: [n('a', 340, 60)], edges: [] })).toEqual({ key: 't', width: 340, height: 60, positions: { a: { x: 0, y: 0 } } });
+  expect(await layoutTurn(never, { key: 't', nodes: [n('a', 340, 60)], edges: [] })).toEqual({ key: 't', width: 340, height: 60, anchorX: 170, positions: { a: { x: 0, y: 0 } } });
 });
 
 test('没有边的多个节点也不重叠（占位节点尚未接上）', async () => {
@@ -48,15 +48,15 @@ test('没有边的多个节点也不重叠（占位节点尚未接上）', async
   expect(Math.abs(a.x - b.x) >= 240 || Math.abs(a.y - b.y) >= 52).toBe(true);
 });
 
-test('stackTurns：轮次居中堆叠；给最后一个轮次加高不改变前面轮次的任何坐标', () => {
-  const t1: TurnLayout = { key: 't1', width: 300, height: 100, positions: { a: { x: 0, y: 0 }, b: { x: 60, y: 48 } } };
-  const t2: TurnLayout = { key: 't2', width: 500, height: 80, positions: { c: { x: 130, y: 0 } } };
+test('stackTurns：轮次按锚点居中堆叠；给最后一个轮次加高不改变前面轮次的任何坐标', () => {
+  const t1: TurnLayout = { key: 't1', width: 300, height: 100, anchorX: 150, positions: { a: { x: 0, y: 0 }, b: { x: 60, y: 48 } } };
+  const t2: TurnLayout = { key: 't2', width: 500, height: 80, anchorX: 250, positions: { c: { x: 130, y: 0 } } };
   const s = stackTurns([t1, t2]);
   expect(s.turnBoxes.t1).toEqual({ x: -150, y: 0, width: 300, height: TURN_HEADER + 100 });
   expect(s.positions.a).toEqual({ x: -150, y: TURN_HEADER });
   expect(s.turnBoxes.t2!.y).toBe(TURN_HEADER + 100 + TURN_GAP);
   expect(s.positions.c).toEqual({ x: -250 + 130, y: TURN_HEADER + 100 + TURN_GAP + TURN_HEADER });
-  const s2 = stackTurns([t1, { ...t2, height: 400, width: 900, positions: { c: { x: 330, y: 0 }, d: { x: 0, y: 300 } } }]);
+  const s2 = stackTurns([t1, { ...t2, height: 400, width: 900, anchorX: 450, positions: { c: { x: 330, y: 0 }, d: { x: 0, y: 300 } } }]);
   expect(s2.positions.a).toEqual(s.positions.a);
   expect(s2.positions.b).toEqual(s.positions.b);
   expect(s2.turnBoxes.t1).toEqual(s.turnBoxes.t1);
@@ -71,4 +71,47 @@ test('turnInput 只带本轮次内部的边；turnSignature 随节点或边变�
   expect(turnSignature(input)).toBe(turnSignature(turnInput(v, v.turns[0]!)));
   expect(turnSignature({ ...input, nodes: [...input.nodes, n('z')] })).not.toBe(turnSignature(input));
   expect(turnSignature({ ...input, edges: input.edges.slice(1) })).not.toBe(turnSignature(input));
+});
+
+test('stackTurns：每个轮次的第一个节点中心都在 x = 0（直的主干），加高最后一个轮次不改前面的坐标', () => {
+  // t1: first node a (width 240) starts at relative x 400 -> centre 520; t2: first node c (width 280) at 0 -> centre 140.
+  const t1: TurnLayout = { key: 't1', width: 900, height: 100, anchorX: 520, positions: { a: { x: 400, y: 0 }, b: { x: 0, y: 48 } } };
+  const t2: TurnLayout = { key: 't2', width: 600, height: 80, anchorX: 140, positions: { c: { x: 0, y: 0 } } };
+  const s = stackTurns([t1, t2]);
+  expect(s.positions.a!.x + 120).toBe(0);
+  expect(s.positions.c!.x + 140).toBe(0);
+  expect(s.turnBoxes.t1!.x + 520).toBe(0);
+  expect(s.turnBoxes.t2!.x + 140).toBe(0);
+  const s2 = stackTurns([t1, { ...t2, height: 300, width: 1200, anchorX: 700, positions: { c: { x: 560, y: 0 }, d: { x: 0, y: 200 } } }]);
+  expect(s2.positions.a).toEqual(s.positions.a);
+  expect(s2.positions.b).toEqual(s.positions.b);
+  expect(s2.turnBoxes.t1).toEqual(s.turnBoxes.t1);
+  expect(s2.positions.c!.x + 140).toBe(0);
+});
+
+test('layoutTurn 的 anchorX 是第一个输入节点的水平中心', async () => {
+  const l = await layoutTurn(elk, { key: 't', nodes: [n('a', 280, 64), n('b1'), n('b2')], edges: [{ id: 'a->b1', from: 'a', to: 'b1' }, { id: 'a->b2', from: 'a', to: 'b2' }] });
+  expect(l.anchorX).toBe(l.positions.a!.x + 140);
+});
+
+test('分叉：a → {b1,b2,b3} → c 时 a 与 c 的中心与 b2 的中心相差不到 1 px', async () => {
+  const bs = ['b1', 'b2', 'b3'];
+  const l = await layoutTurn(elk, {
+    key: 't',
+    nodes: [n('a'), ...bs.map((b) => n(b)), n('c')],
+    edges: [...bs.map((b) => ({ id: `a->${b}`, from: 'a', to: b })), ...bs.map((b) => ({ id: `${b}->c`, from: b, to: 'c' }))],
+  });
+  const cx = (id: string) => l.positions[id]!.x + 120;
+  expect(Math.abs(cx('a') - cx('b2'))).toBeLessThan(1);
+  expect(Math.abs(cx('c') - cx('b2'))).toBeLessThan(1);
+});
+
+test('turnInput 的边按实际输出的节点过滤，而不是按 turn.nodeIds', () => {
+  const v = buildView(twoTurnsLinked(), new Map());
+  const turn = v.turns[0]!;
+  const nodes = new Map(v.nodes);
+  nodes.delete('x1'); // listed in turn.nodeIds but missing from the view's node map
+  const input = turnInput({ ...v, nodes } as CanvasView, turn);
+  expect(input.nodes.map((x) => x.id)).toEqual(['p1', 'y1']);
+  expect(input.edges).toEqual([]);
 });

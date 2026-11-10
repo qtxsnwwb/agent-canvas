@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest';
 import { emptyGraph, type Graph, type GraphEdge, type GraphNode, type NodeKind } from '@claude-canvas/shared';
-import { buildView, PRELUDE_TURN } from '../src/canvas/view';
+import { buildView, forkSources, PRELUDE_TURN } from '../src/canvas/view';
 
 const EPOCH = Date.parse('2026-01-01T00:00:00Z');
 
@@ -84,4 +84,14 @@ test('latestNodeId 是时间最晚的主线节点；它在折叠轮次里时是�
   expect(buildView(emptyGraph(), new Map()).latestNodeId).toBeNull();
   expect(buildView(fiveTurnsOfThreeNodes(), new Map()).latestNodeId).toBe('y5');
   expect(buildView(fiveTurnsOfThreeNodes(), new Map([['t5', false]])).latestNodeId).toBe('turn:t5');
+});
+
+test('forkSources：出度 ≥ 2 的视图节点（不论边的 kind）', () => {
+  const edges = [
+    { id: 'a->b', from: 'a', to: 'b', kind: 'sequence' as const },
+    { id: 'a->c', from: 'a', to: 'c', kind: 'sequence' as const },
+    { id: 'b->d', from: 'b', to: 'd', kind: 'fork' as const },
+  ];
+  expect([...forkSources(edges)]).toEqual(['a']);
+  expect(forkSources([]).size).toBe(0);
 });
