@@ -520,3 +520,49 @@ test('hook 先到的工具节点：重放同一批原始事件得到相同节点
   expect(second.nodes).toEqual(first.nodes);
   expect(first.nodes['tool:tu1']).toMatchObject({ durationMs: 15_000 });
 });
+
+test('JSONL 的 tool_use 写得比工具实际执行晚：确认后起点取较早的 hook 时间，耗时不为 0、起点不晚于结束', () => {
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x', { timestamp: AT(0) }),
+    preAt(AT(1)),
+    hook('PostToolUse', { tool_use_id: 'tu1', tool_response: 'ok' }, AT(3)),
+    useAt(AT(5)),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ timestamp: AT(1), endedAt: AT(3), durationMs: 2000 });
+});
+
+test('PreToolUse 晚于 JSONL tool_use 到达但接收时间更早：同样把起点降到较早的时间；两种到达顺序得到相同节点', () => {
+  const prompt = userPrompt('u1', null, 'x', { timestamp: AT(0) });
+  const result = toolResult('u2', 'a1', 'tu1', 'ok', false, { timestamp: AT(9) });
+  const hookFirst = run(new Normalizer(), [prompt, preAt(AT(1)), useAt(AT(5)), result]).graph.nodes['tool:tu1'];
+  const transcriptFirst = run(n, [prompt, useAt(AT(5)), preAt(AT(1)), result]).graph.nodes['tool:tu1'];
+  expect(transcriptFirst).toMatchObject({ timestamp: AT(1), endedAt: AT(9), durationMs: 8000 });
+  expect(transcriptFirst).toEqual(hookFirst);
+});
+
+test('PreToolUse 在 tool_result 之后到达且接收时间更早：推出的耗时按新起点重算；hook 给的耗时不变', () => {
+  const prompt = userPrompt('u1', null, 'x', { timestamp: AT(0) });
+  const derived = run(n, [prompt, useAt(AT(5)), toolResult('u2', 'a1', 'tu1', 'ok', false, { timestamp: AT(9) }), preAt(AT(1))]);
+  expect(derived.graph.nodes['tool:tu1']).toMatchObject({ timestamp: AT(1), endedAt: AT(9), durationMs: 8000 });
+  const fromHook = run(new Normalizer(), [
+    prompt,
+    useAt(AT(5)),
+    hook('PostToolUse', { tool_use_id: 'tu1', tool_response: 'ok', duration_ms: 1234 }, AT(9)),
+    preAt(AT(1)),
+  ]);
+  expect(fromHook.graph.nodes['tool:tu1']).toMatchObject({ timestamp: AT(1), durationMs: 1234 });
+});
+
+test('PreToolUse 晚于 JSONL 到达且接收时间更晚：起点保持 JSONL 的时间', () => {
+  const { graph } = run(n, [userPrompt('u1', null, 'x', { timestamp: AT(0) }), useAt(AT(5)), preAt(AT(6))]);
+  expect(graph.nodes['tool:tu1']!.timestamp).toBe(AT(5));
+});
+
+test('较早起点规则下重放同一批原始事件得到相同节点（两种到达顺序）', () => {
+  for (const order of ['hook', 'transcript'] as const) {
+    const prompt = userPrompt('u1', null, 'x', { timestamp: AT(0) });
+    const post = hook('PostToolUse', { tool_use_id: 'tu1', tool_response: 'ok' }, AT(3));
+    const events = order === 'hook' ? [prompt, preAt(AT(1)), post, useAt(AT(5))] : [prompt, useAt(AT(5)), preAt(AT(1)), post];
+    expect(run(new Normalizer(), events).graph.nodes).toEqual(run(new Normalizer(), events).graph.nodes);
+  }
+});

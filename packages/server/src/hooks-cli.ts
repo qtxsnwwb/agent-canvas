@@ -45,7 +45,7 @@ interface Loaded {
   /** Indentation unit to write with: the file's own (tab or N spaces), 2 spaces when it has no indented line. */
   indent: string;
   /** Why the file cannot be written back losslessly (checked only when a write is about to happen); null when it can. */
-  lossy: 'number' | 'duplicate' | null;
+  lossy: Lossy | null;
   /** The exact file text the plan is computed from; null when the file did not exist. */
   raw: string | null;
   mode: number | null;
@@ -113,14 +113,19 @@ function numberIsLossy(token: string): boolean {
   return canonicalNumber(token) !== canonicalNumber(JSON.stringify(JSON.parse(token)));
 }
 
+type Lossy = 'number' | 'duplicate' | 'reorder';
+
+const sameOrder = (a: string[], b: string[]): boolean => a.length === b.length && a.every((k, j) => k === b[j]);
+
 /**
  * Scans JSON text that JSON.parse already accepted for what JSON.parse -> JSON.stringify would silently change: a
- * number literal whose value a double cannot hold, or a key repeated within one object (parsing keeps only the last).
+ * number literal whose value a double cannot hold, a key repeated within one object (parsing keeps only the last), or
+ * an object whose key order JSON.parse -> JSON.stringify would change (integer-like keys are moved to the front).
  * Returns the first such problem in text order.
  */
-function findLossy(text: string): 'number' | 'duplicate' | null {
+function findLossy(text: string): Lossy | null {
   let i = 0;
-  let found: 'number' | 'duplicate' | null = null;
+  let found: Lossy | null = null;
   const skipWs = (): void => {
     while (i < text.length && (text[i] === ' ' || text[i] === '\t' || text[i] === '\n' || text[i] === '\r')) i++;
   };
@@ -189,7 +194,11 @@ function findLossy(text: string): 'number' | 'duplicate' | null {
       continue;
     }
     i++; // '}' or ']'
-    stack.pop();
+    const closed = stack.pop();
+    // JSON.parse puts integer-like keys ("0", "10") first, in numeric order: writing back would move them.
+    if (closed && found === null && !sameOrder([...closed], Object.keys(Object.fromEntries([...closed].map((k) => [k, 0]))))) {
+      found = 'reorder';
+    }
   }
   return found;
 }
@@ -261,7 +270,7 @@ function writeAtomically(file: string, next: Record<string, unknown>, loaded: Lo
   const { crlf, bom, indent, mode } = loaded;
   let text = `${JSON.stringify(next, null, indent)}\n`;
   if (crlf) text = text.replace(/\n/g, '\r\n');
-  if (bom) text = `﻿${text}`;
+  if (bom) text = `\uFEFF${text}`;
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.tmp-${process.pid}`;
   try {
@@ -281,6 +290,12 @@ function writeAtomically(file: string, next: Record<string, unknown>, loaded: Lo
 }
 
 type Mode = 'install' | 'uninstall';
+
+const LOSSY_MESSAGE: Record<Lossy, string> = {
+  number: '设置文件包含无法无损读写的数字',
+  duplicate: '设置文件包含重复的键',
+  reorder: '设置文件包含会被重新排序的键',
+};
 
 const STALE_MESSAGE = '设置文件在确认期间被修改，未做任何改动，请重新运行';
 
@@ -317,7 +332,7 @@ async function run(mode: Mode, opts: HooksCliOptions, io: HooksCliIo): Promise<n
 
   // Writing back goes through JSON.parse -> JSON.stringify: refuse when that would silently change the file.
   if (loaded.lossy !== null) {
-    io.err(`${loaded.lossy === 'number' ? '设置文件包含无法无损读写的数字' : '设置文件包含重复的键'}，未做任何改动：${file}`);
+    io.err(`${LOSSY_MESSAGE[loaded.lossy]}，未做任何改动：${file}`);
     return 1;
   }
 

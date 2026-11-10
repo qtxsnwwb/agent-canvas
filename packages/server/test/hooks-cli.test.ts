@@ -155,7 +155,7 @@ test('空白文件视为 {}，并备份原文件', async () => {
 });
 
 test('带 BOM、CRLF 的文件：写回保留 BOM 和 CRLF，且是合法 JSON', async () => {
-  seed('﻿{\r\n  "theme": "dark"\r\n}\r\n');
+  seed('\uFEFF{\r\n  "theme": "dark"\r\n}\r\n');
   expect(await runHooksInstall(opts(), fakeIo())).toBe(0);
   const text = fs.readFileSync(file, 'utf8');
   expect(text.charCodeAt(0)).toBe(0xfeff);
@@ -237,6 +237,27 @@ test.each([['{"a": 1, "a": 2}'], ['{"x": {"k": 1, "k": 1}}'], ['{"a": 1, "\\u006
     expect(io.errs).toEqual([`设置文件包含重复的键，未做任何改动：${file}`]);
     expect(fs.readFileSync(file, 'utf8')).toBe(content);
     expect(listDir()).toEqual(['settings.json']);
+  },
+);
+
+test.each([['{"a": 1, "2": 2}'], ['{"x": {"b": 1, "0": 2}}'], ['{"10": 1, "2": 2}'], ['{"l": [{"q": 1, "7": 2}]}'], ['{"a": 1, "4294967294": 2}']])(
+  '对象里有读写后会被重新排序的键 %s：拒绝写入，返回 1，文件未变',
+  async (content) => {
+    seed(content);
+    const io = fakeIo();
+    expect(await runHooksInstall(opts(), io)).toBe(1);
+    expect(io.errs).toEqual([`设置文件包含会被重新排序的键，未做任何改动：${file}`]);
+    expect(fs.readFileSync(file, 'utf8')).toBe(content);
+    expect(listDir()).toEqual(['settings.json']);
+  },
+);
+
+test.each([['{"0": 1, "2": 2, "a": 3}'], ['{"a": 1, "01": 2, "-1": 3, "1.5": 4, " 2": 5}'], ['{"a": 1, "4294967295": 2}']])(
+  '键顺序在读写后不变 %s：正常写入，顺序保留',
+  async (content) => {
+    seed(content);
+    expect(await runHooksInstall(opts(), fakeIo())).toBe(0);
+    expect(Object.keys(readJson()).filter((k) => k !== 'hooks')).toEqual(Object.keys(JSON.parse(content)));
   },
 );
 

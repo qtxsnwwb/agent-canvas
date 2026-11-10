@@ -261,7 +261,17 @@ export class Normalizer {
     changes: Change[],
   ): void {
     const id = `tool:${spec.toolUseId}`;
-    if (state.nodes.has(id)) return;
+    const existing = state.nodes.get(id);
+    if (existing) {
+      // The transcript record came first; a PreToolUse received earlier than that record still moves the start back.
+      const patch: Partial<GraphNode> = {};
+      this.earlierStart(state, existing, spec.timestamp, patch);
+      if (Object.keys(patch).length > 0) {
+        state.nodes.set(id, { ...existing, ...patch });
+        changes.push({ type: 'node_updated', sessionId: state.session.id, id, patch });
+      }
+      return;
+    }
     const node: GraphNode = {
       id,
       sessionId: state.session.id,
@@ -288,6 +298,24 @@ export class Normalizer {
     changes.push({ type: 'node_added', node, detail: { input: spec.input } });
     const meta = state.agentMetas.get(spec.toolUseId);
     if (meta) this.applyAgentMeta(state, meta, changes);
+  }
+
+  /**
+   * A tool node's start is the earlier of the times its PreToolUse hook and its transcript tool_use record give (the
+   * record can be written after the tool already ran), whichever arrived first. Adds `timestamp` to `patch` when
+   * `candidate` is earlier than the node's start, and re-derives a duration that was derived from the old start (a
+   * hook's duration_ms stays).
+   */
+  private earlierStart(state: SessionState, node: GraphNode, candidate: string | null, patch: Partial<GraphNode>): void {
+    if (candidate === null) return;
+    const next = Date.parse(candidate);
+    const current = Date.parse(node.timestamp);
+    if (Number.isNaN(next) || (!Number.isNaN(current) && next >= current)) return;
+    patch.timestamp = candidate;
+    if (node.endedAt !== null && node.durationMs !== null && !state.durationFromHook.has(node.id)) {
+      const derived = elapsedMs(candidate, node.endedAt);
+      if (derived !== null) patch.durationMs = derived;
+    }
   }
 
   private applyHook(event: Extract<RawEvent, { source: 'hook' }>, projectId: string): NormalizeResult {
@@ -845,15 +873,7 @@ export class Normalizer {
         messageId: meta.messageId,
         usage: meta.usage,
       };
-      const start = str(record.timestamp);
-      if (start !== null) {
-        patch.timestamp = start;
-        // A duration derived from the hook's start is re-derived from the authoritative one; a hook's duration_ms stays.
-        if (existing.endedAt !== null && existing.durationMs !== null && !state.durationFromHook.has(id)) {
-          const derived = elapsedMs(start, existing.endedAt);
-          if (derived !== null) patch.durationMs = derived;
-        }
-      }
+      this.earlierStart(state, existing, str(record.timestamp), patch);
       // An agent meta's description already owns the summary of a dispatch node.
       if (!pending) patch.summary = summary;
       state.nodes.set(id, { ...existing, ...patch });

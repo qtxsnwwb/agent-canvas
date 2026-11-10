@@ -19,8 +19,8 @@ CREATE TABLE IF NOT EXISTS raw_event (
 CREATE UNIQUE INDEX IF NOT EXISTS raw_event_transcript_dedupe
   ON raw_event (file, line_hash) WHERE source = 'transcript';
 CREATE INDEX IF NOT EXISTS raw_event_session ON raw_event (session_id, ingest_id);
--- raw_event_hook served the old hook-stats aggregation; hook_stat replaced it.
-DROP INDEX IF EXISTS raw_event_hook;
+-- raw_event_hook (event_name, received_at) WHERE source = 'hook' served the old hook-stats aggregation; openStore drops
+-- it after the one-time hook_stat backfill, which still uses it on databases that have it.
 CREATE INDEX IF NOT EXISTS raw_event_meta ON raw_event (file, ingest_id) WHERE source = 'meta';
 
 -- Per-event-name hook counters, bumped in the transaction that inserts the raw hook row. Not derived graph data:

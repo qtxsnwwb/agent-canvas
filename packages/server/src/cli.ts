@@ -71,7 +71,7 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
   let watcher: ReturnType<typeof startWatcher> | null = null;
   let pipeline: Pipeline;
   try {
-    store = openStore(config.dbPath);
+    store = openStore(config.dbPath, options.log ? { log: options.log } : {});
     pipeline = new Pipeline(store, config, { log: (line) => process.stderr.write(`${line}\n`) });
     const reason = rebuildReason(store);
     if (reason !== null) {

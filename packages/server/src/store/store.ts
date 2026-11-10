@@ -53,6 +53,8 @@ export interface StoreOptions {
   walSizeLimitBytes?: number;
   /** Receives every SQL statement executed (tests). */
   verbose?: (sql: unknown) => void;
+  /** Receives notices about slow one-time work done while opening (start prints them); silent when omitted. */
+  log?: (line: string) => void;
 }
 
 /** `%x%` with `\`, `%` and `_` escaped (use with ESCAPE '\\'). */
@@ -157,6 +159,12 @@ export interface Store {
 const SAMPLE_MAX = 500;
 /** meta key set once hook_stat holds every stored hook row (backfilled, or created empty with a new database). */
 const HOOK_STAT_READY = 'hook_stat_ready';
+/** The one-time hook_stat backfill query; served by the old raw_event_hook partial index when the database has it. */
+export const HOOK_STAT_BACKFILL_SELECT = `SELECT event_name, COUNT(*), MAX(received_at) FROM raw_event
+  WHERE source = 'hook' AND event_name IS NOT NULL AND received_at IS NOT NULL
+  GROUP BY event_name`;
+/** Printed (through StoreOptions.log) when opening a database runs that backfill. */
+export const HOOK_STAT_BACKFILL_NOTICE = 'claude-canvas counting stored hook events (one-time)…';
 
 interface RawRow {
   ingest_id: number;
@@ -404,20 +412,18 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     bumpHookStat.run(event.eventName, event.receivedAt);
     return id;
   });
-  // Databases from before hook_stat existed: backfill it once (one transaction, one raw_event pass), then never again.
-  // A database created just now has nothing to backfill.
+  // Databases from before hook_stat existed: backfill it once (one transaction), then never again. It runs before the
+  // old raw_event_hook index is dropped, so on such a database it reads that index instead of scanning raw_event
+  // bodies. A database created just now has nothing to backfill.
   db.transaction(() => {
     if (selectMeta.get(HOOK_STAT_READY) !== undefined) return;
     if (!created && db.prepare(`SELECT 1 FROM hook_stat LIMIT 1`).get() === undefined) {
-      db.exec(
-        `INSERT INTO hook_stat (event_name, count, last_at)
-         SELECT event_name, COUNT(*), MAX(received_at) FROM raw_event
-         WHERE source = 'hook' AND event_name IS NOT NULL AND received_at IS NOT NULL
-         GROUP BY event_name`,
-      );
+      options.log?.(HOOK_STAT_BACKFILL_NOTICE);
+      db.exec(`INSERT INTO hook_stat (event_name, count, last_at) ${HOOK_STAT_BACKFILL_SELECT}`);
     }
     upsertMeta.run(HOOK_STAT_READY, '1');
   })();
+  db.exec(`DROP INDEX IF EXISTS raw_event_hook`);
   const selectUnknown = db.prepare(`SELECT record_type, count, sample FROM unknown_stat ORDER BY record_type`);
   const selectFiles = db.prepare(`SELECT file, "offset", size FROM file_offset ORDER BY file`);
 

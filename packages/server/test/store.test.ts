@@ -1,6 +1,6 @@
 import { beforeEach, afterEach, expect, test, vi } from 'vitest';
 import type { Change, GraphNode, Session, SessionStatus } from '@claude-canvas/shared';
-import { CHANGE_LOG_MAX_ROWS, openStore, type Store } from '../src/store/store.js';
+import { CHANGE_LOG_MAX_ROWS, HOOK_STAT_BACKFILL_NOTICE, HOOK_STAT_BACKFILL_SELECT, openStore, type Store } from '../src/store/store.js';
 import { SCHEMA_SQL } from '../src/store/schema.js';
 
 let store: Store;
@@ -419,8 +419,22 @@ test('升级：已有数据库打开时从 raw_event 回填一次 hook_stat，�
     raw.exec(`DROP TABLE hook_stat`);
     raw.exec(`DELETE FROM meta WHERE key = 'hook_stat_ready'`);
     raw.exec(`CREATE INDEX raw_event_hook ON raw_event (event_name, received_at) WHERE source = 'hook'`);
+    raw.exec(`CREATE TABLE IF NOT EXISTS hook_stat (event_name TEXT PRIMARY KEY, count INTEGER NOT NULL, last_at TEXT NOT NULL)`);
+    // With the old index the backfill query reads only that index, never the raw_event table (and its bodies).
+    const plan = (raw.prepare(`EXPLAIN QUERY PLAN ${HOOK_STAT_BACKFILL_SELECT}`).all() as { detail: string }[]).map((r) => r.detail);
+    expect(plan.join(' | ')).toContain('raw_event_hook');
+    expect(plan.filter((l) => /SCAN raw_event(?! USING)/.test(l))).toEqual([]);
+    raw.exec(`DROP TABLE hook_stat`);
     raw.close();
-    const s = openStore(file);
+    const sql: string[] = [];
+    const logs: string[] = [];
+    const s = openStore(file, { verbose: (q) => sql.push(String(q)), log: (l) => logs.push(l) });
+    // The backfill ran while the index still existed: the index is dropped only after it.
+    const backfillAt = sql.findIndex((q) => q.includes('INSERT INTO hook_stat') && q.includes('GROUP BY event_name'));
+    const dropAt = sql.findIndex((q) => /DROP INDEX IF EXISTS raw_event_hook/.test(q));
+    expect(backfillAt).toBeGreaterThanOrEqual(0);
+    expect(dropAt).toBeGreaterThan(backfillAt);
+    expect(logs).toEqual([HOOK_STAT_BACKFILL_NOTICE]);
     try {
       expect(s.hookEventStats()).toEqual([
         { eventName: 'PreToolUse', count: 1, lastAt: '2026-01-01T00:00:03.000Z' },
@@ -431,8 +445,10 @@ test('升级：已有数据库打开时从 raw_event 回填一次 hook_stat，�
     } finally {
       s.close();
     }
-    // Reopening does not backfill again (the table is no longer empty).
-    const again = openStore(file);
+    // Reopening does not backfill again (the table is no longer empty), and prints nothing.
+    const againLogs: string[] = [];
+    const again = openStore(file, { log: (l) => againLogs.push(l) });
+    expect(againLogs).toEqual([]);
     try {
       expect(again.hookEventStats()).toContainEqual({ eventName: 'Stop', count: 3, lastAt: '2026-01-01T00:00:07.000Z' });
     } finally {
@@ -699,4 +715,11 @@ test('片段窗口不劈开代理对', () => {
     expect(m.snippet).toContain('NEEDLE');
     expect(Array.from(m.snippet).length).toBeLessThanOrEqual(80);
   }
+});
+
+test('新建的数据库打开时不回填、不打印', () => {
+  const logs: string[] = [];
+  const s = openStore(':memory:', { log: (l) => logs.push(l) });
+  s.close();
+  expect(logs).toEqual([]);
 });
