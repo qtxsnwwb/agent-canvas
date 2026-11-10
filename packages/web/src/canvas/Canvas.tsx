@@ -22,13 +22,22 @@ import { followTarget, resumeZoom, viewportMoved } from './follow';
 import { sizeOf } from './sizes';
 import { edgeZ, groupDepths, nodeZ } from './stacking';
 import type { CanvasSnapshot } from './useCanvas';
-import { forkSources, type TurnSummary, type ViewEdge } from './view';
+import { forkSources, type CanvasView, type TurnSummary, type ViewEdge } from './view';
+import type { UpstreamChain } from './chain';
 import { isActivationKey } from './format';
-import { CanvasActions, graphNodeAriaLabel, isActive, nodeColor, nodeTypes, summaryAriaLabel, summaryColor, type FlowNode } from './nodes';
+import {
+  CanvasActions, graphNodeAriaLabel, highlightClass, isActive, nodeColor, nodeTypes, summaryAriaLabel, summaryColor,
+  type FlowNode, type Highlight,
+} from './nodes';
 
 export interface CanvasProps {
   snapshot: CanvasSnapshot;
   selectedId: string | null;
+  /**
+   * upstreamChain(snapshot.view, selectedId), or EMPTY_CHAIN; highlighted in the causal view only. Pass a memoized
+   * value: a new object rebuilds the comparison for every node and edge.
+   */
+  chain: UpstreamChain;
   onSelect(id: string | null): void;
   onToggleTurn(turnKey: string): void;
   onShowFullTurn(turnKey: string): void;
@@ -39,6 +48,8 @@ export interface CanvasProps {
 }
 
 const EDGE_COLOR = { sequence: '#94a3b8', fork: '#6366f1' } as const;
+/** Edges on the selection's upstream chain (causal view); the nodes get the same colour as an outline (canvas.css). */
+const CHAIN_COLOR = '#f59e0b';
 /** Header strip height: the turn's reserved TURN_HEADER minus a small gap above its first node. */
 const HEADER_HEIGHT = TURN_HEADER - 6;
 const HEADER_MIN_WIDTH = 200;
@@ -77,8 +88,21 @@ function handlesFor(width: number, height: number): NodeHandle[] {
   return h;
 }
 
-/** React Flow nodes for the snapshot; an unchanged node keeps its previous object so React Flow skips it. */
-function useFlowNodes(snapshot: CanvasSnapshot, selectedId: string | null): FlowNode[] {
+/** Chain highlighting is on in the causal view while a node is selected (the chain then holds at least that node). */
+function chainActive(view: CanvasView, chain: UpstreamChain): boolean {
+  return view.mode === 'causal' && chain.nodeIds.size > 0;
+}
+/** The node wrapper's className: the container class (if any) and the highlight class. */
+function wrapperClass(container: boolean, highlight: Highlight): string | undefined {
+  const s = [container ? 'cc-container-node' : '', highlightClass(highlight)].filter(Boolean).join(' ');
+  return s === '' ? undefined : s;
+}
+
+/**
+ * React Flow nodes for the snapshot; an unchanged node keeps its previous object so React Flow skips it. The highlight
+ * state is part of the comparison, so a selection change only replaces the nodes whose state changed.
+ */
+function useFlowNodes(snapshot: CanvasSnapshot, selectedId: string | null, chain: UpstreamChain): FlowNode[] {
   const cache = useRef(new Map<string, FlowNode>());
   const last = useRef<FlowNode[] | null>(null);
   return useMemo(() => {
@@ -86,6 +110,9 @@ function useFlowNodes(snapshot: CanvasSnapshot, selectedId: string | null): Flow
     const next = new Map<string, FlowNode>();
     const out: FlowNode[] = [];
     const { view, positions, turnBoxes, containerBoxes } = snapshot;
+    const active = chainActive(view, chain);
+    const highlightOf = (id: string): Highlight => (!active ? 'none' : chain.nodeIds.has(id) ? 'chain' : 'dim');
+    const headerHighlight: Highlight = active ? 'dim' : 'none';
 
     // Headers first so they render beneath the nodes. A turn whose nodes have no position yet (an expand in flight)
     // gets no header: its box is still the old layout's.
@@ -99,10 +126,11 @@ function useFlowNodes(snapshot: CanvasSnapshot, selectedId: string | null): Flow
       const old = prev.get(id);
       const n: FlowNode = old && old.type === 'turnHeader' && samePos(old.position, position) && old.width === width
         && old.data.startedAt === turn.summary.startedAt && old.data.nodeCount === turn.summary.nodeCount
+        && old.data.highlight === headerHighlight
         ? old
         : {
-          id, type: 'turnHeader', position, width, height: HEADER_HEIGHT,
-          data: { turnKey: turn.key, startedAt: turn.summary.startedAt, nodeCount: turn.summary.nodeCount },
+          id, type: 'turnHeader', position, width, height: HEADER_HEIGHT, className: wrapperClass(false, headerHighlight),
+          data: { turnKey: turn.key, startedAt: turn.summary.startedAt, nodeCount: turn.summary.nodeCount, highlight: headerHighlight },
           // Declared (empty) handles: otherwise React Flow force-renders an unmeasured node even when off screen.
           handles: NO_HANDLES, selectable: false, focusable: false, draggable: false, connectable: false,
         };
@@ -112,14 +140,16 @@ function useFlowNodes(snapshot: CanvasSnapshot, selectedId: string | null): Flow
 
     const depths = groupDepths(view);
     const live = view.mode === 'live';
+    const causal = view.mode === 'causal';
     for (const vn of view.nodes.values()) {
       const position = positions[vn.id];
       if (!position) continue;
       // An expanded agent is drawn as a container once its box has landed; until then it keeps the collapsed size.
       const box = vn.type === 'node' && vn.expanded ? containerBoxes[vn.id] : undefined;
-      const { width, height } = box ?? sizeOf(vn);
+      const { width, height } = box ?? sizeOf(vn, view.mode);
       const zIndex = nodeZ(depths, vn);
       const selected = vn.id === selectedId;
+      const highlight = highlightOf(vn.id);
       const old = prev.get(vn.id);
       let n: FlowNode;
       if (vn.type === 'node') {
@@ -127,7 +157,8 @@ function useFlowNodes(snapshot: CanvasSnapshot, selectedId: string | null): Flow
         const expandable = live && vn.expandable;
         const d = old?.type === 'graphNode' ? old.data : undefined;
         n = old && d && d.node === vn.node && d.innerCount === vn.innerCount && d.expanded === vn.expanded
-          && d.expandable === expandable && d.container === container && old.zIndex === zIndex
+          && d.expandable === expandable && d.container === container && d.causal === causal && d.highlight === highlight
+          && old.zIndex === zIndex
           && samePos(old.position, position) && old.selected === selected && old.width === width && old.height === height
           ? old
           : {
@@ -136,27 +167,29 @@ function useFlowNodes(snapshot: CanvasSnapshot, selectedId: string | null): Flow
             // The wrapper of a container lets clicks on its body through to the pane; its head opts back in (see
             // canvas.css). Inline, because React Flow sets `pointer-events: all` inline on the wrapper and spreads
             // node.style after it.
-            className: container ? 'cc-container-node' : undefined,
+            className: wrapperClass(container, highlight),
             style: container ? CONTAINER_STYLE : undefined,
-            data: { node: vn.node, innerCount: vn.innerCount, expanded: vn.expanded, expandable, container },
+            data: { node: vn.node, innerCount: vn.innerCount, expanded: vn.expanded, expandable, container, causal, highlight },
             handles: handlesFor(width, height), draggable: false, connectable: false,
           };
       } else if (vn.type === 'turn_summary') {
-        n = old && old.type === 'turnSummary' && sameSummary(old.data.summary, vn.summary)
+        n = old && old.type === 'turnSummary' && sameSummary(old.data.summary, vn.summary) && old.data.highlight === highlight
           && samePos(old.position, position) && old.selected === selected && old.width === width && old.height === height
           ? old
           : {
             id: vn.id, type: 'turnSummary', position, width, height, selected, ariaLabel: summaryAriaLabel(vn.summary),
-            data: { summary: vn.summary },
+            className: wrapperClass(false, highlight),
+            data: { summary: vn.summary, highlight },
             handles: handlesFor(width, height), draggable: false, connectable: false,
           };
       } else {
         n = old && old.type === 'earlier' && old.data.count === vn.count && old.data.toolCount === vn.toolCount
-          && old.data.failedCount === vn.failedCount && samePos(old.position, position) && old.width === width && old.height === height
+          && old.data.failedCount === vn.failedCount && old.data.highlight === highlight
+          && samePos(old.position, position) && old.width === width && old.height === height
           ? old
           : {
-            id: vn.id, type: 'earlier', position, width, height,
-            data: { turnKey: vn.turnKey, count: vn.count, toolCount: vn.toolCount, failedCount: vn.failedCount },
+            id: vn.id, type: 'earlier', position, width, height, className: wrapperClass(false, highlight),
+            data: { turnKey: vn.turnKey, count: vn.count, toolCount: vn.toolCount, failedCount: vn.failedCount, highlight },
             handles: handlesFor(width, height), selectable: false, focusable: false, draggable: false, connectable: false,
           };
       }
@@ -165,15 +198,15 @@ function useFlowNodes(snapshot: CanvasSnapshot, selectedId: string | null): Flow
     }
     cache.current = next;
     return (last.current = sameElements(last.current, out));
-  }, [snapshot, selectedId]);
+  }, [snapshot, selectedId, chain]);
 }
 
 /**
  * React Flow edges between drawn nodes. An edge out of a node with two or more outgoing edges is drawn in the fork
  * colour; an edge into a running or awaiting-permission node is animated.
  */
-function useFlowEdges(snapshot: CanvasSnapshot): Edge[] {
-  type Cached = { src: ViewEdge; animated: boolean; fork: boolean; zIndex: number; edge: Edge };
+function useFlowEdges(snapshot: CanvasSnapshot, chain: UpstreamChain): Edge[] {
+  type Cached = { src: ViewEdge; animated: boolean; fork: boolean; zIndex: number; highlight: Highlight; edge: Edge };
   const cache = useRef(new Map<string, Cached>());
   const last = useRef<Edge[] | null>(null);
   return useMemo(() => {
@@ -183,33 +216,38 @@ function useFlowEdges(snapshot: CanvasSnapshot): Edge[] {
     const { view, positions } = snapshot;
     const forks = forkSources(view.edges, (id) => view.nodes.get(id)?.type === 'earlier');
     const depths = groupDepths(view);
+    const active = chainActive(view, chain);
     for (const e of view.edges) {
       if (!positions[e.from] || !positions[e.to]) continue;
       const target = view.nodes.get(e.to);
       const animated = target?.type === 'node' && isActive(target.node.status);
       const fork = forks.has(e.from);
+      const highlight: Highlight = !active ? 'none' : chain.edgeIds.has(e.id) ? 'chain' : 'dim';
       // Inside a container: above its background, below the nodes of the same group.
       const zIndex = edgeZ(view, depths, e);
       const old = prev.get(e.id);
       let edge: Edge;
-      if (old && old.animated === animated && old.fork === fork && old.zIndex === zIndex && old.src.from === e.from && old.src.to === e.to) {
+      if (old && old.animated === animated && old.fork === fork && old.zIndex === zIndex && old.highlight === highlight
+        && old.src.from === e.from && old.src.to === e.to) {
         edge = old.edge;
       } else {
-        const color = fork ? EDGE_COLOR.fork : EDGE_COLOR.sequence;
+        const onChain = highlight === 'chain';
+        const color = onChain ? CHAIN_COLOR : fork ? EDGE_COLOR.fork : EDGE_COLOR.sequence;
+        const hl = highlightClass(highlight);
         edge = {
           id: e.id, source: e.from, target: e.to, type: 'smoothstep', animated, zIndex,
           selectable: false, focusable: false,
-          className: `cc-edge cc-edge-${fork ? 'fork' : 'sequence'}`,
-          style: { stroke: color, strokeWidth: 1.5 },
+          className: `cc-edge cc-edge-${fork ? 'fork' : 'sequence'}${hl !== '' ? ` ${hl}` : ''}`,
+          style: { stroke: color, strokeWidth: onChain ? 2.5 : 1.5 },
           markerEnd: { type: MarkerType.ArrowClosed, color, width: 14, height: 14 },
         };
       }
-      next.set(e.id, { src: e, animated, fork, zIndex, edge });
+      next.set(e.id, { src: e, animated, fork, zIndex, highlight, edge });
       out.push(edge);
     }
     cache.current = next;
     return (last.current = sameElements(last.current, out));
-  }, [snapshot]);
+  }, [snapshot, chain]);
 }
 
 function miniMapColor(n: FlowNode): string {
@@ -318,14 +356,14 @@ function useHeaderFocus(): (turnKey: string) => void {
   }, []);
 }
 
-function CanvasInner({ snapshot, selectedId, onSelect, onToggleTurn, onShowFullTurn, onToggleAgent, onFollowingChange }: CanvasProps) {
-  const nodes = useFlowNodes(snapshot, selectedId);
-  const edges = useFlowEdges(snapshot);
+function CanvasInner({ snapshot, selectedId, chain, onSelect, onToggleTurn, onShowFullTurn, onToggleAgent, onFollowingChange }: CanvasProps) {
+  const nodes = useFlowNodes(snapshot, selectedId, chain);
+  const edges = useFlowEdges(snapshot, chain);
   const follow = useFollow(snapshot);
   const { following } = follow;
   useEffect(() => { onFollowingChange?.(following); }, [following, onFollowingChange]);
 
-  // A view switch (live / topology) resumes following, as "回到最新" does.
+  // A view switch (live / topology / causal) resumes following, as "回到最新" does.
   const mode = snapshot.view.mode;
   const lastMode = useRef(mode);
   const resumeRef = useRef(follow.resume);

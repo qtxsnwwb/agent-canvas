@@ -3,6 +3,7 @@ import { Handle, Position, type Node, type NodeProps, type NodeTypes } from '@xy
 import type { GraphNode, NodeKind, NodeStatus } from '@claude-canvas/shared';
 import { NODE_STATUS_LABEL } from '../labels';
 import { formatDuration, nodeAriaLabel } from './format';
+import { THINKING_NOT_RECORDED } from './reasoning';
 import type { TurnSummary } from './view';
 
 export const KIND_LABEL: Record<NodeKind, string> = {
@@ -61,11 +62,26 @@ export function isActive(status: NodeStatus | null): boolean {
  * is expanded in the view. `container`: drawn as a container (expanded and its box has landed; until then it keeps the
  * collapsed size).
  */
-export type GraphNodeData = { node: GraphNode; innerCount: number; expandable: boolean; expanded: boolean; container: boolean };
+export type GraphNodeData = {
+  node: GraphNode; innerCount: number; expandable: boolean; expanded: boolean; container: boolean;
+  /** Causal view: a thinking node is drawn with two rows (see sizeOf). */
+  causal: boolean;
+  highlight: Highlight;
+};
+/**
+ * Causal view with a selection: 'chain' for nodes / edges on the selection's upstream chain, 'dim' for the rest; 'none'
+ * otherwise. Drawn through the React Flow wrapper's className only (never changes a size or position).
+ */
+export type Highlight = 'chain' | 'dim' | 'none';
 export type GraphFlowNode = Node<GraphNodeData, 'graphNode'>;
-export type SummaryFlowNode = Node<{ summary: TurnSummary }, 'turnSummary'>;
-export type HeaderFlowNode = Node<{ turnKey: string; startedAt: string; nodeCount: number }, 'turnHeader'>;
-export type EarlierFlowNode = Node<{ turnKey: string; count: number; toolCount: number; failedCount: number }, 'earlier'>;
+export type SummaryFlowNode = Node<{ summary: TurnSummary; highlight: Highlight }, 'turnSummary'>;
+export type HeaderFlowNode = Node<{ turnKey: string; startedAt: string; nodeCount: number; highlight: Highlight }, 'turnHeader'>;
+export type EarlierFlowNode = Node<{ turnKey: string; count: number; toolCount: number; failedCount: number; highlight: Highlight }, 'earlier'>;
+
+/** The wrapper class for a highlight state ('' for none). */
+export function highlightClass(h: Highlight): string {
+  return h === 'chain' ? 'cc-hl-chain' : h === 'dim' ? 'cc-hl-dim' : '';
+}
 export type FlowNode = GraphFlowNode | SummaryFlowNode | HeaderFlowNode | EarlierFlowNode;
 
 /** `fromKeyboard`: the action came from the keyboard, so focus should land on the turn's header once it exists. */
@@ -107,6 +123,24 @@ function GraphNodeView({ data, width, height, selected }: NodeProps<GraphFlowNod
   const style = boxStyle(width, height, nodeColor(node));
   const kindLabel = KIND_LABEL[node.kind] ?? node.kind;
   const tag = unconfirmed ? <span className="cc-tag">未确认</span> : null;
+
+  // Causal view: thinking gets two rows, "思考 · 3.4s" and its text (or a grey placeholder when none was recorded).
+  if (node.kind === 'thinking' && data.causal) {
+    return (
+      <div className={className} style={style} title={node.summary || undefined}>
+        <Handles />
+        <div className="cc-row">
+          <span className="cc-ellipsis cc-grow">{[kindLabel, duration].filter(Boolean).join(' · ')}</span>
+          {tag}
+        </div>
+        <div className="cc-row cc-summary">
+          {node.summary !== ''
+            ? <span className="cc-ellipsis cc-grow">{node.summary}</span>
+            : <span className="cc-ellipsis cc-grow cc-muted">{THINKING_NOT_RECORDED}</span>}
+        </div>
+      </div>
+    );
+  }
 
   // Compact one-line nodes: thinking ("思考 · 3.4s") and system (label, title and summary on one line).
   if (node.kind === 'thinking' || node.kind === 'system') {

@@ -1,7 +1,8 @@
-import { memo, useCallback, useEffect, useReducer, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useReducer, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { openLiveSession, type LiveSession } from '../client';
 import { Canvas } from '../canvas/Canvas';
+import { EMPTY_CHAIN, upstreamChain } from '../canvas/chain';
 import { Drawer } from '../canvas/Drawer';
 import { useCanvas } from '../canvas/useCanvas';
 import type { ViewMode } from '../canvas/view';
@@ -16,9 +17,10 @@ function hasKeys(obj: object): boolean {
 const VIEW_MODES: { mode: ViewMode; label: string }[] = [
   { mode: 'live', label: '实时' },
   { mode: 'topology', label: '拓扑' },
+  { mode: 'causal', label: '因果' },
 ];
 
-/** Segmented live / topology switch; the mode itself lives in the canvas model. */
+/** Segmented live / topology / causal switch; the mode itself lives in the canvas model. */
 /** Disabled until the model exists (before that a click would be dropped). */
 function ViewSwitch({ mode, disabled, onChange }: { mode: ViewMode; disabled: boolean; onChange(mode: ViewMode): void }) {
   return (
@@ -53,6 +55,11 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
   const selectedView = selected !== null ? canvas.view.nodes.get(selected) : undefined;
   const selectedNode = selectedView?.type === 'node' ? selectedView.node : null;
   const closeDrawer = useCallback(() => setSelectedId(null), []);
+  // Causal view: the selection's upstream chain, once per (view, selection); highlighted on the canvas and listed in
+  // the drawer. EMPTY_CHAIN in the other views and without a selected graph node.
+  const view = canvas.view;
+  const chainStart = view.mode === 'causal' && selectedNode !== null ? selectedNode.id : null;
+  const chain = useMemo(() => (chainStart !== null ? upstreamChain(view, chainStart) : EMPTY_CHAIN), [view, chainStart]);
   // "暂无节点" only when the live graph really has no nodes; "布局中…" while the model is starting or the view has
   // nodes none of which is placed yet.
   const empty = !hasKeys(live.getGraph().nodes);
@@ -66,13 +73,23 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
         <Canvas
           snapshot={canvas}
           selectedId={selected}
+          chain={chain}
           onSelect={setSelectedId}
           onToggleTurn={canvas.toggleTurn}
           onShowFullTurn={canvas.showFullTurn}
           onToggleAgent={canvas.toggleAgent}
           onFollowingChange={canvas.setAutoFold}
         />
-        {selectedNode !== null && <Drawer sessionId={live.getSession().id} node={selectedNode} onClose={closeDrawer} />}
+        {selectedNode !== null && (
+          <Drawer
+            sessionId={live.getSession().id}
+            node={selectedNode}
+            chain={chain}
+            view={view}
+            onSelect={setSelectedId}
+            onClose={closeDrawer}
+          />
+        )}
         {empty && <div className="canvas-empty muted">暂无节点</div>}
         {laying && <div className="canvas-empty muted">布局中…</div>}
       </div>

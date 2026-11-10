@@ -33,6 +33,15 @@ test('最新节点在折叠轮次里时取摘要节点的中心（340×60）', (
   expect(followTarget({ view: collapsedLast, positions: { 'turn:t5': { x: 0, y: 0 } } })).toEqual({ x: 170, y: 30 });
 });
 
+test('因果视角下按 280×56 取思考节点的中心，其他视角按 160×28', () => {
+  const g = graph([node('p1', 'prompt', 't1', 0), node('th1', 'thinking', 't1', 1)]);
+  const positions = { th1: { x: 100, y: 400 } };
+  const causal = buildView(g, new Map(), undefined, { mode: 'causal' });
+  expect(causal.latestNodeId).toBe('th1');
+  expect(followTarget({ view: causal, positions })).toEqual({ x: 240, y: 428 });
+  expect(followTarget({ view: buildView(g, new Map()), positions })).toEqual({ x: 180, y: 414 });
+});
+
 test('最新节点尚无位置或图为空时返回 null', () => {
   const view = buildView(fiveTurns(), new Map());
   expect(followTarget({ view, positions: {} })).toBeNull();

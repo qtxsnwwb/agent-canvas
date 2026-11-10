@@ -80,6 +80,14 @@
 
 .cc-selected { outline: 3px solid var(--cc-color); outline-offset: 2px; }
 
+/* Causal view with a selection: the upstream chain stands out, everything else fades. Set on the React Flow wrapper
+   (node.className / edge.className), so no node changes size or position. The chain outline sits on the wrapper, right
+   against the node's border, so a selected node's own outline (offset 2 px, on the node inside) shows around it. The
+   selector outranks React Flow's `.react-flow__node.selectable:focus { outline: none }`. */
+.cc-canvas .react-flow .react-flow__node.cc-hl-chain { outline: 2px solid #f59e0b; outline-offset: 0; border-radius: 6px; }
+.cc-canvas .react-flow .react-flow__node.cc-hl-dim,
+.cc-canvas .react-flow .react-flow__edge.cc-hl-dim { opacity: 0.3; }
+
 /* Collapsed turn. */
 .cc-turn-summary { background: #f1f5f9; }
 .cc-turn-summary .cc-kind { background: #e2e8f0; color: #334155; }
@@ -236,6 +244,21 @@
 .cc-section { margin: 8px 0 12px; }
 .cc-section h3, .cc-section summary { margin: 0 0 4px; font-size: 12px; font-weight: 600; color: #475569; }
 .cc-section summary { cursor: pointer; }
+
+/* Causal view: "推理链" at the top of the drawer body, one row per thinking / text node on the upstream chain. */
+.cc-reason-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 2px; }
+.cc-reason {
+  box-sizing: border-box; display: flex; align-items: baseline; gap: 8px; width: 100%; min-width: 0; margin: 0;
+  padding: 4px 6px; border: 1px solid transparent; border-radius: 4px; background: none; color: #0f172a;
+  font: inherit; font-size: 12px; line-height: 16px; text-align: left;
+}
+button.cc-reason { cursor: pointer; }
+button.cc-reason:hover { background: #f1f5f9; border-color: #e2e8f0; }
+button.cc-reason:focus-visible, .cc-reason-current:focus-visible { outline: 2px solid #2563eb; outline-offset: -2px; }
+.cc-reason-current { background: #fffbeb; border-color: #f59e0b; }
+.cc-reason .cc-kind { align-self: center; }
+.cc-reason-time { flex: none; color: #64748b; font-variant-numeric: tabular-nums; }
+.cc-reason-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cc-section pre {
   margin: 0; padding: 8px; max-height: 60vh; overflow: auto; border-radius: 4px; background: #f1f5f9;
   font: 12px/16px ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere;

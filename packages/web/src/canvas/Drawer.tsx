@@ -1,10 +1,17 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { GraphNode, NodeDetail } from '@claude-canvas/shared';
 import { api } from '../client';
 import { NODE_STATUS_LABEL } from '../labels';
+import type { UpstreamChain } from './chain';
 import { formatDuration } from './format';
 import { DETAIL_MAX_CHARS, detailSections } from './detail';
 import { KIND_LABEL, nodeColor } from './nodes';
+import { NO_REASONING, reasoningRows, type ReasoningRow } from './reasoning';
+import type { CanvasView } from './view';
+
+/** Kind chip colours of the "推理链" rows (the canvas's thinking / text colours). */
+const THINKING_COLOR = '#94a3b8';
+const TEXT_COLOR = '#475569';
 
 export { DETAIL_MAX_CHARS, detailSections, type DetailSection } from './detail';
 
@@ -24,7 +31,56 @@ function LazyDetails({ label, children }: { label: string; children: () => React
   );
 }
 
-function DrawerBody({ sessionId, node }: { sessionId: string; node: GraphNode }) {
+/**
+ * Causal view: the thinking / text nodes on the selection's upstream chain, oldest first. Each other row is a button
+ * that selects its node; the selected node's own row is marked current. When a row selects a node, that node's row
+ * (now current, no longer a button) takes the focus, so it does not fall back to the page body. `pendingFocus` is
+ * owned by the drawer: the list is remounted with the body when the selection changes.
+ */
+function ReasoningList({ rows, onSelect, pendingFocus }: {
+  rows: ReasoningRow[]; onSelect(id: string): void; pendingFocus: { current: boolean };
+}) {
+  const currentRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!pendingFocus.current) return;
+    pendingFocus.current = false;
+    currentRef.current?.focus({ preventScroll: true });
+  }, [rows, pendingFocus]);
+  const content = (r: ReasoningRow) => (
+    <>
+      <span className="cc-kind" style={{ ['--cc-color' as string]: r.kind === 'thinking' ? THINKING_COLOR : TEXT_COLOR }}>{r.label}</span>
+      <span className="cc-reason-time">{formatTime(r.time)}</span>
+      <span className={`cc-reason-text${r.missing ? ' cc-muted' : ''}`} title={r.missing ? undefined : r.text}>
+        {r.text}
+        {r.durationMs !== null && ` · ${formatDuration(r.durationMs)}`}
+      </span>
+    </>
+  );
+  return (
+    <section className="cc-section cc-reasoning">
+      <h3>推理链</h3>
+      {rows.length === 0
+        ? <div className="cc-muted">{NO_REASONING}</div>
+        : (
+          <ol className="cc-reason-list">
+            {rows.map((r) => (
+              <li key={r.id}>
+                {r.current
+                  ? <div ref={currentRef} className="cc-reason cc-reason-current" aria-current="true" tabIndex={-1}>{content(r)}</div>
+                  : (
+                    <button type="button" className="cc-reason" onClick={() => { pendingFocus.current = true; onSelect(r.id); }}>
+                      {content(r)}
+                    </button>
+                  )}
+              </li>
+            ))}
+          </ol>
+        )}
+    </section>
+  );
+}
+
+function DrawerBody({ sessionId, node, prefix }: { sessionId: string; node: GraphNode; prefix: ReactNode }) {
   const [detail, setDetail] = useState<NodeDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -39,13 +95,19 @@ function DrawerBody({ sessionId, node }: { sessionId: string; node: GraphNode })
   }, [sessionId, node]);
 
   if (detail === null) {
-    return error === null
-      ? <div className="cc-drawer-body cc-muted">加载中…</div>
-      : <div className="cc-drawer-body cc-drawer-error">详情加载失败：{error}</div>;
+    return (
+      <div className="cc-drawer-body">
+        {prefix}
+        {error === null
+          ? <div className="cc-muted">加载中…</div>
+          : <div className="cc-drawer-error">详情加载失败：{error}</div>}
+      </div>
+    );
   }
   const sections = detailSections(detail);
   return (
     <div className="cc-drawer-body">
+      {prefix}
       {error !== null && <div className="cc-drawer-error">详情刷新失败：{error}</div>}
       {sections.length === 0 && <div className="cc-muted">无内容</div>}
       {sections.map((s) => {
@@ -63,7 +125,18 @@ function DrawerBody({ sessionId, node }: { sessionId: string; node: GraphNode })
   );
 }
 
-export function Drawer({ sessionId, node, onClose }: { sessionId: string; node: GraphNode; onClose(): void }) {
+export interface DrawerProps {
+  sessionId: string;
+  node: GraphNode;
+  /** upstreamChain(view, node.id) in the causal view (EMPTY_CHAIN otherwise). */
+  chain: UpstreamChain;
+  view: CanvasView;
+  /** Selects another node (a row of the "推理链" list). */
+  onSelect(id: string): void;
+  onClose(): void;
+}
+
+export function Drawer({ sessionId, node, chain, view, onSelect, onClose }: DrawerProps) {
   const closeRef = useRef<HTMLButtonElement>(null);
   // Focus the close button on open; give focus back to whatever had it when the drawer closes.
   useEffect(() => {
@@ -79,6 +152,10 @@ export function Drawer({ sessionId, node, onClose }: { sessionId: string; node: 
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
 
+  /** Set by a "推理链" row click; the next list render focuses the (new) current row. */
+  const reasonFocus = useRef(false);
+  const causal = view.mode === 'causal';
+  const rows = useMemo(() => (causal ? reasoningRows(view, chain, node.id) : []), [causal, view, chain, node.id]);
   const duration = node.durationMs !== null ? formatDuration(node.durationMs) : '';
   return (
     <aside className="cc-drawer" aria-label="节点详情" style={{ ['--cc-color' as string]: nodeColor(node) }}>
@@ -96,7 +173,12 @@ export function Drawer({ sessionId, node, onClose }: { sessionId: string; node: 
           {!node.confirmed && <span className="cc-tag">未确认</span>}
         </div>
       </div>
-      <DrawerBody key={node.id} sessionId={sessionId} node={node} />
+      <DrawerBody
+        key={node.id}
+        sessionId={sessionId}
+        node={node}
+        prefix={causal ? <ReasoningList rows={rows} onSelect={onSelect} pendingFocus={reasonFocus} /> : null}
+      />
     </aside>
   );
 }

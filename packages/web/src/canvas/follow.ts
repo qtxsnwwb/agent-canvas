@@ -8,7 +8,7 @@ export function followTarget(snapshot: Pick<CanvasSnapshot, 'view' | 'positions'
   const pos = snapshot.positions[id];
   const vn = snapshot.view.nodes.get(id);
   if (!pos || !vn) return null;
-  const { width, height } = sizeOf(vn);
+  const { width, height } = sizeOf(vn, snapshot.view.mode);
   return { x: pos.x + width / 2, y: pos.y + height / 2 };
 }
 
