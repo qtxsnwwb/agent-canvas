@@ -162,7 +162,7 @@ function useFlowEdges(snapshot: CanvasSnapshot): Edge[] {
     const next = new Map<string, Cached>();
     const out: Edge[] = [];
     const { view, positions } = snapshot;
-    const forks = forkSources(view.edges);
+    const forks = forkSources(view.edges, (id) => view.nodes.get(id)?.type === 'earlier');
     for (const e of view.edges) {
       if (!positions[e.from] || !positions[e.to]) continue;
       const target = view.nodes.get(e.to);

@@ -22,8 +22,27 @@ export type ViewNode =
   /** Stands for the folded middle of a long expanded turn; id is `earlier:${turnKey}`. */
   | { type: 'earlier'; id: string; turnKey: string; count: number; toolCount: number; failedCount: number };
 export interface ViewEdge { id: string; from: string; to: string; kind: EdgeKind }
-/** `foldedEarlier`: how many nodes the turn's `earlier` node stands for (0 when the turn is not folded that way). */
-export interface TurnView { key: string; collapsed: boolean; summary: TurnSummary; nodeIds: string[]; foldedEarlier: number }
+/**
+ * `foldedEarlier`: how many nodes the turn's `earlier` node stands for (0 when the turn is not folded that way);
+ * `foldedIds`: those nodes' ids, in time order.
+ */
+export interface TurnView {
+  key: string;
+  collapsed: boolean;
+  summary: TurnSummary;
+  nodeIds: string[];
+  foldedEarlier: number;
+  foldedIds: string[];
+}
+export interface BuildViewOptions {
+  /**
+   * Turn key -> node ids hidden in that turn's `earlier` node. For a turn in this map the set replaces the length
+   * rule: exactly these ids (those that still exist) are hidden, every other node of the turn is shown.
+   */
+  frozenHidden?: ReadonlyMap<string, ReadonlySet<string>>;
+  /** A node that must stay visible (the selection): never folded into `earlier`, and its turn is not auto-collapsed. */
+  keepVisible?: string | null;
+}
 export interface CanvasView {
   turns: TurnView[];
   nodes: Map<string, ViewNode>;
@@ -31,11 +50,12 @@ export interface CanvasView {
   latestNodeId: string | null;
 }
 
-/** View nodes with two or more outgoing view edges: their outgoing edges are drawn as a fork. */
-export function forkSources(edges: readonly Pick<ViewEdge, 'from'>[]): Set<string> {
+/** View nodes with two or more outgoing view edges (except those `ignore` accepts): their outgoing edges are drawn as a fork. */
+export function forkSources(edges: readonly Pick<ViewEdge, 'from'>[], ignore?: (id: string) => boolean): Set<string> {
   const out = new Map<string, number>();
   const forks = new Set<string>();
   for (const e of edges) {
+    if (ignore?.(e.from)) continue;
     const n = (out.get(e.from) ?? 0) + 1;
     out.set(e.from, n);
     if (n >= 2) forks.add(e.from);
@@ -81,12 +101,22 @@ function summarize(key: string, entries: Entry[]): TurnSummary {
 }
 
 const NO_FULL_TURNS: ReadonlySet<string> = new Set();
+const NO_FROZEN: ReadonlyMap<string, ReadonlySet<string>> = new Map();
 
 /**
  * `overrides`: turn key -> expanded. `fullTurns`: expanded turns shown in full even when they are long (otherwise
- * the middle of a long turn is folded into one `earlier` node).
+ * the middle of a long turn is folded into one `earlier` node). See BuildViewOptions for the rest.
  */
-export function buildView(graph: Graph, overrides: ReadonlyMap<string, boolean>, fullTurns: ReadonlySet<string> = NO_FULL_TURNS): CanvasView {
+export function buildView(
+  graph: Graph,
+  overrides: ReadonlyMap<string, boolean>,
+  fullTurns: ReadonlySet<string> = NO_FULL_TURNS,
+  options: BuildViewOptions = {},
+): CanvasView {
+  const frozenHidden = options.frozenHidden ?? NO_FROZEN;
+  const keepVisible = options.keepVisible ?? null;
+  /** Never folded into `earlier`: still running, or the selection. */
+  const mustShow = (node: GraphNode): boolean => isActiveStatus(node) || node.id === keepVisible;
   // Pass over nodes: main-thread entries, inner-node counts per agent.
   const main: Entry[] = [];
   const innerByAgent = new Map<string, number>();
@@ -128,52 +158,68 @@ export function buildView(graph: Graph, overrides: ReadonlyMap<string, boolean>,
   const collapsedKeys = new Set<string>();
   /** Hidden node id -> the id of the `earlier` node that stands for it. */
   const foldedInto = new Map<string, string>();
+  /** Visible nodes of a folded turn shown after its `earlier` node -> the next visible node of the turn in time order. */
+  const nextAfterEarlier = new Map<string, string | null>();
   const addNode = (key: string, node: GraphNode): void => {
     const innerCount = node.childAgentId ? (innerByAgent.get(node.childAgentId) ?? 0) : 0;
     nodes.set(node.id, { type: 'node', id: node.id, turnKey: key, node, innerCount });
   };
+  /** The ids of an expanded turn to fold into `earlier` (empty: show everything). */
+  const hiddenOf = (key: string, entries: Entry[]): Set<string> => {
+    const hidden = new Set<string>();
+    if (fullTurns.has(key)) return hidden;
+    const frozen = frozenHidden.get(key);
+    if (frozen) {
+      for (const { node } of entries) if (frozen.has(node.id) && !mustShow(node)) hidden.add(node.id);
+    } else if (entries.length > TURN_FOLD_THRESHOLD) {
+      const head = entries[0]!.node.kind === 'prompt' ? 1 : 0;
+      for (const { node } of entries.slice(head, entries.length - TURN_TAIL_NODES)) if (!mustShow(node)) hidden.add(node.id);
+    }
+    return hidden;
+  };
   ordered.forEach(({ key, entries }, i) => {
     const expandedOverride = overrides.get(key);
-    const collapsed = expandedOverride === undefined ? i < ordered.length - EXPANDED_RECENT_TURNS : !expandedOverride;
+    const holdsKept = keepVisible !== null && entries.some((x) => x.node.id === keepVisible);
+    const collapsed = expandedOverride === undefined
+      ? i < ordered.length - EXPANDED_RECENT_TURNS && !holdsKept
+      : !expandedOverride;
     const summary = summarize(key, entries);
     let nodeIds: string[];
-    let foldedEarlier = 0;
+    const foldedIds: string[] = [];
     if (collapsed) {
       collapsedKeys.add(key);
       nodeIds = [`turn:${key}`];
       nodes.set(nodeIds[0]!, { type: 'turn_summary', id: nodeIds[0]!, turnKey: key, summary });
-    } else if (entries.length > TURN_FOLD_THRESHOLD && !fullTurns.has(key)) {
-      const head = entries[0]!.node.kind === 'prompt' ? 1 : 0;
-      const tailStart = entries.length - TURN_TAIL_NODES;
-      const earlierId = `earlier:${key}`;
-      const kept: string[] = [];
-      let toolCount = 0;
-      let failedCount = 0;
-      for (const { node } of entries.slice(head, tailStart)) {
-        if (isActiveStatus(node)) { // still running: stays visible, in time order after the earlier node
-          kept.push(node.id);
-          addNode(key, node);
-          continue;
-        }
-        foldedInto.set(node.id, earlierId);
-        foldedEarlier++;
-        if (node.kind === 'tool' || node.kind === 'subagent') toolCount++;
-        if (node.status === 'failed' || node.status === 'denied') failedCount++;
-      }
-      const headIds = entries.slice(0, head).map((x) => x.node.id);
-      const tail = entries.slice(tailStart);
-      for (const { node } of [...entries.slice(0, head), ...tail]) addNode(key, node);
-      if (foldedEarlier > 0) {
-        nodes.set(earlierId, { type: 'earlier', id: earlierId, turnKey: key, count: foldedEarlier, toolCount, failedCount });
-        nodeIds = [...headIds, earlierId, ...kept, ...tail.map((x) => x.node.id)];
-      } else {
-        nodeIds = [...headIds, ...kept, ...tail.map((x) => x.node.id)];
-      }
     } else {
-      nodeIds = entries.map((x) => x.node.id);
-      for (const { node } of entries) addNode(key, node);
+      const hidden = hiddenOf(key, entries);
+      if (hidden.size === 0) {
+        nodeIds = entries.map((x) => x.node.id);
+        for (const { node } of entries) addNode(key, node);
+      } else {
+        // [prompt], earlier, then every other visible node in time order.
+        const earlierId = `earlier:${key}`;
+        const first = entries[0]!.node;
+        const headId = first.kind === 'prompt' && !hidden.has(first.id) ? first.id : null;
+        const after: string[] = [];
+        let toolCount = 0;
+        let failedCount = 0;
+        for (const { node } of entries) {
+          if (hidden.has(node.id)) {
+            foldedInto.set(node.id, earlierId);
+            foldedIds.push(node.id);
+            if (node.kind === 'tool' || node.kind === 'subagent') toolCount++;
+            if (node.status === 'failed' || node.status === 'denied') failedCount++;
+            continue;
+          }
+          addNode(key, node);
+          if (node.id !== headId) after.push(node.id);
+        }
+        after.forEach((id, k) => nextAfterEarlier.set(id, after[k + 1] ?? null));
+        nodes.set(earlierId, { type: 'earlier', id: earlierId, turnKey: key, count: foldedIds.length, toolCount, failedCount });
+        nodeIds = [...(headId !== null ? [headId] : []), earlierId, ...after];
+      }
     }
-    turns.push({ key, collapsed, summary, nodeIds, foldedEarlier });
+    turns.push({ key, collapsed, summary, nodeIds, foldedEarlier: foldedIds.length, foldedIds });
   });
 
   const viewId = (nodeId: string): string => {
@@ -189,7 +235,14 @@ export function buildView(graph: Graph, overrides: ReadonlyMap<string, boolean>,
     const toTurn = turnOf.get(edge.to);
     if (fromTurn === undefined || toTurn === undefined) continue;
     const from = viewId(edge.from);
-    const to = viewId(edge.to);
+    let to = viewId(edge.to);
+    // From a node shown after `earlier` (a kept running / selected node) into the folded range: continue to the next
+    // visible node in time order instead of looping back into `earlier`.
+    if (fromTurn === toTurn && to !== edge.to && foldedInto.has(edge.to)) {
+      const next = nextAfterEarlier.get(from);
+      if (next === null) continue;
+      if (next !== undefined) to = next;
+    }
     if (from === to) continue;
     if (fromTurn !== toTurn) {
       const a = turnIndex.get(fromTurn)!;

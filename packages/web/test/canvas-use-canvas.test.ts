@@ -360,3 +360,93 @@ test('showFullTurn 立即重建并显示长轮次的全部节点；把轮次折�
   expect(turn().foldedEarlier).toBe(21);
   model.dispose();
 });
+
+/** One turn 't1' of `count` nodes; node 0 is a prompt. */
+function promptTurn(count: number, key = 't1', t0 = 0): Graph {
+  return graph(Array.from({ length: count }, (_, i) => (i === 0 ? { ...node(`${key}n0`, key, t0), kind: 'prompt' as const } : node(`${key}n${i}`, key, t0 + i))));
+}
+const viewIds = (model: { getSnapshot(): { view: { nodes: Map<string, unknown> } } }) => new Set(model.getSnapshot().view.nodes.keys());
+
+test('关闭自动折叠：轮次从 55 长到 65 个节点，之前可见的节点都不离开视图，也不出现 earlier', async () => {
+  const live = fakeLive(promptTurn(55));
+  const layout = fakeLayout();
+  const model = createCanvasModel(live, layout.client);
+  model.setAutoFold(false);
+  const before = viewIds(model);
+  for (let n = 56; n <= 65; n++) {
+    live.set(promptTurn(n));
+    await vi.advanceTimersByTimeAsync(60);
+    layout.resolveAll();
+    await flush();
+  }
+  const after = viewIds(model);
+  for (const id of before) expect(after.has(id)).toBe(true);
+  expect(after.has('earlier:t1')).toBe(false);
+  expect(after.size).toBe(65);
+  model.dispose();
+});
+
+test('关闭自动折叠：已在 61 个节点折叠的轮次长到 70，隐藏集合不变，新节点全部可见；重新打开后回到正常规则', async () => {
+  const live = fakeLive(promptTurn(61));
+  const layout = fakeLayout();
+  const model = createCanvasModel(live, layout.client);
+  const turn = () => model.getSnapshot().view.turns[0]!;
+  const hiddenAt61 = [...turn().foldedIds];
+  expect(hiddenAt61).toHaveLength(20);
+  model.setAutoFold(false);
+  live.set(promptTurn(70));
+  await vi.advanceTimersByTimeAsync(60);
+  expect(turn().foldedIds).toEqual(hiddenAt61);
+  for (let i = 21; i < 70; i++) expect(model.getSnapshot().view.nodes.has(`t1n${i}`)).toBe(true);
+
+  model.setAutoFold(true);
+  expect(turn().nodeIds).toEqual(['t1n0', 'earlier:t1', ...Array.from({ length: 40 }, (_, k) => `t1n${30 + k}`)]);
+  model.dispose();
+});
+
+test('关闭自动折叠后才出现的轮次，其折叠状态在出现时被冻结', async () => {
+  const live = fakeLive(promptTurn(3, 't1'));
+  const layout = fakeLayout();
+  const model = createCanvasModel(live, layout.client);
+  model.setAutoFold(false);
+  const both = (n: number) => graph([...Object.values(promptTurn(3, 't1').nodes), ...Object.values(promptTurn(n, 't2', 100).nodes)]);
+  live.set(both(61));
+  await vi.advanceTimersByTimeAsync(60);
+  const t2 = () => model.getSnapshot().view.turns[1]!;
+  const hidden = [...t2().foldedIds];
+  expect(hidden).toHaveLength(20);
+  live.set(both(75));
+  await vi.advanceTimersByTimeAsync(60);
+  expect(t2().foldedIds).toEqual(hidden);
+  model.dispose();
+});
+
+test('setKeepVisible：被选中的节点在本该隐藏的范围里时仍留在视图中', async () => {
+  const live = fakeLive(promptTurn(55));
+  const layout = fakeLayout();
+  const model = createCanvasModel(live, layout.client);
+  model.setKeepVisible('t1n5');
+  live.set(promptTurn(70));
+  await vi.advanceTimersByTimeAsync(60);
+  const s = model.getSnapshot();
+  expect(s.view.nodes.has('earlier:t1')).toBe(true);
+  expect(s.view.nodes.has('t1n5')).toBe(true);
+  expect(s.view.nodes.has('t1n6')).toBe(false);
+  model.dispose();
+});
+
+test('setKeepVisible：新轮次到来时，选中节点所在的轮次不被默认规则折叠', async () => {
+  const turns = (n: number) => graph(Array.from({ length: n }, (_, i) => node(`x${i + 1}`, `t${i + 1}`, i * 10)));
+  const live = fakeLive(turns(3));
+  const layout = fakeLayout();
+  const model = createCanvasModel(live, layout.client);
+  model.setKeepVisible('x1');
+  live.set(turns(5));
+  await vi.advanceTimersByTimeAsync(60);
+  expect(model.getSnapshot().view.turns.map((t) => t.collapsed)).toEqual([false, true, false, false, false]);
+  model.setKeepVisible(null);
+  live.set(turns(6));
+  await vi.advanceTimersByTimeAsync(60);
+  expect(model.getSnapshot().view.turns[0]!.collapsed).toBe(true);
+  model.dispose();
+});

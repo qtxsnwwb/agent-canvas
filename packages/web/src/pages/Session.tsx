@@ -19,6 +19,9 @@ const SessionCanvas = memo(function SessionCanvas({ live }: { live: LiveSession 
   useEffect(() => {
     if (selectedId !== null && selected === null) setSelectedId(null);
   }, [selectedId, selected]);
+  // The selected node is never folded away by later updates (see CanvasModel.setKeepVisible).
+  const { setKeepVisible } = canvas;
+  useEffect(() => { setKeepVisible(selected); }, [selected, setKeepVisible]);
   // Only graph nodes open the drawer; a vanished node (or a turn summary) leaves selectedNode null and closes it.
   const selectedView = selected !== null ? canvas.view.nodes.get(selected) : undefined;
   const selectedNode = selectedView?.type === 'node' ? selectedView.node : null;

@@ -20,10 +20,14 @@ export interface CanvasModel {
   /** Shows every node of a long expanded turn (instead of folding its middle into an `earlier` node). */
   showFullTurn(turnKey: string): void;
   /**
-   * Default true. While false, turns expanded by the default "last 3" rule stay expanded when newer turns arrive (so
-   * content does not move under a reader); turning it back on drops those and applies the default rule again.
+   * Default true. While false nothing visible is folded away under a reader: turns expanded by the default "last 3"
+   * rule stay expanded when newer turns arrive, and each expanded turn's `earlier` fold is frozen (the nodes hidden
+   * when the freeze started stay hidden, everything else stays visible however long the turn grows). Turning it back
+   * on drops both and applies the default rules again.
    */
   setAutoFold(enabled: boolean): void;
+  /** A node (the selection) that is never folded into `earlier` and whose turn is not auto-collapsed; null for none. */
+  setKeepVisible(id: string | null): void;
   dispose(): void;
 }
 
@@ -75,6 +79,9 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
   /** Turn key -> expanded, recorded while auto-fold is off for turns the default rule had expanded. */
   const implicit = new Map<string, boolean>();
   const fullTurns = new Set<string>();
+  /** Turn key -> ids hidden in its `earlier` node, recorded while auto-fold is off. */
+  const frozen = new Map<string, ReadonlySet<string>>();
+  let keepVisible: string | null = null;
   const listeners = new Set<() => void>();
   let snapshot: CanvasSnapshot = EMPTY_SNAPSHOT;
   let disposed = false;
@@ -87,10 +94,15 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
     for (const fn of [...listeners]) fn();
   };
 
-  /** Keeps every turn the current view shows expanded by the default rule expanded from now on (until auto-fold returns). */
-  const pinDefaultExpanded = (): void => {
-    for (const t of snapshot.view.turns) {
-      if (!t.collapsed && !overrides.has(t.key)) implicit.set(t.key, true);
+  /**
+   * While auto-fold is off: every turn `view` shows expanded stays expanded (unless the user overrides it), and its
+   * current `earlier` fold is frozen the first time it is seen.
+   */
+  const freeze = (view: CanvasView): void => {
+    for (const t of view.turns) {
+      if (t.collapsed) continue;
+      if (!overrides.has(t.key)) implicit.set(t.key, true);
+      if (!frozen.has(t.key)) frozen.set(t.key, new Set(t.foldedIds));
     }
   };
 
@@ -138,8 +150,8 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
 
   function rebuild(): void {
     if (disposed) return;
-    if (!autoFold) pinDefaultExpanded();
-    const view = buildView(live.getGraph(), effectiveOverrides(), fullTurns);
+    const view = buildView(live.getGraph(), effectiveOverrides(), fullTurns, { frozenHidden: frozen, keepVisible });
+    if (!autoFold) freeze(view); // turns that appeared (or were expanded) since the last rebuild
     const inView = (id: string): boolean => view.nodes.has(id);
     const turnKeys = new Set(view.turns.map((t) => t.key));
     publish({
@@ -167,7 +179,11 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
       const turn = snapshot.view.turns.find((t) => t.key === turnKey);
       if (!turn) return;
       overrides.set(turnKey, turn.collapsed); // value = expanded: a collapsed turn becomes expanded and vice versa
-      if (!turn.collapsed) fullTurns.delete(turnKey); // folding resets "show all": re-expanding folds the middle again
+      if (!turn.collapsed) {
+        // Folding resets "show all" and the frozen fold: re-expanding folds the middle by the length rule again.
+        fullTurns.delete(turnKey);
+        frozen.delete(turnKey);
+      }
       throttle.cancel(); // this rebuild also picks up any pending graph change
       rebuild();
     },
@@ -181,12 +197,16 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
       if (disposed || enabled === autoFold) return;
       autoFold = enabled;
       if (!enabled) {
-        pinDefaultExpanded();
+        freeze(snapshot.view);
         return; // nothing on screen changes
       }
       implicit.clear();
+      frozen.clear();
       throttle.cancel();
       rebuild();
+    },
+    setKeepVisible(id) {
+      keepVisible = id; // takes effect with the next rebuild: a selected node is already visible
     },
     dispose() {
       disposed = true;
@@ -198,7 +218,7 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
 }
 
 /** One model and one layout worker per live session; both are disposed when the page unmounts. */
-export function useCanvas(live: LiveSession): CanvasSnapshot & Pick<CanvasModel, 'toggleTurn' | 'showFullTurn' | 'setAutoFold'> {
+export function useCanvas(live: LiveSession): CanvasSnapshot & Pick<CanvasModel, 'toggleTurn' | 'showFullTurn' | 'setAutoFold' | 'setKeepVisible'> {
   const [model, setModel] = useState<CanvasModel | null>(null);
   useEffect(() => {
     const client = createLayoutClient(createBrowserLayoutWorker);
@@ -217,6 +237,10 @@ export function useCanvas(live: LiveSession): CanvasSnapshot & Pick<CanvasModel,
   const toggleTurn = useCallback((turnKey: string) => model?.toggleTurn(turnKey), [model]);
   const showFullTurn = useCallback((turnKey: string) => model?.showFullTurn(turnKey), [model]);
   const setAutoFold = useCallback((enabled: boolean) => model?.setAutoFold(enabled), [model]);
+  const setKeepVisible = useCallback((id: string | null) => model?.setKeepVisible(id), [model]);
   // Same object until the snapshot changes, so consumers can memoize on it.
-  return useMemo(() => ({ ...snapshot, toggleTurn, showFullTurn, setAutoFold }), [snapshot, toggleTurn, showFullTurn, setAutoFold]);
+  return useMemo(
+    () => ({ ...snapshot, toggleTurn, showFullTurn, setAutoFold, setKeepVisible }),
+    [snapshot, toggleTurn, showFullTurn, setAutoFold, setKeepVisible],
+  );
 }

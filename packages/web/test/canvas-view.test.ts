@@ -158,10 +158,47 @@ test('长轮次：被隐藏范围里仍在运行的节点保持可见并连通',
   expect(t.foldedEarlier).toBe(18);
   expect(v.edges.some((x) => x.from === 'earlier:t1' && x.to === 'n10')).toBe(true);
   expect(v.edges.some((x) => x.from === 'n10' && x.to === 'n11')).toBe(true);
+  // The kept chain continues to the next visible node in time order instead of looping back into `earlier`.
+  expect(v.edges.some((x) => x.from === 'n11' && x.to === 'n21')).toBe(true);
+  expect(v.edges.some((x) => x.to === 'earlier:t1' && x.from !== 'n0')).toBe(false);
+  // `earlier` fans out to the kept node and the tail, but is not a fork source.
+  expect(forkSources(v.edges, (id) => v.nodes.get(id)?.type === 'earlier').has('earlier:t1')).toBe(false);
+  expect(t.foldedIds).toHaveLength(18);
+  expect(t.foldedIds).not.toContain('n10');
 });
 
 test('长轮次：fullTurns 不影响折叠的轮次', () => {
   const g = longTurn(61);
   const v = buildView(g, new Map([['t1', false]]), new Set(['t1']));
   expect(v.turns[0]).toMatchObject({ collapsed: true, nodeIds: ['turn:t1'], foldedEarlier: 0 });
+});
+
+test('frozenHidden：冻结的轮次只隐藏记录的那些节点，新节点都可见；没有折叠记录的轮次无论多长都不折叠', () => {
+  const v61 = buildView(longTurn(61), new Map());
+  const frozen = new Map([['t1', new Set(v61.turns[0]!.foldedIds)]]);
+  const v70 = buildView(longTurn(70), new Map(), undefined, { frozenHidden: frozen });
+  expect(v70.turns[0]!.nodeIds).toEqual(['n0', 'earlier:t1', ...ids(21, 70)]);
+  expect(v70.turns[0]!.foldedIds).toEqual(v61.turns[0]!.foldedIds);
+  const unfolded = buildView(longTurn(80), new Map(), undefined, { frozenHidden: new Map([['t1', new Set<string>()]]) });
+  expect(unfolded.turns[0]!.nodeIds).toEqual(ids(0, 80));
+  expect(unfolded.nodes.has('earlier:t1')).toBe(false);
+  // Ids that no longer exist simply drop out.
+  const gone = buildView(longTurn(61), new Map(), undefined, { frozenHidden: new Map([['t1', new Set(['n1', 'zzz'])]]) });
+  expect(gone.turns[0]!.foldedEarlier).toBe(1);
+});
+
+test('keepVisible：被选中的节点不被折叠进 earlier，并且它的轮次不被默认规则折叠', () => {
+  const v = buildView(longTurn(61), new Map(), undefined, { keepVisible: 'n5' });
+  expect(v.turns[0]!.nodeIds).toEqual(['n0', 'earlier:t1', 'n5', ...ids(21, 61)]);
+  expect(v.turns[0]!.foldedEarlier).toBe(19);
+  const five = buildView(fiveTurnsOfThreeNodes(), new Map(), undefined, { keepVisible: 'x1' });
+  expect(five.turns.map((t) => t.collapsed)).toEqual([false, true, false, false, false]);
+  // An explicit fold still wins.
+  const folded = buildView(fiveTurnsOfThreeNodes(), new Map([['t1', false]]), undefined, { keepVisible: 'x1' });
+  expect(folded.turns[0]!.collapsed).toBe(true);
+});
+
+test('forkSources 可以排除某些源节点', () => {
+  const edges = [{ from: 'a' }, { from: 'a' }, { from: 'b' }, { from: 'b' }];
+  expect([...forkSources(edges, (id) => id === 'a')]).toEqual(['b']);
 });
