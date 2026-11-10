@@ -20,5 +20,8 @@
     "@types/node": "^22.0.0",
     "@types/ws": "^8.18.2",
     "ws": "^8.22.2"
+  },
+  "bin": {
+    "claude-canvas": "./dist/cli.js"
   }
 }

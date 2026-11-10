@@ -9,6 +9,7 @@
   },
   "scripts": {
     "build": "pnpm -r build",
+    "start": "node packages/server/dist/cli.js start",
     "test": "vitest run",
     "typecheck": "pnpm -r exec tsc --noEmit"
   },
