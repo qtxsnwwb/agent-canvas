@@ -1,6 +1,7 @@
-import { useEffect, useReducer, useState } from 'react';
+import { useCallback, useEffect, useReducer, useState } from 'react';
 import { openLiveSession, type LiveSession } from '../client';
 import { Canvas } from '../canvas/Canvas';
+import { Drawer } from '../canvas/Drawer';
 import { useCanvas } from '../canvas/useCanvas';
 import { sessionStatusView } from '../labels';
 import { useNow } from '../useNow';
@@ -10,12 +11,17 @@ function SessionCanvas({ live }: { live: LiveSession }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // Drop a selection whose node is no longer drawn (e.g. its turn was folded).
   const selected = selectedId !== null && canvas.view.nodes.has(selectedId) ? selectedId : null;
+  // Only graph nodes open the drawer; a vanished node (or a turn summary) leaves selectedNode null and closes it.
+  const selectedView = selected !== null ? canvas.view.nodes.get(selected) : undefined;
+  const selectedNode = selectedView?.type === 'node' ? selectedView.node : null;
+  const closeDrawer = useCallback(() => setSelectedId(null), []);
   const empty = canvas.view.nodes.size === 0;
   return (
     <>
       {canvas.layoutError !== null && <div className="canvas-error">布局失败：{canvas.layoutError}</div>}
       <div className="canvas-area">
         <Canvas snapshot={canvas} selectedId={selected} onSelect={setSelectedId} onToggleTurn={canvas.toggleTurn} />
+        {selectedNode !== null && <Drawer sessionId={live.getSession().id} node={selectedNode} onClose={closeDrawer} />}
         {empty && <div className="canvas-empty muted">暂无节点</div>}
       </div>
     </>
