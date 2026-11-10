@@ -24,6 +24,7 @@ pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
 
 /* Session page: a one-line info bar, then the canvas filling the rest of the viewport. */
 .session-loading { padding: 8px 16px; }
+.session-missing { padding: 8px 16px; }
 .session-page { display: flex; flex-direction: column; height: calc(100vh - var(--header-h)); overflow: hidden; }
 .session-bar {
   display: flex; align-items: center; gap: 12px; flex: none; min-width: 0;

@@ -8,6 +8,7 @@ import { Timeline } from '../canvas/Timeline';
 import { useCanvas } from '../canvas/useCanvas';
 import type { ViewMode } from '../canvas/view';
 import { sessionStatusView } from '../labels';
+import { sessionLoadState } from '../sessionLoad';
 import { useNow } from '../useNow';
 
 function hasKeys(obj: object): boolean {
@@ -124,7 +125,8 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
 
 export function SessionPage({ sessionId }: { sessionId: string }) {
   const [live, setLive] = useState<LiveSession | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  /** The failure of openLiveSession (null while there is none); see sessionLoadState. */
+  const [error, setError] = useState<unknown>(null);
   const [, rerender] = useReducer((n: number) => n + 1, 0);
   /** The info bar's right-hand slot; the canvas renders its view switch into it (it owns the mode). */
   const [toolbar, setToolbar] = useState<HTMLElement | null>(null);
@@ -141,7 +143,7 @@ export function SessionPage({ sessionId }: { sessionId: string }) {
         unsubscribe = l.subscribe(rerender); // the info bar shows live session fields
         setLive(l);
       },
-      (e: unknown) => { if (alive) setError(String(e)); },
+      (e: unknown) => { if (alive) setError(e ?? new Error('unknown error')); },
     );
     return () => {
       alive = false;
@@ -150,7 +152,17 @@ export function SessionPage({ sessionId }: { sessionId: string }) {
     };
   }, [sessionId]);
 
-  if (error !== null) return <p className="error">加载失败：{error}</p>;
+  // The subscription re-renders this page when a resync finds the session gone (live.isGone()).
+  const state = sessionLoadState(error, live);
+  if (state === 'missing') {
+    return (
+      <div className="session-missing">
+        <p>会话不存在</p>
+        <a href="#/">返回首页</a>
+      </div>
+    );
+  }
+  if (state === 'error') return <p className="error">加载失败：{String(error)}</p>;
   if (live === null) return <p className="muted session-loading">加载中…</p>;
   const session = live.getSession();
   const status = sessionStatusView(session, now);
