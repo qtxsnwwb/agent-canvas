@@ -40,7 +40,7 @@ export const RETRY_MAX_MS = 30_000;
 type Positions = CanvasSnapshot['positions'];
 
 const EMPTY_SNAPSHOT: CanvasSnapshot = {
-  view: { turns: [], nodes: new Map(), edges: [], latestNodeId: null },
+  view: { turns: [], nodes: new Map(), edges: [], latestNodeId: null, agentGroups: [], mode: 'live' },
   positions: {},
   turnBoxes: {},
   layoutError: null,

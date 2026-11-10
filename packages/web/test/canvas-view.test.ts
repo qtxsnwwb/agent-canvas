@@ -117,7 +117,7 @@ test('长轮次：61 个节点 → 提示 + 更早(20) + 最后 40 个', () => {
   const t = v.turns[0]!;
   expect(t.nodeIds).toEqual(['n0', 'earlier:t1', ...ids(21, 61)]);
   expect(t.foldedEarlier).toBe(20);
-  expect(v.nodes.get('earlier:t1')).toEqual({ type: 'earlier', id: 'earlier:t1', turnKey: 't1', count: 20, toolCount: 20, failedCount: 1 });
+  expect(v.nodes.get('earlier:t1')).toEqual({ type: 'earlier', id: 'earlier:t1', turnKey: 't1', groupKey: 't1', count: 20, toolCount: 20, failedCount: 1 });
   expect(v.nodes.has('n1')).toBe(false);
   expect(v.nodes.size).toBe(42);
   expect(v.latestNodeId).toBe('n60');
