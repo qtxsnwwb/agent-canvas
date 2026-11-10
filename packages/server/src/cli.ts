@@ -14,6 +14,8 @@ import { openStore, type Store } from './store/store.js';
 
 export interface Running {
   url: string;
+  /** The address the server is actually bound to. */
+  address: { address: string; port: number };
   close(): Promise<void>;
 }
 
@@ -81,12 +83,14 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
     lock.release();
     throw err;
   }
-  const url = `http://${config.host}:${(app.server.address() as AddressInfo).port}`;
+  const bound = app.server.address() as AddressInfo;
+  const url = `http://${config.host}:${bound.port}`;
   let closing: Promise<void> | null = null;
   const openedStore = store;
   const server = app;
   return {
     url,
+    address: { address: bound.address, port: bound.port },
     close() {
       closing ??= (async () => {
         try {

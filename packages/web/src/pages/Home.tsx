@@ -2,7 +2,10 @@ import { useEffect, useRef, useState } from 'react';
 import type { Project, Session } from '@claude-canvas/shared';
 import { api, openLiveSessions } from '../client';
 import { sessionStatusView } from '../labels';
+import { createThrottle } from '../throttle';
 import { useNow } from '../useNow';
+
+const PROJECTS_REFRESH_MS = 500;
 
 const byActivityDesc = (a: Session, b: Session): number =>
   a.lastActivityAt < b.lastActivityAt ? 1 : a.lastActivityAt > b.lastActivityAt ? -1 : 0;
@@ -20,10 +23,10 @@ export function Home({ projectId }: { projectId: string | null }) {
   const selected = useRef(projectId);
   selected.current = projectId;
 
-  // Projects: initial load, plus a debounced refetch whenever any session changes (counts move with status).
+  // Projects: initial load, plus a throttled refetch whenever any session changes (counts move with status). A throttle,
+  // not a debounce: during a long import upserts never stop, and the list must still refresh (at most every 500 ms).
   useEffect(() => {
     let alive = true;
-    let timer: ReturnType<typeof setTimeout> | null = null;
     const loadProjects = (): void => {
       api.projects().then(
         (p) => { if (alive) { setProjects(p); setError(null); } },
@@ -39,20 +42,20 @@ export function Home({ projectId }: { projectId: string | null }) {
       );
     };
     loadProjects();
+    const refresh = createThrottle(loadProjects, PROJECTS_REFRESH_MS);
     const live = openLiveSessions(
       (s) => {
         if (s.projectId === selected.current) {
           setSessions((prev) => [...prev.filter((x) => x.id !== s.id), s].sort(byActivityDesc));
         }
-        if (timer !== null) clearTimeout(timer);
-        timer = setTimeout(loadProjects, 500);
+        refresh.trigger();
       },
       // Upserts missed while disconnected are not replayed: refetch both lists.
       { onReconnect: () => { loadProjects(); loadSessions(); } },
     );
     return () => {
       alive = false;
-      if (timer !== null) clearTimeout(timer);
+      refresh.cancel();
       live.close();
     };
   }, []);

@@ -138,5 +138,8 @@ test('服务只监听回环地址', async () => {
   const app = await launch();
   expect(new URL(app.url).hostname).toBe('127.0.0.1');
   expect(Number(new URL(app.url).port)).toBeGreaterThan(0);
+  // the actual bound address, not just the URL string
+  expect(app.address.address).toBe('127.0.0.1');
+  expect(app.address.port).toBe(Number(new URL(app.url).port));
   await closeApp(app);
 });
