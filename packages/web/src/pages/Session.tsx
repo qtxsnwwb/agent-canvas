@@ -9,8 +9,12 @@ import { useNow } from '../useNow';
 function SessionCanvas({ live }: { live: LiveSession }) {
   const canvas = useCanvas(live);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  // Drop a selection whose node is no longer drawn (e.g. its turn was folded).
+  // Drop a selection whose node is no longer in the view (its turn was folded, it went into an "earlier" node, a
+  // resync removed it): hidden at once, and cleared so the drawer cannot reopen by itself when the node comes back.
   const selected = selectedId !== null && canvas.view.nodes.has(selectedId) ? selectedId : null;
+  useEffect(() => {
+    if (selectedId !== null && selected === null) setSelectedId(null);
+  }, [selectedId, selected]);
   // Only graph nodes open the drawer; a vanished node (or a turn summary) leaves selectedNode null and closes it.
   const selectedView = selected !== null ? canvas.view.nodes.get(selected) : undefined;
   const selectedNode = selectedView?.type === 'node' ? selectedView.node : null;
@@ -19,7 +23,7 @@ function SessionCanvas({ live }: { live: LiveSession }) {
   return (
     <>
       {canvas.layoutError !== null && <div className="canvas-error">布局失败：{canvas.layoutError}</div>}
-      <div className="canvas-area">
+      <div className={`canvas-area${selectedNode !== null ? ' cc-drawer-open' : ''}`}>
         <Canvas
           snapshot={canvas}
           selectedId={selected}

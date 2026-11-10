@@ -1,6 +1,7 @@
 /* Canvas and node styles. Every node is drawn at exactly the size sizeOf() gives it (inline width/height); nothing
    inside may grow it: overflow is hidden and text is single-line with an ellipsis. */
 
+:root { --cc-drawer-width: 440px; }
 .cc-canvas { width: 100%; height: 100%; background: #f8fafc; }
 .cc-canvas .react-flow { --xy-background-color: #f8fafc; }
 
@@ -164,6 +165,10 @@
 }
 .cc-follow-btn:hover { background: #1d4ed8; }
 
+/* While the drawer is open, the right-hand panels (minimap, "回到最新") move left of it. The zoom controls sit at
+   the bottom left, clear of the drawer. */
+.cc-drawer-open .react-flow__panel.right { margin-right: calc(var(--cc-drawer-width) + 15px); }
+
 /* Node detail drawer: overlays the right edge of the canvas area; the React Flow container is not resized. */
 .cc-drawer {
   position: absolute;
@@ -171,7 +176,7 @@
   right: 0;
   bottom: 0;
   z-index: 20;
-  width: 440px;
+  width: var(--cc-drawer-width);
   max-width: 100%;
   box-sizing: border-box;
   display: flex;

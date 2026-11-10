@@ -14,6 +14,12 @@ function bodyOf(v: unknown): string | null {
   }
 }
 
+/** The first `max` UTF-16 code units, one fewer when the cut would split a surrogate pair. */
+function cut(s: string, max: number): string {
+  const last = s.charCodeAt(max - 1);
+  return s.slice(0, last >= 0xd800 && last <= 0xdbff ? max - 1 : max);
+}
+
 /** Only the sections that have content, in the order text, input, output, raw. Strings are shown as is, anything else as indented JSON. */
 export function detailSections(detail: NodeDetail): DetailSection[] {
   const parts: [DetailSection['label'], unknown][] = [
@@ -24,7 +30,7 @@ export function detailSections(detail: NodeDetail): DetailSection[] {
     const body = bodyOf(value);
     if (body === null || body === '') continue;
     const truncated = body.length > DETAIL_MAX_CHARS;
-    out.push({ label, body: truncated ? body.slice(0, DETAIL_MAX_CHARS) : body, truncated });
+    out.push({ label, body: truncated ? cut(body, DETAIL_MAX_CHARS) : body, truncated });
   }
   return out;
 }
