@@ -99,7 +99,8 @@ export function classifyRecord(record: TranscriptRecord): Classified {
 
 /** Session status implied by a record, or null when it does not change it. */
 export function impliedStatus(c: Classified, isSubagent: boolean): SessionStatus | null {
+  if (isSubagent) return null; // subagent records never change the session status
   if (c.kind === 'prompt') return 'running';
-  if (!isSubagent && (c.kind === 'thinking' || c.kind === 'text' || c.kind === 'tool_use') && c.meta.endTurn) return 'idle';
+  if ((c.kind === 'thinking' || c.kind === 'text' || c.kind === 'tool_use') && c.meta.endTurn) return 'idle';
   return null;
 }

@@ -1,6 +1,7 @@
 import {
   TERMINAL_STATUSES,
   type Change,
+  type GraphEdge,
   type GraphNode,
   type NodeDetail,
   type Session,
@@ -29,6 +30,30 @@ interface SessionState {
   passthrough: Map<string, string | null>;
   /** agentId ('' for the main thread) -> current turn id. */
   turnByAgent: Map<string, string>;
+  /** agentId ('' for the main thread) -> currently open run of same-message tool_use nodes. */
+  batches: Map<string, Batch>;
+  /** agentId -> first node produced by that agent. */
+  firstNodeByAgent: Map<string, string>;
+  /** agentId -> dispatch (tool) node id, known from the agent meta. */
+  dispatchByAgent: Map<string, string>;
+  /** toolUseId -> agent meta, kept so the dispatch node can be updated when it appears later. */
+  agentMetas: Map<string, AgentMeta>;
+  /** agents whose spawn edge was already emitted. */
+  spawned: Set<string>;
+}
+
+interface Batch {
+  messageId: string;
+  /** parent shared by every member (the first member's parent). */
+  parentId: string | null;
+  members: string[];
+}
+
+interface AgentMeta {
+  agentId: string;
+  toolUseId: string;
+  agentType: string;
+  description: string;
 }
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -36,11 +61,15 @@ const str = (v: unknown): string | null => (typeof v === 'string' ? v : null);
 
 export class Normalizer {
   private readonly sessions = new Map<string, SessionState>();
+  /** Meta that arrived before its session existed. */
+  private readonly pendingTitles = new Map<string, string>();
+  private readonly pendingAgentMetas = new Map<string, AgentMeta[]>();
 
   apply(event: RawEvent, projectId: string): NormalizeResult {
     try {
       if (event.source === 'transcript') return this.applyTranscript(event, projectId);
-      return { changes: [] }; // hook and meta events arrive in later tasks
+      if (event.source === 'meta') return this.applyMeta(event);
+      return { changes: [] }; // hook events arrive in a later task
     } catch {
       return { changes: [], unknownRecordType: 'normalizer-error' };
     }
@@ -52,6 +81,68 @@ export class Normalizer {
 
   hasSession(sessionId: string): boolean {
     return this.sessions.has(sessionId);
+  }
+
+  private applyMeta(event: Extract<RawEvent, { source: 'meta' }>): NormalizeResult {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(event.payload);
+    } catch {
+      return { changes: [] };
+    }
+    if (!isObject(parsed)) return { changes: [] };
+    const changes: Change[] = [];
+    const state = this.sessions.get(event.sessionId);
+    if (event.agentId === null) {
+      const title = str(parsed.customTitle);
+      if (title === null) return { changes };
+      if (state) this.commitSession(state, { ...state.session, title }, changes);
+      else this.pendingTitles.set(event.sessionId, title);
+      return { changes };
+    }
+    const toolUseId = str(parsed.toolUseId);
+    const agentType = str(parsed.agentType);
+    const description = str(parsed.description);
+    if (toolUseId === null || agentType === null || description === null) return { changes };
+    const meta: AgentMeta = { agentId: event.agentId, toolUseId, agentType, description };
+    if (state) this.registerAgentMeta(state, meta, changes);
+    else this.pendingAgentMetas.set(event.sessionId, [...(this.pendingAgentMetas.get(event.sessionId) ?? []), meta]);
+    return { changes };
+  }
+
+  private registerAgentMeta(state: SessionState, meta: AgentMeta, changes: Change[]): void {
+    state.agentMetas.set(meta.toolUseId, meta);
+    state.dispatchByAgent.set(meta.agentId, `tool:${meta.toolUseId}`);
+    this.applyAgentMeta(state, meta, changes);
+  }
+
+  /** Writes the meta onto the dispatch node (if it exists yet) and tries the spawn edge. */
+  private applyAgentMeta(state: SessionState, meta: AgentMeta, changes: Change[]): void {
+    const id = `tool:${meta.toolUseId}`;
+    const node = state.nodes.get(id);
+    if (!node) return;
+    const patch: Partial<GraphNode> = { agentId: meta.agentId, title: meta.agentType, summary: summarize(meta.description) };
+    state.nodes.set(id, { ...node, ...patch });
+    changes.push({ type: 'node_updated', sessionId: state.session.id, id, patch });
+    this.trySpawn(state, meta.agentId, changes);
+  }
+
+  /** Emits the spawn edge once both the dispatch node and the agent's first node exist; at most once per agent. */
+  private trySpawn(state: SessionState, agentId: string, changes: Change[]): void {
+    if (state.spawned.has(agentId)) return;
+    const dispatch = state.dispatchByAgent.get(agentId);
+    const first = state.firstNodeByAgent.get(agentId);
+    if (dispatch === undefined || first === undefined) return;
+    const firstNode = state.nodes.get(first);
+    if (!state.nodes.has(dispatch) || !firstNode) return;
+    state.spawned.add(agentId);
+    const patch: Partial<GraphNode> = { parentId: dispatch };
+    state.nodes.set(first, { ...firstNode, ...patch });
+    changes.push({ type: 'node_updated', sessionId: state.session.id, id: first, patch });
+    changes.push({
+      type: 'edge_added',
+      edge: { id: `${dispatch}->${first}`, sessionId: state.session.id, from: dispatch, to: first, kind: 'spawn' },
+    });
   }
 
   private applyTranscript(event: Extract<RawEvent, { source: 'transcript' }>, projectId: string): NormalizeResult {
@@ -80,7 +171,7 @@ export class Normalizer {
     const agentId = event.agentId;
 
     this.updateSession(state, record, projectId, impliedStatus(classified, agentId !== null), changes);
-    if (classified.kind === 'prompt') state.turnByAgent.set(agentId ?? '', str(record.promptId) ?? uuid);
+    if (classified.kind === 'prompt' && agentId === null) state.turnByAgent.set('', str(record.promptId) ?? uuid);
 
     const parentUuid = str(record.parentUuid);
     switch (classified.kind) {
@@ -150,7 +241,7 @@ export class Normalizer {
         id: sessionId,
         projectId,
         cwd: str(record.cwd),
-        title: null,
+        title: this.pendingTitles.get(sessionId) ?? null,
         gitBranch: str(record.gitBranch),
         status: 'idle',
         sourceDeleted: false,
@@ -164,9 +255,20 @@ export class Normalizer {
         lastNodeByUuid: new Map(),
         passthrough: new Map(),
         turnByAgent: new Map(),
+        batches: new Map(),
+        firstNodeByAgent: new Map(),
+        dispatchByAgent: new Map(),
+        agentMetas: new Map(),
+        spawned: new Set(),
       };
       this.sessions.set(sessionId, state);
+      this.pendingTitles.delete(sessionId);
       changes.push({ type: 'session_upserted', session });
+      for (const meta of this.pendingAgentMetas.get(sessionId) ?? []) {
+        state.agentMetas.set(meta.toolUseId, meta);
+        state.dispatchByAgent.set(meta.agentId, `tool:${meta.toolUseId}`);
+      }
+      this.pendingAgentMetas.delete(sessionId);
     }
     return state;
   }
@@ -201,6 +303,7 @@ export class Normalizer {
       s.cwd === next.cwd &&
       s.gitBranch === next.gitBranch &&
       s.projectId === next.projectId &&
+      s.title === next.title &&
       s.status === next.status;
     if (same) return;
     state.session = next;
@@ -230,7 +333,7 @@ export class Normalizer {
     return {
       id,
       sessionId: state.session.id,
-      turnId: state.turnByAgent.get(agentId ?? '') ?? null,
+      turnId: agentId === null ? (state.turnByAgent.get('') ?? null) : null,
       agentId,
       parentId: this.resolveParent(state, record),
       kind: 'unknown',
@@ -273,27 +376,69 @@ export class Normalizer {
       usage: spec.meta?.usage ?? null,
       systemSubtype: spec.systemSubtype ?? null,
     };
-    this.emitNode(state, record.uuid, node, spec.detail, changes);
+    this.emitNode(state, record.uuid, node, spec.detail, agentId, false, changes);
   }
 
-  private emitNode(state: SessionState, uuid: string, node: GraphNode, detail: Partial<NodeDetail>, changes: Change[]): void {
+  private emitNode(
+    state: SessionState,
+    uuid: string,
+    created: GraphNode,
+    detail: Partial<NodeDetail>,
+    agentId: string | null,
+    isTool: boolean,
+    changes: Change[],
+  ): void {
+    const key = agentId ?? '';
+    const batch = state.batches.get(key);
+    let node = created;
+    let edgeKind: GraphEdge['kind'] = 'sequence';
+    let joinFrom: string[] = [];
+    let forkFirst: string | null = null;
+    if (batch && isTool && node.messageId !== null && node.messageId === batch.messageId) {
+      // Parallel sibling: fork from the batch's shared parent.
+      node = { ...node, parentId: batch.parentId };
+      edgeKind = 'fork';
+      if (batch.members.length === 1) forkFirst = batch.members[0] ?? null;
+      batch.members.push(node.id);
+    } else if (batch) {
+      state.batches.delete(key);
+      if (batch.members.length >= 2) {
+        // Join: the first node after a parallel batch hangs off the last member; every member links to it.
+        node = { ...node, parentId: batch.members[batch.members.length - 1] ?? null };
+        joinFrom = batch.members.slice(0, -1);
+      }
+    }
+    if (isTool && node.messageId !== null && !state.batches.has(key)) {
+      state.batches.set(key, { messageId: node.messageId, parentId: node.parentId, members: [node.id] });
+    }
+
     state.nodes.set(node.id, node);
     state.lastNodeByUuid.set(uuid, node.id);
     changes.push({ type: 'node_added', node, detail });
-    this.emitSequenceEdge(state, node, changes);
+    this.emitSequenceEdge(state, node, changes, edgeKind);
+    if (forkFirst !== null && node.parentId !== null) {
+      changes.push({
+        type: 'edge_added',
+        edge: { id: `${node.parentId}->${forkFirst}:fork`, sessionId: state.session.id, from: node.parentId, to: forkFirst, kind: 'fork' },
+      });
+    }
+    for (const from of joinFrom) {
+      changes.push({
+        type: 'edge_added',
+        edge: { id: `${from}->${node.id}`, sessionId: state.session.id, from, to: node.id, kind: 'sequence' },
+      });
+    }
+    if (agentId !== null && !state.firstNodeByAgent.has(agentId)) {
+      state.firstNodeByAgent.set(agentId, node.id);
+      this.trySpawn(state, agentId, changes);
+    }
   }
 
-  private emitSequenceEdge(state: SessionState, node: GraphNode, changes: Change[]): void {
+  private emitSequenceEdge(state: SessionState, node: GraphNode, changes: Change[], kind: GraphEdge['kind'] = 'sequence'): void {
     if (node.parentId === null) return;
     changes.push({
       type: 'edge_added',
-      edge: {
-        id: `${node.parentId}->${node.id}`,
-        sessionId: state.session.id,
-        from: node.parentId,
-        to: node.id,
-        kind: 'sequence',
-      },
+      edge: { id: `${node.parentId}->${node.id}`, sessionId: state.session.id, from: node.parentId, to: node.id, kind },
     });
   }
 
@@ -336,7 +481,9 @@ export class Normalizer {
       messageId: c.meta.messageId,
       usage: c.meta.usage,
     };
-    this.emitNode(state, record.uuid, node, { input: c.input }, changes);
+    this.emitNode(state, record.uuid, node, { input: c.input }, agentId, true, changes);
+    const meta = state.agentMetas.get(c.toolUseId);
+    if (meta) this.applyAgentMeta(state, meta, changes);
   }
 
   private applyToolResults(

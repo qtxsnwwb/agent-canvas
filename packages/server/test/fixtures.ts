@@ -83,6 +83,29 @@ export function rawLine(type: string, body: object): RawEvent {
   return toEvent(type, record, agentIdOf(body));
 }
 
+export function agentMeta(
+  agentId: string,
+  meta: { toolUseId: string; agentType: string; description: string; finished?: boolean },
+): RawEvent {
+  return {
+    source: 'meta',
+    file: `projects/p1/s1/subagents/agent-${agentId}.meta.json`,
+    sessionId: 's1',
+    agentId,
+    payload: JSON.stringify(meta),
+  };
+}
+
+export function customTitle(title: string): RawEvent {
+  return {
+    source: 'meta',
+    file: 'projects/p1/s1/custom-title.json',
+    sessionId: 's1',
+    agentId: null,
+    payload: JSON.stringify({ customTitle: title }),
+  };
+}
+
 export function run(n: Normalizer, events: RawEvent[]): { changes: Change[]; graph: Graph; unknown: string[] } {
   const changes: Change[] = [];
   const unknown: string[] = [];
