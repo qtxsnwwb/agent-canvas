@@ -136,6 +136,7 @@ function terminalIo(): HooksCliIo {
     confirm: (question) =>
       new Promise<boolean>((resolve) => {
         const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+        rl.once('close', () => resolve(false)); // Ctrl-D / Ctrl-C without an answer
         rl.question(question, (answer) => {
           rl.close();
           resolve(/^(y|yes)$/i.test(answer.trim()));
@@ -158,6 +159,7 @@ async function hooksCommand(args: string[], env: NodeJS.ProcessEnv, io: HooksCli
       options: { port: { type: 'string' }, yes: { type: 'boolean' }, settings: { type: 'string' } },
       allowPositionals: false,
     });
+    if (values.port !== undefined && !/^[0-9]+$/.test(values.port)) throw new Error(`invalid --port: ${values.port}`);
     const port = values.port === undefined ? loadConfig(env).port : Number(values.port);
     if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`invalid --port: ${values.port}`);
     const opts = { settingsFile: values.settings ?? defaultSettingsFile(env), port, yes: values.yes === true };

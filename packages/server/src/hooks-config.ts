@@ -49,6 +49,11 @@ function isPlainObject(value: unknown): value is Obj {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/** Assigns an own data property, so keys such as __proto__ cannot reach the prototype setter. */
+function setOwn(target: Obj, key: string, value: unknown): void {
+  Object.defineProperty(target, key, { value, writable: true, enumerable: true, configurable: true });
+}
+
 function isOurs(hook: unknown, url: string): boolean {
   return isPlainObject(hook) && hook.type === 'http' && hook.url === url;
 }
@@ -85,7 +90,7 @@ export function planInstall(settings: unknown, port: number): InstallPlan {
       continue;
     }
     const entry = { hooks: [{ type: 'http', url, timeout: HOOK_TIMEOUT_SECONDS }] };
-    if (existing === undefined) nextHooks[event] = [entry];
+    if (existing === undefined) setOwn(nextHooks, event, [entry]);
     else existing.push(entry);
     added.push(event);
   }
@@ -116,7 +121,7 @@ export function planUninstall(settings: unknown, port: number): UninstallPlan {
     }
     if (!touched) continue;
     removed.push(event);
-    if (kept.length > 0) nextHooks[event] = kept;
+    if (kept.length > 0) setOwn(nextHooks, event, kept);
     else delete nextHooks[event];
   }
   if (removed.length > 0 && Object.keys(nextHooks).length === 0) delete next.hooks;
