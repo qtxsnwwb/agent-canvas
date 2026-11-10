@@ -1,8 +1,11 @@
 import { expect, test } from 'vitest';
 import ELK from 'elkjs/lib/elk.bundled.js';
 import { emptyGraph, type Graph, type GraphEdge, type GraphNode, type NodeKind } from '@claude-canvas/shared';
-import { buildView, type CanvasView } from '../src/canvas/view';
-import { layoutTurn, stackTurns, turnInput, turnSignature, TURN_GAP, TURN_HEADER, type ElkLike, type TurnLayout } from '../src/canvas/layout';
+import { agentGroupKey, buildView, type AgentGroup, type CanvasView } from '../src/canvas/view';
+import {
+  groupInput, layoutTurn, placeAgentGroups, stackTurns, turnInput, turnSignature, TURN_GAP, TURN_HEADER, type ElkLike, type TurnLayout,
+} from '../src/canvas/layout';
+import { containerSize } from '../src/canvas/sizes';
 
 const EPOCH = Date.parse('2026-01-01T00:00:00Z');
 function node(id: string, kind: NodeKind, turnId: string, tMs: number): GraphNode {
@@ -114,4 +117,72 @@ test('turnInput 的边按实际输出的节点过滤，而不是按 turn.nodeIds
   const input = turnInput({ ...v, nodes } as CanvasView, turn);
   expect(input.nodes.map((x) => x.id)).toEqual(['p1', 'y1']);
   expect(input.edges).toEqual([]);
+});
+
+/** 主线 p1(prompt) → s1(subagent, childAgentId a1)；a1 内部 i1 → i2 */
+function mainWithAgent(): Graph {
+  const nodes = [
+    node('p1', 'prompt', 't1', 0), { ...node('s1', 'subagent', 't1', 1), childAgentId: 'a1' },
+    { ...node('i1', 'tool', 't1', 2), turnId: null, agentId: 'a1' }, { ...node('i2', 'tool', 't1', 3), turnId: null, agentId: 'a1' },
+  ];
+  const edges = [e('p1', 's1'), { ...e('s1', 'i1'), kind: 'spawn' as const }, e('i1', 'i2')];
+  return { ...emptyGraph(), nodes: Object.fromEntries(nodes.map((x) => [x.id, x])), edges: Object.fromEntries(edges.map((x) => [x.id, x])) };
+}
+const opts = (o: { expandedAgents?: ReadonlySet<string> } = {}) => o;
+const view = (graph: Graph, o: { expandedAgents?: ReadonlySet<string> } = {}) => buildView(graph, new Map(), undefined, o);
+const g = (key: string, containerId: string, depth: number, nodeIds: string[]): AgentGroup =>
+  ({ key, agentId: key.slice('agent:'.length), containerId, parentGroupKey: 't1', depth, nodeIds });
+
+test('containerSize：加内边距和标题区，宽度有下限', () => {
+  expect(containerSize({ width: 500, height: 300 })).toEqual({ width: 532, height: 400 });
+  expect(containerSize({ width: 100, height: 40 })).toEqual({ width: 260, height: 140 });
+});
+
+test('groupInput 对展开的容器使用给定尺寸，其余用 sizeOf；只带分组内部的边', () => {
+  const v = view(mainWithAgent(), opts({ expandedAgents: new Set(['a1']) }));
+  const input = groupInput(v, 't1', v.turns[0]!.nodeIds, new Map([['s1', { width: 532, height: 400 }]]));
+  expect(input.key).toBe('t1');
+  expect(input.nodes).toEqual([{ id: 'p1', width: 280, height: 64 }, { id: 's1', width: 532, height: 400 }]);
+  expect(input.edges).toEqual([{ id: 'p1->s1', from: 'p1', to: 's1' }]);
+  // The agent group itself: its inner nodes and only the edges between them.
+  const group = v.agentGroups[0]!;
+  expect(group.key).toBe(agentGroupKey('a1'));
+  const inner = groupInput(v, group.key, group.nodeIds, new Map());
+  expect(inner).toEqual({
+    key: 'agent:a1', nodes: [{ id: 'i1', width: 240, height: 52 }, { id: 'i2', width: 240, height: 52 }], edges: [{ id: 'i1->i2', from: 'i1', to: 'i2' }],
+  });
+  // turnInput is the thin wrapper with no container sizes.
+  expect(turnInput(v, v.turns[0]!)).toEqual(groupInput(v, 't1', v.turns[0]!.nodeIds, new Map()));
+});
+
+test('placeAgentGroups：内部节点坐标 = 容器坐标 + 偏移；嵌套逐层累加', () => {
+  const base = { positions: { s1: { x: 100, y: 200 } } };
+  const outer = { group: g('agent:a1', 's1', 1, ['i1', 's2']), layout: { key: 'agent:a1', width: 300, height: 200, anchorX: 120, positions: { i1: { x: 0, y: 0 }, s2: { x: 10, y: 80 } } } };
+  const inner = { group: g('agent:a2', 's2', 2, ['j1']), layout: { key: 'agent:a2', width: 240, height: 52, anchorX: 120, positions: { j1: { x: 0, y: 0 } } } };
+  const r = placeAgentGroups(base, [outer, inner]);
+  expect(r.positions.s1).toEqual({ x: 100, y: 200 });
+  expect(r.positions.i1).toEqual({ x: 116, y: 284 });
+  expect(r.positions.s2).toEqual({ x: 126, y: 364 });
+  expect(r.positions.j1).toEqual({ x: 142, y: 448 });
+  expect(r.containerBoxes.s1).toEqual({ x: 100, y: 200, width: 332, height: 300 });
+  expect(r.containerBoxes.s2).toEqual({ x: 126, y: 364, width: 272, height: 152 });
+  expect(base.positions).toEqual({ s1: { x: 100, y: 200 } }); // input untouched
+});
+
+test('placeAgentGroups：容器没有位置时，其分组（及更深的分组）不放置', () => {
+  const outer = { group: g('agent:a1', 's1', 1, ['i1', 's2']), layout: { key: 'agent:a1', width: 300, height: 200, anchorX: 120, positions: { i1: { x: 0, y: 0 }, s2: { x: 10, y: 80 } } } };
+  const inner = { group: g('agent:a2', 's2', 2, ['j1']), layout: { key: 'agent:a2', width: 240, height: 52, anchorX: 120, positions: { j1: { x: 0, y: 0 } } } };
+  const r = placeAgentGroups({ positions: { p1: { x: 0, y: 0 } } }, [outer, inner]);
+  expect(r.positions).toEqual({ p1: { x: 0, y: 0 } });
+  expect(r.containerBoxes).toEqual({});
+});
+
+test('stackTurns：没有节点的轮次不占纵向空间，也没有轮次框', () => {
+  const t1: TurnLayout = { key: 't1', width: 300, height: 100, anchorX: 150, positions: { a: { x: 0, y: 0 } } };
+  const empty: TurnLayout = { key: 't2', width: 0, height: 0, anchorX: 0, positions: {} };
+  const t3: TurnLayout = { key: 't3', width: 300, height: 80, anchorX: 150, positions: { c: { x: 0, y: 0 } } };
+  const s = stackTurns([t1, empty, t3]);
+  expect(s.turnBoxes.t2).toBeUndefined();
+  expect(s.turnBoxes.t3!.y).toBe(TURN_HEADER + 100 + TURN_GAP);
+  expect(s.turnBoxes.t3).toEqual(stackTurns([t1, t3]).turnBoxes.t3);
 });

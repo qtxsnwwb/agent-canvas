@@ -3,6 +3,7 @@ import type { Graph, GraphEdge, GraphNode } from '@claude-canvas/shared';
 import { createCanvasModel } from '../src/canvas/useCanvas';
 import type { LayoutClient } from '../src/canvas/layoutClient';
 import type { TurnLayout, TurnLayoutInput } from '../src/canvas/layout';
+import { containerSize } from '../src/canvas/sizes';
 
 const EPOCH = Date.parse('2026-01-01T00:00:00Z');
 
@@ -580,5 +581,187 @@ test('被默认规则折叠的轮次忘掉“展开全部”：再展开时回�
   expect(model.getSnapshot().view.turns[0]!.collapsed).toBe(true);
   model.toggleTurn('t1');
   expect(model.getSnapshot().view.turns[0]!.foldedEarlier).toBe(21);
+  model.dispose();
+});
+
+const prompt = (id: string, turnId: string, t: number): GraphNode => ({ ...node(id, turnId, t), kind: 'prompt' });
+const sub = (id: string, turnId: string | null, agentId: string | null, t: number, childAgentId: string): GraphNode =>
+  ({ ...node(id, turnId ?? 'x', t), turnId, agentId, kind: 'subagent', childAgentId });
+const inner = (id: string, agentId: string, t: number): GraphNode => ({ ...node(id, 'x', t), turnId: null, agentId, kind: 'tool' });
+function withEdges(nodes: GraphNode[], pairs: [string, string, GraphEdge['kind']?][]): Graph {
+  const edges = pairs.map(([from, to, kind]): GraphEdge => ({ id: `${from}->${to}`, sessionId: 's1', from, to, kind: kind ?? 'sequence' }));
+  return { nodes: Object.fromEntries(nodes.map((n) => [n.id, n])), edges: Object.fromEntries(edges.map((e) => [e.id, e])) };
+}
+/** t1: p1 → s1(a1)；a1: k1 → s2(a2)；a2: j1 */
+function nestedAgents(): Graph {
+  return withEdges(
+    [prompt('p1', 't1', 0), sub('s1', 't1', null, 1, 'a1'), inner('k1', 'a1', 2), sub('s2', null, 'a1', 3, 'a2'), inner('j1', 'a2', 4)],
+    [['p1', 's1'], ['s1', 'k1', 'spawn'], ['k1', 's2'], ['s2', 'j1', 'spawn']],
+  );
+}
+/** t1: p1 → x1；t2: p2 → s1(a1)；a1: i1 → i2 */
+function twoTurnsWithAgent(): Graph {
+  return withEdges(
+    [prompt('p1', 't1', 0), { ...node('x1', 't1', 1), kind: 'tool' }, prompt('p2', 't2', 10), sub('s1', 't2', null, 11, 'a1'),
+      inner('i1', 'a1', 12), inner('i2', 'a1', 13)],
+    [['p1', 'x1'], ['x1', 'p2'], ['p2', 's1'], ['s1', 'i1', 'spawn'], ['i1', 'i2']],
+  );
+}
+/** Same input, same layout (like the real client's cache): nodes stacked at x = 0 with no gap, in input order. */
+function deterministicLayout() {
+  const inputs: TurnLayoutInput[] = [];
+  const client: LayoutClient = {
+    layout: async (input) => {
+      inputs.push(input);
+      const positions: Record<string, { x: number; y: number }> = {};
+      let y = 0;
+      for (const n of input.nodes) {
+        positions[n.id] = { x: 0, y };
+        y += n.height;
+      }
+      const width = Math.max(...input.nodes.map((n) => n.width));
+      return { key: input.key, width, height: y, anchorX: input.nodes[0]!.width / 2, positions };
+    },
+    dispose() {},
+  };
+  return { client, inputs };
+}
+
+test('先布局最深的代理分组，再布局包含它的分组，最后布局轮次；容器尺寸传给上层', async () => {
+  const live = fakeLive(nestedAgents());
+  const layout = fakeLayout();
+  const model = createCanvasModel(live, layout.client);
+  model.toggleAgent('a1');
+  model.toggleAgent('a2');
+  layout.resolveAll(); // the first round (nothing expanded yet)
+  await flush();
+  const start = 1;
+  const keys = () => layout.reqs.slice(start).map((r) => r.input.key);
+  expect(keys()).toEqual(['agent:a2']); // the deeper group alone: its parent needs its size
+  layout.resolveAll();
+  await flush();
+  expect(keys()).toEqual(['agent:a2', 'agent:a1']);
+  const a1 = layout.reqs[start + 1]!.input;
+  expect(a1.nodes).toEqual([{ id: 'k1', width: 240, height: 52 }, { id: 's2', ...containerSize({ width: 300, height: 100 }) }]);
+  expect(a1.edges).toEqual([{ id: 'k1->s2', from: 'k1', to: 's2' }]);
+  layout.resolveAll();
+  await flush();
+  expect(keys()).toEqual(['agent:a2', 'agent:a1', 't1']);
+  const t1 = layout.reqs[start + 2]!.input;
+  expect(t1.nodes).toEqual([{ id: 'p1', width: 280, height: 64 }, { id: 's1', ...containerSize({ width: 300, height: 200 }) }]);
+  expect(model.getSnapshot().positions.j1).toBeUndefined(); // nothing lands before the turns return
+  layout.resolveAll();
+  await flush();
+  const s = model.getSnapshot();
+  for (const id of ['p1', 's1', 'k1', 's2', 'j1']) expect(s.positions[id]).toBeDefined();
+  expect(Object.keys(s.containerBoxes).sort()).toEqual(['s1', 's2']);
+  expect(s.containerBoxes.s1).toEqual({ ...s.positions.s1!, ...containerSize({ width: 300, height: 200 }) });
+  await vi.advanceTimersByTimeAsync(200);
+  expect(layout.reqs).toHaveLength(start + 3); // one round, nothing more
+  model.dispose();
+});
+
+test('未展开的子代理不产生布局请求', async () => {
+  const live = fakeLive(nestedAgents());
+  const layout = fakeLayout();
+  const model = createCanvasModel(live, layout.client);
+  expect(layout.reqs.map((r) => r.input.key)).toEqual(['t1']);
+  expect(layout.reqs[0]!.input.nodes).toEqual([{ id: 'p1', width: 280, height: 64 }, { id: 's1', width: 260, height: 68 }]);
+  layout.resolveAll();
+  await flush();
+  expect(model.getSnapshot().containerBoxes).toEqual({});
+  await vi.advanceTimersByTimeAsync(200);
+  expect(layout.reqs).toHaveLength(1);
+  model.dispose();
+});
+
+test('toggleAgent 展开后内部节点获得位置；再次调用折叠后内部节点从 positions 中消失', async () => {
+  const live = fakeLive(twoTurnsWithAgent());
+  const layout = deterministicLayout();
+  const model = createCanvasModel(live, layout.client);
+  await flush();
+  model.toggleAgent('a1');
+  const mid = model.getSnapshot(); // rebuilt at once; inner nodes not placed yet, no container box yet
+  expect(mid.view.nodes.has('i1')).toBe(true);
+  expect(mid.positions.i1).toBeUndefined();
+  expect(mid.containerBoxes).toEqual({});
+  await flush();
+  const s = model.getSnapshot();
+  const box = s.containerBoxes.s1!;
+  expect(box).toEqual({ ...s.positions.s1!, ...containerSize({ width: 240, height: 104 }) }); // two 240 x 52 tools
+  expect(s.positions.i1).toEqual({ x: box.x + 16, y: box.y + 68 + 16 });
+  expect(s.positions.i2).toEqual({ x: box.x + 16, y: box.y + 68 + 16 + 52 });
+
+  model.toggleAgent('a1');
+  const folded = model.getSnapshot();
+  expect(folded.view.nodes.has('i1')).toBe(false);
+  expect(folded.positions.i1).toBeUndefined();
+  expect(folded.positions.i2).toBeUndefined();
+  expect(folded.containerBoxes).toEqual({});
+  await flush();
+  expect(model.getSnapshot().positions.i1).toBeUndefined();
+  expect(model.getSnapshot().containerBoxes).toEqual({});
+  model.dispose();
+});
+
+test('展开一个子代理不改变它之前各轮次的坐标', async () => {
+  const live = fakeLive(twoTurnsWithAgent());
+  const layout = deterministicLayout();
+  const model = createCanvasModel(live, layout.client);
+  await flush();
+  const before = model.getSnapshot();
+  model.toggleAgent('a1');
+  await flush();
+  const after = model.getSnapshot();
+  expect(after.positions.i1).toBeDefined();
+  expect(after.positions.p1).toEqual(before.positions.p1);
+  expect(after.positions.x1).toEqual(before.positions.x1);
+  expect(after.turnBoxes.t1).toEqual(before.turnBoxes.t1);
+  expect(after.turnBoxes.t2!.height).toBeGreaterThan(before.turnBoxes.t2!.height); // the container is taller
+  model.dispose();
+});
+
+test('setMode("topology") 立即重建；getMode 反映当前视角', async () => {
+  const live = fakeLive(withEdges(
+    [prompt('p1', 't1', 0), node('tx', 't1', 1), sub('s1', 't1', null, 2, 'a1'), inner('i1', 'a1', 3)],
+    [['p1', 'tx'], ['tx', 's1'], ['s1', 'i1', 'spawn']],
+  ));
+  const layout = fakeLayout();
+  const model = createCanvasModel(live, layout.client);
+  expect(model.getMode()).toBe('live');
+  model.toggleAgent('a1');
+  expect(model.getSnapshot().view.nodes.has('i1')).toBe(true);
+  const fn = vi.fn();
+  model.subscribe(fn);
+  model.setMode('topology');
+  expect(model.getMode()).toBe('topology');
+  const s = model.getSnapshot(); // no timer advanced
+  expect(fn).toHaveBeenCalled();
+  expect(s.view.mode).toBe('topology');
+  expect(s.view.nodes.has('tx')).toBe(false);
+  expect(s.view.nodes.has('i1')).toBe(false); // topology mode shows every subagent collapsed
+  expect(s.view.agentGroups).toEqual([]);
+  model.setMode('live'); // the expanded agents were kept
+  expect(model.getMode()).toBe('live');
+  expect(model.getSnapshot().view.nodes.has('i1')).toBe(true);
+  expect(model.getSnapshot().view.nodes.has('tx')).toBe(true);
+  model.dispose();
+});
+
+test('拓扑视角下没有可见节点的轮次不请求布局，也不占纵向空间', async () => {
+  // t1 holds only text nodes (hidden in topology mode); t2 starts with a prompt.
+  const live = fakeLive(graph([node('a', 't1', 0), node('b', 't1', 1), prompt('c', 't2', 10)]));
+  const layout = deterministicLayout();
+  const model = createCanvasModel(live, layout.client);
+  await flush();
+  const start = layout.inputs.length;
+  model.setMode('topology');
+  expect(model.getSnapshot().view.turns[0]!.nodeIds).toEqual([]);
+  await flush();
+  expect(layout.inputs.slice(start).map((x) => x.key)).toEqual(['t2']);
+  const s = model.getSnapshot();
+  expect(Object.keys(s.turnBoxes)).toEqual(['t2']);
+  expect(s.turnBoxes.t2!.y).toBe(0);
+  expect(s.positions.c!.y).toBe(28); // TURN_HEADER: nothing above it
   model.dispose();
 });

@@ -1,15 +1,21 @@
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import type { LiveSession } from '../client';
 import { createThrottle } from '../throttle';
-import { stackTurns, turnInput, type Box } from './layout';
+import { groupInput, placeAgentGroups, stackTurns, turnInput, type Box, type TurnLayout } from './layout';
 import { createBrowserLayoutWorker, createLayoutClient, type LayoutClient } from './layoutClient';
-import { buildView, type CanvasView } from './view';
+import { containerSize } from './sizes';
+import { buildView, type AgentGroup, type CanvasView, type ViewMode } from './view';
 
 export interface CanvasSnapshot {
   view: CanvasView;
   /** Only view nodes whose position has been computed; the canvas does not draw the others yet. */
   positions: Record<string, { x: number; y: number }>;
   turnBoxes: Record<string, Box>;
+  /**
+   * Expanded container node id -> its box (position and expanded size). Only containers still expanded in `view` whose
+   * inner layout has landed; inner nodes are positioned inside it.
+   */
+  containerBoxes: Record<string, Box>;
   layoutError: string | null;
 }
 export interface CanvasModel {
@@ -28,6 +34,14 @@ export interface CanvasModel {
   setAutoFold(enabled: boolean): void;
   /** A node (the selection) that is never folded into `earlier` and whose turn is not auto-collapsed; null for none. */
   setKeepVisible(id: string | null): void;
+  /**
+   * Expands the agent (a dispatch node's childAgentId) into a container of its inner nodes, or collapses it again;
+   * rebuilds at once. The set of expanded agents is kept across setMode (topology mode ignores it).
+   */
+  toggleAgent(agentId: string): void;
+  /** Switches between the live and topology views; rebuilds at once. Default 'live'. */
+  setMode(mode: ViewMode): void;
+  getMode(): ViewMode;
   dispose(): void;
 }
 
@@ -43,6 +57,7 @@ const EMPTY_SNAPSHOT: CanvasSnapshot = {
   view: { turns: [], nodes: new Map(), edges: [], latestNodeId: null, agentGroups: [], mode: 'live' },
   positions: {},
   turnBoxes: {},
+  containerBoxes: {},
   layoutError: null,
 };
 
@@ -61,6 +76,11 @@ const samePoint = (a: { x: number; y: number }, b: { x: number; y: number } | un
   b !== undefined && a.x === b.x && a.y === b.y;
 const sameBox = (a: Box, b: Box | undefined): boolean =>
   b !== undefined && a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
+const isExpandedContainer = (view: CanvasView, id: string): boolean => {
+  const vn = view.nodes.get(id);
+  return vn?.type === 'node' && vn.expanded;
+};
+
 /** Same keys, and every value equal by `same`. */
 function sameRecord<T>(a: Record<string, T>, b: Record<string, T>, same: (x: T, y: T | undefined) => boolean): boolean {
   if (a === b) return true;
@@ -76,6 +96,10 @@ function sameRecord<T>(a: Record<string, T>, b: Record<string, T>, same: (x: T, 
  * time: a rebuild during a round publishes its view and marks the model dirty, and one more round runs (against the
  * then-current graph) when the running one settles. A failed round with nothing queued schedules one retry
  * (2.5 s, doubling up to 30 s while rounds keep failing, reset by a success); any rebuild replaces that timer.
+ *
+ * A round is laid out bottom-up: the expanded agents' groups first, deepest level first (each level in parallel), each
+ * result giving its container's size in the level above; then every turn with something to draw; then the turns are
+ * stacked and the groups placed inside their containers. With no agent expanded a round is just the turns.
  */
 export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscribe'>, layout: LayoutClient): CanvasModel {
   /** Turn key -> expanded, set by the user. */
@@ -86,6 +110,9 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
   /** Turn key -> ids hidden in its `earlier` node, recorded while auto-fold is off. */
   const frozen = new Map<string, ReadonlySet<string>>();
   let keepVisible: string | null = null;
+  /** Agent ids the user expanded (kept across mode switches). */
+  const expandedAgents = new Set<string>();
+  let mode: ViewMode = 'live';
   const listeners = new Set<() => void>();
   let snapshot: CanvasSnapshot = EMPTY_SNAPSHOT;
   let disposed = false;
@@ -123,6 +150,34 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
     return merged;
   };
 
+  /** Lays out `view` bottom-up; null when the model was disposed meanwhile. */
+  const layoutRound = async (view: CanvasView): Promise<{
+    positions: Positions; turnBoxes: Record<string, Box>; containerBoxes: Record<string, Box>;
+  } | null> => {
+    const sizes = new Map<string, { width: number; height: number }>();
+    const placed: { group: AgentGroup; layout: TurnLayout }[] = [];
+    const groups = view.agentGroups; // deepest first
+    for (let i = 0; i < groups.length;) {
+      let j = i;
+      while (j < groups.length && groups[j]!.depth === groups[i]!.depth) j++;
+      const level = groups.slice(i, j).map((group) => ({ group, input: groupInput(view, group.key, group.nodeIds, sizes) }))
+        .filter((x) => x.input.nodes.length > 0);
+      const layouts = await Promise.all(level.map((x) => layout.layout(x.input)));
+      if (disposed) return null;
+      level.forEach(({ group }, k) => {
+        placed.push({ group, layout: layouts[k]! });
+        sizes.set(group.containerId, containerSize(layouts[k]!));
+      });
+      i = j;
+    }
+    const inputs = view.turns.map((t) => turnInput(view, t, sizes)).filter((x) => x.nodes.length > 0);
+    const layouts = await Promise.all(inputs.map((x) => layout.layout(x)));
+    if (disposed) return null;
+    const stacked = stackTurns(layouts);
+    const { positions, containerBoxes } = placeAgentGroups(stacked, placed.reverse()); // outer groups first
+    return { positions, turnBoxes: stacked.turnBoxes, containerBoxes };
+  };
+
   const startRound = (view: CanvasView): void => {
     roundRunning = true;
     const settle = (failed: boolean): void => {
@@ -136,10 +191,9 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
         retryDelay = Math.min(retryDelay * 2, RETRY_MAX_MS);
       }
     };
-    Promise.all(view.turns.map((t) => layout.layout(turnInput(view, t)))).then(
-      (layouts) => {
-        if (disposed) return;
-        const stacked = stackTurns(layouts);
+    layoutRound(view).then(
+      (stacked) => {
+        if (disposed || stacked === null) return;
         // The view may have moved on since this request: keep only what is still shown.
         const current = snapshot.view;
         let positions: Positions = {};
@@ -147,10 +201,13 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
         for (const [id, p] of Object.entries(snapshot.positions)) if (!(id in positions)) positions[id] = p;
         const currentTurns = new Set(current.turns.map((t) => t.key));
         let turnBoxes = pick(stacked.turnBoxes, (k) => currentTurns.has(k));
+        let containerBoxes = pick(stacked.containerBoxes, (id) => isExpandedContainer(current, id));
         if (sameRecord(positions, snapshot.positions, samePoint)) positions = snapshot.positions;
         if (sameRecord(turnBoxes, snapshot.turnBoxes, sameBox)) turnBoxes = snapshot.turnBoxes;
-        const unchanged = positions === snapshot.positions && turnBoxes === snapshot.turnBoxes && snapshot.layoutError === null;
-        if (!unchanged) publish({ view: current, positions, turnBoxes, layoutError: null });
+        if (sameRecord(containerBoxes, snapshot.containerBoxes, sameBox)) containerBoxes = snapshot.containerBoxes;
+        const unchanged = positions === snapshot.positions && turnBoxes === snapshot.turnBoxes
+          && containerBoxes === snapshot.containerBoxes && snapshot.layoutError === null;
+        if (!unchanged) publish({ view: current, positions, turnBoxes, containerBoxes, layoutError: null });
         retryDelay = RETRY_FIRST_MS;
         settle(false);
       },
@@ -166,7 +223,7 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
   function rebuild(): void {
     if (disposed) return;
     cancelRetry(); // this rebuild is the retry
-    const view = buildView(live.getGraph(), effectiveOverrides(), fullTurns, { frozenHidden: frozen, keepVisible });
+    const view = buildView(live.getGraph(), effectiveOverrides(), fullTurns, { frozenHidden: frozen, keepVisible, expandedAgents, mode });
     // A collapsed turn forgets "show all" and its frozen fold, however it got collapsed: re-expanding it folds the
     // middle by the length rule again.
     for (const t of view.turns) {
@@ -182,6 +239,7 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
       view,
       positions: pick(snapshot.positions, inView),
       turnBoxes: pick(snapshot.turnBoxes, (k) => turnKeys.has(k)),
+      containerBoxes: pick(snapshot.containerBoxes, (id) => isExpandedContainer(view, id)),
     });
     if (roundRunning) dirty = true;
     else startRound(view);
@@ -231,6 +289,19 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
     setKeepVisible(id) {
       keepVisible = id; // takes effect with the next rebuild: a selected node is already visible
     },
+    toggleAgent(agentId) {
+      if (disposed) return;
+      if (!expandedAgents.delete(agentId)) expandedAgents.add(agentId);
+      throttle.cancel();
+      rebuild();
+    },
+    setMode(next) {
+      if (disposed || next === mode) return;
+      mode = next;
+      throttle.cancel();
+      rebuild();
+    },
+    getMode: () => mode,
     dispose() {
       disposed = true;
       cancelRetry();
@@ -243,7 +314,7 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
 
 /** One model and one layout worker per live session; both are disposed when the page unmounts. */
 export type UseCanvasResult = CanvasSnapshot
-  & Pick<CanvasModel, 'toggleTurn' | 'showFullTurn' | 'setAutoFold' | 'setKeepVisible'>
+  & Pick<CanvasModel, 'toggleTurn' | 'showFullTurn' | 'setAutoFold' | 'setKeepVisible' | 'toggleAgent' | 'setMode'>
   & { /** False until the model exists (the snapshot is then an empty placeholder). */ ready: boolean };
 
 export function useCanvas(live: LiveSession): UseCanvasResult {
@@ -266,10 +337,12 @@ export function useCanvas(live: LiveSession): UseCanvasResult {
   const showFullTurn = useCallback((turnKey: string) => model?.showFullTurn(turnKey), [model]);
   const setAutoFold = useCallback((enabled: boolean) => model?.setAutoFold(enabled), [model]);
   const setKeepVisible = useCallback((id: string | null) => model?.setKeepVisible(id), [model]);
+  const toggleAgent = useCallback((agentId: string) => model?.toggleAgent(agentId), [model]);
+  const setMode = useCallback((mode: ViewMode) => model?.setMode(mode), [model]);
   // Same object until the snapshot changes, so consumers can memoize on it.
   const ready = model !== null;
   return useMemo(
-    () => ({ ...snapshot, toggleTurn, showFullTurn, setAutoFold, setKeepVisible, ready }),
-    [snapshot, toggleTurn, showFullTurn, setAutoFold, setKeepVisible, ready],
+    () => ({ ...snapshot, toggleTurn, showFullTurn, setAutoFold, setKeepVisible, toggleAgent, setMode, ready }),
+    [snapshot, toggleTurn, showFullTurn, setAutoFold, setKeepVisible, toggleAgent, setMode, ready],
   );
 }
