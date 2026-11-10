@@ -268,6 +268,30 @@ function useFollow(snapshot: CanvasSnapshot) {
   };
 }
 
+/** How long a keyboard expand keeps waiting for its turn header to appear before giving up. */
+const HEADER_FOCUS_WAIT_MS = 3_000;
+const HEADER_FOCUS_POLL_MS = 50;
+
+/**
+ * After a keyboard expand the focused element (a summary node or its button) goes away; move focus to the turn
+ * header's "折叠" button once React Flow has rendered it, so focus does not fall back to the page body. Best effort.
+ */
+function useHeaderFocus(): (turnKey: string) => void {
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(timer.current), []);
+  return useCallback((turnKey: string) => {
+    clearTimeout(timer.current);
+    const until = Date.now() + HEADER_FOCUS_WAIT_MS;
+    const selector = `.react-flow__node[data-id="${CSS.escape(HEADER_PREFIX + turnKey)}"] .cc-fold`;
+    const attempt = (): void => {
+      const button = document.querySelector<HTMLButtonElement>(selector);
+      if (button) button.focus({ preventScroll: true });
+      else if (Date.now() < until) timer.current = setTimeout(attempt, HEADER_FOCUS_POLL_MS);
+    };
+    timer.current = setTimeout(attempt, 0);
+  }, []);
+}
+
 function CanvasInner({ snapshot, selectedId, onSelect, onToggleTurn, onShowFullTurn, onFollowingChange }: CanvasProps) {
   const nodes = useFlowNodes(snapshot, selectedId);
   const edges = useFlowEdges(snapshot);
@@ -280,11 +304,23 @@ function CanvasInner({ snapshot, selectedId, onSelect, onToggleTurn, onShowFullT
   toggleRef.current = onToggleTurn;
   const showFullRef = useRef(onShowFullTurn);
   showFullRef.current = onShowFullTurn;
+  const followChangeRef = useRef(onFollowingChange);
+  followChangeRef.current = onFollowingChange;
+  const focusHeader = useHeaderFocus();
   const stopFollowing = follow.stop;
-  const actions = useMemo(() => ({
-    toggleTurn: (key: string) => { stopFollowing(); toggleRef.current(key); },
-    showFullTurn: (key: string) => { stopFollowing(); showFullRef.current(key); },
-  }), [stopFollowing]);
+  // A UI layout change stops following; auto-fold is switched off right away (not only through the follow effect
+  // after the next render), so the rebuild this action triggers already keeps everything expanded in place.
+  const actions = useMemo(() => {
+    const before = (key: string, fromKeyboard?: boolean): void => {
+      stopFollowing();
+      followChangeRef.current?.(false);
+      if (fromKeyboard) focusHeader(key);
+    };
+    return {
+      toggleTurn: (key: string, fromKeyboard?: boolean) => { before(key, fromKeyboard); toggleRef.current(key); },
+      showFullTurn: (key: string, fromKeyboard?: boolean) => { before(key, fromKeyboard); showFullRef.current(key); },
+    };
+  }, [stopFollowing, focusHeader]);
 
   // Enter / Space on a focused node. React Flow's own key handler on the node wrapper only updates its internal
   // selection and never calls onNodeClick; the wrapper (not our node component) holds the focus, so the key is
@@ -303,7 +339,7 @@ function CanvasInner({ snapshot, selectedId, onSelect, onToggleTurn, onShowFullT
     e.stopPropagation();
     if (e.repeat) return;
     if (vn.type === 'node') onSelectRef.current(vn.id);
-    else actions.toggleTurn(vn.turnKey);
+    else actions.toggleTurn(vn.turnKey, true);
   }, [actions]);
   const onNodeClick = useCallback((_: unknown, n: FlowNode) => {
     if (n.type === 'turnSummary') actions.toggleTurn(n.data.summary.turnKey);

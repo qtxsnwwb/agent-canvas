@@ -33,6 +33,9 @@ export interface CanvasModel {
 
 /** Minimum interval between two rebuilds triggered by live updates. */
 const REBUILD_MS = 50;
+/** After a failed round with nothing queued, the model retries after this delay, doubling up to RETRY_MAX_MS. */
+export const RETRY_FIRST_MS = 2_500;
+export const RETRY_MAX_MS = 30_000;
 
 type Positions = CanvasSnapshot['positions'];
 
@@ -71,7 +74,8 @@ function sameRecord<T>(a: Record<string, T>, b: Record<string, T>, same: (x: T, 
  * every turn is laid out and the new positions are swapped in at once when all turns have returned. Until then nodes
  * keep their old positions, and nodes that have none are left out of `positions`. At most one layout round runs at a
  * time: a rebuild during a round publishes its view and marks the model dirty, and one more round runs (against the
- * then-current graph) when the running one settles.
+ * then-current graph) when the running one settles. A failed round with nothing queued schedules one retry
+ * (2.5 s, doubling up to 30 s while rounds keep failing, reset by a success); any rebuild replaces that timer.
  */
 export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscribe'>, layout: LayoutClient): CanvasModel {
   /** Turn key -> expanded, set by the user. */
@@ -88,6 +92,12 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
   let autoFold = true;
   let roundRunning = false;
   let dirty = false;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  let retryDelay = RETRY_FIRST_MS;
+  const cancelRetry = (): void => {
+    if (retryTimer !== null) clearTimeout(retryTimer);
+    retryTimer = null;
+  };
 
   const publish = (next: CanvasSnapshot): void => {
     snapshot = next;
@@ -115,11 +125,15 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
 
   const startRound = (view: CanvasView): void => {
     roundRunning = true;
-    const settle = (): void => {
+    const settle = (failed: boolean): void => {
       roundRunning = false;
-      if (dirty && !disposed) {
+      if (disposed) return;
+      if (dirty) {
         dirty = false;
         rebuild();
+      } else if (failed) {
+        retryTimer = setTimeout(() => { retryTimer = null; rebuild(); }, retryDelay);
+        retryDelay = Math.min(retryDelay * 2, RETRY_MAX_MS);
       }
     };
     Promise.all(view.turns.map((t) => layout.layout(turnInput(view, t)))).then(
@@ -137,20 +151,29 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
         if (sameRecord(turnBoxes, snapshot.turnBoxes, sameBox)) turnBoxes = snapshot.turnBoxes;
         const unchanged = positions === snapshot.positions && turnBoxes === snapshot.turnBoxes && snapshot.layoutError === null;
         if (!unchanged) publish({ view: current, positions, turnBoxes, layoutError: null });
-        settle();
+        retryDelay = RETRY_FIRST_MS;
+        settle(false);
       },
       (err: unknown) => {
         if (disposed) return;
         const layoutError = err instanceof Error ? err.message : String(err);
         if (layoutError !== snapshot.layoutError) publish({ ...snapshot, layoutError });
-        settle();
+        settle(true);
       },
     );
   };
 
   function rebuild(): void {
     if (disposed) return;
+    cancelRetry(); // this rebuild is the retry
     const view = buildView(live.getGraph(), effectiveOverrides(), fullTurns, { frozenHidden: frozen, keepVisible });
+    // A collapsed turn forgets "show all" and its frozen fold, however it got collapsed: re-expanding it folds the
+    // middle by the length rule again.
+    for (const t of view.turns) {
+      if (!t.collapsed) continue;
+      fullTurns.delete(t.key);
+      frozen.delete(t.key);
+    }
     if (!autoFold) freeze(view); // turns that appeared (or were expanded) since the last rebuild
     const inView = (id: string): boolean => view.nodes.has(id);
     const turnKeys = new Set(view.turns.map((t) => t.key));
@@ -210,6 +233,7 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
     },
     dispose() {
       disposed = true;
+      cancelRetry();
       throttle.cancel();
       unsubscribe();
       listeners.clear();
@@ -218,7 +242,11 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
 }
 
 /** One model and one layout worker per live session; both are disposed when the page unmounts. */
-export function useCanvas(live: LiveSession): CanvasSnapshot & Pick<CanvasModel, 'toggleTurn' | 'showFullTurn' | 'setAutoFold' | 'setKeepVisible'> {
+export type UseCanvasResult = CanvasSnapshot
+  & Pick<CanvasModel, 'toggleTurn' | 'showFullTurn' | 'setAutoFold' | 'setKeepVisible'>
+  & { /** False until the model exists (the snapshot is then an empty placeholder). */ ready: boolean };
+
+export function useCanvas(live: LiveSession): UseCanvasResult {
   const [model, setModel] = useState<CanvasModel | null>(null);
   useEffect(() => {
     const client = createLayoutClient(createBrowserLayoutWorker);
@@ -239,8 +267,9 @@ export function useCanvas(live: LiveSession): CanvasSnapshot & Pick<CanvasModel,
   const setAutoFold = useCallback((enabled: boolean) => model?.setAutoFold(enabled), [model]);
   const setKeepVisible = useCallback((id: string | null) => model?.setKeepVisible(id), [model]);
   // Same object until the snapshot changes, so consumers can memoize on it.
+  const ready = model !== null;
   return useMemo(
-    () => ({ ...snapshot, toggleTurn, showFullTurn, setAutoFold, setKeepVisible }),
-    [snapshot, toggleTurn, showFullTurn, setAutoFold, setKeepVisible],
+    () => ({ ...snapshot, toggleTurn, showFullTurn, setAutoFold, setKeepVisible, ready }),
+    [snapshot, toggleTurn, showFullTurn, setAutoFold, setKeepVisible, ready],
   );
 }

@@ -450,3 +450,135 @@ test('setKeepVisible：新轮次到来时，选中节点所在的轮次不被默
   expect(model.getSnapshot().view.turns[0]!.collapsed).toBe(true);
   model.dispose();
 });
+
+test('失败且没有排队的重建时，2.5 秒后自动重试一轮', async () => {
+  const live = fakeLive(graph([node('a', 't1', 0)]));
+  const layout = fakeLayout();
+  const model = createCanvasModel(live, layout.client);
+  layout.reject(layout.reqs[0]!, 'boom');
+  await flush();
+  expect(model.getSnapshot().layoutError).toContain('boom');
+  await vi.advanceTimersByTimeAsync(2_499);
+  expect(layout.reqs).toHaveLength(1);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(layout.reqs).toHaveLength(2);
+  layout.resolve(layout.reqs[1]!);
+  await flush();
+  expect(model.getSnapshot().layoutError).toBeNull();
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(layout.reqs).toHaveLength(2);
+  model.dispose();
+});
+
+test('连续失败时重试间隔翻倍（上限 30 秒），成功后重置', async () => {
+  const live = fakeLive(graph([node('a', 't1', 0)]));
+  const layout = fakeLayout();
+  const model = createCanvasModel(live, layout.client);
+  const failAndWait = async (delay: number) => {
+    const n = layout.reqs.length;
+    layout.reject(layout.reqs[n - 1]!, 'boom');
+    await flush();
+    await vi.advanceTimersByTimeAsync(delay - 1);
+    expect(layout.reqs).toHaveLength(n);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(layout.reqs).toHaveLength(n + 1);
+  };
+  await failAndWait(2_500);
+  await failAndWait(5_000);
+  await failAndWait(10_000);
+  await failAndWait(20_000);
+  await failAndWait(30_000);
+  await failAndWait(30_000);
+  layout.resolve(layout.reqs[layout.reqs.length - 1]!);
+  await flush();
+  live.set(graph([node('a', 't1', 0), node('b', 't1', 1)]));
+  await vi.advanceTimersByTimeAsync(60);
+  await failAndWait(2_500);
+  model.dispose();
+});
+
+test('重试计时期间的重建取代计时器；dispose 取消重试', async () => {
+  const live = fakeLive(graph([node('a', 't1', 0)]));
+  const layout = fakeLayout();
+  const model = createCanvasModel(live, layout.client);
+  layout.reject(layout.reqs[0]!, 'boom');
+  await flush();
+  live.set(graph([node('a', 't1', 0), node('b', 't1', 1)]));
+  await vi.advanceTimersByTimeAsync(60);
+  expect(layout.reqs).toHaveLength(2);
+  layout.resolve(layout.reqs[1]!);
+  await flush();
+  await vi.advanceTimersByTimeAsync(10_000);
+  expect(layout.reqs).toHaveLength(2); // the replaced timer did not fire
+
+  live.set(graph([node('a', 't1', 0), node('b', 't1', 1), node('c', 't1', 2)]));
+  await vi.advanceTimersByTimeAsync(60);
+  layout.reject(layout.reqs[2]!, 'boom');
+  await flush();
+  model.dispose();
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(layout.reqs).toHaveLength(3);
+});
+
+test('布局进行中 toggleTurn / showFullTurn：视图立即更新，结束前不发新请求，结束后恰好一轮', async () => {
+  const live = fakeLive(graph([
+    ...Array.from({ length: 61 }, (_, i) => node(`a${i}`, 't1', i)), node('b', 't2', 100), node('c', 't3', 200), node('d', 't4', 300),
+  ]));
+  const layout = fakeLayout();
+  const model = createCanvasModel(live, layout.client);
+  const pendingBefore = layout.reqs.length;
+  model.toggleTurn('t1');
+  expect(model.getSnapshot().view.turns[0]!.collapsed).toBe(false);
+  model.showFullTurn('t1');
+  expect(model.getSnapshot().view.turns[0]!.foldedEarlier).toBe(0);
+  await flush();
+  expect(layout.reqs).toHaveLength(pendingBefore);
+  layout.resolveAll();
+  await flush();
+  expect(layout.reqs.length).toBe(pendingBefore + 4); // exactly one more round: one request per turn
+  expect(layout.reqs[pendingBefore]!.input.nodes).toHaveLength(61);
+  layout.resolveAll();
+  await vi.advanceTimersByTimeAsync(200);
+  expect(layout.reqs.length).toBe(pendingBefore + 4);
+  model.dispose();
+});
+
+test('dispose 之后才结束的一轮（且有排队重建）不再安排任何事情', async () => {
+  const live = fakeLive(graph([node('a', 't1', 0)]));
+  const layout = fakeLayout();
+  const model = createCanvasModel(live, layout.client);
+  live.set(graph([node('a', 't1', 0), node('b', 't1', 1)]));
+  await vi.advanceTimersByTimeAsync(60); // dirty
+  model.dispose();
+  layout.reject(layout.reqs[0]!, 'boom');
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(layout.reqs).toHaveLength(1);
+});
+
+test('关闭自动折叠期间做的显式覆盖在恢复后保留', async () => {
+  const turns = (n: number) => graph(Array.from({ length: n }, (_, i) => node(`x${i + 1}`, `t${i + 1}`, i * 10)));
+  const live = fakeLive(turns(5));
+  const layout = fakeLayout();
+  const model = createCanvasModel(live, layout.client);
+  model.setAutoFold(false);
+  model.toggleTurn('t1'); // expand
+  model.toggleTurn('t5'); // fold
+  model.setAutoFold(true);
+  expect(model.getSnapshot().view.turns.map((t) => t.collapsed)).toEqual([false, true, false, false, true]);
+  model.dispose();
+});
+
+test('被默认规则折叠的轮次忘掉“展开全部”：再展开时回到折叠更早节点', async () => {
+  const long = Array.from({ length: 61 }, (_, i) => node(`a${i}`, 't1', i));
+  const live = fakeLive(graph(long));
+  const layout = fakeLayout();
+  const model = createCanvasModel(live, layout.client);
+  model.showFullTurn('t1');
+  expect(model.getSnapshot().view.turns[0]!.foldedEarlier).toBe(0);
+  live.set(graph([...long, node('b', 't2', 100), node('c', 't3', 200), node('d', 't4', 300)]));
+  await vi.advanceTimersByTimeAsync(60);
+  expect(model.getSnapshot().view.turns[0]!.collapsed).toBe(true);
+  model.toggleTurn('t1');
+  expect(model.getSnapshot().view.turns[0]!.foldedEarlier).toBe(21);
+  model.dispose();
+});

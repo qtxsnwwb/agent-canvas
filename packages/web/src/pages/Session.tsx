@@ -6,6 +6,11 @@ import { useCanvas } from '../canvas/useCanvas';
 import { sessionStatusView } from '../labels';
 import { useNow } from '../useNow';
 
+function hasKeys(obj: object): boolean {
+  for (const _ in obj) return true;
+  return false;
+}
+
 /**
  * Memoized on `live` alone, so the info bar's per-second and per-update re-renders do not reach React Flow; it
  * re-renders when the canvas snapshot or the selection changes. Every handler passed to Canvas is stable.
@@ -26,11 +31,14 @@ const SessionCanvas = memo(function SessionCanvas({ live }: { live: LiveSession 
   const selectedView = selected !== null ? canvas.view.nodes.get(selected) : undefined;
   const selectedNode = selectedView?.type === 'node' ? selectedView.node : null;
   const closeDrawer = useCallback(() => setSelectedId(null), []);
-  const empty = canvas.view.nodes.size === 0;
-  const laying = !empty && canvas.layoutError === null && Object.keys(canvas.positions).length === 0;
+  // "暂无节点" only when the live graph really has no nodes; "布局中…" while the model is starting or the view has
+  // nodes none of which is placed yet.
+  const empty = !hasKeys(live.getGraph().nodes);
+  const laying = !empty && canvas.layoutError === null
+    && (!canvas.ready || (canvas.view.nodes.size > 0 && !hasKeys(canvas.positions)));
   return (
     <>
-      {canvas.layoutError !== null && <div className="canvas-error">布局失败：{canvas.layoutError}</div>}
+      {canvas.layoutError !== null && <div className="canvas-error">布局失败，正在自动重试：{canvas.layoutError}</div>}
       <div className={`canvas-area${selectedNode !== null ? ' cc-drawer-open' : ''}`}>
         <Canvas
           snapshot={canvas}

@@ -78,25 +78,35 @@ test('dispose 后终止 Worker，未完成的请求 reject', async () => {
   expect(w.terminated).toBe(true);
 });
 
+/** Throws from postMessage the first `times` times (e.g. a DataCloneError), then behaves normally. */
 class ThrowingWorker extends FakeWorker {
-  override postMessage(): void { throw new Error('cannot post'); }
+  constructor(private times: number) { super(); }
+  override postMessage(msg: unknown): void {
+    if (this.times > 0) {
+      this.times--;
+      throw new Error('cannot post');
+    }
+    super.postMessage(msg);
+  }
 }
 
-test('postMessage 同步抛错：丢弃 Worker 并 reject，inflight 里不留被拒绝的 promise', async () => {
-  const workers: FakeWorker[] = [];
-  const c = createLayoutClient(() => {
-    const w = workers.length === 0 ? new ThrowingWorker() : new FakeWorker();
-    workers.push(w);
-    return w;
-  });
-  const p1 = c.layout(input('t'));
-  // Same request again, synchronously after the failure: must not share the rejected promise.
-  const p2 = c.layout(input('t'));
-  await expect(p1).rejects.toThrow('cannot post');
-  expect(workers[0]!.terminated).toBe(true);
-  expect(workers).toHaveLength(2);
-  workers[1]!.reply(0, result('t'));
-  expect(await p2).toEqual(result('t'));
+test('postMessage 同步抛错：只 reject 这一个请求，不算 Worker 故障，inflight 里不留被拒绝的 promise', async () => {
+  const workers: ThrowingWorker[] = [];
+  const c = createLayoutClient(() => { const w = new ThrowingWorker(4); workers.push(w); return w; });
+  const ok = c.layout(input('other'));
+  expect(workers[0]!.sent).toHaveLength(0); // the first post threw: this request rejects ...
+  await expect(ok).rejects.toThrow('cannot post');
+  const pa = c.layout(input('A'));
+  const pb = c.layout(input('A')); // same request right after a failure: not the rejected promise
+  await expect(pa).rejects.toThrow('cannot post');
+  await expect(pb).rejects.toThrow('cannot post');
+  await expect(c.layout(input('B'))).rejects.toThrow('cannot post');
+  // Four throws, yet the worker was kept and no cool-down started.
+  expect(workers).toHaveLength(1);
+  expect(workers[0]!.terminated).toBe(false);
+  const p = c.layout(input('A'));
+  workers[0]!.reply(0, result('A'));
+  expect(await p).toEqual(result('A'));
 });
 
 test('单个请求 20 秒超时：所有挂起请求 reject，Worker 被丢弃', async () => {

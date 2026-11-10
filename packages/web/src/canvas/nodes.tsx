@@ -59,7 +59,11 @@ export type HeaderFlowNode = Node<{ turnKey: string; startedAt: string; nodeCoun
 export type EarlierFlowNode = Node<{ turnKey: string; count: number; toolCount: number; failedCount: number }, 'earlier'>;
 export type FlowNode = GraphFlowNode | SummaryFlowNode | HeaderFlowNode | EarlierFlowNode;
 
-export interface CanvasActionsValue { toggleTurn(turnKey: string): void; showFullTurn(turnKey: string): void }
+/** `fromKeyboard`: the action came from the keyboard, so focus should land on the turn's header once it exists. */
+export interface CanvasActionsValue {
+  toggleTurn(turnKey: string, fromKeyboard?: boolean): void;
+  showFullTurn(turnKey: string, fromKeyboard?: boolean): void;
+}
 /** Callbacks for controls inside nodes; a context keeps them out of node data (which must stay stable). */
 export const CanvasActions = createContext<CanvasActionsValue>({ toggleTurn() {}, showFullTurn() {} });
 
@@ -138,7 +142,7 @@ function TurnSummaryView({ data, width, height, selected }: NodeProps<SummaryFlo
   const { toggleTurn } = useContext(CanvasActions);
   const onExpand = (e: MouseEvent): void => {
     e.stopPropagation(); // the node click would expand it as well
-    toggleTurn(data.summary.turnKey);
+    toggleTurn(data.summary.turnKey, e.detail === 0); // detail 0: a click synthesised from Enter / Space
   };
   const s = data.summary;
   const duration = s.durationMs > 0 ? formatDuration(s.durationMs) : '';
@@ -167,7 +171,7 @@ function EarlierView({ data, width, height }: NodeProps<EarlierFlowNode>) {
   const { showFullTurn } = useContext(CanvasActions);
   const onShowAll = (e: MouseEvent): void => {
     e.stopPropagation(); // not a node click
-    showFullTurn(data.turnKey);
+    showFullTurn(data.turnKey, e.detail === 0);
   };
   return (
     <div className="cc-node cc-earlier" style={boxStyle(width, height, SUMMARY_COLOR)}>

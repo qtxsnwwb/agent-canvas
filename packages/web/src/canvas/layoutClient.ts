@@ -24,7 +24,7 @@ interface Pending { cacheKey: string; timer: ReturnType<typeof setTimeout>; reso
 
 /**
  * Results cached by key+signature (LRU, max 300); concurrent equal requests share one computation. A worker that
- * errors, cannot be posted to or does not answer within 20 s is dropped and every pending request rejects; after 3
+ * errors, cannot be created or does not answer within 20 s is dropped and every pending request rejects; after 3
  * such failures in a row the client waits 2 s before starting a new worker, rejecting requests meanwhile.
  */
 export function createLayoutClient(createWorker: () => WorkerLike): LayoutClient {
@@ -116,12 +116,24 @@ export function createLayoutClient(createWorker: () => WorkerLike): LayoutClient
           LAYOUT_TIMEOUT_MS,
         );
         pending.set(id, { cacheKey, timer, resolve, reject });
+        const toError = (err: unknown): Error => (err instanceof Error ? err : new Error(String(err)));
+        let w: WorkerLike;
         try {
-          ensureWorker().postMessage({ id, input });
+          w = ensureWorker();
         } catch (err) {
           failedSync = true;
-          // This request is still pending, so dropping the worker rejects it along with everything else on it.
-          workerFailed(err instanceof Error ? err : new Error(String(err)));
+          // No worker could be created: a worker failure; it rejects this request (still pending) with the rest.
+          workerFailed(toError(err));
+          return;
+        }
+        try {
+          w.postMessage({ id, input });
+        } catch (err) {
+          // The message could not be sent (e.g. it is not cloneable): only this request fails, the worker is fine.
+          failedSync = true;
+          clearTimeout(timer);
+          pending.delete(id);
+          reject(toError(err));
         }
       });
       if (failedSync) return promise; // already rejected: never shared through `inflight`
