@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react';
 import {
   Background,
   BackgroundVariant,
@@ -61,6 +61,7 @@ function sameElements<T>(prev: T[] | null, next: T[]): T[] {
 }
 
 const NO_HANDLES: NodeHandle[] = [];
+const CONTAINER_STYLE: CSSProperties = { pointerEvents: 'none' };
 /** Top-centre target, bottom-centre source: declared up front so edges are drawn without measuring the DOM. */
 const handleCache = new Map<string, NodeHandle[]>();
 function handlesFor(width: number, height: number): NodeHandle[] {
@@ -132,8 +133,11 @@ function useFlowNodes(snapshot: CanvasSnapshot, selectedId: string | null): Flow
           : {
             id: vn.id, type: 'graphNode', position, width, height, selected, zIndex,
             ariaLabel: graphNodeAriaLabel(vn.node, container),
-            // The wrapper of a container lets clicks on its body through (see canvas.css); its head stays clickable.
+            // The wrapper of a container lets clicks on its body through to the pane; its head opts back in (see
+            // canvas.css). Inline, because React Flow sets `pointer-events: all` inline on the wrapper and spreads
+            // node.style after it.
             className: container ? 'cc-container-node' : undefined,
+            style: container ? CONTAINER_STYLE : undefined,
             data: { node: vn.node, innerCount: vn.innerCount, expanded: vn.expanded, expandable, container },
             handles: handlesFor(width, height), draggable: false, connectable: false,
           };

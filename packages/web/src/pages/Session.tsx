@@ -19,11 +19,12 @@ const VIEW_MODES: { mode: ViewMode; label: string }[] = [
 ];
 
 /** Segmented live / topology switch; the mode itself lives in the canvas model. */
-function ViewSwitch({ mode, onChange }: { mode: ViewMode; onChange(mode: ViewMode): void }) {
+/** Disabled until the model exists (before that a click would be dropped). */
+function ViewSwitch({ mode, disabled, onChange }: { mode: ViewMode; disabled: boolean; onChange(mode: ViewMode): void }) {
   return (
     <div className="view-switch" role="group" aria-label="视角">
       {VIEW_MODES.map((m) => (
-        <button key={m.mode} type="button" aria-pressed={mode === m.mode} onClick={() => onChange(m.mode)}>
+        <button key={m.mode} type="button" aria-pressed={mode === m.mode} disabled={disabled} onClick={() => onChange(m.mode)}>
           {m.label}
         </button>
       ))}
@@ -59,7 +60,7 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
     && (!canvas.ready || (canvas.view.nodes.size > 0 && !hasKeys(canvas.positions)));
   return (
     <>
-      {toolbar !== null && createPortal(<ViewSwitch mode={canvas.view.mode} onChange={canvas.setMode} />, toolbar)}
+      {toolbar !== null && createPortal(<ViewSwitch mode={canvas.view.mode} disabled={!canvas.ready} onChange={canvas.setMode} />, toolbar)}
       {canvas.layoutError !== null && <div className="canvas-error">布局失败，正在自动重试：{canvas.layoutError}</div>}
       <div className={`canvas-area${selectedNode !== null ? ' cc-drawer-open' : ''}`}>
         <Canvas

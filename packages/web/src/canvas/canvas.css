@@ -96,9 +96,8 @@
 .cc-agent-head { display: flex; flex-direction: column; justify-content: center; gap: 2px; min-width: 0; flex: none; }
 
 /* Expanded subagent drawn as a container: the 68 px head (CONTAINER_HEADER) looks like the collapsed node, the body is a
-   light tint of the status colour; inner nodes are separate nodes drawn above it. The React Flow wrapper lets
-   clicks on the body through to the pane, so they never land on the container; the head stays clickable. */
-.cc-canvas .react-flow__node.cc-container-node { pointer-events: none; }
+   light tint of the status colour; inner nodes are separate nodes drawn above it. The React Flow wrapper gets an inline
+   `pointer-events: none` (node.style, set in Canvas), so clicks on the body reach the pane; the head opts back in. */
 .cc-container-node .cc-agent-head { pointer-events: auto; }
 .cc-node.cc-container {
   justify-content: flex-start;

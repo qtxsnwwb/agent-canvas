@@ -171,7 +171,7 @@ function SubagentView({ data, className, style, rows }: {
   const button = expandable && agentId !== null
     ? (
       <button type="button" className="cc-expand nodrag nopan nokey" onClick={onToggle}
-        aria-expanded={expanded} aria-label={`${verb}子代理 ${node.title}`}>
+        aria-expanded={expanded} aria-label={`子代理 ${node.title}`}>
         {verb}
       </button>
     )
