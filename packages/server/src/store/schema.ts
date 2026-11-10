@@ -44,6 +44,9 @@ CREATE TABLE IF NOT EXISTS node (
   PRIMARY KEY (session_id, id)
 );
 
+-- Search over main-thread prompts: queries repeat this exact expression so SQLite can use the index.
+CREATE INDEX IF NOT EXISTS node_prompt ON node (session_id) WHERE json_extract(body, '$.kind') = 'prompt';
+
 CREATE TABLE IF NOT EXISTS node_detail (
   session_id TEXT NOT NULL,
   node_id    TEXT NOT NULL,

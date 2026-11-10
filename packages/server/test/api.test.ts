@@ -276,6 +276,35 @@ describe('http api', () => {
       expect(res.statusCode).toBe(403);
     });
 
+    test('GET /api/search 受回环校验保护（非回环 Host 返回 403）', async () => {
+      const url = '/api/search?q=hello';
+      expect((await app.inject({ method: 'GET', url, headers: { host: 'evil.example' } })).statusCode).toBe(403);
+      const foreign = await app.inject({ method: 'GET', url, headers: evil });
+      expect(foreign.statusCode).toBe(403);
+      expect(foreign.body).toBe('');
+      expect((await app.inject({ method: 'GET', url, headers: { 'sec-fetch-site': 'cross-site' } })).statusCode).toBe(403);
+    });
+
+    test('GET /api/search：缺 q 返回 []；limit=0、limit=abc、limit=1000 都不报错', async () => {
+      await seed();
+      expect((await get('/api/search')).json()).toEqual([]);
+      expect((await get('/api/search?q=')).json()).toEqual([]);
+      expect((await get('/api/search?q=h')).json()).toEqual([]);
+      expect((await get('/api/search?q=hello&q=world')).json()).toEqual([]);
+      const hit = (await get('/api/search?q=HELLO')).json();
+      expect(hit).toHaveLength(1);
+      expect(hit[0].session.id).toBe('s1');
+      expect(hit[0].matches).toEqual([{ field: 'prompt', nodeId: 'u1', snippet: 'hello' }]);
+      for (const limit of ['0', 'abc', '1000', '-5', '1.5', '']) {
+        const res = await get(`/api/search?q=hello&limit=${limit}`);
+        expect(res.statusCode, limit).toBe(200);
+        expect(res.json(), limit).toHaveLength(1);
+      }
+      // special characters and injection-looking text are plain data
+      for (const q of ['%25%25', '__', "'%20OR%201=1--", '%5C%5C']) expect((await get(`/api/search?q=${q}`)).json(), q).toEqual([]);
+      expect((await get(`/api/search?q=${encodeURIComponent('你好')}`)).json()).toEqual([]);
+    });
+
     test('允许的 Origin 和 Host', async () => {
       for (const headers of [
         {},

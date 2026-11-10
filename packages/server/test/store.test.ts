@@ -359,3 +359,155 @@ test('epoch 在建库时生成，重开和 clearDerived 后不变，新库不同
     await fsp.rm(dir, { recursive: true, force: true, maxRetries: 10 });
   }
 });
+
+// ---- searchSessions ----
+
+function seedSession(id: string, over: Partial<Session> = {}): void {
+  const base = sessionUpsert(id, 'p1');
+  if (base.type !== 'session_upserted') throw new Error('unreachable');
+  store.applyChanges([{ type: 'session_upserted', session: { ...base.session, ...over } }]);
+}
+
+function seedPrompt(sessionId: string, id: string, summary: string, timestamp: string, agentId: string | null = null): void {
+  const node: GraphNode = { ...mkNode(id, sessionId), kind: 'prompt', status: null, toolName: null, summary, timestamp, agentId };
+  store.applyChanges([{ type: 'node_added', node, detail: {} }]);
+}
+
+test('按标题、分支、目录、会话 id、提示摘要匹配，不区分大小写', () => {
+  seedSession('sess-alpha', { title: 'Fix Login Bug', gitBranch: 'feature/Payments', cwd: '/work/Demo-App' });
+  seedPrompt('sess-alpha', 'u1', 'please Refactor the cache layer', '2026-01-01T00:00:01.000Z');
+  seedSession('other', { title: 'unrelated' });
+  const fieldsOf = (q: string) => store.searchSessions(q, 10).map((h) => h.matches.map((m) => m.field));
+  expect(fieldsOf('LOGIN')).toEqual([['title']]);
+  expect(fieldsOf('payments')).toEqual([['branch']]);
+  expect(fieldsOf('demo-app')).toEqual([['cwd']]);
+  expect(fieldsOf('SESS-ALPHA')).toEqual([['id']]);
+  expect(fieldsOf('refactor')).toEqual([['prompt']]);
+  const hit = store.searchSessions('refactor', 10)[0]!;
+  expect(hit.session.id).toBe('sess-alpha');
+  expect(hit.matches[0]).toEqual({ field: 'prompt', nodeId: 'u1', snippet: 'please Refactor the cache layer' });
+  expect(fieldsOf('zzzz')).toEqual([]);
+});
+
+test('中文查询可以匹配标题和提示', () => {
+  seedSession('c1', { title: '修复登录问题' });
+  seedPrompt('c1', 'u1', '请重构缓存层', '2026-01-01T00:00:01.000Z');
+  seedSession('c2', { title: '别的会话' });
+  expect(store.searchSessions('登录', 10).map((h) => h.session.id)).toEqual(['c1']);
+  expect(store.searchSessions('缓存', 10)[0]!.matches).toEqual([{ field: 'prompt', nodeId: 'u1', snippet: '请重构缓存层' }]);
+});
+
+test('每个会话最多 3 条匹配，会话字段在前、提示按时间在后', () => {
+  seedSession('x-needle', { title: 'needle title', gitBranch: 'needle-branch', cwd: '/needle' });
+  seedPrompt('x-needle', 'late', 'needle late', '2026-01-01T00:00:09.000Z');
+  expect(store.searchSessions('needle', 10)[0]!.matches.map((m) => m.field)).toEqual(['title', 'id', 'branch']);
+
+  seedSession('y', { title: 'plain' });
+  seedPrompt('y', 'p-late', 'needle late', '2026-01-01T00:00:09.000Z');
+  seedPrompt('y', 'p-early', 'needle early', '2026-01-01T00:00:02.000Z');
+  seedPrompt('y', 'p-mid', 'needle mid', '2026-01-01T00:00:05.000Z');
+  seedPrompt('y', 'p-extra', 'needle extra', '2026-01-01T00:00:06.000Z');
+  const y = store.searchSessions('needle', 10).find((h) => h.session.id === 'y')!;
+  expect(y.matches.map((m) => m.nodeId)).toEqual(['p-early', 'p-mid', 'p-extra']);
+
+  seedSession('z', { title: 'needle z' });
+  seedPrompt('z', 'z1', 'needle z prompt', '2026-01-01T00:00:03.000Z');
+  seedPrompt('z', 'z0', 'needle z prompt 0', '2026-01-01T00:00:01.000Z');
+  seedPrompt('z', 'z2', 'needle z prompt 2', '2026-01-01T00:00:04.000Z');
+  const z = store.searchSessions('needle', 10).find((h) => h.session.id === 'z')!;
+  expect(z.matches.map((m) => (m.field === 'prompt' ? m.nodeId : m.field))).toEqual(['title', 'z0', 'z1']);
+});
+
+test('结果按最近活动时间降序，受 limit 限制', () => {
+  seedSession('old', { title: 'topic old', lastActivityAt: '2026-01-01T00:00:00.000Z' });
+  seedSession('new', { title: 'topic new', lastActivityAt: '2026-03-01T00:00:00.000Z' });
+  seedSession('mid', { title: 'topic mid', lastActivityAt: '2026-02-01T00:00:00.000Z' });
+  expect(store.searchSessions('topic', 10).map((h) => h.session.id)).toEqual(['new', 'mid', 'old']);
+  expect(store.searchSessions('topic', 2).map((h) => h.session.id)).toEqual(['new', 'mid']);
+  expect(store.searchSessions('topic', 0).map((h) => h.session.id)).toEqual(['new']);
+  expect(store.searchSessions('topic', 1000)).toHaveLength(3);
+});
+
+test.each(['%', '_', '\\', "'", '"', '%_%'])('特殊字符 %s 按字面匹配，不匹配无关会话', (c) => {
+  seedSession('s-special', { title: `100%_done\\'"` });
+  seedSession('s-plain', { title: 'plain' });
+  // The doubled character occurs in neither title; as wildcards or unescaped SQL it would match (or break) both.
+  expect(store.searchSessions(c + c, 10)).toEqual([]);
+});
+
+test('特殊字符作为字面子串匹配，通配符不当通配符用', () => {
+  seedSession('s-special', { title: `100%_done\\'"` });
+  seedSession('s-plain', { title: 'plain' });
+  for (const q of ['0%', '%_', '_d', 'e\\', "\\'", `'"`, '%_d', `100%_done\\'"`]) {
+    expect(store.searchSessions(q, 10).map((h) => h.session.id), q).toEqual(['s-special']);
+  }
+  for (const q of ['%%', '__', '1%e', '1_0', 'p%n', 'p_ain%']) expect(store.searchSessions(q, 10), q).toEqual([]);
+});
+
+test('少于 2 个非空白字符返回空数组；超长查询被截断而不报错', () => {
+  seedSession('s1', { title: 'ab title' });
+  expect(store.searchSessions('', 10)).toEqual([]);
+  expect(store.searchSessions('a', 10)).toEqual([]);
+  expect(store.searchSessions('   a   ', 10)).toEqual([]);
+  expect(store.searchSessions('登', 10)).toEqual([]);
+  expect(store.searchSessions('  ab  ', 10)).toHaveLength(1);
+  expect(store.searchSessions('x'.repeat(5000), 10)).toEqual([]);
+  // cut to 200 characters: the 200-character prefix matches, the untruncated query would not
+  seedSession('s2', { title: 'y'.repeat(200) });
+  expect(store.searchSessions('y'.repeat(200) + 'ZZZ', 10).map((h) => h.session.id)).toEqual(['s2']);
+});
+
+test('片段不超过 80 字符，截断的一侧带省略号，且包含匹配文本', () => {
+  const long = (pre: number, post: number) => `${'a'.repeat(pre)}NEEDLE${'b'.repeat(post)}`;
+  seedSession('snip', { title: 'plain' });
+  seedPrompt('snip', 'mid', long(60, 60), '2026-01-01T00:00:01.000Z');
+  seedPrompt('snip', 'head', long(0, 120), '2026-01-01T00:00:02.000Z');
+  seedPrompt('snip', 'tail', long(120, 0), '2026-01-01T00:00:03.000Z');
+  const snips: Record<string, string> = Object.fromEntries(store.searchSessions('needle', 10)[0]!.matches.map((m) => [m.nodeId ?? '', m.snippet]));
+  for (const s of Object.values(snips)) {
+    expect(s.length).toBeLessThanOrEqual(80);
+    expect(s).toContain('NEEDLE');
+  }
+  expect(snips.mid!.startsWith('…') && snips.mid!.endsWith('…')).toBe(true);
+  expect(snips.head!.startsWith('…')).toBe(false);
+  expect(snips.head!.endsWith('…')).toBe(true);
+  expect(snips.tail!.startsWith('…')).toBe(true);
+  expect(snips.tail!.endsWith('…')).toBe(false);
+  seedSession('short', { title: 'short NEEDLE title' });
+  const shortHit = store.searchSessions('needle', 10).find((h) => h.session.id === 'short')!;
+  expect(shortHit.matches[0]!.snippet).toBe('short NEEDLE title');
+});
+
+test('子代理内部的 prompt 节点不参与检索', () => {
+  seedSession('s1', { title: 'plain' });
+  seedPrompt('s1', 'sub', 'secret subagent words', '2026-01-01T00:00:01.000Z', 'ag1');
+  expect(store.searchSessions('secret', 10)).toEqual([]);
+  seedPrompt('s1', 'main', 'secret main words', '2026-01-01T00:00:02.000Z');
+  expect(store.searchSessions('secret', 10)[0]!.matches.map((m) => m.nodeId)).toEqual(['main']);
+});
+
+test('提示检索使用 node_prompt 部分索引', async () => {
+  const fsp = await import('node:fs/promises');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const { default: Database } = await import('better-sqlite3');
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'cc-search-idx-'));
+  const file = path.join(dir, 'a.db');
+  openStore(file).close();
+  try {
+    const raw = new Database(file, { readonly: true });
+    try {
+      const plan = raw
+        .prepare(
+          `EXPLAIN QUERY PLAN SELECT 1 FROM node n WHERE n.session_id = ? AND json_extract(n.body, '$.kind') = 'prompt'
+           AND json_extract(n.body, '$.agentId') IS NULL AND json_extract(n.body, '$.summary') LIKE ? ESCAPE '\\'`,
+        )
+        .all('s1', '%x%') as { detail: string }[];
+      expect(plan.map((r) => r.detail).join('\n')).toContain('node_prompt');
+    } finally {
+      raw.close();
+    }
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true, maxRetries: 10 });
+  }
+});

@@ -5,12 +5,20 @@ import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import Database from 'better-sqlite3';
 import {
+  SEARCH_DEFAULT_LIMIT,
+  SEARCH_MAX_CHARS,
+  SEARCH_MAX_LIMIT,
+  SEARCH_MAX_MATCHES,
+  SEARCH_MIN_CHARS,
+  SEARCH_SNIPPET_CHARS,
   STALE_AFTER_MS,
   type Change,
   type Diagnostics,
   type GraphSnapshot,
   type NodeDetail,
   type Project,
+  type SearchHit,
+  type SearchMatch,
   type SeqChange,
   type Session,
 } from '@claude-canvas/shared';
@@ -47,6 +55,31 @@ export interface StoreOptions {
   verbose?: (sql: unknown) => void;
 }
 
+/** `%x%` with `\`, `%` and `_` escaped (use with ESCAPE '\\'). */
+function likePattern(query: string): string {
+  return `%${query.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+}
+
+/** Lower-cases ASCII letters only (like SQLite LIKE), so string indexes stay aligned with the original. */
+function asciiLower(s: string): string {
+  return s.replace(/[A-Z]/g, (c) => c.toLowerCase());
+}
+
+/**
+ * At most SEARCH_SNIPPET_CHARS characters including the `…` marks on truncated sides, centred on the match. A match
+ * longer than the window is cut at the window's end.
+ */
+function snippetAround(text: string, at: number, matchLen: number): string {
+  const max = SEARCH_SNIPPET_CHARS;
+  if (text.length <= max) return text;
+  const inner = max - 2;
+  let start = Math.max(0, Math.min(at - Math.floor((inner - Math.min(matchLen, inner)) / 2), text.length - inner));
+  let end = Math.min(text.length, start + inner);
+  if (start === 0) end = Math.min(text.length, end + 1);
+  if (end === text.length) start = Math.max(0, start - 1);
+  return `${start > 0 ? '…' : ''}${text.slice(start, end)}${end < text.length ? '…' : ''}`;
+}
+
 export interface Store {
   /** Runs `fn` in one SQLite transaction (nested calls become savepoints); all or nothing. */
   transaction<T>(fn: () => T): T;
@@ -66,6 +99,12 @@ export interface Store {
   /** Ordered by lastActivityAt descending. */
   listSessions(projectId: string): Session[];
   getSession(sessionId: string): Session | null;
+  /**
+   * Case-insensitive (ASCII only, as SQLite LIKE) literal substring search over session title, id, git branch, cwd
+   * and the summaries of main-thread prompt nodes. Newest activity first; fewer than SEARCH_MIN_CHARS characters
+   * after trimming gives []. `limit` is clamped to 1..SEARCH_MAX_LIMIT.
+   */
+  searchSessions(query: string, limit: number): SearchHit[];
   getGraph(sessionId: string): GraphSnapshot | null;
   /** The GraphSnapshot already serialized, built from the stored bodies without parsing them. */
   getGraphJson(sessionId: string): string | null;
@@ -277,6 +316,29 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   );
   const selectSessions = db.prepare(`SELECT body FROM session WHERE project_id = ? ORDER BY last_activity_at DESC, id`);
   const selectSession = db.prepare(`SELECT body FROM session WHERE id = ?`).pluck();
+  // Query text is only ever a bound parameter (already LIKE-escaped by likePattern). The prompt condition repeats
+  // the node_prompt partial index expression verbatim so the index is used.
+  const searchSessionsStmt = db.prepare(
+    `SELECT body FROM session
+     WHERE json_extract(body, '$.title') LIKE @pattern ESCAPE '\\'
+        OR id LIKE @pattern ESCAPE '\\'
+        OR json_extract(body, '$.gitBranch') LIKE @pattern ESCAPE '\\'
+        OR json_extract(body, '$.cwd') LIKE @pattern ESCAPE '\\'
+        OR EXISTS (SELECT 1 FROM node n WHERE n.session_id = session.id
+                     AND json_extract(n.body, '$.kind') = 'prompt'
+                     AND json_extract(n.body, '$.agentId') IS NULL
+                     AND json_extract(n.body, '$.summary') LIKE @pattern ESCAPE '\\')
+     ORDER BY last_activity_at DESC, id
+     LIMIT @limit`,
+  );
+  const searchPromptsStmt = db.prepare(
+    `SELECT id, json_extract(body, '$.summary') AS summary FROM node
+     WHERE session_id = @sessionId AND json_extract(body, '$.kind') = 'prompt'
+       AND json_extract(body, '$.agentId') IS NULL
+       AND json_extract(body, '$.summary') LIKE @pattern ESCAPE '\\'
+     ORDER BY json_extract(body, '$.timestamp'), rowid
+     LIMIT @limit`,
+  );
   const selectNodeBodies = db.prepare(`SELECT body FROM node WHERE session_id = ? ORDER BY rowid`).pluck();
   const selectEdgeBodies = db.prepare(`SELECT body FROM edge WHERE session_id = ? ORDER BY rowid`).pluck();
   const selectChanges = db.prepare(`SELECT seq, body FROM change_log WHERE seq > ? ORDER BY seq`);
@@ -445,6 +507,41 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
       return (selectSessions.all(projectId) as { body: string }[]).map((r) => JSON.parse(r.body) as Session);
     },
     getSession,
+    searchSessions(rawQuery, rawLimit) {
+      const query = rawQuery.trim().slice(0, SEARCH_MAX_CHARS).trim();
+      if ([...query].length < SEARCH_MIN_CHARS) return [];
+      const limit = Number.isFinite(rawLimit) ? Math.min(SEARCH_MAX_LIMIT, Math.max(1, Math.trunc(rawLimit))) : SEARCH_DEFAULT_LIMIT;
+      const pattern = likePattern(query);
+      const needle = asciiLower(query);
+      const hits: SearchHit[] = [];
+      for (const row of searchSessionsStmt.all({ pattern, limit }) as { body: string }[]) {
+        const session = JSON.parse(row.body) as Session;
+        const matches: SearchMatch[] = [];
+        const fields: [SearchMatch['field'], string | null][] = [
+          ['title', session.title],
+          ['id', session.id],
+          ['branch', session.gitBranch],
+          ['cwd', session.cwd],
+        ];
+        for (const [field, text] of fields) {
+          if (text === null || matches.length >= SEARCH_MAX_MATCHES) continue;
+          const at = asciiLower(text).indexOf(needle);
+          if (at >= 0) matches.push({ field, nodeId: null, snippet: snippetAround(text, at, needle.length) });
+        }
+        if (matches.length < SEARCH_MAX_MATCHES) {
+          const prompts = searchPromptsStmt.all({ sessionId: session.id, pattern, limit: SEARCH_MAX_MATCHES - matches.length }) as {
+            id: string;
+            summary: string;
+          }[];
+          for (const p of prompts) {
+            const at = asciiLower(p.summary).indexOf(needle);
+            if (at >= 0) matches.push({ field: 'prompt', nodeId: p.id, snippet: snippetAround(p.summary, at, needle.length) });
+          }
+        }
+        hits.push({ session, matches });
+      }
+      return hits;
+    },
     getGraph(sessionId) {
       const json = getGraphJson(sessionId);
       return json === null ? null : (JSON.parse(json) as GraphSnapshot);
