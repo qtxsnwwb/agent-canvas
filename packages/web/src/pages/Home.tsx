@@ -93,7 +93,7 @@ export function Home({ projectId }: { projectId: string | null }) {
               <a href={`#/s/${encodeURIComponent(s.id)}`}>
                 <div className="session-title">{s.title ?? s.id.slice(0, 8)}</div>
                 <div className="muted">
-                  <span className={`status status-${s.status}`}>{SESSION_STATUS_LABEL[s.status]}</span>
+                  <span className={`status status-${s.status}`}>{SESSION_STATUS_LABEL[s.status] ?? s.status}</span>
                   {s.gitBranch !== null && <span> · {s.gitBranch}</span>}
                   <span> · {formatTime(s.lastActivityAt)}</span>
                   {s.sourceDeleted && <span className="tag"> 源文件已删除</span>}

@@ -16,24 +16,29 @@ function atBottom(): boolean {
 }
 
 function DetailView({ sessionId, node }: { sessionId: string; node: GraphNode }) {
-  const [state, setState] = useState<{ detail: NodeDetail } | { error: string } | null>(null);
+  const [detail, setDetail] = useState<NodeDetail | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   // `node` is a new object whenever the node receives an update, so this refetches the detail then.
   useEffect(() => {
     let alive = true;
     api.nodeDetail(sessionId, node.id).then(
-      (detail) => { if (alive) setState({ detail }); },
-      (e: unknown) => { if (alive) setState({ error: String(e) }); },
+      (d) => { if (alive) { setDetail(d); setError(null); } },
+      (e: unknown) => { if (alive) setError(String(e)); },
     );
     return () => { alive = false; };
   }, [sessionId, node]);
 
-  if (state === null) return <div className="detail muted">加载中…</div>;
-  if ('error' in state) return <div className="detail error">详情加载失败：{state.error}</div>;
-  const json = JSON.stringify(state.detail, null, 2) ?? '';
+  if (detail === null) {
+    return error === null
+      ? <div className="detail muted">加载中…</div>
+      : <div className="detail error">详情加载失败：{error}</div>;
+  }
+  const json = JSON.stringify(detail, null, 2) ?? '';
   const truncated = json.length > DETAIL_MAX_CHARS;
   return (
     <div className="detail">
+      {error !== null && <div className="error">详情刷新失败：{error}</div>}
       <pre>{truncated ? json.slice(0, DETAIL_MAX_CHARS) : json}</pre>
       {truncated && <div className="muted">（已截断，仅显示前 {DETAIL_MAX_CHARS} 个字符）(truncated)</div>}
     </div>
@@ -55,7 +60,7 @@ function NodeRow({ sessionId, node, open, onToggle }: {
         <span className="kind">{node.kind}</span>
         {inSubagent && <span className="tag">子代理 {node.agentId}</span>}
         <span className="title">{node.title}</span>
-        {node.status !== null && <span className={`status status-${node.status}`}>{NODE_STATUS_LABEL[node.status]}</span>}
+        {node.status !== null && <span className={`status status-${node.status}`}>{NODE_STATUS_LABEL[node.status] ?? node.status}</span>}
         {!node.confirmed && <span className="tag">未确认</span>}
         <span className="summary">{node.summary}</span>
       </div>
@@ -121,7 +126,7 @@ export function SessionPage({ sessionId }: { sessionId: string }) {
         <a href={`#/p/${encodeURIComponent(session.projectId)}`}>返回项目</a>
         <h2>{session.title ?? session.id.slice(0, 8)}</h2>
         <div className="muted">
-          <span className={`status status-${session.status}`}>{SESSION_STATUS_LABEL[session.status]}</span>
+          <span className={`status status-${session.status}`}>{SESSION_STATUS_LABEL[session.status] ?? session.status}</span>
           {session.gitBranch !== null && <span> · {session.gitBranch}</span>}
           {session.sourceDeleted && <span className="tag"> 源文件已删除</span>}
         </div>

@@ -1,6 +1,4 @@
 import {
-  applyChange,
-  emptyGraph,
   type ClientMessage,
   type Graph,
   type GraphNode,
@@ -112,9 +110,11 @@ export async function openLiveSession(
 ): Promise<LiveSession> {
   const fetchGraph = deps.fetchGraph ?? api.graph;
   const snap = await fetchGraph(sessionId);
-  let graph = emptyGraph();
-  for (const n of snap.nodes) graph = applyChange(graph, { type: 'node_added', node: n, detail: {} });
-  for (const e of snap.edges) graph = applyChange(graph, { type: 'edge_added', edge: e });
+  // Build the records directly: applyChange copies the whole map per call, which is quadratic here.
+  let graph: Graph = {
+    nodes: Object.fromEntries(snap.nodes.map((n) => [n.id, n])),
+    edges: Object.fromEntries(snap.edges.map((e) => [e.id, e])),
+  };
   let session = snap.session;
   let seq = snap.seq;
   const listeners = new Set<() => void>();
@@ -122,14 +122,24 @@ export async function openLiveSession(
   const close = connect(
     () => ({ type: 'subscribe', scope: 'session', sessionId, sinceSeq: seq }),
     (changes) => {
+      // One copy of each map per message (mutated locally, then published), one notification per message.
+      const nodes = { ...graph.nodes };
+      const edges = { ...graph.edges };
       let touched = false;
       for (const c of changes) {
         if (c.seq <= seq) continue;
         seq = c.seq;
-        if (c.type === 'session_upserted') session = c.session;
-        else graph = applyChange(graph, c);
         touched = true;
+        // Same semantics as the shared applyChange, minus the per-change copying.
+        if (c.type === 'session_upserted') session = c.session;
+        else if (c.type === 'node_added') nodes[c.node.id] = c.node;
+        else if (c.type === 'edge_added') edges[c.edge.id] = c.edge;
+        else {
+          const existing = nodes[c.id];
+          if (existing) nodes[c.id] = { ...existing, ...c.patch };
+        }
       }
+      if (touched) graph = { nodes, edges };
       if (touched) for (const fn of [...listeners]) fn();
     },
     deps.createSocket ?? createBrowserSocket,
