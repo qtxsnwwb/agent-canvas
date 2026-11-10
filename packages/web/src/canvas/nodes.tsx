@@ -2,7 +2,7 @@ import { createContext, memo, useContext, type CSSProperties, type MouseEvent } 
 import { Handle, Position, type Node, type NodeProps, type NodeTypes } from '@xyflow/react';
 import type { GraphNode, NodeKind, NodeStatus } from '@claude-canvas/shared';
 import { NODE_STATUS_LABEL } from '../labels';
-import { formatDuration } from './format';
+import { formatDuration, nodeAriaLabel } from './format';
 import type { TurnSummary } from './view';
 
 export const KIND_LABEL: Record<NodeKind, string> = {
@@ -41,6 +41,14 @@ export function summaryColor(s: TurnSummary): string {
   if (s.failedCount > 0) return STATUS_COLOR.failed;
   return SUMMARY_COLOR;
 }
+/** Accessible name for a graph node: kind, title and status. */
+export function graphNodeAriaLabel(node: GraphNode): string {
+  return nodeAriaLabel([KIND_LABEL[node.kind] ?? node.kind, node.title, node.status !== null ? NODE_STATUS_LABEL[node.status] ?? node.status : null]);
+}
+export function summaryAriaLabel(s: TurnSummary): string {
+  return nodeAriaLabel(['已折叠的轮次', s.promptSummary, `${s.nodeCount} 个节点`, s.running ? '运行中' : null]);
+}
+
 export function isActive(status: NodeStatus | null): boolean {
   return status === 'running' || status === 'awaiting_permission';
 }
@@ -112,9 +120,11 @@ function GraphNodeView({ data, width, height, selected }: NodeProps<GraphFlowNod
         {duration !== '' && <span className="cc-duration">{duration}</span>}
         {tag}
       </div>
-      <div className="cc-row cc-summary">
-        <span className="cc-ellipsis cc-grow">{node.summary}</span>
-      </div>
+      {node.summary !== '' && (
+        <div className="cc-row cc-summary">
+          <span className="cc-ellipsis cc-grow">{node.summary}</span>
+        </div>
+      )}
       {node.kind === 'subagent' && (
         <div className="cc-row cc-inner">
           <span className="cc-ellipsis cc-grow">内部 {innerCount} 个节点</span>
@@ -125,6 +135,11 @@ function GraphNodeView({ data, width, height, selected }: NodeProps<GraphFlowNod
 }
 
 function TurnSummaryView({ data, width, height, selected }: NodeProps<SummaryFlowNode>) {
+  const { toggleTurn } = useContext(CanvasActions);
+  const onExpand = (e: MouseEvent): void => {
+    e.stopPropagation(); // the node click would expand it as well
+    toggleTurn(data.summary.turnKey);
+  };
   const s = data.summary;
   const duration = s.durationMs > 0 ? formatDuration(s.durationMs) : '';
   const stats = [`${s.nodeCount} 个节点`, `${s.toolCount} 次工具调用`, duration].filter(Boolean).join(' · ');
@@ -136,7 +151,7 @@ function TurnSummaryView({ data, width, height, selected }: NodeProps<SummaryFlo
         <span className="cc-kind">已折叠</span>
         <span className="cc-title cc-ellipsis cc-grow">{s.promptSummary || '（无提示）'}</span>
         {s.running && <span className="cc-status cc-running-dot">运行中</span>}
-        <span className="cc-expand">展开</span>
+        <button type="button" className="cc-expand nodrag nopan" onClick={onExpand}>展开</button>
       </div>
       <div className="cc-row cc-summary">
         <span className="cc-ellipsis cc-grow">

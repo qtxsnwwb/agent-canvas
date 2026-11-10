@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import {
   Background,
   BackgroundVariant,
@@ -22,7 +22,8 @@ import { followTarget, resumeZoom, viewportMoved } from './follow';
 import { sizeOf } from './sizes';
 import type { CanvasSnapshot } from './useCanvas';
 import { forkSources, type TurnSummary, type ViewEdge } from './view';
-import { CanvasActions, isActive, nodeColor, nodeTypes, summaryColor, type FlowNode } from './nodes';
+import { isActivationKey } from './format';
+import { CanvasActions, graphNodeAriaLabel, isActive, nodeColor, nodeTypes, summaryAriaLabel, summaryColor, type FlowNode } from './nodes';
 
 export interface CanvasProps {
   snapshot: CanvasSnapshot;
@@ -117,7 +118,7 @@ function useFlowNodes(snapshot: CanvasSnapshot, selectedId: string | null): Flow
           && samePos(old.position, position) && old.selected === selected && old.width === width && old.height === height
           ? old
           : {
-            id: vn.id, type: 'graphNode', position, width, height, selected,
+            id: vn.id, type: 'graphNode', position, width, height, selected, ariaLabel: graphNodeAriaLabel(vn.node),
             data: { node: vn.node, innerCount: vn.innerCount },
             handles: handlesFor(width, height), draggable: false, connectable: false,
           };
@@ -126,7 +127,7 @@ function useFlowNodes(snapshot: CanvasSnapshot, selectedId: string | null): Flow
           && samePos(old.position, position) && old.selected === selected && old.width === width && old.height === height
           ? old
           : {
-            id: vn.id, type: 'turnSummary', position, width, height, selected,
+            id: vn.id, type: 'turnSummary', position, width, height, selected, ariaLabel: summaryAriaLabel(vn.summary),
             data: { summary: vn.summary },
             handles: handlesFor(width, height), draggable: false, connectable: false,
           };
@@ -285,9 +286,30 @@ function CanvasInner({ snapshot, selectedId, onSelect, onToggleTurn, onShowFullT
     showFullTurn: (key: string) => { stopFollowing(); showFullRef.current(key); },
   }), [stopFollowing]);
 
+  // Enter / Space on a focused node. React Flow's own key handler on the node wrapper only updates its internal
+  // selection and never calls onNodeClick; the wrapper (not our node component) holds the focus, so the key is
+  // handled here as it bubbles out of the wrapper. Stopping it keeps Space from also arming React Flow's pan key.
+  const viewRef = useRef(snapshot.view);
+  viewRef.current = snapshot.view;
+  const onSelectRef = useRef(onSelect);
+  onSelectRef.current = onSelect;
+  const onKeyDown = useCallback((e: KeyboardEvent<HTMLDivElement>) => {
+    if (!isActivationKey(e.key)) return;
+    const el = e.target as HTMLElement;
+    if (!el.classList.contains('react-flow__node')) return; // a button inside a node handles its own keys
+    const vn = el.dataset.id !== undefined ? viewRef.current.nodes.get(el.dataset.id) : undefined;
+    if (!vn || vn.type === 'earlier') return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.repeat) return;
+    if (vn.type === 'node') onSelectRef.current(vn.id);
+    else actions.toggleTurn(vn.turnKey);
+  }, [actions]);
+
   return (
     <CanvasActions.Provider value={actions}>
       <ReactFlow<FlowNode, Edge>
+        onKeyDown={onKeyDown}
         nodes={nodes}
         edges={edges}
         nodeTypes={nodeTypes}

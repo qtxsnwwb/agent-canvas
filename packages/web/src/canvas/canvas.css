@@ -85,7 +85,11 @@
 .cc-turn-summary .cc-kind { background: #e2e8f0; color: #334155; }
 .cc-turn-summary .cc-title { color: #0f172a; }
 .cc-turn-summary:hover { background: #e8eef6; }
-.cc-expand { flex: none; color: #2563eb; font-size: 11px; }
+.cc-expand {
+  flex: none; margin: 0; padding: 0 6px; border: 1px solid #bfdbfe; border-radius: 3px; background: #fff;
+  color: #2563eb; font: inherit; font-size: 11px; line-height: 14px; cursor: pointer;
+}
+.cc-expand:hover { background: #eff6ff; border-color: #93c5fd; }
 .cc-failed { color: #dc2626; font-weight: 600; }
 
 /* Folded middle of a long turn. */
