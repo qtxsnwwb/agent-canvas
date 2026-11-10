@@ -154,8 +154,19 @@ export function buildServer(deps: { store: Store; pipeline: Pipeline; config: Co
       }
     }
   });
+  // A session re-derived from its raw events (after a failed hook): its open pages refetch the snapshot.
+  const unsubscribeResync = pipeline.onResync((sessionId) => {
+    for (const conn of [...connections]) {
+      try {
+        if (conn.sessionId === sessionId) conn.send({ type: 'resync', sessionId });
+      } catch {
+        connections.delete(conn);
+      }
+    }
+  });
   app.addHook('onClose', async () => {
     unsubscribe();
+    unsubscribeResync();
     connections.clear();
   });
 

@@ -848,4 +848,156 @@ describe('pipeline', () => {
     expect(pipeline.importing()).toBe(false);
     await later;
   });
+
+  // ---- residuals: a failed hook marks its session dirty; the next touch re-derives that session ----
+
+  /** The real store; `ctl.applyChanges` / `ctl.deleteDerivedForSession` make the next call of that method throw once. */
+  function controlledStore(): { s: Store; ctl: { applyChanges: boolean; deleteDerivedForSession: boolean } } {
+    const ctl = { applyChanges: false, deleteDerivedForSession: false };
+    const s: Store = {
+      ...store,
+      applyChanges: (cs) => {
+        if (ctl.applyChanges) {
+          ctl.applyChanges = false;
+          throw new Error('simulated crash');
+        }
+        return store.applyChanges(cs);
+      },
+      deleteDerivedForSession: (id) => {
+        if (ctl.deleteDerivedForSession) {
+          ctl.deleteDerivedForSession = false;
+          throw new Error('simulated rederive crash');
+        }
+        store.deleteDerivedForSession(id);
+      },
+    };
+    return { s, ctl };
+  }
+  const preToolUse = (p: Pipeline): void =>
+    p.ingestHook(
+      'PreToolUse',
+      's1',
+      JSON.stringify({ session_id: 's1', hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: { file_path: 'a' }, tool_use_id: 'tu1' }),
+    );
+  const toolUse = () => assistantBlock('a1', 'u1', { type: 'tool_use', id: 'tu1', name: 'Read', input: { file_path: 'a' } });
+  /** The stored graph equals what a from-scratch rebuild of the same raw events gives. */
+  function expectRebuildEqual(p: Pipeline): void {
+    const before = store.getGraph('s1')!;
+    p.rebuild();
+    const after = store.getGraph('s1')!;
+    expect(before.nodes).toEqual(after.nodes);
+    expect(before.edges).toEqual(after.edges);
+    expect({ ...before.session }).toEqual({ ...after.session });
+  }
+
+  test('失败的 hook：会话被标记，下次触及时按原始事件重新推导，工具节点落库且与重建一致', async () => {
+    const { s, ctl } = controlledStore();
+    const p = new Pipeline(s, config);
+    await write('proj/s1.jsonl', [userPrompt('u1', null, 'x')]);
+    await p.ingestFile(abs('proj/s1.jsonl'));
+    ctl.applyChanges = true;
+    preToolUse(p);
+    await p.idle();
+    expect(store.getGraph('s1')!.nodes.map((n) => n.id)).toEqual(['u1']);
+    expect(store.dirtySessionIds()).toEqual(['s1']);
+    await append('proj/s1.jsonl', [toolUse(), toolResult('u2', 'a1', 'tu1', 'ok')]);
+    await p.ingestFile(abs('proj/s1.jsonl'));
+    expect(store.dirtySessionIds()).toEqual([]);
+    const node = store.getGraph('s1')!.nodes.find((n) => n.id === 'tool:tu1');
+    expect(node).toMatchObject({ status: 'succeeded', confirmed: true, parentId: 'u1' });
+    expectRebuildEqual(p);
+  });
+
+  test('失败的 hook 发生在会话还没有行时：同样被标记并重新推导', async () => {
+    const { s, ctl } = controlledStore();
+    const p = new Pipeline(s, config);
+    ctl.applyChanges = true;
+    preToolUse(p);
+    await p.idle();
+    expect(store.getSession('s1')).toBeNull();
+    expect(store.dirtySessionIds()).toEqual(['s1']);
+    await write('proj/s1.jsonl', [userPrompt('u1', null, 'x'), toolUse(), toolResult('u2', 'a1', 'tu1', 'ok')]);
+    await p.ingestFile(abs('proj/s1.jsonl'));
+    expect(store.dirtySessionIds()).toEqual([]);
+    expect(store.getGraph('s1')!.nodes.find((n) => n.id === 'tool:tu1')).toMatchObject({ status: 'succeeded', confirmed: true });
+    expectRebuildEqual(p);
+  });
+
+  test('标记跨“重启”保留，在第一次触及该会话时（导入之前）解决', async () => {
+    const { s, ctl } = controlledStore();
+    const p1 = new Pipeline(s, config);
+    await write('proj/s1.jsonl', [userPrompt('u1', null, 'x')]);
+    await p1.ingestFile(abs('proj/s1.jsonl'));
+    ctl.applyChanges = true;
+    preToolUse(p1);
+    await p1.idle();
+    const p2 = new Pipeline(store, config); // restart: only the database survives
+    const seen: string[] = [];
+    p2.onResync((id) => seen.push(id));
+    await append('proj/s1.jsonl', [toolUse()]);
+    await p2.ingestFile(abs('proj/s1.jsonl'));
+    expect(seen).toEqual(['s1']);
+    expect(store.dirtySessionIds()).toEqual([]);
+    expect(store.getGraph('s1')!.nodes.find((n) => n.id === 'tool:tu1')).toMatchObject({ status: 'running', confirmed: true });
+    expectRebuildEqual(p2);
+  });
+
+  test('重新推导失败：标记保留、记入导入失败，下次（热扫描）重试成功', async () => {
+    const { s, ctl } = controlledStore();
+    const p = new Pipeline(s, config);
+    await write('proj/s1.jsonl', [userPrompt('u1', null, 'x')]);
+    await p.ingestFile(abs('proj/s1.jsonl'));
+    ctl.applyChanges = true;
+    preToolUse(p);
+    await p.idle();
+    ctl.deleteDerivedForSession = true;
+    await append('proj/s1.jsonl', [toolUse(), toolResult('u2', 'a1', 'tu1', 'ok')]);
+    await p.ingestFile(abs('proj/s1.jsonl'));
+    expect(store.dirtySessionIds()).toEqual(['s1']);
+    expect(p.ingestFailures().map((f) => f.file)).toContain('session:s1');
+    await p.rescan();
+    await p.idle();
+    expect(store.dirtySessionIds()).toEqual([]);
+    expect(p.ingestFailures().map((f) => f.file)).not.toContain('session:s1');
+    expect(store.getGraph('s1')!.nodes.find((n) => n.id === 'tool:tu1')).toMatchObject({ status: 'succeeded' });
+    expectRebuildEqual(p);
+  });
+
+  test('重新推导后，订阅者收到该会话的 resync，会话列表收到 session_upserted', async () => {
+    const { s, ctl } = controlledStore();
+    const p = new Pipeline(s, config);
+    await write('proj/s1.jsonl', [userPrompt('u1', null, 'x')]);
+    await p.ingestFile(abs('proj/s1.jsonl'));
+    ctl.applyChanges = true;
+    preToolUse(p);
+    await p.idle();
+    const resyncs: string[] = [];
+    const changes: SeqChange[] = [];
+    p.onResync((id) => resyncs.push(id));
+    p.onChanges((cs) => changes.push(...cs));
+    await p.rescan(); // the next scan touches the dirty session even without new content
+    await p.idle();
+    expect(resyncs).toEqual(['s1']);
+    expect(changes.some((c) => c.type === 'session_upserted' && c.session.id === 's1')).toBe(true);
+    expect(store.getGraph('s1')!.nodes.map((n) => n.id)).toEqual(['u1', 'tool:tu1']);
+  });
+
+  test('没有标记的会话从不重新推导（正常路径没有额外工作）', async () => {
+    const spy = vi.spyOn(store, 'deleteDerivedForSession');
+    const p = new Pipeline(store, config);
+    const resyncs: string[] = [];
+    p.onResync((id) => resyncs.push(id));
+    await write('proj/s1.jsonl', [userPrompt('u1', null, 'x')]);
+    await p.scanAll();
+    preToolUse(p);
+    await append('proj/s1.jsonl', [toolUse(), toolResult('u2', 'a1', 'tu1', 'ok')]);
+    await p.rescan();
+    await p.scanAll();
+    await new Pipeline(store, config).scanAll();
+    await p.idle();
+    expect(spy).not.toHaveBeenCalled();
+    expect(resyncs).toEqual([]);
+    expect(store.dirtySessionIds()).toEqual([]);
+    spy.mockRestore();
+  });
 });

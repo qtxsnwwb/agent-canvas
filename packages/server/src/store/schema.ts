@@ -31,6 +31,13 @@ CREATE TABLE IF NOT EXISTS hook_stat (
   last_at    TEXT NOT NULL
 );
 
+-- Sessions whose committed raw events are ahead of their derived rows (a hook whose processing failed was stored
+-- alone). The pipeline re-derives such a session from its raw events on the next touch and removes the row in the same
+-- transaction. Not derived data: clearDerived leaves it alone (a full rebuild clears it explicitly).
+CREATE TABLE IF NOT EXISTS dirty_session (
+  session_id TEXT PRIMARY KEY
+);
+
 CREATE TABLE IF NOT EXISTS file_offset (
   file     TEXT PRIMARY KEY,   -- relative to projectsDir, '/' separators
   "offset" INTEGER NOT NULL,

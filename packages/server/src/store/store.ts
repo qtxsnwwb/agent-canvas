@@ -137,6 +137,16 @@ export interface Store {
   allSessionIdsInRaw(): string[];
   /** Clears derived tables, the change log and unknown_stat; keeps raw_event, file_offset and meta. */
   clearDerived(): void;
+  /**
+   * Deletes one session's derived rows (session, nodes, details, edges, its change_log rows); for a per-session
+   * re-derive inside the caller's transaction.
+   */
+  deleteDerivedForSession(sessionId: string): void;
+  /** Marks a session whose stored raw events are ahead of its derived rows (see Pipeline); persistent. */
+  markDirty(sessionId: string): void;
+  clearDirty(sessionId: string): void;
+  clearAllDirty(): void;
+  dirtySessionIds(): string[];
   bumpUnknown(recordType: string, sample: string): void;
   getMeta(key: string): string | null;
   setMeta(key: string, value: string): void;
@@ -488,6 +498,17 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     return out;
   });
 
+  const deleteSessionDerived = [
+    db.prepare(`DELETE FROM session WHERE id = ?`),
+    db.prepare(`DELETE FROM node WHERE session_id = ?`),
+    db.prepare(`DELETE FROM node_detail WHERE session_id = ?`),
+    db.prepare(`DELETE FROM edge WHERE session_id = ?`),
+    db.prepare(`DELETE FROM change_log WHERE session_id = ?`),
+  ];
+  const insertDirty = db.prepare(`INSERT OR IGNORE INTO dirty_session (session_id) VALUES (?)`);
+  const deleteDirty = db.prepare(`DELETE FROM dirty_session WHERE session_id = ?`);
+  const selectDirty = db.prepare(`SELECT session_id FROM dirty_session ORDER BY session_id`).pluck();
+
   const clearDerivedTx = db.transaction(() => {
     for (const t of DERIVED_TABLES) db.exec(`DELETE FROM ${t}`);
     // seq (AUTOINCREMENT) is deliberately NOT reset: it must stay monotonic so clients
@@ -656,6 +677,19 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     clearDerived() {
       clearDerivedTx();
     },
+    deleteDerivedForSession(sessionId) {
+      for (const stmt of deleteSessionDerived) stmt.run(sessionId);
+    },
+    markDirty(sessionId) {
+      insertDirty.run(sessionId);
+    },
+    clearDirty(sessionId) {
+      deleteDirty.run(sessionId);
+    },
+    clearAllDirty() {
+      db.exec(`DELETE FROM dirty_session`);
+    },
+    dirtySessionIds: () => selectDirty.all() as string[],
     bumpUnknown(recordType, sample) {
       upsertUnknown.run(recordType, sample.slice(0, SAMPLE_MAX));
     },

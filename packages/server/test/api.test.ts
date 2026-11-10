@@ -465,6 +465,29 @@ describe('http api', () => {
     expect(sizes.length).toBeGreaterThanOrEqual(3);
   });
 
+  test('失败的 hook 让会话被重新推导后，只给订阅了该会话的连接发 resync', async () => {
+    await seed();
+    const ws = await connect();
+    const other = await connect();
+    const got = collect(ws);
+    const gotOther = collect(other);
+    other.send(JSON.stringify({ type: 'subscribe', scope: 'session', sessionId: 's2', sinceSeq: 0 }));
+    ws.send(JSON.stringify({ type: 'subscribe', scope: 'session', sessionId: 's1', sinceSeq: 0 }));
+    // The catch-up backlog shows the subscription was processed.
+    await vi.waitFor(() => expect(got.changes().length).toBeGreaterThan(0));
+    vi.spyOn(store, 'applyChanges').mockImplementationOnce(() => {
+      throw new Error('simulated crash');
+    });
+    pipeline.ingestHook('Stop', 's1', JSON.stringify({ session_id: 's1', hook_event_name: 'Stop' }));
+    await pipeline.idle();
+    expect(store.dirtySessionIds()).toEqual(['s1']);
+    await pipeline.rescan();
+    await pipeline.idle();
+    await vi.waitFor(() => expect(got.messages()).toContainEqual({ type: 'resync', sessionId: 's1' }));
+    expect(gotOther.messages().filter((m) => m.type === 'resync')).toEqual([]);
+    vi.restoreAllMocks();
+  });
+
   test('需要补发的变更超过 5000 时发 resync，之后照常实时推送', async () => {
     await seed();
     store.applyChanges(manyNodes(5001));
