@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Background,
   BackgroundVariant,
   Controls,
+  Panel,
   MarkerType,
   MiniMap,
   Position,
@@ -16,6 +17,7 @@ import {
 import '@xyflow/react/dist/style.css';
 import './canvas.css';
 import { TURN_HEADER } from './layout';
+import { followTarget } from './follow';
 import { sizeOf } from './sizes';
 import type { CanvasSnapshot } from './useCanvas';
 import type { TurnSummary, ViewEdge } from './view';
@@ -164,30 +166,44 @@ function miniMapColor(n: FlowNode): string {
   return 'transparent';
 }
 
+/** Share of the viewport height by which the view is centred above the latest node, leaving it below centre. */
+const FOLLOW_LIFT = 0.15;
+const FOLLOW_DURATION = 200;
+
 /**
- * Centres on the latest node at zoom 1 once its position first arrives, so the page is not blank on open.
- * (Placeholder: Task 5 replaces this with follow logic.)
+ * Keeps the latest node in view (slightly below centre) until the user pans or zooms.
+ * `onMoveStart` is passed to React Flow: a non-null event means the user moved the viewport.
  */
-function useInitialCentre(snapshot: CanvasSnapshot): void {
-  const { setCenter } = useReactFlow();
+function useFollow(snapshot: CanvasSnapshot): { following: boolean; resume(): void; onMoveStart(event: unknown): void } {
+  const { setCenter, getZoom } = useReactFlow();
+  const [following, setFollowing] = useState(true);
   const ready = useStore((s) => s.width > 0 && s.height > 0 && s.panZoom !== null);
-  const done = useRef(false);
-  const id = snapshot.view.latestNodeId;
-  const pos = id !== null ? snapshot.positions[id] : undefined;
-  const vn = id !== null ? snapshot.view.nodes.get(id) : undefined;
+  const height = useStore((s) => s.height);
+  const placed = useRef(false);
+  const heightRef = useRef(height);
+  heightRef.current = height;
+  const target = followTarget(snapshot);
+  const tx = target?.x;
+  const ty = target?.y;
   useEffect(() => {
     // `ready` includes the zoom pane, so setCenter takes effect now.
-    if (done.current || !ready || !pos || !vn) return;
-    done.current = true;
-    const { width, height } = sizeOf(vn);
-    void setCenter(pos.x + width / 2, pos.y + height / 2, { zoom: 1 });
-  }, [ready, pos, vn, setCenter]);
+    if (!following || !ready || tx === undefined || ty === undefined) return;
+    const first = !placed.current;
+    placed.current = true;
+    const zoom = first ? 1 : getZoom();
+    void setCenter(tx, ty - (FOLLOW_LIFT * heightRef.current) / zoom, first ? { zoom } : { zoom, duration: FOLLOW_DURATION });
+  }, [following, ready, tx, ty, setCenter, getZoom]);
+  return {
+    following,
+    resume: () => setFollowing(true),
+    onMoveStart: (event) => { if (event) setFollowing(false); },
+  };
 }
 
 function CanvasInner({ snapshot, selectedId, onSelect, onToggleTurn }: CanvasProps) {
   const nodes = useFlowNodes(snapshot, selectedId);
   const edges = useFlowEdges(snapshot);
-  useInitialCentre(snapshot);
+  const follow = useFollow(snapshot);
 
   // Stable identity for the context value; the latest callback is read through the ref.
   const toggleRef = useRef(onToggleTurn);
@@ -205,6 +221,7 @@ function CanvasInner({ snapshot, selectedId, onSelect, onToggleTurn }: CanvasPro
           else if (n.type === 'graphNode') onSelect(n.id);
         }}
         onPaneClick={() => onSelect(null)}
+        onMoveStart={(event) => follow.onMoveStart(event)}
         nodesDraggable={false}
         nodesConnectable={false}
         elementsSelectable
@@ -216,6 +233,11 @@ function CanvasInner({ snapshot, selectedId, onSelect, onToggleTurn }: CanvasPro
       >
         <Background variant={BackgroundVariant.Dots} gap={20} size={1.2} color="#cbd5e1" />
         <Controls showInteractive={false} />
+        {!follow.following && (
+          <Panel position="bottom-right" className="cc-follow-panel">
+            <button type="button" className="cc-follow-btn" onClick={follow.resume}>回到最新</button>
+          </Panel>
+        )}
         <MiniMap<FlowNode> nodeColor={miniMapColor} nodeStrokeWidth={0} pannable zoomable />
       </ReactFlow>
     </CanvasActions.Provider>

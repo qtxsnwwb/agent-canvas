@@ -61,7 +61,7 @@ export function SessionPage({ sessionId }: { sessionId: string }) {
         {session.gitBranch !== null && <span className="muted branch" title={session.gitBranch}>{session.gitBranch}</span>}
         {session.sourceDeleted && <span className="tag">源文件已删除</span>}
       </div>
-      <SessionCanvas live={live} />
+      <SessionCanvas key={session.id} live={live} />
     </div>
   );
 }
