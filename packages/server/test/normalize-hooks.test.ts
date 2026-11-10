@@ -393,3 +393,24 @@ test('终态来源在重放时一致', () => {
   ];
   expect(run(new Normalizer(), events).changes).toEqual(run(new Normalizer(), events).changes);
 });
+
+// ---- final fix wave, group 4: tool inputs leave memory once a node is terminal ----
+
+test('终态节点的入参从内存中移除，执行中的仍可被 PermissionRequest 匹配', () => {
+  run(n, [userPrompt('u1', null, 'x'), pre('tu1'), use('tu1'), pre('tu2', { command: 'pwd' })]);
+  expect(n.toolInputCount('s1')).toBe(2);
+  run(n, [toolResult('u2', 'a1', 'tu1', 'ok')]);
+  expect(n.toolInputCount('s1')).toBe(1);
+  const { changes } = run(n, [hook('PermissionRequest', { tool_name: 'Bash', tool_input: { command: 'pwd' } })]);
+  expect(changes).toContainEqual(expect.objectContaining({ type: 'node_updated', id: 'tool:tu2', patch: { status: 'awaiting_permission' } }));
+  run(n, [hook('PermissionDenied', { tool_use_id: 'tu2' })]);
+  expect(n.toolInputCount('s1')).toBe(0);
+});
+
+test('hook 终态之后到达的 tool_use 不再记住入参', () => {
+  run(n, [userPrompt('u1', null, 'x'), pre(), hook('PostToolUse', { tool_use_id: 'tu1', tool_response: 'ok' })]);
+  expect(n.toolInputCount('s1')).toBe(0);
+  run(n, [use()]);
+  expect(n.toolInputCount('s1')).toBe(0);
+  expect(n.toolInputCount('missing')).toBe(0);
+});

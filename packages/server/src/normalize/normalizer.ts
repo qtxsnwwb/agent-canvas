@@ -109,6 +109,11 @@ export class Normalizer {
     return this.sessions.has(sessionId);
   }
 
+  /** Number of tool inputs held in memory for a session (introspection for tests). */
+  toolInputCount(sessionId: string): number {
+    return this.sessions.get(sessionId)?.toolInputs.size ?? 0;
+  }
+
   private applyMeta(event: Extract<RawEvent, { source: 'meta' }>): NormalizeResult {
     let parsed: unknown;
     try {
@@ -294,7 +299,10 @@ export class Normalizer {
     if (!node) return;
     const terminal = node.status !== null && TERMINAL_STATUSES.includes(node.status);
     const patch: Partial<GraphNode> = {};
-    if (!terminal) patch.status = effect.status;
+    if (!terminal) {
+      patch.status = effect.status;
+      state.toolInputs.delete(id); // only non-terminal nodes are PermissionRequest candidates
+    }
     if (node.durationMs === null && effect.durationMs !== null) patch.durationMs = effect.durationMs;
     const withOutput = !terminal && 'output' in effect;
     if (Object.keys(patch).length === 0) return;
@@ -692,9 +700,10 @@ export class Normalizer {
   ): string {
     const id = `tool:${c.toolUseId}`;
     const summary = summarize(c.input);
-    state.toolInputs.set(id, c.input);
     state.lastNodeByUuid.set(record.uuid, id);
     const existing = state.nodes.get(id);
+    // Only non-terminal nodes keep their input in memory (PermissionRequest matching).
+    if (!existing || existing.status === null || !TERMINAL_STATUSES.includes(existing.status)) state.toolInputs.set(id, c.input);
     if (existing) {
       // A hook created this node first; the transcript record now confirms it. status is left alone.
       const base = this.baseNode(state, record, agentId, id, parentId);
@@ -749,6 +758,7 @@ export class Normalizer {
       const final = terminal && (node.status === 'denied' || state.terminalFromContent.has(id));
       const patch: Partial<GraphNode> = !final && node.status !== status ? { status } : {};
       if (!final) state.terminalFromContent.add(id);
+      state.toolInputs.delete(id);
       if (patch.status !== undefined) state.nodes.set(id, { ...node, ...patch });
       changes.push({ type: 'node_updated', sessionId: state.session.id, id, patch, detail: { output: r.content } });
     }
