@@ -1,8 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { expect, test } from 'vitest';
+import { afterEach, expect, test, vi } from 'vitest';
 import type { Diagnostics } from '@claude-canvas/shared';
-import { EXPECTED_HOOK_EVENTS, formatAge, summarizeDiagnostics, truncateSample, SAMPLE_DISPLAY_MAX } from '../src/diagnostics';
+import { createPoller, EXPECTED_HOOK_EVENTS, formatAge, summarizeDiagnostics, truncateSample, SAMPLE_DISPLAY_MAX } from '../src/diagnostics';
 
 const NOW = Date.parse('2026-01-01T12:00:00.000Z');
 const base: Diagnostics = {
@@ -75,4 +75,82 @@ test('truncateSample 最多 2000 字符', () => {
   expect(SAMPLE_DISPLAY_MAX).toBe(2000);
   expect(truncateSample('x'.repeat(2000))).toBe('x'.repeat(2000));
   expect(truncateSample('x'.repeat(2001))).toBe('x'.repeat(2000) + '…');
+});
+
+test('behindTotal 是全部未读完文件数；无法解析的 lastHookAt 视为 quiet 且 hookAgeMs 为 null', () => {
+  const many = Array.from({ length: 250 }, (_, i) => ({ path: `f${i}`, offset: i % 2, size: 1 }));
+  const s = summarizeDiagnostics({ ...base, files: many }, NOW);
+  expect(s.behindTotal).toBe(125);
+  expect(s.filesBehind).toHaveLength(125);
+  const big = summarizeDiagnostics({ ...base, files: Array.from({ length: 300 }, (_, i) => ({ path: `g${i}`, offset: 0, size: 1 })) }, NOW);
+  expect(big.behindTotal).toBe(300);
+  expect(big.filesBehind).toHaveLength(200);
+  expect(summarizeDiagnostics({ ...base, lastHookAt: 'garbage' }, NOW)).toMatchObject({ hooks: 'quiet', hookAgeMs: null });
+  expect(summarizeDiagnostics(base, NOW)).toMatchObject({ hooks: 'never', behindTotal: 0 });
+});
+
+// ---- createPoller ----
+afterEach(() => { vi.useRealTimers(); });
+
+function deferred<T>() {
+  let resolve!: (v: T) => void;
+  let reject!: (e: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
+test('createPoller：请求未返回时不发第二个；返回 5 秒后才发下一个', async () => {
+  vi.useFakeTimers();
+  const pending: ReturnType<typeof deferred<number>>[] = [];
+  const load = vi.fn(() => { const d = deferred<number>(); pending.push(d); return d.promise; });
+  const onResult = vi.fn();
+  const p = createPoller({ load, onResult, intervalMs: 5000 });
+  p.start();
+  expect(load).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(20_000);
+  expect(load).toHaveBeenCalledTimes(1); // still pending: no overlap
+  pending[0]!.resolve(1);
+  await vi.advanceTimersByTimeAsync(4999);
+  expect(onResult).toHaveBeenCalledWith({ ok: true, value: 1 });
+  expect(load).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(load).toHaveBeenCalledTimes(2);
+  p.stop();
+});
+
+test('createPoller：失败也会安排下一次', async () => {
+  vi.useFakeTimers();
+  const load = vi.fn<() => Promise<number>>().mockRejectedValueOnce(new Error('boom')).mockResolvedValue(2);
+  const onResult = vi.fn();
+  const p = createPoller({ load, onResult, intervalMs: 5000 });
+  p.start();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(onResult).toHaveBeenNthCalledWith(1, { ok: false, error: 'boom' });
+  await vi.advanceTimersByTimeAsync(5000);
+  expect(load).toHaveBeenCalledTimes(2);
+  expect(onResult).toHaveBeenNthCalledWith(2, { ok: true, value: 2 });
+  p.stop();
+});
+
+test('createPoller：stop() 之后不再请求，迟到的结果被丢弃', async () => {
+  vi.useFakeTimers();
+  const d = deferred<number>();
+  const load = vi.fn(() => d.promise);
+  const onResult = vi.fn();
+  const p = createPoller({ load, onResult, intervalMs: 5000 });
+  p.start();
+  p.stop();
+  d.resolve(1);
+  await vi.advanceTimersByTimeAsync(20_000);
+  expect(onResult).not.toHaveBeenCalled();
+  expect(load).toHaveBeenCalledTimes(1);
+
+  // stop() while a next request is only scheduled
+  const load2 = vi.fn(async () => 1);
+  const p2 = createPoller({ load: load2, onResult, intervalMs: 5000 });
+  p2.start();
+  await vi.advanceTimersByTimeAsync(0);
+  p2.stop();
+  await vi.advanceTimersByTimeAsync(20_000);
+  expect(load2).toHaveBeenCalledTimes(1);
 });

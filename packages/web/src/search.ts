@@ -39,7 +39,7 @@ export function createSearcher(deps: {
       const mine = latest;
       if (timer !== null) clearTimeout(timer);
       timer = null;
-      if (q.length < SEARCH_MIN_CHARS) {
+      if (Array.from(q).length < SEARCH_MIN_CHARS) {
         deps.onResult({ q, hits: null, error: null });
         return;
       }

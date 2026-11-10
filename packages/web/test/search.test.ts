@@ -105,3 +105,23 @@ test('createSearcher：请求失败回报 error；dispose 后不再回调', asyn
   expect(onResult).toHaveBeenCalledTimes(1);
   expect(search).toHaveBeenCalledTimes(1);
 });
+
+test('highlightParts：相邻命中、q 比片段长', () => {
+  expect(highlightParts('abab', 'ab')).toEqual([{ text: 'ab', match: true }, { text: 'ab', match: true }]);
+  expect(highlightParts('ab', 'abcdef')).toEqual([{ text: 'ab', match: false }]);
+  expect(highlightParts('', 'ab')).toEqual([{ text: '', match: false }]);
+});
+
+test('createSearcher：最小长度按码点计，与服务端一致', async () => {
+  vi.useFakeTimers();
+  const search = vi.fn(async () => [] as SearchHit[]);
+  const onResult = vi.fn();
+  const s = createSearcher({ search, onResult, delayMs: 10 });
+  s.query('😀'); // one code point, two UTF-16 units
+  await vi.advanceTimersByTimeAsync(50);
+  expect(search).not.toHaveBeenCalled();
+  expect(onResult).toHaveBeenLastCalledWith({ q: '😀', hits: null, error: null });
+  s.query('登录'); // two code points
+  await vi.advanceTimersByTimeAsync(50);
+  expect(search).toHaveBeenCalledWith('登录');
+});

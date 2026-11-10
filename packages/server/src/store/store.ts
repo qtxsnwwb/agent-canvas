@@ -115,6 +115,8 @@ export interface Store {
   searchSessions(query: string, limit: number): SearchHit[];
   /** Query plans (EXPLAIN QUERY PLAN detail lines) of the two statements searchSessions runs; for tests. */
   searchPlans(): { sessions: string[]; prompts: string[] };
+  /** Query plan (EXPLAIN QUERY PLAN detail lines) of the statement hookEventStats runs; for tests. */
+  hookEventPlan(): string[];
   getGraph(sessionId: string): GraphSnapshot | null;
   /** The GraphSnapshot already serialized, built from the stored bodies without parsing them. */
   getGraphJson(sessionId: string): string | null;
@@ -576,6 +578,9 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
       const plan = (stmt: { source: string }) =>
         (db.prepare(`EXPLAIN QUERY PLAN ${stmt.source}`).all(params) as { detail: string }[]).map((r) => r.detail);
       return { sessions: plan(searchSessionsStmt), prompts: plan(searchPromptsStmt) };
+    },
+    hookEventPlan() {
+      return (db.prepare(`EXPLAIN QUERY PLAN ${selectHookStats.source}`).all() as { detail: string }[]).map((r) => r.detail);
     },
     getGraph(sessionId) {
       const json = getGraphJson(sessionId);

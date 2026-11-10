@@ -28,20 +28,27 @@ export interface DiagnosticsSummary {
   hookAgeMs: number | null;
   missingHookEvents: string[];
   filesTotal: number;
+  /** Files with offset < size, at most FILES_BEHIND_MAX of them. */
   filesBehind: { path: string; offset: number; size: number }[];
+  /** Count of all files with offset < size (filesBehind may be cut). */
+  behindTotal: number;
   unknownTotal: number;
 }
 
 export function summarizeDiagnostics(d: Diagnostics, nowMs: number): DiagnosticsSummary {
   const last = d.lastHookAt === null ? Number.NaN : Date.parse(d.lastHookAt);
   const hookAgeMs = Number.isNaN(last) ? null : Math.max(0, nowMs - last);
+  // A present but unparseable timestamp is not "never received": hooks did arrive, we just cannot date them.
+  const hooks: DiagnosticsSummary['hooks'] =
+    d.lastHookAt === null ? 'never' : hookAgeMs === null ? 'quiet' : hookAgeMs <= HOOK_QUIET_MS ? 'recent' : 'quiet';
   const seen = new Set(d.hookEvents.map((e) => e.eventName));
   const behind = d.files.filter((f) => f.offset < f.size);
   return {
-    hooks: hookAgeMs === null ? 'never' : hookAgeMs <= HOOK_QUIET_MS ? 'recent' : 'quiet',
+    hooks,
     hookAgeMs,
     missingHookEvents: EXPECTED_HOOK_EVENTS.filter((e) => !seen.has(e)),
     filesTotal: d.files.length,
+    behindTotal: behind.length,
     filesBehind: behind.slice(0, FILES_BEHIND_MAX).map((f) => ({ path: f.path, offset: f.offset, size: f.size })),
     unknownTotal: d.unknownRecords.reduce((n, r) => n + r.count, 0),
   };
@@ -58,4 +65,45 @@ export function formatAge(ms: number): string {
 /** Unknown-record samples hold raw conversation content: show at most this much of one. */
 export function truncateSample(sample: string): string {
   return sample.length > SAMPLE_DISPLAY_MAX ? `${sample.slice(0, SAMPLE_DISPLAY_MAX)}…` : sample;
+}
+
+export type PollResult<T> = { ok: true; value: T } | { ok: false; error: string };
+
+/**
+ * Polls `load` with a chained timer: the next request is scheduled `intervalMs` after the previous one settles
+ * (success or failure), so at most one is in flight and results are delivered in order. `stop()` cancels the timer
+ * and suppresses the result of a request still in flight.
+ */
+export function createPoller<T>(deps: {
+  load(): Promise<T>;
+  onResult(r: PollResult<T>): void;
+  intervalMs: number;
+}): { start(): void; stop(): void } {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let stopped = false;
+  let started = false;
+  const tick = (): void => {
+    timer = null;
+    const settle = (r: PollResult<T>): void => {
+      if (stopped) return;
+      deps.onResult(r);
+      timer = setTimeout(tick, deps.intervalMs);
+    };
+    deps.load().then(
+      (value) => settle({ ok: true, value }),
+      (e: unknown) => settle({ ok: false, error: e instanceof Error ? e.message : String(e) }),
+    );
+  };
+  return {
+    start() {
+      if (started || stopped) return;
+      started = true;
+      tick();
+    },
+    stop() {
+      stopped = true;
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
+    },
+  };
 }

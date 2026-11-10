@@ -131,7 +131,7 @@ export function Home({ projectId }: { projectId: string | null }) {
     searcher.current?.query(value);
   };
   const q = query.trim();
-  const searching = q.length >= SEARCH_MIN_CHARS;
+  const searching = Array.from(q).length >= SEARCH_MIN_CHARS;
 
   return (
     <>

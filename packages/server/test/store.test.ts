@@ -348,16 +348,11 @@ test('hookEventStats 按事件名聚合次数和最近时间，不含 transcript
   ]);
 });
 
-test('hookEventStats 的部分索引只覆盖 hook 行，且查询限定 source = hook', () => {
-  expect(SCHEMA_SQL).toMatch(/CREATE INDEX IF NOT EXISTS raw_event_hook[^;]*\(event_name, received_at\) WHERE source = 'hook'/);
-  const sql: string[] = [];
-  const s = openStore(':memory:', { verbose: (q) => sql.push(String(q)) });
-  try {
-    s.hookEventStats();
-    expect(sql.some((q) => q.includes('raw_event') && q.includes("source = 'hook'") && q.includes('GROUP BY'))).toBe(true);
-  } finally {
-    s.close();
-  }
+test('hookEventStats 的查询计划走只覆盖 hook 行的部分索引，不全表扫描 raw_event', () => {
+  const plan = store.hookEventPlan();
+  const text = plan.join(' | ');
+  expect(text).toContain('raw_event_hook');
+  expect(plan.filter((l) => /SCAN raw_event(?! USING)/.test(l))).toEqual([]);
 });
 
 test('文件数据库的 WAL 由后台线程检查点，主连接不做自动检查点', async () => {
