@@ -190,13 +190,17 @@ function useFlowNodes(snapshot: CanvasSnapshot, selectedId: string | null, chain
             handles: handlesFor(width, height), draggable: false, connectable: false,
           };
       } else {
+        // An agent group's `earlier` node sits inside its container: it needs the group's zIndex.
         n = old && old.type === 'earlier' && old.data.count === vn.count && old.data.toolCount === vn.toolCount
-          && old.data.failedCount === vn.failedCount && old.data.highlight === highlight
+          && old.data.failedCount === vn.failedCount && old.data.highlight === highlight && old.zIndex === zIndex
           && samePos(old.position, position) && old.width === width && old.height === height
           ? old
           : {
-            id: vn.id, type: 'earlier', position, width, height, className: wrapperClass(false, highlight),
-            data: { turnKey: vn.turnKey, count: vn.count, toolCount: vn.toolCount, failedCount: vn.failedCount, highlight },
+            id: vn.id, type: 'earlier', position, width, height, zIndex, className: wrapperClass(false, highlight),
+            data: {
+              turnKey: vn.turnKey, groupKey: vn.groupKey, count: vn.count, toolCount: vn.toolCount, failedCount: vn.failedCount,
+              highlight,
+            },
             handles: handlesFor(width, height), selectable: false, focusable: false, draggable: false, connectable: false,
           };
       }

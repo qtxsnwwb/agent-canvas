@@ -131,7 +131,7 @@ function mainWithAgent(): Graph {
 const opts = (o: { expandedAgents?: ReadonlySet<string> } = {}) => o;
 const view = (graph: Graph, o: { expandedAgents?: ReadonlySet<string> } = {}) => buildView(graph, new Map(), undefined, o);
 const g = (key: string, containerId: string, depth: number, nodeIds: string[]): AgentGroup =>
-  ({ key, agentId: key.slice('agent:'.length), containerId, parentGroupKey: 't1', depth, nodeIds });
+  ({ key, agentId: key.slice('agent:'.length), containerId, parentGroupKey: 't1', depth, nodeIds, foldedIds: [] });
 
 test('containerSize：加内边距和标题区，宽度有下限', () => {
   expect(containerSize({ width: 500, height: 300 })).toEqual({ width: 532, height: 400 });

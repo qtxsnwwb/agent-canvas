@@ -38,7 +38,10 @@ export type ViewNode =
     expanded: boolean; expandable: boolean;
   }
   | { type: 'turn_summary'; id: string; turnKey: string; groupKey: string; summary: TurnSummary }
-  /** Stands for the folded middle of a long expanded turn; id is `earlier:${turnKey}`. */
+  /**
+   * Stands for the folded middle of a long expanded turn (id `earlier:${turnKey}`, groupKey = the turn key) or of a long
+   * expanded agent (id `earlier:${groupKey}`, groupKey = the agent group key, turnKey = the container's turn).
+   */
   | { type: 'earlier'; id: string; turnKey: string; groupKey: string; count: number; toolCount: number; failedCount: number };
 export interface ViewEdge { id: string; from: string; to: string; kind: EdgeKind }
 /**
@@ -62,21 +65,32 @@ export interface AgentGroup {
   parentGroupKey: string;
   /** 1 for an agent dispatched from the main thread, 2 for one dispatched inside it, … */
   depth: number;
-  /** Ascending by timestamp, then id. */
+  /**
+   * View node ids in order: ascending by timestamp, then id; when the group is folded, its first node, its `earlier`
+   * node (`earlier:${key}`), then the other visible nodes.
+   */
   nodeIds: string[];
+  /** The inner node ids folded into the group's `earlier` node, in time order (empty when it is not folded). */
+  foldedIds: string[];
 }
 export interface BuildViewOptions {
   /**
-   * Turn key -> node ids hidden in that turn's `earlier` node. For a turn in this map the set replaces the length
-   * rule: exactly these ids (those that still exist) are hidden, every other node of the turn is shown.
+   * Turn key or agent group key -> node ids hidden in that turn's / group's `earlier` node. For a key in this map the
+   * set replaces the length rule: exactly these ids (those that still exist) are hidden, every other node is shown.
    */
   frozenHidden?: ReadonlyMap<string, ReadonlySet<string>>;
-  /** A node that must stay visible (the selection): never folded into `earlier`, and its turn is not auto-collapsed. */
+  /**
+   * A node that must stay visible (the selection): never folded into `earlier`, and its turn is not auto-collapsed.
+   * When it is an inner node of an expanded agent, the same holds for its container, every container above that, and
+   * the turn holding the outermost container.
+   */
   keepVisible?: string | null;
   /**
-   * Agent ids (a dispatch node's childAgentId) to show expanded. A dispatch node is expanded only in live mode, when it
-   * is itself in the view, is expandable, and its agent is not on its own ancestor chain; each agent id yields at most
-   * one group (the first such dispatch node in view order). Inner nodes are never folded into `earlier`.
+   * Agent ids (a dispatch node's childAgentId) to show expanded. A dispatch node is expanded only outside topology mode,
+   * when it is itself in the view, is expandable, and its agent is not on its own ancestor chain; each agent id yields
+   * at most one group (the first such dispatch node in view order). A group with more than TURN_FOLD_THRESHOLD inner
+   * nodes is folded like a long turn: its first node, an `earlier` node, its last TURN_TAIL_NODES (unless its group key
+   * is in `fullTurns` or `frozenHidden`).
    */
   expandedAgents?: ReadonlySet<string>;
   /** Default 'live'. In topology mode the in-turn fold counts only nodes visible in that mode. */
@@ -166,15 +180,20 @@ export function buildView(
   const mode: ViewMode = options.mode ?? 'live';
   const topology = mode === 'topology';
   const expandedAgents = topology ? NO_AGENTS : options.expandedAgents ?? NO_AGENTS;
-  /** Never folded into `earlier`: still running, or the selection. */
-  const mustShow = (node: GraphNode): boolean => isActiveStatus(node) || node.id === keepVisible;
   /** Main-thread nodes not drawn in this mode (they still count in turn summaries and edges are contracted through them). */
   const isHidden = (node: GraphNode): boolean => topology && hiddenInTopology(node);
   // Pass over nodes: main-thread entries, inner-node counts per agent, inner entries of the agents asked to expand.
   const main: Entry[] = [];
   const innerByAgent = new Map<string, number>();
   const innerEntries = new Map<string, Entry[]>();
+  /** Agent id -> its earliest dispatch node (only needed to protect the containers above keepVisible). */
+  const dispatchOf = new Map<string, Entry>();
   for (const node of Object.values(graph.nodes)) {
+    if (node.kind === 'subagent' && node.childAgentId !== null && keepVisible !== null) {
+      const entry = { node, ms: parseMs(node.timestamp) };
+      const known = dispatchOf.get(node.childAgentId);
+      if (!known || byTimeThenId(entry, known) < 0) dispatchOf.set(node.childAgentId, entry);
+    }
     if (node.agentId === null) {
       main.push({ node, ms: parseMs(node.timestamp) });
       continue;
@@ -187,6 +206,16 @@ export function buildView(
     }
   }
   main.sort(byTimeThenId);
+
+  /** keepVisible and, when it is an inner node of an expanded agent, the dispatch nodes above it up to the main thread. */
+  const protectedIds = new Set<string>();
+  for (let id = keepVisible; id !== null && !protectedIds.has(id);) {
+    protectedIds.add(id);
+    const agentId = graph.nodes[id]?.agentId ?? null;
+    id = agentId !== null && expandedAgents.has(agentId) ? dispatchOf.get(agentId)?.node.id ?? null : null;
+  }
+  /** Never folded into `earlier`: still running, or the selection (and its containers). */
+  const mustShow = (node: GraphNode): boolean => isActiveStatus(node) || protectedIds.has(node.id);
 
   // Turns with a turnId define the turn start times.
   const turnStart = new Map<string, number>();
@@ -220,7 +249,10 @@ export function buildView(
   const collapsedKeys = new Set<string>();
   /** Hidden node id -> the id of the `earlier` node that stands for it. */
   const foldedInto = new Map<string, string>();
-  /** Visible nodes of a folded turn shown after its `earlier` node -> the next visible node of the turn in time order. */
+  /**
+   * Visible nodes of a folded turn / agent group shown after its `earlier` node -> the next visible node of the same
+   * turn / group in time order.
+   */
   const nextAfterEarlier = new Map<string, string | null>();
   /** Agent groups to fill, in discovery order (breadth first). */
   const pending: PendingGroup[] = [];
@@ -237,81 +269,96 @@ export function buildView(
     }
     nodes.set(node.id, { type: 'node', id: node.id, turnKey, groupKey, node, innerCount, expanded, expandable });
   };
-  /** The ids of an expanded turn to fold into `earlier` (empty: show everything). */
-  const hiddenOf = (key: string, entries: Entry[]): Set<string> => {
+  /**
+   * The ids of an expanded turn / agent group to fold into `earlier` (empty: show everything). `head`: how many leading
+   * nodes the length rule always shows.
+   */
+  const hiddenOf = (key: string, entries: Entry[], head: number): Set<string> => {
     const hidden = new Set<string>();
     if (fullTurns.has(key)) return hidden;
     const frozen = frozenHidden.get(key);
     if (frozen) {
       for (const { node } of entries) if (frozen.has(node.id) && !mustShow(node)) hidden.add(node.id);
     } else if (entries.length > TURN_FOLD_THRESHOLD) {
-      const head = entries[0]!.node.kind === 'prompt' ? 1 : 0;
       for (const { node } of entries.slice(head, entries.length - TURN_TAIL_NODES)) if (!mustShow(node)) hidden.add(node.id);
     }
     return hidden;
   };
+  /**
+   * Adds the visible nodes of a turn / agent group (through `add`, in time order) and, when `hidden` is not empty, its
+   * `earlier` node; returns the view ids in order ([head], earlier, then every other visible node) and the folded ids.
+   */
+  const assemble = (
+    turnKey: string, groupKey: string, entries: Entry[], hidden: ReadonlySet<string>, headId: string | null,
+    add: (node: GraphNode) => void,
+  ): { nodeIds: string[]; foldedIds: string[] } => {
+    const foldedIds: string[] = [];
+    if (hidden.size === 0) {
+      for (const { node } of entries) add(node);
+      return { nodeIds: entries.map((x) => x.node.id), foldedIds };
+    }
+    const earlierId = `earlier:${groupKey}`;
+    const after: string[] = [];
+    let toolCount = 0;
+    let failedCount = 0;
+    for (const { node } of entries) {
+      if (hidden.has(node.id)) {
+        foldedInto.set(node.id, earlierId);
+        foldedIds.push(node.id);
+        if (node.kind === 'tool' || node.kind === 'subagent') toolCount++;
+        if (node.status === 'failed' || node.status === 'denied') failedCount++;
+        continue;
+      }
+      add(node);
+      if (node.id !== headId) after.push(node.id);
+    }
+    after.forEach((id, k) => nextAfterEarlier.set(id, after[k + 1] ?? null));
+    nodes.set(earlierId, { type: 'earlier', id: earlierId, turnKey, groupKey, count: foldedIds.length, toolCount, failedCount });
+    return { nodeIds: [...(headId !== null ? [headId] : []), earlierId, ...after], foldedIds };
+  };
   ordered.forEach(({ key, entries: all }, i) => {
     const entries = topology ? all.filter((x) => !isHidden(x.node)) : all;
     const expandedOverride = overrides.get(key);
-    const holdsKept = keepVisible !== null && entries.some((x) => x.node.id === keepVisible);
+    const holdsKept = protectedIds.size > 0 && entries.some((x) => protectedIds.has(x.node.id));
     const collapsed = expandedOverride === undefined
       ? i < ordered.length - EXPANDED_RECENT_TURNS && !holdsKept
       : !expandedOverride;
     const summary = summarize(key, all);
     let nodeIds: string[];
-    const foldedIds: string[] = [];
+    let foldedIds: string[] = [];
     if (collapsed) {
       collapsedKeys.add(key);
       nodeIds = [`turn:${key}`];
       nodes.set(nodeIds[0]!, { type: 'turn_summary', id: nodeIds[0]!, turnKey: key, groupKey: key, summary });
     } else {
-      const hidden = hiddenOf(key, entries);
-      if (hidden.size === 0) {
-        nodeIds = entries.map((x) => x.node.id);
-        for (const { node } of entries) addNode(key, key, node, 0, NO_ANCESTORS);
-      } else {
-        // [prompt], earlier, then every other visible node in time order.
-        const earlierId = `earlier:${key}`;
-        const first = entries[0]!.node;
-        const headId = first.kind === 'prompt' && !hidden.has(first.id) ? first.id : null;
-        const after: string[] = [];
-        let toolCount = 0;
-        let failedCount = 0;
-        for (const { node } of entries) {
-          if (hidden.has(node.id)) {
-            foldedInto.set(node.id, earlierId);
-            foldedIds.push(node.id);
-            if (node.kind === 'tool' || node.kind === 'subagent') toolCount++;
-            if (node.status === 'failed' || node.status === 'denied') failedCount++;
-            continue;
-          }
-          addNode(key, key, node, 0, NO_ANCESTORS);
-          if (node.id !== headId) after.push(node.id);
-        }
-        after.forEach((id, k) => nextAfterEarlier.set(id, after[k + 1] ?? null));
-        nodes.set(earlierId, { type: 'earlier', id: earlierId, turnKey: key, groupKey: key, count: foldedIds.length, toolCount, failedCount });
-        nodeIds = [...(headId !== null ? [headId] : []), earlierId, ...after];
-      }
+      // The length rule always shows a leading prompt.
+      const first = entries[0]?.node;
+      const hidden = hiddenOf(key, entries, first?.kind === 'prompt' ? 1 : 0);
+      const headId = first !== undefined && first.kind === 'prompt' && !hidden.has(first.id) ? first.id : null;
+      ({ nodeIds, foldedIds } = assemble(key, key, entries, hidden, headId, (node) => addNode(key, key, node, 0, NO_ANCESTORS)));
     }
     turns.push({ key, collapsed, summary, nodeIds, foldedEarlier: foldedIds.length, foldedIds });
   });
 
-  // Fill the agent groups; a nested container found while filling appends its own group.
+  // Fill the agent groups; a nested container found while filling appends its own group (unless it is folded into its
+  // group's `earlier` node).
   const agentGroups: AgentGroup[] = [];
-  /** Inner node id -> its agent group key (only inner nodes in the view). */
+  /** Inner node id -> its agent group key (inner nodes of every group in the view, including folded ones). */
   const groupOfInner = new Map<string, string>();
   for (let k = 0; k < pending.length; k++) {
     const g = pending[k]!;
     const key = agentGroupKey(g.agentId);
     const ancestors = new Set(g.ancestors).add(g.agentId);
     const list = (innerEntries.get(g.agentId) ?? []).sort(byTimeThenId);
-    const nodeIds: string[] = [];
-    for (const { node } of list) {
-      addNode(g.turnKey, key, node, g.depth, ancestors);
-      groupOfInner.set(node.id, key);
-      nodeIds.push(node.id);
-    }
-    agentGroups.push({ key, agentId: g.agentId, containerId: g.containerId, parentGroupKey: g.parentGroupKey, depth: g.depth, nodeIds });
+    // The length rule always shows the group's first node.
+    const hidden = hiddenOf(key, list, 1);
+    const first = list[0]?.node;
+    const headId = first !== undefined && !hidden.has(first.id) ? first.id : null;
+    const { nodeIds, foldedIds } = assemble(g.turnKey, key, list, hidden, headId, (node) => addNode(g.turnKey, key, node, g.depth, ancestors));
+    for (const { node } of list) groupOfInner.set(node.id, key);
+    agentGroups.push({
+      key, agentId: g.agentId, containerId: g.containerId, parentGroupKey: g.parentGroupKey, depth: g.depth, nodeIds, foldedIds,
+    });
   }
   agentGroups.sort((a, b) => b.depth - a.depth || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
 
@@ -329,8 +376,17 @@ export function buildView(
     const innerTo = groupOfInner.get(gTo);
     if (innerFrom !== undefined || innerTo !== undefined) {
       if (innerFrom !== innerTo) return; // across groups
-      const id = `${gFrom}->${gTo}`;
-      if (!edges.has(id)) edges.set(id, { id, from: gFrom, to: gTo, kind });
+      // Folded inner nodes map to their group's `earlier` node, as in a folded turn (see below).
+      const from = foldedInto.get(gFrom) ?? gFrom;
+      let to = foldedInto.get(gTo) ?? gTo;
+      if (to !== gTo) {
+        const next = nextAfterEarlier.get(from);
+        if (next === null) return;
+        if (next !== undefined) to = next;
+      }
+      if (from === to) return;
+      const id = `${from}->${to}`;
+      if (!edges.has(id)) edges.set(id, { id, from, to, kind });
       return;
     }
     const fromTurn = turnOf.get(gFrom);
@@ -370,16 +426,32 @@ export function buildView(
       list.push(edge.from);
     }
   }
-  /** The first visible nodes met walking edges backwards from hidden node `id` through hidden nodes (memoized). */
+  /**
+   * The first visible nodes met walking edges backwards from hidden node `id` through hidden nodes. Iterative (a long
+   * run of hidden nodes must not overflow the stack); each start's result is memoized and reused by later walks that
+   * reach that node.
+   */
   const upstreamMemo = new Map<string, readonly string[]>();
   const upstream = (id: string): readonly string[] => {
     const known = upstreamMemo.get(id);
     if (known) return known;
-    upstreamMemo.set(id, []); // cycle guard
     const found = new Set<string>();
-    for (const src of incomingHidden.get(id) ?? []) {
-      if (isHiddenId(src)) for (const x of upstream(src)) found.add(x);
-      else found.add(src);
+    const seen = new Set<string>([id]);
+    const stack = [id];
+    while (stack.length > 0) {
+      const cur = stack.pop()!;
+      const memo = cur === id ? undefined : upstreamMemo.get(cur);
+      if (memo) {
+        for (const x of memo) found.add(x);
+        continue;
+      }
+      for (const src of incomingHidden.get(cur) ?? []) {
+        if (!isHiddenId(src)) found.add(src);
+        else if (!seen.has(src)) {
+          seen.add(src);
+          stack.push(src);
+        }
+      }
     }
     const result = [...found];
     upstreamMemo.set(id, result);

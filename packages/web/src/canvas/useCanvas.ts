@@ -4,7 +4,7 @@ import { createThrottle } from '../throttle';
 import { groupInput, placeAgentGroups, stackTurns, turnInput, type Box, type TurnLayout } from './layout';
 import { createBrowserLayoutWorker, createLayoutClient, type LayoutClient } from './layoutClient';
 import { containerSize } from './sizes';
-import { buildView, type AgentGroup, type CanvasView, type ViewMode } from './view';
+import { agentGroupKey, buildView, type AgentGroup, type CanvasView, type ViewMode } from './view';
 
 export interface CanvasSnapshot {
   view: CanvasView;
@@ -28,20 +28,24 @@ export interface CanvasModel {
   subscribe(fn: () => void): () => void;
   /** Flips the turn's current expanded/collapsed state and records it as an override. */
   toggleTurn(turnKey: string): void;
-  /** Shows every node of a long expanded turn (instead of folding its middle into an `earlier` node). */
+  /**
+   * Shows every node of a long expanded turn (instead of folding its middle into an `earlier` node); also takes an agent
+   * group key (agentGroupKey) for a long expanded agent.
+   */
   showFullTurn(turnKey: string): void;
   /**
    * Default true. While false nothing visible is folded away under a reader: turns expanded by the default "last 3"
-   * rule stay expanded when newer turns arrive, and each expanded turn's `earlier` fold is frozen (the nodes hidden
-   * when the freeze started stay hidden, everything else stays visible however long the turn grows). Turning it back
+   * rule stay expanded when newer turns arrive, and each expanded turn's and agent group's `earlier` fold is frozen (the
+   * nodes hidden when the freeze started stay hidden, everything else stays visible however long it grows). Turning it back
    * on drops both and applies the default rules again.
    */
   setAutoFold(enabled: boolean): void;
   /** A node (the selection) that is never folded into `earlier` and whose turn is not auto-collapsed; null for none. */
   setKeepVisible(id: string | null): void;
   /**
-   * Expands the agent (a dispatch node's childAgentId) into a container of its inner nodes, or collapses it again;
-   * rebuilds at once. The set of expanded agents is kept across setMode (topology mode ignores it).
+   * Expands the agent (a dispatch node's childAgentId) into a container of its inner nodes, or collapses it again
+   * (which forgets its "show all" and frozen fold); rebuilds at once. The set of expanded agents is kept across setMode
+   * (topology mode ignores it).
    */
   toggleAgent(agentId: string): void;
   /** Switches between the live and topology views; rebuilds at once. Default 'live'. */
@@ -115,7 +119,7 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
   /** Turn key -> expanded, recorded while auto-fold is off for turns the default rule had expanded. */
   const implicit = new Map<string, boolean>();
   const fullTurns = new Set<string>();
-  /** Turn key -> ids hidden in its `earlier` node, recorded while auto-fold is off. */
+  /** Turn key or agent group key -> ids hidden in its `earlier` node, recorded while auto-fold is off. */
   const frozen = new Map<string, ReadonlySet<string>>();
   let keepVisible: string | null = null;
   /** Agent ids the user expanded (kept across mode switches). */
@@ -143,7 +147,7 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
 
   /**
    * While auto-fold is off: every turn `view` shows expanded stays expanded (unless the user overrides it), and its
-   * current `earlier` fold is frozen the first time it is seen.
+   * current `earlier` fold is frozen the first time it is seen; so is every agent group's.
    */
   const freeze = (view: CanvasView): void => {
     for (const t of view.turns) {
@@ -151,6 +155,7 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
       if (!overrides.has(t.key)) implicit.set(t.key, true);
       if (!frozen.has(t.key)) frozen.set(t.key, new Set(t.foldedIds));
     }
+    for (const g of view.agentGroups) if (!frozen.has(g.key)) frozen.set(g.key, new Set(g.foldedIds));
   };
 
   const effectiveOverrides = (): ReadonlyMap<string, boolean> => {
@@ -314,7 +319,13 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
     },
     toggleAgent(agentId) {
       if (disposed) return;
-      if (!expandedAgents.delete(agentId)) expandedAgents.add(agentId);
+      if (expandedAgents.delete(agentId)) {
+        // Collapsing forgets "show all" and the frozen fold: re-expanding folds a long agent by the length rule again.
+        fullTurns.delete(agentGroupKey(agentId));
+        frozen.delete(agentGroupKey(agentId));
+      } else {
+        expandedAgents.add(agentId);
+      }
       throttle.cancel();
       rebuild();
     },

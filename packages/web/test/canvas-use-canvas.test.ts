@@ -937,3 +937,48 @@ test('toggleAgent 之后才到达的过期一轮：位置和容器框保持一�
   expect(s.positions.i1).toBeDefined();
   model.dispose();
 });
+
+/** t1: p1 → s1(a1)；a1 内部 m0..m{n-1} 串成一条链 */
+function longAgent(n: number): Graph {
+  const nodes: GraphNode[] = [prompt('p1', 't1', 0), sub('s1', 't1', null, 1, 'a1')];
+  const pairs: [string, string, GraphEdge['kind']?][] = [['p1', 's1'], ['s1', 'm0', 'spawn']];
+  for (let k = 0; k < n; k++) {
+    nodes.push(inner(`m${k}`, 'a1', 1000 + k));
+    if (k > 0) pairs.push([`m${k - 1}`, `m${k}`]);
+  }
+  return withEdges(nodes, pairs);
+}
+
+test('showFullTurn 对代理分组键同样生效；收起代理后忘掉“展开全部”', async () => {
+  const live = fakeLive(longAgent(61));
+  const layout = deterministicLayout();
+  const model = createCanvasModel(live, layout.client);
+  model.toggleAgent('a1');
+  const group = () => model.getSnapshot().view.agentGroups[0]!;
+  expect(group().foldedIds).toHaveLength(20);
+  expect(model.getSnapshot().view.nodes.get('earlier:agent:a1')).toMatchObject({ type: 'earlier', groupKey: 'agent:a1' });
+  model.showFullTurn('agent:a1');
+  expect(group().foldedIds).toEqual([]);
+  expect(group().nodeIds).toHaveLength(61);
+  model.toggleAgent('a1'); // collapse
+  model.toggleAgent('a1'); // expand again: folded by the length rule
+  expect(group().foldedIds).toHaveLength(20);
+  model.dispose();
+});
+
+test('关闭自动折叠：代理内部从 61 长到 70，隐藏集合不变，新节点全部可见；重新打开后回到正常规则', async () => {
+  const live = fakeLive(longAgent(61));
+  const layout = deterministicLayout();
+  const model = createCanvasModel(live, layout.client);
+  model.toggleAgent('a1');
+  const group = () => model.getSnapshot().view.agentGroups[0]!;
+  const hiddenAt61 = [...group().foldedIds];
+  model.setAutoFold(false);
+  live.set(longAgent(70));
+  await vi.advanceTimersByTimeAsync(60);
+  expect(group().foldedIds).toEqual(hiddenAt61);
+  for (let k = 21; k < 70; k++) expect(model.getSnapshot().view.nodes.has(`m${k}`)).toBe(true);
+  model.setAutoFold(true);
+  expect(group().foldedIds).toHaveLength(70 - 1 - 40);
+  model.dispose();
+});

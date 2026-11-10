@@ -78,7 +78,7 @@ test('未展开的子代理不产生内部视图节点，也没有代理分组',
 
 test('展开后内部节点进入视图，归入代理分组，带内部的边，不带派发边', () => {
   const v = view(mainWithAgent(), opts({ expandedAgents: new Set(['a1']) }));
-  expect(v.agentGroups).toEqual([{ key: 'agent:a1', agentId: 'a1', containerId: 's1', parentGroupKey: 't1', depth: 1, nodeIds: ['i1', 'i2', 'i3'] }]);
+  expect(v.agentGroups).toEqual([{ key: 'agent:a1', agentId: 'a1', containerId: 's1', parentGroupKey: 't1', depth: 1, nodeIds: ['i1', 'i2', 'i3'], foldedIds: [] }]);
   expect(v.nodes.get('i2')).toMatchObject({ groupKey: 'agent:a1', turnKey: 't1' });
   expect(v.nodes.get('s1')).toMatchObject({ expanded: true });
   expect(v.edges.map((e) => e.id).sort()).toEqual(['i1->i2', 'i2->i3', 'p1->s1']);
@@ -173,12 +173,13 @@ test('折叠进 earlier 的派发节点不展开，也不产生分组；earlier 
   expect(v.nodes.get('earlier:t1')).toMatchObject({ type: 'earlier', groupKey: 't1' });
 });
 
-test('展开的代理内部节点从不折叠进 earlier（即使超过阈值）', () => {
+test('展开的代理内部节点超过阈值时折叠进分组自己的 earlier，轮次的 earlier 不受影响', () => {
   const v = view(longTurnWithAgent(10, 9, 100), opts({ expandedAgents: new Set(['a1']) }));
   expect(v.agentGroups).toHaveLength(1);
-  expect(v.agentGroups[0]!.nodeIds).toHaveLength(100);
-  expect(v.nodes.has('earlier:agent:a1')).toBe(false);
-  expect(v.edges.filter((x) => x.from.startsWith('m')).length).toBe(99);
+  expect(v.agentGroups[0]!.nodeIds).toHaveLength(1 + 1 + TURN_TAIL_NODES);
+  expect(v.nodes.has('earlier:agent:a1')).toBe(true);
+  expect(v.nodes.has('earlier:t1')).toBe(false);
+  expect(v.edges.filter((x) => x.from.startsWith('m')).length).toBe(TURN_TAIL_NODES); // m0->earlier + 39 in the tail
 });
 
 test('keepVisible 指向展开代理的内部节点：照常可见；被拓扑视角隐藏的节点不阻止轮次的默认折叠', () => {
@@ -269,4 +270,135 @@ test('因果视角的节点、分组、边与实时视角相同，只有 mode �
 
 test('agentGroupKey', () => {
   expect(agentGroupKey('a1')).toBe('agent:a1');
+});
+
+// ---- C1 拓扑缩并 ----
+
+test('拓扑视角：5000 个连续的隐藏节点缩并不爆栈，200 毫秒内完成', () => {
+  const nodes: GraphNode[] = [p('p1', 't1', 0)];
+  const edges: GraphEdge[] = [];
+  let prev = 'p1';
+  for (let i = 0; i < 5000; i++) {
+    nodes.push(think(`h${i}`, 't1', 1 + i));
+    edges.push(e(prev, `h${i}`));
+    prev = `h${i}`;
+  }
+  nodes.push(tool('x', 't1', 10_000));
+  edges.push(e(prev, 'x'));
+  const g = graph(nodes, edges);
+  const t = performance.now();
+  const v = view(g, opts({ mode: 'topology' }));
+  expect(performance.now() - t).toBeLessThan(200);
+  expect(v.edges.map((x) => x.id)).toEqual(['p1->x']);
+});
+
+test('拓扑视角：从 A 到 B 有两条隐藏路径时只产生一条边', () => {
+  const g = graph(
+    [p('p1', 't1', 0), tool('a', 't1', 1), think('h1', 't1', 2), text('h2', 't1', 3), tool('b', 't1', 4)],
+    [e('p1', 'a'), e('a', 'h1', 'fork'), e('a', 'h2', 'fork'), e('h1', 'b'), e('h2', 'b')],
+  );
+  const v = view(g, opts({ mode: 'topology' }));
+  expect(v.edges.map((x) => x.id).sort()).toEqual(['a->b', 'p1->a']);
+});
+
+// ---- C2 keepVisible 指向内部节点 ----
+
+test('keepVisible 指向内部节点：容器不被轮内折叠，所在轮次不被默认规则折叠（一层）', () => {
+  // longTurnWithAgent: 派发节点 n5 在折叠范围里
+  const g = longTurnWithAgent(61, 5, 3);
+  const v = view(g, opts({ expandedAgents: new Set(['a1']), keepVisible: 'm1' }));
+  expect(v.nodes.has('n5')).toBe(true);
+  expect(v.agentGroups.map((x) => x.key)).toEqual(['agent:a1']);
+  expect(v.nodes.has('m1')).toBe(true);
+  // 后面再来 3 个轮次：容器所在的 t1 不被默认折叠
+  for (let i = 2; i <= 4; i++) g.nodes[`q${i}`] = p(`q${i}`, `t${i}`, 10_000 * i);
+  const later = view(g, opts({ expandedAgents: new Set(['a1']), keepVisible: 'm1' }));
+  expect(later.turns[0]!.collapsed).toBe(false);
+  expect(later.nodes.has('m1')).toBe(true);
+  expect(view(g, opts({ expandedAgents: new Set(['a1']) })).turns[0]!.collapsed).toBe(true);
+});
+
+test('keepVisible 指向两层嵌套的内部节点：两个容器都保留，外层容器所在轮次不被折叠', () => {
+  const g = longTurnWithAgent(61, 5, 3);
+  g.nodes.s2 = innerSub('s2', 'a1', 1003, 'a2');
+  g.edges['m2->s2'] = e('m2', 's2');
+  g.nodes.j1 = inner('j1', 'a2', 1004);
+  for (let i = 2; i <= 4; i++) g.nodes[`q${i}`] = p(`q${i}`, `t${i}`, 10_000 * i);
+  const v = view(g, opts({ expandedAgents: new Set(['a1', 'a2']), keepVisible: 'j1' }));
+  expect(v.turns[0]!.collapsed).toBe(false);
+  expect(v.nodes.has('n5')).toBe(true);
+  expect(v.nodes.get('s2')).toMatchObject({ expanded: true });
+  expect(v.nodes.has('j1')).toBe(true);
+  expect(v.agentGroups.map((x) => x.key)).toEqual(['agent:a2', 'agent:a1']);
+});
+
+// ---- C3 代理内部折叠 ----
+
+/** p1 → s1(a1)；a1 内部 m0..m{n-1} 串成一条链；`extra` 改写个别内部节点 */
+function agentOf(n: number, extra: Record<number, Partial<GraphNode>> = {}): Graph {
+  const nodes: GraphNode[] = [p('p1', 't1', 0), sub('s1', 't1', 1, 'a1')];
+  const edges: GraphEdge[] = [e('p1', 's1'), e('s1', 'm0', 'spawn')];
+  for (let k = 0; k < n; k++) {
+    nodes.push(inner(`m${k}`, 'a1', 1000 + k, extra[k]?.kind ?? 'tool', extra[k] ?? {}));
+    if (k > 0) edges.push(e(`m${k - 1}`, `m${k}`));
+  }
+  return graph(nodes, edges);
+}
+const ms = (from: number, to: number) => Array.from({ length: to - from }, (_, k) => `m${from + k}`);
+const expandA1 = { expandedAgents: new Set(['a1']) };
+
+test('代理内部 61 个节点：第一个 + earlier(20) + 最后 40 个；边改接且两端都在视图里', () => {
+  const v = view(agentOf(61), opts(expandA1));
+  const grp = v.agentGroups[0]!;
+  expect(grp.nodeIds).toEqual(['m0', 'earlier:agent:a1', ...ms(21, 61)]);
+  expect(grp.foldedIds).toEqual(ms(1, 21));
+  expect(v.nodes.get('earlier:agent:a1')).toMatchObject({ type: 'earlier', groupKey: 'agent:a1', turnKey: 't1', count: 20, toolCount: 20 });
+  const ids = new Set(v.edges.map((x) => x.id));
+  expect(ids.has('m0->earlier:agent:a1')).toBe(true);
+  expect(ids.has('earlier:agent:a1->m21')).toBe(true);
+  expect(ids.has('m1->m2')).toBe(false);
+  expect(v.edges.every((x) => v.nodes.has(x.from) && v.nodes.has(x.to))).toBe(true);
+  expect(v.nodes.has('m5')).toBe(false);
+});
+
+test('代理内部 60 个节点不折叠；分组键在 fullTurns 里时也不折叠', () => {
+  expect(view(agentOf(60), opts(expandA1)).agentGroups[0]!.nodeIds).toEqual(ms(0, 60));
+  const v = buildView(agentOf(61), new Map(), new Set(['agent:a1']), expandA1);
+  expect(v.agentGroups[0]!.nodeIds).toEqual(ms(0, 61));
+  expect(v.agentGroups[0]!.foldedIds).toEqual([]);
+  expect(v.nodes.has('earlier:agent:a1')).toBe(false);
+});
+
+test('隐藏范围里的运行中节点和 keepVisible 节点保留', () => {
+  const v = view(agentOf(61, { 7: { status: 'running' } }), opts({ ...expandA1, keepVisible: 'm9' }));
+  const grp = v.agentGroups[0]!;
+  expect(grp.nodeIds).toEqual(['m0', 'earlier:agent:a1', 'm7', 'm9', ...ms(21, 61)]);
+  expect(grp.foldedIds).toHaveLength(18);
+  // 从保留节点进入隐藏范围的边接到它之后的下一个可见节点
+  const ids = new Set(v.edges.map((x) => x.id));
+  expect(ids.has('m7->m9')).toBe(true);
+  expect(ids.has('m9->m21')).toBe(true);
+  expect(v.edges.every((x) => v.nodes.has(x.from) && v.nodes.has(x.to))).toBe(true);
+});
+
+test('隐藏范围里的嵌套派发节点不展开，不产生分组', () => {
+  const g = agentOf(61, { 5: { kind: 'subagent', childAgentId: 'a2' } });
+  g.nodes.j1 = inner('j1', 'a2', 5000);
+  const v = view(g, opts({ expandedAgents: new Set(['a1', 'a2']) }));
+  expect(v.nodes.has('m5')).toBe(false);
+  expect(v.nodes.has('j1')).toBe(false);
+  expect(v.agentGroups.map((x) => x.key)).toEqual(['agent:a1']);
+});
+
+test('冻结的代理折叠：代理继续增长时隐藏集合不变，新节点全部可见', () => {
+  const at61 = view(agentOf(61), opts(expandA1)).agentGroups[0]!.foldedIds;
+  const frozenHidden = new Map([['agent:a1', new Set(at61)]]);
+  const v = buildView(agentOf(80), new Map(), undefined, { ...expandA1, frozenHidden });
+  expect(v.agentGroups[0]!.foldedIds).toEqual(at61);
+  for (let k = 21; k < 80; k++) expect(v.nodes.has(`m${k}`)).toBe(true);
+});
+
+test('代理内部折叠不影响 latestNodeId', () => {
+  expect(view(agentOf(61), opts(expandA1)).latestNodeId).toBe('s1');
+  expect(view(agentOf(61)).latestNodeId).toBe('s1');
 });

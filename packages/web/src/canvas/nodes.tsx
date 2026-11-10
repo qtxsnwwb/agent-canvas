@@ -76,7 +76,10 @@ export type Highlight = 'chain' | 'dim' | 'none';
 export type GraphFlowNode = Node<GraphNodeData, 'graphNode'>;
 export type SummaryFlowNode = Node<{ summary: TurnSummary; highlight: Highlight }, 'turnSummary'>;
 export type HeaderFlowNode = Node<{ turnKey: string; startedAt: string; nodeCount: number; highlight: Highlight }, 'turnHeader'>;
-export type EarlierFlowNode = Node<{ turnKey: string; count: number; toolCount: number; failedCount: number; highlight: Highlight }, 'earlier'>;
+/** `groupKey`: the turn key, or the agent group key for the fold inside a long expanded agent (see ViewNode). */
+export type EarlierFlowNode = Node<{
+  turnKey: string; groupKey: string; count: number; toolCount: number; failedCount: number; highlight: Highlight;
+}, 'earlier'>;
 
 /** The wrapper class for a highlight state ('' for none). */
 export function highlightClass(h: Highlight): string {
@@ -87,6 +90,7 @@ export type FlowNode = GraphFlowNode | SummaryFlowNode | HeaderFlowNode | Earlie
 /** `fromKeyboard`: the action came from the keyboard, so focus should land on the turn's header once it exists. */
 export interface CanvasActionsValue {
   toggleTurn(turnKey: string, fromKeyboard?: boolean): void;
+  /** Takes a turn key or an agent group key (the fold inside a long agent). */
   showFullTurn(turnKey: string, fromKeyboard?: boolean): void;
   /** Expands or collapses the agent (a subagent node's childAgentId). */
   toggleAgent(agentId: string): void;
@@ -257,7 +261,8 @@ function EarlierView({ data, width, height }: NodeProps<EarlierFlowNode>) {
   const { showFullTurn } = useContext(CanvasActions);
   const onShowAll = (e: MouseEvent): void => {
     e.stopPropagation(); // not a node click
-    showFullTurn(data.turnKey, e.detail === 0);
+    // A keyboard click moves focus to the turn's header afterwards; an agent group has no header of its own.
+    showFullTurn(data.groupKey, e.detail === 0 && data.groupKey === data.turnKey);
   };
   return (
     <div className="cc-node cc-earlier" style={boxStyle(width, height, SUMMARY_COLOR)}>
