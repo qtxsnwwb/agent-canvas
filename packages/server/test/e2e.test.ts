@@ -90,12 +90,10 @@ test('回放一轮带权限确认和子代理的会话', async () => {
 
   await H('UserPromptSubmit', { prompt: '删掉临时文件' });
   await append('proj/s1.jsonl', [userPrompt('u1', null, '删掉临时文件', { promptId: 'p1' })]);
-  // Let the transcript line land first: a late-ingested prompt record would otherwise reset the session status the hooks set.
-  await vi.waitFor(async () => expect((await sessions(app, 'proj')).map((x) => x.id)).toContain('s1'), T);
   await H('PreToolUse', { tool_name: 'Bash', tool_input: { command: 'rm tmp' }, tool_use_id: 'tu1' });
   await H('PermissionRequest', { tool_name: 'Bash', tool_input: { command: 'rm tmp' } });
   await vi.waitFor(async () => expect((await graph(app, 's1')).nodes.find((n) => n.id === 'tool:tu1')?.status).toBe('awaiting_permission'), T);
-  expect((await sessions(app, 'proj')).find((s) => s.id === 's1')?.status).toBe('awaiting_permission');
+  await vi.waitFor(async () => expect((await sessions(app, 'proj')).find((s) => s.id === 's1')?.status).toBe('awaiting_permission'), T);
 
   await append('proj/s1.jsonl', [assistantBlock('a1', 'u1', { type: 'tool_use', id: 'tu1', name: 'Bash', input: { command: 'rm tmp' } }, { messageId: 'm1' })]);
   await H('PostToolUse', { tool_use_id: 'tu1', tool_response: '', duration_ms: 12 });
