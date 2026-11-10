@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import readline from 'node:readline';
 import { SettingsShapeError, hookUrl, planInstall, planUninstall } from './hooks-config.js';
 
 export interface HooksCliIo {
@@ -18,6 +19,18 @@ export interface HooksCliOptions {
   yes: boolean;
 }
 
+/** Asks one question and reads one line; true for y / yes. */
+export function confirmOnStreams(question: string, input: NodeJS.ReadableStream, output: NodeJS.WritableStream): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const rl = readline.createInterface({ input, output });
+    rl.once('close', () => resolve(false)); // Ctrl-D / Ctrl-C without an answer
+    rl.question(question, (answer) => {
+      resolve(/^(y|yes)$/i.test(answer.trim())); // before close(): close emits 'close' synchronously
+      rl.close();
+    });
+  });
+}
+
 export function defaultSettingsFile(env: NodeJS.ProcessEnv): string {
   const fromEnv = env.CLAUDE_CANVAS_SETTINGS_FILE;
   return fromEnv !== undefined && fromEnv !== '' ? fromEnv : path.join(os.homedir(), '.claude', 'settings.json');
@@ -32,12 +45,23 @@ interface Loaded {
   mode: number | null;
 }
 
-/** Follows a symlinked settings file so the link itself is never replaced; a missing/dangling path is used as is. */
-function resolveTarget(file: string): string {
+function isSymlink(p: string): boolean {
+  try {
+    return fs.lstatSync(p).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Follows a symlinked settings file so the link itself is never replaced. A missing path is used as is; a dangling
+ * symlink is refused (null).
+ */
+function resolveTarget(file: string): string | null {
   try {
     return fs.realpathSync(file);
   } catch {
-    return file;
+    return isSymlink(file) ? null : file;
   }
 }
 
@@ -138,6 +162,10 @@ const STALE_MESSAGE = '设置文件在确认期间被修改，未做任何改动
 
 async function run(mode: Mode, opts: HooksCliOptions, io: HooksCliIo): Promise<number> {
   const file = resolveTarget(opts.settingsFile);
+  if (file === null) {
+    io.err(`设置文件是一个指向不存在目标的符号链接，未做任何改动：${opts.settingsFile}`);
+    return 1;
+  }
   const url = hookUrl(opts.port);
   let loaded: Loaded;
   let events: string[];
@@ -163,6 +191,9 @@ async function run(mode: Mode, opts: HooksCliOptions, io: HooksCliIo): Promise<n
     return 0;
   }
 
+  if (isSymlink(opts.settingsFile)) {
+    io.out(`（${opts.settingsFile} 是符号链接，实际写入 ${file}）`);
+  }
   io.out(`settings 文件：${file}`);
   io.out(`hook 地址：${url}`);
   io.out(`将${mode === 'install' ? '添加' : '移除'}的事件（${events.length}）：${events.join(', ')}`);

@@ -61,11 +61,25 @@ test.skipIf(!canSymlink)('符号链接的 settings 文件：链接保留，目�
   fs.writeFileSync(real, '{"theme":"dark"}');
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.symlinkSync(real, file);
-  expect(await runHooksInstall(opts(), fakeIo())).toBe(0);
+  const io = fakeIo();
+  expect(await runHooksInstall(opts(), io)).toBe(0);
+  expect(io.outs).toContain(`（${file} 是符号链接，实际写入 ${fs.realpathSync(real)}）`);
   expect(fs.lstatSync(file).isSymbolicLink()).toBe(true);
   expect(readJson(real).theme).toBe('dark');
   expect(Object.keys(readJson(real).hooks)).toEqual([...HOOK_EVENTS]);
   expect(fs.readdirSync(path.dirname(real)).some((n) => n.startsWith('settings.json.bak-claude-canvas-'))).toBe(true);
+});
+
+test.skipIf(!canSymlink)('指向不存在目标的符号链接：拒绝写入，返回 1', async () => {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const missing = path.join(dir, 'nowhere.json');
+  fs.symlinkSync(missing, file);
+  const io = fakeIo();
+  expect(await runHooksInstall(opts(), io)).toBe(1);
+  expect(io.errs.join('\n')).toContain(`设置文件是一个指向不存在目标的符号链接，未做任何改动：${file}`);
+  expect(fs.existsSync(missing)).toBe(false);
+  expect(fs.lstatSync(file).isSymbolicLink()).toBe(true);
+  expect(await runHooksUninstall(opts(), fakeIo())).toBe(1);
 });
 
 test.skipIf(process.platform === 'win32')('保留原文件的权限位', async () => {

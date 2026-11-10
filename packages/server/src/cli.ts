@@ -2,12 +2,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import readline from 'node:readline';
 import { parseArgs } from 'node:util';
 import type { AddressInfo } from 'node:net';
 import { buildServer } from './api/server.js';
 import { loadConfig, type Config } from './config.js';
-import { defaultSettingsFile, runHooksInstall, runHooksUninstall, type HooksCliIo } from './hooks-cli.js';
+import { confirmOnStreams, defaultSettingsFile, runHooksInstall, runHooksUninstall, type HooksCliIo } from './hooks-cli.js';
 import { acquireLock } from './lock.js';
 import { NORMALIZER_VERSION } from './normalize/version.js';
 import { NORMALIZER_VERSION_KEY, Pipeline, REBUILD_FLAG } from './pipeline.js';
@@ -133,15 +132,7 @@ function terminalIo(): HooksCliIo {
   return {
     out: (line) => console.log(line),
     err: (line) => console.error(line),
-    confirm: (question) =>
-      new Promise<boolean>((resolve) => {
-        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-        rl.once('close', () => resolve(false)); // Ctrl-D / Ctrl-C without an answer
-        rl.question(question, (answer) => {
-          rl.close();
-          resolve(/^(y|yes)$/i.test(answer.trim()));
-        });
-      }),
+    confirm: (question) => confirmOnStreams(question, process.stdin, process.stdout),
     isInteractive: Boolean(process.stdin.isTTY && process.stdout.isTTY),
     now: () => new Date(),
   };
