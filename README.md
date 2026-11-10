@@ -1,7 +1,7 @@
 # claude-canvas
 
 claude-canvas 是一个本地服务：它读取 Claude Code 的 transcript 文件并接收 hook 事件，在固定的本地网址上用网页展示每个 Claude Code 会话正在做什么。
-每个会话显示为一张实时更新的画布：节点按时间自上而下自动排布，状态变化随即反映在画布上。
+每个会话显示为一张实时更新的画布：节点按时间自上而下自动排布，状态变化随即反映在画布上。画布有四个视角：实时、拓扑、因果、复盘（见下文“画布”）。首页可以检索会话，诊断页给出服务和 hooks 的运行情况。
 
 ## 环境要求
 
@@ -36,11 +36,26 @@ claude-canvas listening on http://127.0.0.1:4317
 
 换端口：`pnpm start --port 4400`（或直接 `node packages/server/dist/cli.js start --port 4400`），打印的地址会随之变化。
 
-首次启动会导入 `~/.claude/projects` 下全部已有的 transcript；历史很多时需要一段时间，导入在后台进行，页面在此期间已可使用（`GET /api/diagnostics` 的 `importing` 为 `true`）。在一份真实数据上测得（340 MB、612 个文件）：导入约 2 分钟，导入完成后数据库约为 transcript 总量的 1.6 倍；导入期间 WAL 文件会临时增长到 transcript 总量的数倍，之后收缩到 64 MB 以内，请为数据目录预留空间。之后服务会持续监视 transcript 的变化。
+首次启动会导入 `~/.claude/projects` 下全部已有的 transcript；历史很多时需要一段时间，导入在后台进行，页面在此期间已可使用（`GET /api/diagnostics` 的 `importing` 为 `true`，诊断页上显示“正在导入：是”）。在一份真实数据上测得（340 MB、612 个文件）：导入约 2 分钟，导入完成后数据库约为 transcript 总量的 1.6 倍；导入期间 WAL 文件会临时增长到 transcript 总量的数倍，之后收缩到 64 MB 以内，请为数据目录预留空间。之后服务会持续监视 transcript 的变化。
 
 同一个数据目录只能运行一个服务：启动时会创建锁文件 `<数据目录>/claude-canvas.lock`（记录 pid 和启动时间）。若已有服务在运行，第二次 `start` 会打印 `claude-canvas is already running with this data directory (pid N); lock file: …` 并以退出码 1 退出。上一次进程异常退出留下的锁会被自动接管。
 
-升级 claude-canvas 后，如果推导规则的版本变了（或上次重建被中断），`start` 会在开始监听前自动重建派生数据，先打印 `claude-canvas rebuilding derived data (reason: …)`，再打印正常的监听地址。
+升级 claude-canvas 后，如果推导规则的版本变了（或上次重建被中断），`start` 会在开始监听前自动重建派生数据，先打印 `claude-canvas rebuilding derived data (reason: …)`，再打印正常的监听地址。2026-11-10 在一份真实数据上测得：升级时有 14 个会话被自动重新推导（这是一次测量，不是保证）。
+
+## 首页与检索
+
+首页按项目列出会话，项目内按最近活动时间排序。
+
+- 项目名：取该项目下会话的工作目录中，编码后（非字母数字字符换成 `-`）与项目目录名相同的那个；找不到时显示项目目录名本身。
+- 会话标题按以下优先级取第一个有的：自定义标题（`/rename` 等写入的 custom title）> agent 名称 > hook 提供的标题 > 第一条提示（去掉首尾空白、换行折成空格，取前 60 个字符）。
+
+顶部的检索框：
+
+- 检索范围：会话标题、会话 id、分支、工作目录，以及每条主线程提示的前 200 个字符。
+- 不检索：工具输出、回复文本、子代理里的提示。
+- 至少输入 2 个字符才开始检索；查询最多取前 200 个字符。
+- 按字面匹配：不支持通配符或正则，只有 ASCII 字母不区分大小写（`É` 和 `é` 视为不同字符）。命中处在结果里高亮，每个会话最多列出 3 处命中，点结果打开该会话。
+- 2026-11-10 在一份真实数据上测得：一次检索在几毫秒内返回（测量值，不是保证）。
 
 ## 画布
 
@@ -55,7 +70,19 @@ claude-canvas listening on http://127.0.0.1:4317
   - 实时：全部节点，子代理可以展开。
   - 拓扑：隐藏思考和回复节点，只看提示、工具调用和子代理（子代理一律收起），被隐藏节点两侧的连线接到一起，链路不断开。
   - 因果：节点和实时视角相同，思考节点放大显示它的内容（没有记录内容时显示时长）。选中一个节点后，从它沿连线往上直到本轮提示的那条链被高亮，其余变暗；抽屉里的“推理链”按时间顺序列出链上的思考和回复，点其中一行选中那个节点。链被折叠截断时，抽屉里会提示“更早的部分已折叠”，点“展开”展开截断它的轮次或节点。在因果视角选中节点会停止跟随，链上的内容不会在阅读时被折叠走。
-- 在一份真实数据上测得：最大的会话（7,520 个节点）从打开到画出画布约 1 秒。
+  - 复盘：把会话回放到过去的某一时刻，见下一节。
+- 2026-11-10 在一份真实数据上测得：最大的会话（约 7,500 个节点）从打开到画出画布约 1 秒（测量值，不是保证）。
+
+### 复盘
+
+复盘视角在画布下方显示一条时间轴，范围从会话最早的节点开始，到最晚的节点开始或结束为止：
+
+- 播放 / 暂停，倍速 1× / 10× / 60×；播放到末尾自动停止，在末尾再点播放从头开始。“回到末尾”直接跳到最后。
+- 拖动滑块选择时刻；滑块上方每个轮次一个刻度，点刻度跳到该轮次开始。滑块获得焦点时，PageUp / PageDown 跳到上一个 / 下一个轮次（刻度本身不参与 Tab 切换）。
+- 时间轴显示当前时刻（回放范围跨了日期时带上 `MM-DD`）和“第 N / M 轮”。
+- 画布只显示该时刻及之前出现的节点，之后的隐藏；在该时刻还在执行中的工具显示为执行中。
+- 工具和子代理节点下方多一行耗时和 token（输入 / 输出），回复节点只显示 token；时间轴右侧是到该时刻为止的节点数和 token 合计，同一条消息拆成的多个节点只计一次。
+- 历史会话里工具的耗时由开始和结束时间推算（hook 提供了 `duration_ms` 时用 hook 的值）。
 
 ## Hooks（可选）
 
@@ -64,9 +91,26 @@ claude-canvas listening on http://127.0.0.1:4317
 - 没有 hooks：无法显示“等待权限确认”，状态更新会稍慢（取决于 transcript 写入；文件监听之外，最近活跃会话的文件每 3 秒复查一次，整个目录每 60 秒完整扫描一次）。
 - 有 hooks：状态接近实时。
 
-`docs/hooks-snippet.json` 覆盖服务理解的全部 14 个事件：`SessionStart`、`UserPromptSubmit`、`PreToolUse`、`PermissionRequest`、`PermissionDenied`、`PostToolUse`、`PostToolUseFailure`、`SubagentStart`、`SubagentStop`、`Notification`、`Stop`、`StopFailure`、`PostCompact`、`SessionEnd`。每个事件一条 HTTP hook，指向 `http://127.0.0.1:4317/hooks`，超时 2 秒，不设 `matcher`。
+服务理解全部 14 个事件：`SessionStart`、`UserPromptSubmit`、`PreToolUse`、`PermissionRequest`、`PermissionDenied`、`PostToolUse`、`PostToolUseFailure`、`SubagentStart`、`SubagentStop`、`Notification`、`Stop`、`StopFailure`、`PostCompact`、`SessionEnd`。每个事件一条 HTTP hook，指向 `http://127.0.0.1:4317/hooks`，超时 2 秒，不设 `matcher`。
 
-### 手动合并到 `~/.claude/settings.json`
+### 安装与移除（推荐）
+
+先构建（`pnpm build`），然后：
+
+```
+node packages/server/dist/cli.js hooks install
+node packages/server/dist/cli.js hooks uninstall
+```
+
+- 可选参数：`--port <n>`（hook 指向的端口，默认 4317）、`--yes`（不询问直接写入）、`--settings <文件>`（要修改的 settings 文件，默认 `~/.claude/settings.json`，也可用环境变量 `CLAUDE_CANVAS_SETTINGS_FILE` 指定）。
+- 写入前会列出 settings 文件路径、hook 地址、将要添加（或移除）的事件和备份文件名，并询问是否继续；输入 `y` 才写入。在非交互终端（脚本、管道）里必须加 `--yes`，否则不做任何改动并以退出码 1 退出。
+- 原文件存在时，先复制一份备份 `settings.json.bak-claude-canvas-<YYYYMMDD-HHMMSS>`（同名已存在时加序号，不覆盖已有备份），再写入。
+- install 只追加：缺的事件加上，已有事件的数组末尾追加一项，不改动、不删除已有的条目和其他设置；已经全部装好时不写文件。uninstall 只移除 url 指向本端口 `/hooks` 的条目。写回时保留原文件的 BOM、换行符（CRLF / LF）和缩进。
+- 遇到不寻常的文件会拒绝写入，原文件保持不变（退出码 1）：不是合法 JSON、顶层不是对象、`hooks` 的形状不对、指向不存在目标的符号链接、含有 JSON 读写后会变的数字（例如超过 2^53 的整数）或重复的键、确认期间文件被别的程序修改。
+- 改了服务端口时，install 和 uninstall 都要带上同一个 `--port`，例如 `hooks install --port 4400`。
+- 写入后，新开的 Claude Code 会话才会使用这些 hooks。
+
+### 手动合并到 `~/.claude/settings.json`（备选）
 
 1. 先备份：复制 `~/.claude/settings.json` 为 `settings.json.bak`。
 2. 打开 `docs/hooks-snippet.json`，把其中 `hooks` 下的每个事件合并进 settings.json 顶层的 `"hooks"` 键：
@@ -75,17 +119,21 @@ claude-canvas listening on http://127.0.0.1:4317
    - 某个事件已有数组：把本片段的那一项（`{ "hooks": [ { "type": "http", ... } ] }`）追加到现有数组里，不要替换原有条目。
 3. 保存后，新开的 Claude Code 会话会使用这些 hooks。
 
-### 移除
-
-删除你合并进去的这些条目（url 为 `http://127.0.0.1:4317/hooks` 的那些），或用备份文件覆盖回去。
+手动移除：删除你合并进去的这些条目（url 为 `http://127.0.0.1:4317/hooks` 的那些），或用备份文件覆盖回去。手动合并时如果用 `--port` 改了端口，必须把每条 hook 的 url 改成相同端口，例如 `http://127.0.0.1:4400/hooks`。
 
 ### 失败行为
 
 claude-canvas 没有运行时，HTTP hook 连接失败会立刻报错，而 Claude Code 把它当作不阻塞的错误，继续正常工作，不受影响。超时设为 2 秒也是为了避免服务卡住时拖慢 Claude Code（HTTP hook 默认超时是 600 秒）。
 
-### 改了端口
+## 诊断页
 
-如果用 `--port` 改了端口，必须把 settings.json 里每条 hook 的 url 改成相同端口，例如 `http://127.0.0.1:4400/hooks`。
+页面右上角的“诊断”打开 `#/diagnostics`（<http://127.0.0.1:4317/#/diagnostics>），每 5 秒自动刷新，内容来自 `GET /api/diagnostics`：
+
+- 服务：是否正在导入、推导规则版本、数据库标识。
+- Hooks：是否收到过 hook、最近一次收到的时间（超过 10 分钟没有收到时提示）；每个事件收到的次数和最近一次的时间；以及 14 个事件中哪些从未收到过（装了 hooks 但某些事件一直没出现，通常只是还没有触发它的操作，例如 `PermissionDenied`）。
+- 导入失败：读取或处理失败的文件、错误信息和时间。
+- 未识别的记录类型：每种类型的次数和一条样例（样例可能含对话内容，展开后才显示）。
+- 文件读取进度：已记录的文件总数和尚未读完的文件（已读 / 总字节）。
 
 ## 数据与环境变量
 
@@ -93,6 +141,7 @@ claude-canvas 没有运行时，HTTP hook 连接失败会立刻报错，而 Clau
 | --- | --- | --- |
 | `CLAUDE_CANVAS_PROJECTS_DIR` | `~/.claude/projects` | 读取 transcript 的目录 |
 | `CLAUDE_CANVAS_DATA_DIR` | `~/.claude-canvas` | 数据目录，数据库文件为 `data.db` |
+| `CLAUDE_CANVAS_SETTINGS_FILE` | `~/.claude/settings.json` | `hooks install` / `hooks uninstall` 修改的 settings 文件 |
 
 ## rebuild
 
@@ -107,18 +156,20 @@ node packages/server/dist/cli.js rebuild
 - 只监听 `127.0.0.1`，不对局域网开放。
 - 没有任何认证。为防止网页跨站访问，`Host` 或 `Origin` 不是回环地址的请求会被拒绝（`/hooks` 仍返回空的 200，但内容不会被采纳）。
 - 数据库含有你的对话和工具输出的明文，请像对待对话记录本身一样对待数据目录（不要同步到云盘、不要分享）。
-- 服务对 transcript 只读；使用默认数据目录（`~/.claude-canvas`）时，不会往 `~/.claude` 下写任何东西（若把 `CLAUDE_CANVAS_DATA_DIR` 设到 `~/.claude` 之下，数据库和锁文件当然会写在那里）。
+- 服务对 transcript 只读；使用默认数据目录（`~/.claude-canvas`）时，服务不会往 `~/.claude` 下写任何东西（若把 `CLAUDE_CANVAS_DATA_DIR` 设到 `~/.claude` 之下，数据库和锁文件当然会写在那里）。只有你运行 `hooks install` / `hooks uninstall` 时才会修改 settings 文件（并先备份）。
 
 ## 状态与错误在哪里看
 
 - 会话状态：运行中、等待输入、等待权限确认、空闲、已结束。一个“运行中”的会话超过 15 分钟没有任何活动时，页面显示为“长时间无活动”（例如 Claude Code 进程被杀、API 报错后没有后续记录）；它不计入项目的活跃会话数，一有新活动就恢复。
-- 错误：读不了的文件、写库失败、hook 处理失败会写到服务的 stderr（每个文件每分钟最多一行，只含路径和错误信息，不含对话内容），并出现在 `GET /api/diagnostics` 的 `ingestFailures` 里。诊断接口还给出未识别的记录类型、最近一次收到 hook 的时间、各文件读取进度、`importing`、推导规则版本 `normalizerVersion` 和数据库标识 `dbEpoch`。
+- 错误：读不了的文件、写库失败、hook 处理失败会写到服务的 stderr（每个文件每分钟最多一行，只含路径和错误信息，不含对话内容），并出现在诊断页的“导入失败”和 `GET /api/diagnostics` 的 `ingestFailures` 里。诊断接口还给出未识别的记录类型、最近一次收到 hook 的时间和各事件的次数、各文件读取进度、`importing`、推导规则版本 `normalizerVersion` 和数据库标识 `dbEpoch`。
 
 ## 已知限制
 
 - 在一份真实数据上，只有约 3% 的思考节点带文本（6,352 个中的 217 个），其余只有时长，所以因果链主要依靠回复文本和思考时长。
-- transcript 格式不是稳定的契约：无法识别的记录类型会被计数，可在 `GET /api/diagnostics` 查看（目前还没有诊断页面）。
+- transcript 格式不是稳定的契约：无法识别的记录类型会被计数，可在诊断页或 `GET /api/diagnostics` 查看。
 - 等待权限确认的工具会一直保持该状态，直到它的结果到达。
+- 复盘时，抽屉里显示的是节点现在的内容（例如工具最终的输出），不是所选时刻的内容。
+- 复盘不重现“等待权限确认”的过程：一个节点在结束之前一律显示为执行中。
 - Windows 是经过测试的平台。
 
 ## 开发
