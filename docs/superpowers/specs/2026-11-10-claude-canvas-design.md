@@ -50,10 +50,14 @@ A 是第一优先级。C、B、D 的先后是实现顺序，不代表重要性�
 
 这个格式不是官方稳定契约。解析必须对未知类型和缺失字段容错（见第 8 节）。
 
-尚未确认、在里程碑 1 开头用真实数据确认的事项：
+同日进一步实测确认：
 
-- 思考块里是完整原文还是摘要，`thinkingDisplay` 的取值含义。
-- 子代理的记录是写在主会话文件里（`isSidechain: true`）还是独立文件，以及它与主线 `tool_use` 的关联字段。
+- 每条 `assistant` 记录只含一个内容块。同一次 API 响应的多个块拆成多条记录，共享 `message.id`。并行工具调用表现为多条共享 `message.id` 的 `tool_use` 记录。
+- `assistant` 记录的 `message.stop_reason` 可用（`tool_use`、`end_turn` 等），`message.usage` 含 `input_tokens`、`output_tokens` 及缓存相关字段。
+- `user` 记录的 `message.content` 要么是字符串（用户输入），要么是 `tool_result` 块数组。
+- 子代理的记录写在独立文件 `<项目目录>/<session_id>/subagents/agent-<agentId>.jsonl`，每条带 `agentId` 和 `isSidechain: true`，`sessionId` 与主会话相同。同目录的 `agent-<agentId>.meta.json` 含 `toolUseId`（指向主线派发它的 `tool_use`）、`agentType`、`description`、`spawnDepth`、`finished`。主线对应的工具结果记录里 `toolUseResult.agentId` 也给出同一关联。
+- 会话标题在 `<项目目录>/<session_id>/custom-title.json` 的 `customTitle` 字段。
+- **思考内容在抽查的会话里是空的**：`thinking` 块只有 `signature`，`thinking` 文本长度为 0（该会话 `thinkingDisplay` 为 `updates`）。能拿到的只有思考的存在和耗时 `thinkingDurationMs`。其他配置下是否有文本未验证。这是数据源的上限：因果视角（B）在思考文本为空时只能展示"此处思考了多久"以及前后的文本和工具调用，不能展示思考内容。
 
 ### 2.2 Hooks
 
@@ -71,18 +75,22 @@ A 是第一优先级。C、B、D 的先后是实现顺序，不代表重要性�
 |---|---|---|
 | `SessionStart` | `source` | 会话开始或恢复 |
 | `UserPromptSubmit` | `prompt` | 新轮次开始，会话进入运行中 |
-| `PreToolUse` | `tool_name`、`tool_input`、`tool_use_id` | 工具节点进入"排队" |
+| `PreToolUse` | `tool_name`、`tool_input`、`tool_use_id` | 工具节点进入"执行中" |
 | `PermissionRequest` | `tool_name`、`tool_input`（**没有** `tool_use_id`） | 工具节点进入"等待权限确认" |
 | `PermissionDenied` | `tool_use_id`、`reason` | 工具节点"被拒绝" |
 | `PostToolUse` | `tool_use_id`、`tool_response`、`duration_ms` | 工具节点"成功" |
 | `PostToolUseFailure` | `tool_use_id`、`error`、`is_interrupt` | 工具节点"失败" |
-| `SubagentStart` / `SubagentStop` | 待确认 | 子代理节点状态 |
-| `Notification` | `message`、`notification_type` | 会话"等待输入"等状态 |
-| `Stop` / `StopFailure` | 待确认 | 轮次结束，会话进入空闲 |
-| `PreCompact` / `PostCompact` | 待确认 | 压缩系统事件 |
-| `SessionEnd` | 待确认 | 会话结束 |
+| `SubagentStart` | `agent_id`、`agent_type` | 子代理节点"执行中" |
+| `SubagentStop` | `agent_id`、`agent_type`、`agent_transcript_path`、`last_assistant_message` | 子代理节点结束 |
+| `Notification` | `message`、`notification_type`（`permission_prompt`、`idle_prompt` 等） | 会话"等待输入" |
+| `Stop` | `last_assistant_message`、`stop_hook_active` | 轮次结束，会话进入空闲 |
+| `StopFailure` | `error`、`last_assistant_message` | 轮次因错误结束 |
+| `PreCompact` / `PostCompact` | `trigger`；后者另有 `compact_summary` | 压缩系统事件 |
+| `SessionEnd` | `reason` | 会话结束 |
 
-标"待确认"的事件，文档对应章节在调研时未读到。里程碑 1 的第一项工作是装上 hooks 录制一份真实载荷，据此补全本表并作为测试夹具。
+以上字段来自文档。里程碑 1 的验收环节会装上 hooks 录制真实载荷，与本表核对。
+
+hooks 里没有"权限已批准、开始执行"的独立事件：`PreToolUse` 在权限检查之前触发，批准之后直到 `PostToolUse` 之间没有事件。因此一个工具节点一旦进入"等待权限确认"，会保持该状态直到出结果。
 
 约束带来的两条设计要求：
 
@@ -119,7 +127,7 @@ A 是第一优先级。C、B、D 的先后是实现顺序，不代表重要性�
 对齐规则：
 
 1. 带 `tool_use_id` 的 hook 事件，按 `(session_id, tool_use_id)` 对到工具节点。
-2. `PermissionRequest` 没有 `tool_use_id`：在同一 `session_id`、同一 `agent_id`（主线为空）下，找状态为"排队"且 `tool_name` 和 `tool_input` 相同的最新工具节点。找不到时把会话状态置为"等待权限确认"，不绑定到具体节点。
+2. `PermissionRequest` 没有 `tool_use_id`：在同一 `session_id`、同一 `agent_id`（主线为空）下，找状态为"执行中"且 `tool_name` 和 `tool_input` 相同的最新工具节点。找不到时把会话状态置为"等待权限确认"，不绑定到具体节点。
 3. hook 先到而内容平面还没有对应节点时，创建占位节点，标记 `confirmed: false`。JSONL 记录到达后填入内容并置 `confirmed: true`，节点 id 不变。
 4. 内容平面与状态平面冲突时（例如 JSONL 里已经有工具结果，但没收到 `PostToolUse`），以内容平面为准推导终态。
 5. hooks 未安装或事件丢失时，状态完全由内容平面推断：有 `tool_use` 无结果为"执行中"，有结果按结果判成功或失败。"等待权限确认"在这种情况下无法区分，显示为"执行中"。
@@ -155,8 +163,10 @@ A 是第一优先级。C、B、D 的先后是实现顺序，不代表重要性�
 工具和子代理节点：
 
 ```
-排队 → 等待权限确认 → 执行中 → 成功 | 失败 | 被拒绝
+执行中 → （等待权限确认） → 成功 | 失败 | 被拒绝
 ```
+
+终态不回退：节点进入成功、失败、被拒绝之后，迟到的状态事件一律忽略。
 
 会话：`运行中`、`等待输入`、`等待权限确认`、`空闲`、`已结束`、`源文件已删除`（可与已结束并存，作为附加标记）。
 
@@ -174,8 +184,7 @@ SQLite，单文件，WAL 模式，位置 `~/.claude-canvas/data.db`。
 
 | 表 | 内容 |
 |---|---|
-| `raw_transcript` | JSONL 原始行：来源文件、字节偏移、原文、记录类型 |
-| `raw_hook` | hook 原始载荷：接收时间、事件名、原文 |
+| `raw_event` | 两路原始记录共用一张表，自增主键即采集顺序，重建时按它重放。JSONL 行：来源文件、字节偏移、原文、记录类型；hook：接收时间、事件名、原文 |
 | `file_offset` | 每个 transcript 文件已读到的字节偏移和文件大小 |
 | `session` / `turn` / `node` / `edge` | 派生图 |
 | `unknown_stat` | 未识别记录类型的计数和一条样例 |
@@ -240,7 +249,7 @@ WebSocket `/ws`：客户端订阅会话列表或某个会话，并带上已持�
 | 服务重启 | 从 `file_offset` 续读；重启期间丢失的 hook 状态按 3.1 节规则 5 由内容平面推断 |
 | hook 先到而 JSONL 记录迟迟不来 | 占位节点保留并显示为"未确认"，不删除 |
 | 源 transcript 文件被删除 | 已入库数据不变，会话加"源文件已删除"标记 |
-| hook 载荷无法解析 | 存入 `raw_hook`，计入诊断，仍返回 `200` |
+| hook 载荷无法解析 | 存入 `raw_event`，计入诊断，仍返回 `200` |
 
 ## 9. 模块划分
 
@@ -298,7 +307,7 @@ WebSocket `/ws`：客户端订阅会话列表或某个会话，并带上已持�
 
 每一步都可独立使用，且都是最终架构的一部分。
 
-1. **管线打通**：录制真实 hook 载荷并补全 2.2 节表格；确认 2.1 节两项未决事实；两个事件源、归一、入库、接口；页面能浏览项目和会话，以简单列表显示节点。目的是验证数据正确。
+1. **管线打通**：两个事件源、归一、入库、接口；页面能浏览项目和会话，以简单列表显示节点；验收时录制真实 hook 载荷与 2.2 节表格核对。目的是验证数据正确。
 2. **实时画布（A）**：节点和边渲染、状态和动效、自动跟随、长会话折叠、节点详情抽屉。
 3. **子代理拓扑（C）**：容器节点、展开折叠、拓扑视角。
 4. **因果视角（B）**：思考节点、上游链高亮。
@@ -314,5 +323,5 @@ WebSocket `/ws`：客户端订阅会话列表或某个会话，并带上已持�
 | transcript 格式随 Claude Code 版本变化 | 原始记录保留、派生可重建、未知类型计数并在诊断页可见、`normalize` 集中且以夹具覆盖 |
 | hook 给 Claude Code 增加延迟 | 2 秒超时、端点先应答后处理；在里程碑 1 实测单次 hook 往返耗时 |
 | 长会话节点数过多，画布卡顿 | 轮次折叠、快照只带摘要、子代理默认折叠；里程碑 2 用本机最大的真实会话验证 |
-| 思考内容可能只有摘要 | 里程碑 1 确认；若只有摘要，因果视角按摘要展示，这是数据源的上限 |
+| 思考文本在 transcript 里可能为空（已在一个会话中观察到） | 思考节点始终保留并显示耗时；有文本则显示文本。里程碑 4 开始前抽查更多会话和配置，确认是否存在能拿到思考文本的条件 |
 | transcript 含代码和对话等敏感内容 | 只监听回环地址；数据库在用户目录下；测试夹具脱敏后才能入库 |
