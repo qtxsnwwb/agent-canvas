@@ -6,10 +6,31 @@ export interface UpstreamChain {
   /** The edges walked. */
   edgeIds: ReadonlySet<string>;
   /** Ids of chain nodes of kind thinking or text, ascending by timestamp, then id. */
-  reasoning: string[];
+  reasoning: readonly string[];
 }
 
-export const EMPTY_CHAIN: UpstreamChain = { nodeIds: new Set(), edgeIds: new Set(), reasoning: [] };
+export const EMPTY_CHAIN: UpstreamChain = { nodeIds: new Set(), edgeIds: new Set(), reasoning: Object.freeze([] as string[]) };
+
+interface Index { incoming: Map<string, ViewEdge[]>; containerOf: Map<string, string> }
+const indexes = new WeakMap<CanvasView, Index>();
+
+/** Incoming edges per node (only edges whose source is in the view) and group key -> container id; built once per view. */
+function indexOf(view: CanvasView): Index {
+  const known = indexes.get(view);
+  if (known) return known;
+  const incoming = new Map<string, ViewEdge[]>();
+  for (const e of view.edges) {
+    if (!view.nodes.has(e.from)) continue;
+    let list = incoming.get(e.to);
+    if (!list) incoming.set(e.to, (list = []));
+    list.push(e);
+  }
+  const containerOf = new Map<string, string>();
+  for (const g of view.agentGroups) containerOf.set(g.key, g.containerId);
+  const index = { incoming, containerOf };
+  indexes.set(view, index);
+  return index;
+}
 
 /**
  * Walks the view's edges backwards (breadth first, each node once) from `nodeId`. A prompt, a turn summary and an
@@ -18,14 +39,7 @@ export const EMPTY_CHAIN: UpstreamChain = { nodeIds: new Set(), edgeIds: new Set
  */
 export function upstreamChain(view: CanvasView, nodeId: string | null): UpstreamChain {
   if (nodeId === null || !view.nodes.has(nodeId)) return EMPTY_CHAIN;
-  const incoming = new Map<string, ViewEdge[]>();
-  for (const e of view.edges) {
-    let list = incoming.get(e.to);
-    if (!list) incoming.set(e.to, (list = []));
-    list.push(e);
-  }
-  const containerOf = new Map<string, string>();
-  for (const g of view.agentGroups) containerOf.set(g.key, g.containerId);
+  const { incoming, containerOf } = indexOf(view);
 
   const nodeIds = new Set<string>([nodeId]);
   const edgeIds = new Set<string>();

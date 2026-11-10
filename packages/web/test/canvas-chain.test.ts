@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest';
 import type { Graph, GraphEdge, GraphNode, NodeKind } from '@claude-canvas/shared';
-import { buildView, type ViewMode } from '../src/canvas/view';
+import { buildView, type CanvasView, type ViewMode } from '../src/canvas/view';
 import { EMPTY_CHAIN, upstreamChain } from '../src/canvas/chain';
 
 const EPOCH = Date.parse('2026-01-01T00:00:00Z');
@@ -48,7 +48,7 @@ function chainIntoCollapsedTurn(): Graph {
   for (let i = 1; i <= 5; i++) nodes.push(p(`p${i}`, `t${i}`, i * 100), tool(`x${i}`, `t${i}`, i * 100 + 1));
   for (let i = 1; i <= 5; i++) edges.push(e(`p${i}`, `x${i}`));
   nodes.push(tool('x9', null, 502));
-  edges.push(e('x1', 'x9'));
+  edges.push(e('x1', 'x9'), e('x2', 'x1')); // turn:t2 (collapsed) is upstream of turn:t1 (collapsed)
   return graph(nodes, edges);
 }
 /** p1 → tx1 → s1(a1)；a1 内部 i1 → ith → i2 */
@@ -90,6 +90,8 @@ test('上游是折叠的轮次：摘要节点算进链并停止', () => {
   const v = buildV(chainIntoCollapsedTurn(), opts({ mode: 'causal' }));
   const c = upstreamChain(v, 'x9');
   expect(c.nodeIds.has('turn:t1')).toBe(true);
+  expect(c.nodeIds.has('turn:t2')).toBe(false);
+  expect(v.edges.some((x) => x.from === 'turn:t2' && x.to === 'turn:t1')).toBe(true);
   expect([...c.nodeIds].every((id) => id === 'turn:t1' || !id.startsWith('turn:'))).toBe(true);
 });
 
@@ -128,4 +130,39 @@ test('500 个节点的直链在 50 毫秒内算完', () => {
   const t = performance.now();
   expect(upstreamChain(v, 'n499').nodeIds.size).toBe(500);
   expect(performance.now() - t).toBeLessThan(50);
+});
+
+test('源节点不在视图里的边被忽略', () => {
+  const real = buildV(twoTurnChain(), opts({ mode: 'causal' }));
+  const v: CanvasView = { ...real, edges: [...real.edges, { id: 'ghost->b2', from: 'ghost', to: 'b2', kind: 'sequence' }] };
+  const c = upstreamChain(v, 'b2');
+  expect([...c.nodeIds].sort()).toEqual(['b2', 'p2', 'th2']);
+  expect(c.edgeIds.has('ghost->b2')).toBe(false);
+});
+
+test('同一个视图上多次调用结果正确且互不影响', () => {
+  const v = buildV(twoTurnChain(), opts({ mode: 'causal' }));
+  const a = upstreamChain(v, 'b2');
+  const b = upstreamChain(v, 'tx1');
+  expect([...b.nodeIds].sort()).toEqual(['p1', 'th1', 'tx1']);
+  expect(upstreamChain(v, 'b2')).toEqual(a);
+});
+
+test('EMPTY_CHAIN 可以安全共享：reasoning 已冻结', () => {
+  expect(Object.isFrozen(EMPTY_CHAIN.reasoning)).toBe(true);
+});
+
+test('拓扑视角：思考和文本被隐藏，reasoning 为空且不报错', () => {
+  const v = buildV(twoTurnChain(), opts({ mode: 'topology' }));
+  const c = upstreamChain(v, 'b2');
+  expect(c.reasoning).toEqual([]);
+  expect(c.nodeIds.has('b2')).toBe(true);
+});
+
+test('时间戳相同的推理节点按 id 排序', () => {
+  const g = graph(
+    [p('p1', 't1', 0), think('zz', 't1', 5), text('aa', 't1', 5), tool('c1', 't1', 9)],
+    [e('p1', 'zz'), e('p1', 'aa'), e('zz', 'c1'), e('aa', 'c1')],
+  );
+  expect(upstreamChain(buildV(g, opts({ mode: 'causal' })), 'c1').reasoning).toEqual(['aa', 'zz']);
 });
