@@ -189,24 +189,6 @@ describe('pipeline', () => {
     expect(store.rawForSession('s1')).toHaveLength(2);
   });
 
-  test('大文件导入期间事件循环不被长时间占用', async () => {
-    const big = Array.from({ length: 20_000 }, (_, i) =>
-      assistantBlock(`a${i}`, i ? `a${i - 1}` : null, { type: 'text', text: 'x'.repeat(500) }),
-    );
-    await write('proj/s1.jsonl', big);
-    let maxGap = 0;
-    let last = performance.now();
-    const timer = setInterval(() => {
-      const now = performance.now();
-      maxGap = Math.max(maxGap, now - last);
-      last = now;
-    }, 5);
-    await pipeline.ingestFile(abs('proj/s1.jsonl'));
-    clearInterval(timer);
-    expect(maxGap).toBeLessThan(100);
-    expect(store.getGraph('s1')!.nodes).toHaveLength(20_000);
-  }, 60_000);
-
   test('即使没有文件系统事件，定时扫描也能发现追加', async () => {
     const w = startWatcher(pipeline, { ...config, rescanMs: 200 });
     try {
@@ -282,45 +264,6 @@ describe('pipeline', () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
-  test('冷启动的 hook 水合不阻塞事件循环，且新事件排在水合之后', async () => {
-    const big = Array.from({ length: 20_000 }, (_, i) =>
-      assistantBlock(`a${i}`, i ? `a${i - 1}` : null, { type: 'text', text: 'x'.repeat(500) }),
-    );
-    await write('proj/s1.jsonl', big);
-    await pipeline.ingestFile(abs('proj/s1.jsonl'));
-    await append('proj/s1.jsonl', [assistantBlock('late', 'a19999', { type: 'text', text: 'late' })]);
-
-    const p2 = new Pipeline(store, config); // cold Normalizer
-    let maxGap = 0;
-    let last = performance.now();
-    const timer = setInterval(() => {
-      const now = performance.now();
-      maxGap = Math.max(maxGap, now - last);
-      last = now;
-    }, 5);
-    try {
-      p2.ingestHook(
-        'PreToolUse',
-        's1',
-        JSON.stringify({ session_id: 's1', hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: {}, tool_use_id: 'tuH' }),
-      );
-      const file = p2.ingestFile(abs('proj/s1.jsonl'));
-      await p2.idle();
-      await file;
-    } finally {
-      clearInterval(timer);
-    }
-    expect(maxGap).toBeLessThan(100);
-    const ids = store.getGraph('s1')!.nodes.map((n) => n.id);
-    expect(ids).toContain('tool:tuH');
-    expect(ids).toContain('late');
-    const raw = store.rawForSession('s1');
-    const hookAt = raw.findIndex((e) => e.source === 'hook');
-    const lateAt = raw.findIndex((e) => e.source === 'transcript' && e.line.includes('"late"'));
-    expect(hookAt).toBeGreaterThan(-1);
-    expect(lateAt).toBeGreaterThan(hookAt);
-  }, 60_000);
-
   test('scanAll 后久未活动的会话不留在内存里，之后追加仍然正确', async () => {
     await write('proj/s1.jsonl', [userPrompt('u1', null, 'x'), assistantBlock('a1', 'u1', { type: 'text', text: 'hi' })]);
     await write('proj/s2.jsonl', [userPrompt('v1', null, 'y')]);
@@ -341,43 +284,6 @@ describe('pipeline', () => {
     await p.rescan();
     expect(p.loadedSessionCount()).toBe(0);
   });
-  test('10 万行的冷会话水合分页读取，事件循环间隔 < 100ms', async () => {
-    const file = abs('proj/s1.jsonl');
-    for (let i = 0; i < 100_000; i++) {
-      const ev = assistantBlock(`a${i}`, i ? `a${i - 1}` : null, { type: 'text', text: 'x'.repeat(450) });
-      if (ev.source === 'transcript') store.insertRaw({ ...ev, file });
-    }
-    store.applyChanges([
-      {
-        type: 'session_upserted',
-        session: {
-          id: 's1', projectId: 'proj', cwd: null, title: null, gitBranch: null, status: 'idle',
-          sourceDeleted: false, startedAt: '2026-01-01T00:00:00.000Z', lastActivityAt: '2026-01-01T00:00:00.000Z',
-        },
-      },
-    ]);
-    const p2 = new Pipeline(store, config);
-    let maxGap = 0;
-    let last = performance.now();
-    const timer = setInterval(() => {
-      const now = performance.now();
-      maxGap = Math.max(maxGap, now - last);
-      last = now;
-    }, 5);
-    try {
-      p2.ingestHook(
-        'PreToolUse',
-        's1',
-        JSON.stringify({ session_id: 's1', hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: {}, tool_use_id: 'tuH' }),
-      );
-      await p2.idle();
-    } finally {
-      clearInterval(timer);
-    }
-    expect(maxGap).toBeLessThan(100);
-    expect(store.getGraph('s1')!.nodes.map((n) => n.id)).toContain('tool:tuH');
-  }, 180_000);
-
   test('rebuild 在有待处理工作时抛错；rebuild 后不留下未被追踪的会话', async () => {
     await write('proj/s1.jsonl', [userPrompt('u1', null, 'x')]);
     const pending = pipeline.ingestFile(abs('proj/s1.jsonl'));

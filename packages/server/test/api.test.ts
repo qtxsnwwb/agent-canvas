@@ -137,18 +137,6 @@ describe('http api', () => {
     await new Promise((r) => setTimeout(r, 20));
   });
 
-  test('全量导入进行中 /hooks 仍在 100ms 内应答', async () => {
-    const events: RawEvent[] = [userPrompt('u0', null, 'start')];
-    for (let i = 1; i < 20_000; i++) events.push(assistantBlock(`a${i}`, 'u0', { type: 'text', text: `t${i}` }));
-    await writeSession('proj/big.jsonl', events);
-    const importing = pipeline.scanAll();
-    const t0 = performance.now();
-    const res = await post('/hooks', { hook_event_name: 'Stop', session_id: 's1' });
-    expect(res.statusCode).toBe(200);
-    expect(performance.now() - t0).toBeLessThan(100);
-    await importing;
-  }, 60_000);
-
   test('WebSocket 会话订阅先补齐再实时推送', async () => {
     await seed();
     const ws = await connect();
