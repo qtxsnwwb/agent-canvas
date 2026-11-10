@@ -124,3 +124,11 @@ test('bumpUnknown 计数并只保留首个样例', () => {
   store.bumpUnknown('atis-latch', 'second');
   expect(store.diagnostics().unknownRecords).toEqual([{ recordType: 'atis-latch', count: 2, sample: 'first' }]);
 });
+
+test('clearDerived 之后 seq 仍然单调递增', () => {
+  const before = store.applyChanges([sessionUpsert('s1', 'p1'), nodeAdded('n1', 's1')]);
+  const maxBefore = Math.max(...before.map((c) => c.seq));
+  store.clearDerived();
+  const after = store.applyChanges([sessionUpsert('s1', 'p1')]);
+  expect(after[0].seq).toBeGreaterThan(maxBefore);
+});

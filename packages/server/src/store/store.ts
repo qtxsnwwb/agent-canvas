@@ -214,8 +214,8 @@ export function openStore(dbPath: string): Store {
 
   const clearDerivedTx = db.transaction(() => {
     for (const t of DERIVED_TABLES) db.exec(`DELETE FROM ${t}`);
-    // Restart seq numbering so a rebuild from raw events is deterministic.
-    db.exec(`DELETE FROM sqlite_sequence WHERE name = 'change_log'`);
+    // seq (AUTOINCREMENT) is deliberately NOT reset: it must stay monotonic so clients
+    // holding an old sinceSeq still receive the rebuilt changes.
   });
 
   const toChanges = (rows: unknown[]): SeqChange[] =>
