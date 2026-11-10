@@ -1,4 +1,4 @@
-import { turnSignature, type TurnLayout, type TurnLayoutInput } from './layout';
+import { singleNodeLayout, turnSignature, type TurnLayout, type TurnLayoutInput } from './layout';
 
 export interface WorkerLike {
   postMessage(msg: unknown): void;
@@ -8,7 +8,8 @@ export interface WorkerLike {
 }
 export interface LayoutClient { layout(input: TurnLayoutInput): Promise<TurnLayout>; dispose(): void }
 
-const CACHE_LIMIT = 300;
+/** Large enough for every group of a long session (a fixed limit; simpler than one sized by the request count). */
+export const CACHE_LIMIT = 2_000;
 /** A request with no reply after this long counts as a hung worker. */
 export const LAYOUT_TIMEOUT_MS = 20_000;
 /** After this many worker failures in a row (no successful reply in between), wait before starting a new worker. */
@@ -23,7 +24,8 @@ export function createBrowserLayoutWorker(): WorkerLike {
 interface Pending { cacheKey: string; timer: ReturnType<typeof setTimeout>; resolve(l: TurnLayout): void; reject(e: Error): void }
 
 /**
- * Results cached by key+signature (LRU, max 300); concurrent equal requests share one computation. A worker that
+ * Results cached by key+signature (LRU, max CACHE_LIMIT); concurrent equal requests share one computation. A single-node
+ * input is answered at once without the worker or the cache (it needs no layout). A worker that
  * errors, cannot be created or does not answer within 20 s is dropped and every pending request rejects; after 3
  * such failures in a row the client waits 2 s before starting a new worker, rejecting requests meanwhile.
  */
@@ -94,6 +96,8 @@ export function createLayoutClient(createWorker: () => WorkerLike): LayoutClient
   return {
     layout(input) {
       if (disposed) return Promise.reject(new Error('layout client disposed'));
+      const single = singleNodeLayout(input);
+      if (single) return Promise.resolve(single);
       const cacheKey = `${input.key}\u0000${turnSignature(input)}`;
       const hit = cache.get(cacheKey);
       if (hit) {

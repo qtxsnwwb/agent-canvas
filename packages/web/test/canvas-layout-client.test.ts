@@ -12,7 +12,8 @@ class FakeWorker implements WorkerLike {
   reply(i: number, layout: TurnLayout): void { this.onmessage?.({ data: { id: this.sent[i]!.id, layout } }); }
   fail(i: number, error: string): void { this.onmessage?.({ data: { id: this.sent[i]!.id, error } }); }
 }
-const input = (key: string, ids: string[] = ['a']): TurnLayoutInput => ({ key, nodes: ids.map((id) => ({ id, width: 10, height: 10 })), edges: [] });
+/** Two nodes by default: single-node inputs are answered without the worker. */
+const input = (key: string, ids: string[] = ['a', 'b']): TurnLayoutInput => ({ key, nodes: ids.map((id) => ({ id, width: 10, height: 10 })), edges: [] });
 const result = (key: string, w = 10): TurnLayout => ({ key, width: w, height: 10, anchorX: 5, positions: { a: { x: 0, y: 0 } } });
 
 test('相同签名的请求只计算一次，之后走缓存', async () => {
@@ -179,4 +180,25 @@ test('一次成功的应答清零连续失败计数', async () => {
   expect(workers).toHaveLength(5);
   workers[4]!.reply(0, result('next'));
   await p;
+});
+
+test('单节点输入在本地直接应答：不建 Worker，也不进缓存', async () => {
+  const workers: FakeWorker[] = [];
+  const c = createLayoutClient(() => { const w = new FakeWorker(); workers.push(w); return w; });
+  const one: TurnLayoutInput = { key: 't', nodes: [{ id: 'x', width: 340, height: 60 }], edges: [] };
+  expect(await c.layout(one)).toEqual({ key: 't', width: 340, height: 60, anchorX: 170, positions: { x: { x: 0, y: 0 } } });
+  expect(workers).toHaveLength(0);
+});
+
+test('400 个不同的多节点输入各请求两次：第二次全部命中缓存', async () => {
+  const w = new FakeWorker();
+  const c = createLayoutClient(() => w);
+  const keys = Array.from({ length: 400 }, (_, i) => `t${i}`);
+  const first = keys.map((k) => c.layout(input(k)));
+  expect(w.sent).toHaveLength(400);
+  w.sent.forEach((m, i) => w.reply(i, result(m.input.key)));
+  await Promise.all(first);
+  const second = await Promise.all(keys.map((k) => c.layout(input(k))));
+  expect(w.sent).toHaveLength(400);
+  expect(second.map((l) => l.key)).toEqual(keys);
 });

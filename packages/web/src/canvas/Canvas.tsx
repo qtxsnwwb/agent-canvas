@@ -74,17 +74,21 @@ function sameElements<T>(prev: T[] | null, next: T[]): T[] {
 const NO_HANDLES: NodeHandle[] = [];
 const CONTAINER_STYLE: CSSProperties = { pointerEvents: 'none' };
 /** Top-centre target, bottom-centre source: declared up front so edges are drawn without measuring the DOM. */
+function makeHandles(width: number, height: number): NodeHandle[] {
+  return [
+    { type: 'target', position: Position.Top, x: width / 2 - 0.5, y: 0, width: 1, height: 1 },
+    { type: 'source', position: Position.Bottom, x: width / 2 - 0.5, y: height - 1, width: 1, height: 1 },
+  ];
+}
+/**
+ * Shared handle arrays for the fixed node sizes (a handful of keys, see sizeOf). Containers have a size per layout and
+ * get their own array (computed inline, never cached), so the cache cannot grow without bound.
+ */
 const handleCache = new Map<string, NodeHandle[]>();
 function handlesFor(width: number, height: number): NodeHandle[] {
   const key = `${width}x${height}`;
   let h = handleCache.get(key);
-  if (!h) {
-    h = [
-      { type: 'target', position: Position.Top, x: width / 2 - 0.5, y: 0, width: 1, height: 1 },
-      { type: 'source', position: Position.Bottom, x: width / 2 - 0.5, y: height - 1, width: 1, height: 1 },
-    ];
-    handleCache.set(key, h);
-  }
+  if (!h) handleCache.set(key, (h = makeHandles(width, height)));
   return h;
 }
 
@@ -109,7 +113,7 @@ function useFlowNodes(snapshot: CanvasSnapshot, selectedId: string | null, chain
     const prev = cache.current;
     const next = new Map<string, FlowNode>();
     const out: FlowNode[] = [];
-    const { view, positions, turnBoxes, containerBoxes } = snapshot;
+    const { view, positions, turnBoxes, containerBoxes, layoutMode } = snapshot;
     const active = chainActive(view, chain);
     const highlightOf = (id: string): Highlight => (!active ? 'none' : chain.nodeIds.has(id) ? 'chain' : 'dim');
     const headerHighlight: Highlight = active ? 'dim' : 'none';
@@ -141,13 +145,15 @@ function useFlowNodes(snapshot: CanvasSnapshot, selectedId: string | null, chain
     const depths = groupDepths(view);
     // Agents can be expanded and collapsed in every view except topology (which shows every subagent collapsed).
     const canExpand = view.mode !== 'topology';
-    const causal = view.mode === 'causal';
+    // Sizes (and the two-row causal thinking node) follow the mode the positions were laid out for, so a mode switch
+    // never draws new sizes on old positions; both switch together when the new mode's round lands.
+    const causal = layoutMode === 'causal';
     for (const vn of view.nodes.values()) {
       const position = positions[vn.id];
       if (!position) continue;
       // An expanded agent is drawn as a container once its box has landed; until then it keeps the collapsed size.
       const box = vn.type === 'node' && vn.expanded ? containerBoxes[vn.id] : undefined;
-      const { width, height } = box ?? sizeOf(vn, view.mode);
+      const { width, height } = box ?? sizeOf(vn, layoutMode);
       const zIndex = nodeZ(depths, vn);
       const selected = vn.id === selectedId;
       const highlight = highlightOf(vn.id);
@@ -171,7 +177,7 @@ function useFlowNodes(snapshot: CanvasSnapshot, selectedId: string | null, chain
             className: wrapperClass(container, highlight),
             style: container ? CONTAINER_STYLE : undefined,
             data: { node: vn.node, innerCount: vn.innerCount, expanded: vn.expanded, expandable, container, causal, highlight },
-            handles: handlesFor(width, height), draggable: false, connectable: false,
+            handles: container ? makeHandles(width, height) : handlesFor(width, height), draggable: false, connectable: false,
           };
       } else if (vn.type === 'turn_summary') {
         n = old && old.type === 'turnSummary' && sameSummary(old.data.summary, vn.summary) && old.data.highlight === highlight

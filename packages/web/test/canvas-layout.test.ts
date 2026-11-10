@@ -199,3 +199,12 @@ test('因果视角下思考节点用大尺寸，其余尺寸不变', () => {
   const causal = buildView(g, new Map(), undefined, { mode: 'causal' });
   expect(groupInput(causal, 't1', ['th', 'tl'], new Map()).nodes[0]).toMatchObject({ width: 280, height: 56 });
 });
+
+test('placeAgentGroups：容器被撑到最小宽度时，较窄的内部布局水平居中', () => {
+  const base = { positions: { s1: { x: 100, y: 200 } } };
+  const narrow = { group: g('agent:a1', 's1', 1, ['i1']), layout: { key: 'agent:a1', width: 100, height: 40, anchorX: 50, positions: { i1: { x: 0, y: 0 } } } };
+  const r = placeAgentGroups(base, [narrow]);
+  expect(r.containerBoxes.s1).toEqual({ x: 100, y: 200, width: 260, height: 140 });
+  // (260 - 2 * 16 - 100) / 2 = 64 to the right of the padding.
+  expect(r.positions.i1).toEqual({ x: 100 + 16 + 64, y: 284 });
+});

@@ -60,11 +60,16 @@ export function turnSignature(input: TurnLayoutInput): string {
 
 interface ElkOut { width?: number; height?: number; children?: { id: string; x?: number; y?: number }[] }
 
+/** The layout of a single-node input (no layout engine needed); null for any other input. */
+export function singleNodeLayout(input: TurnLayoutInput): TurnLayout | null {
+  if (input.nodes.length !== 1) return null;
+  const only = input.nodes[0]!;
+  return { key: input.key, width: only.width, height: only.height, anchorX: only.width / 2, positions: { [only.id]: { x: 0, y: 0 } } };
+}
+
 export async function layoutTurn(elk: ElkLike, input: TurnLayoutInput): Promise<TurnLayout> {
-  if (input.nodes.length === 1) {
-    const only = input.nodes[0]!;
-    return { key: input.key, width: only.width, height: only.height, anchorX: only.width / 2, positions: { [only.id]: { x: 0, y: 0 } } };
-  }
+  const single = singleNodeLayout(input);
+  if (single) return single;
   const out = (await elk.layout({
     id: 'root',
     layoutOptions: ELK_OPTIONS,
@@ -98,7 +103,8 @@ export function stackTurns(layouts: TurnLayout[]): { positions: Record<string, {
 
 /**
  * Places agent groups on top of the stackTurns result: inner node position = container position + (PADDING,
- * HEADER + PADDING) + its position relative to the group. `groups` must be ordered by depth ascending (outer groups
+ * HEADER + PADDING) + its position relative to the group, shifted right by (container width - 2 * PADDING - inner
+ * width) / 2 when the container was widened to its minimum width (so a narrow inner layout is centred). `groups` must be ordered by depth ascending (outer groups
  * first). A group whose container has no position is skipped (and so are the groups nested in it). Returns new
  * positions (with the inner nodes) and each placed container's box (its expanded size, see containerSize).
  */
@@ -111,8 +117,9 @@ export function placeAgentGroups(
   for (const { group, layout } of groups) {
     const c = positions[group.containerId];
     if (!c) continue;
-    containerBoxes[group.containerId] = { x: c.x, y: c.y, ...containerSize(layout) };
-    const ox = c.x + CONTAINER_PADDING;
+    const size = containerSize(layout);
+    containerBoxes[group.containerId] = { x: c.x, y: c.y, ...size };
+    const ox = c.x + CONTAINER_PADDING + Math.max(0, (size.width - 2 * CONTAINER_PADDING - layout.width) / 2);
     const oy = c.y + CONTAINER_HEADER + CONTAINER_PADDING;
     for (const [id, p] of Object.entries(layout.positions)) positions[id] = { x: ox + p.x, y: oy + p.y };
   }

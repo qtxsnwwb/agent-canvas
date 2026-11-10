@@ -16,6 +16,11 @@ export interface CanvasSnapshot {
    * inner layout has landed; inner nodes are positioned inside it.
    */
   containerBoxes: Record<string, Box>;
+  /**
+   * The view mode `positions` were laid out for. After a mode switch it keeps the old mode until the new mode's round
+   * lands: node sizes (see sizeOf) must follow the positions, not `view.mode`.
+   */
+  layoutMode: ViewMode;
   layoutError: string | null;
 }
 export interface CanvasModel {
@@ -58,6 +63,7 @@ const EMPTY_SNAPSHOT: CanvasSnapshot = {
   positions: {},
   turnBoxes: {},
   containerBoxes: {},
+  layoutMode: 'live',
   layoutError: null,
 };
 
@@ -99,7 +105,9 @@ function sameRecord<T>(a: Record<string, T>, b: Record<string, T>, same: (x: T, 
  *
  * A round is laid out bottom-up: the expanded agents' groups first, deepest level first (each level in parallel), each
  * result giving its container's size in the level above; then every turn with something to draw; then the turns are
- * stacked and the groups placed inside their containers. With no agent expanded a round is just the turns.
+ * stacked and the groups placed inside their containers. With no agent expanded a round is just the turns. A round
+ * that finds the model dirty between two stages stops there and publishes nothing (unless the round before it stopped
+ * that way too); the queued rebuild then starts the next round.
  */
 export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscribe'>, layout: LayoutClient): CanvasModel {
   /** Turn key -> expanded, set by the user. */
@@ -119,6 +127,8 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
   let autoFold = true;
   let roundRunning = false;
   let dirty = false;
+  /** The previous round stopped early because the model was dirty; the next one then runs to the end (no starvation). */
+  let lastAbandoned = false;
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
   let retryDelay = RETRY_FIRST_MS;
   const cancelRetry = (): void => {
@@ -150,10 +160,15 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
     return merged;
   };
 
-  /** Lays out `view` bottom-up; null when the model was disposed meanwhile. */
+  /**
+   * Lays out `view` bottom-up; null when the model was disposed meanwhile, 'stale' when it stopped between two stages
+   * because the model became dirty (a newer view is queued). It stops that way only when the previous round did not, so
+   * a steady stream of updates cannot starve the layout.
+   */
   const layoutRound = async (view: CanvasView): Promise<{
     positions: Positions; turnBoxes: Record<string, Box>; containerBoxes: Record<string, Box>;
-  } | null> => {
+  } | null | 'stale'> => {
+    const mayStop = !lastAbandoned;
     const sizes = new Map<string, { width: number; height: number }>();
     const placed: { group: AgentGroup; layout: TurnLayout }[] = [];
     const groups = view.agentGroups; // deepest first
@@ -164,6 +179,7 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
         .filter((x) => x.input.nodes.length > 0);
       const layouts = await Promise.all(level.map((x) => layout.layout(x.input)));
       if (disposed) return null;
+      if (dirty && mayStop) return 'stale'; // the next stage would lay out a view that is no longer shown
       level.forEach(({ group }, k) => {
         placed.push({ group, layout: layouts[k]! });
         sizes.set(group.containerId, containerSize(layouts[k]!));
@@ -194,6 +210,11 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
     layoutRound(view).then(
       (stacked) => {
         if (disposed || stacked === null) return;
+        lastAbandoned = stacked === 'stale';
+        if (stacked === 'stale') { // publishes nothing; the queued rebuild runs now
+          settle(false);
+          return;
+        }
         // The view may have moved on since this request: keep only what is still shown.
         const current = snapshot.view;
         let positions: Positions = {};
@@ -205,14 +226,16 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
         if (sameRecord(positions, snapshot.positions, samePoint)) positions = snapshot.positions;
         if (sameRecord(turnBoxes, snapshot.turnBoxes, sameBox)) turnBoxes = snapshot.turnBoxes;
         if (sameRecord(containerBoxes, snapshot.containerBoxes, sameBox)) containerBoxes = snapshot.containerBoxes;
+        const layoutMode = view.mode;
         const unchanged = positions === snapshot.positions && turnBoxes === snapshot.turnBoxes
-          && containerBoxes === snapshot.containerBoxes && snapshot.layoutError === null;
-        if (!unchanged) publish({ view: current, positions, turnBoxes, containerBoxes, layoutError: null });
+          && containerBoxes === snapshot.containerBoxes && snapshot.layoutMode === layoutMode && snapshot.layoutError === null;
+        if (!unchanged) publish({ view: current, positions, turnBoxes, containerBoxes, layoutMode, layoutError: null });
         retryDelay = RETRY_FIRST_MS;
         settle(false);
       },
       (err: unknown) => {
         if (disposed) return;
+        lastAbandoned = false;
         const layoutError = err instanceof Error ? err.message : String(err);
         if (layoutError !== snapshot.layoutError) publish({ ...snapshot, layoutError });
         settle(true);

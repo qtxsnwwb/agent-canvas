@@ -765,3 +765,175 @@ test('拓扑视角下没有可见节点的轮次不请求布局，也不占纵�
   expect(s.positions.c!.y).toBe(28); // TURN_HEADER: nothing above it
   model.dispose();
 });
+
+test('切换视角：新视角的布局到达前 layoutMode 仍是旧视角，到达后两者一起切换', async () => {
+  const live = fakeLive(withEdges([prompt('p1', 't1', 0), { ...node('th', 't1', 1), kind: 'thinking' }], [['p1', 'th']]));
+  const layout = fakeLayout();
+  const model = createCanvasModel(live, layout.client);
+  expect(model.getSnapshot().layoutMode).toBe('live');
+  layout.resolveAll();
+  await flush();
+  model.setMode('causal');
+  const mid = model.getSnapshot();
+  expect(mid.view.mode).toBe('causal');
+  expect(mid.layoutMode).toBe('live');
+  layout.resolveAll();
+  await flush();
+  const s = model.getSnapshot();
+  expect(s.view.mode).toBe('causal');
+  expect(s.layoutMode).toBe('causal');
+  model.dispose();
+});
+
+test('相同的布局结果在切换视角后仍会发布新的 layoutMode', async () => {
+  const live = fakeLive(withEdges([prompt('p1', 't1', 0), { ...node('x', 't1', 1), kind: 'tool' }], [['p1', 'x']]));
+  const layout = deterministicLayout(); // no thinking node: the causal layout equals the live one
+  const model = createCanvasModel(live, layout.client);
+  await flush();
+  const before = model.getSnapshot().positions;
+  model.setMode('causal');
+  await flush();
+  expect(model.getSnapshot().positions).toBe(before);
+  expect(model.getSnapshot().layoutMode).toBe('causal');
+  model.dispose();
+});
+
+test('过期的一轮在分层之间停下：不再请求下一层，不发布，之后恰好再跑一轮', async () => {
+  const live = fakeLive(nestedAgents());
+  const layout = fakeLayout();
+  const model = createCanvasModel(live, layout.client);
+  model.toggleAgent('a1');
+  model.toggleAgent('a2');
+  layout.resolveAll(); // the first round (nothing expanded yet)
+  await flush();
+  const start = 1;
+  const keys = () => layout.reqs.slice(start).map((r) => r.input.key);
+  expect(keys()).toEqual(['agent:a2']);
+  const fn = vi.fn();
+  model.subscribe(fn);
+  model.showFullTurn('t1'); // a rebuild while the round runs: the model is dirty
+  fn.mockClear();
+  layout.resolve(layout.reqs[start]!);
+  await flush();
+  // The stale round requested no further level; the queued rebuild started a new round from the deepest level.
+  expect(keys()).toEqual(['agent:a2', 'agent:a2']);
+  expect(model.getSnapshot().positions.j1).toBeUndefined();
+  layout.resolveAll();
+  await flush();
+  expect(keys()).toEqual(['agent:a2', 'agent:a2', 'agent:a1']);
+  layout.resolveAll();
+  await flush();
+  expect(keys()).toEqual(['agent:a2', 'agent:a2', 'agent:a1', 't1']);
+  layout.resolveAll();
+  await flush();
+  expect(model.getSnapshot().positions.j1).toBeDefined();
+  await vi.advanceTimersByTimeAsync(200);
+  expect(keys()).toHaveLength(4);
+  model.dispose();
+});
+
+test('连续过期时不会一直停下：上一轮已提前停下时，这一轮跑完', async () => {
+  const live = fakeLive(nestedAgents());
+  const layout = fakeLayout();
+  const model = createCanvasModel(live, layout.client);
+  model.toggleAgent('a1');
+  model.toggleAgent('a2');
+  layout.resolveAll();
+  await flush();
+  model.showFullTurn('t1');
+  layout.resolveAll(); // abandoned after its first level
+  await flush();
+  model.toggleTurn('t1'); // dirty again during the new round
+  model.toggleTurn('t1');
+  const n = layout.reqs.length;
+  layout.resolveAll(); // the new round's first level: this round goes on
+  await flush();
+  expect(layout.reqs.length).toBe(n + 1);
+  expect(layout.reqs[n]!.input.key).toBe('agent:a1');
+  model.dispose();
+});
+
+/**
+ * No positioned inner node without its container's box, and no box (of a container expanded in the view) without a
+ * positioned inner node.
+ */
+function consistent(s: ReturnType<ReturnType<typeof createCanvasModel>['getSnapshot']>): boolean {
+  const byContainer = new Map(s.view.agentGroups.map((g) => [g.containerId, g]));
+  for (const g of s.view.agentGroups) {
+    const box = s.containerBoxes[g.containerId] !== undefined;
+    if (!box && g.nodeIds.some((id) => s.positions[id] !== undefined)) return false;
+  }
+  return Object.keys(s.containerBoxes).every((id) => {
+    const g = byContainer.get(id);
+    return g !== undefined && g.nodeIds.some((x) => s.positions[x] !== undefined);
+  });
+}
+
+test('代理分组布局失败：保留之前的位置和容器框，记录 layoutError，之后自动重试', async () => {
+  const live = fakeLive(twoTurnsWithAgent());
+  const layout = fakeLayout();
+  const model = createCanvasModel(live, layout.client);
+  model.toggleAgent('a1');
+  for (let k = 0; k < 3; k++) { layout.resolveAll(); await flush(); }
+  const before = model.getSnapshot();
+  expect(before.containerBoxes.s1).toBeDefined();
+  const g = twoTurnsWithAgent();
+  g.nodes.i3 = inner('i3', 'a1', 14);
+  g.edges['i2->i3'] = { id: 'i2->i3', sessionId: 's1', from: 'i2', to: 'i3', kind: 'sequence' };
+  live.set(g);
+  await vi.advanceTimersByTimeAsync(60);
+  const req = layout.pending();
+  expect(req.map((r) => r.input.key)).toEqual(['agent:a1']);
+  layout.reject(req[0]!, 'inner boom');
+  await flush();
+  const s = model.getSnapshot();
+  expect(s.layoutError).toContain('inner boom');
+  expect(s.positions).toEqual(before.positions);
+  expect(s.containerBoxes).toEqual(before.containerBoxes);
+  expect(consistent(s)).toBe(true);
+  const n = layout.reqs.length;
+  await vi.advanceTimersByTimeAsync(2_500);
+  expect(layout.reqs.length).toBe(n + 1);
+  expect(layout.reqs[n]!.input.key).toBe('agent:a1');
+  model.dispose();
+});
+
+test('分层之间 dispose：不再发出任何请求', async () => {
+  const live = fakeLive(nestedAgents());
+  const layout = fakeLayout();
+  const model = createCanvasModel(live, layout.client);
+  model.toggleAgent('a1');
+  model.toggleAgent('a2');
+  layout.resolveAll();
+  await flush();
+  const n = layout.reqs.length;
+  layout.resolveAll(); // the deepest level
+  model.dispose();
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(layout.reqs.length).toBe(n);
+});
+
+test('toggleAgent 之后才到达的过期一轮：位置和容器框保持一致', async () => {
+  const live = fakeLive(twoTurnsWithAgent());
+  const layout = fakeLayout();
+  const model = createCanvasModel(live, layout.client);
+  layout.resolveAll();
+  await flush();
+  // Expanded round in its last stage, then collapse: the landing round must not leave a box or inner positions.
+  model.toggleAgent('a1');
+  layout.resolveAll(); // agent:a1
+  await flush();
+  expect(layout.pending().map((r) => r.input.key)).toEqual(['t1', 't2']);
+  model.toggleAgent('a1');
+  layout.resolveAll();
+  await flush();
+  expect(consistent(model.getSnapshot())).toBe(true);
+  expect(model.getSnapshot().containerBoxes).toEqual({});
+  // Collapsed round in flight, then expand: the landing round has no inner positions and no box.
+  model.toggleAgent('a1');
+  for (let k = 0; k < 3; k++) { layout.resolveAll(); await flush(); expect(consistent(model.getSnapshot())).toBe(true); }
+  const s = model.getSnapshot();
+  expect(s.containerBoxes.s1).toBeDefined();
+  expect(s.positions.i1).toBeDefined();
+  model.dispose();
+});

@@ -61,3 +61,11 @@ test('resumeZoom：缩放低于 0.5 时回到 1，否则保持当前缩放', () 
   expect(resumeZoom(0.5)).toBe(0.5);
   expect(resumeZoom(1.4)).toBe(1.4);
 });
+
+test('位置还是按旧视角布局的（layoutMode）时，按 layoutMode 的尺寸取中心', () => {
+  const g = graph([node('p1', 'prompt', 't1', 0), node('th1', 'thinking', 't1', 1)]);
+  const positions = { th1: { x: 100, y: 400 } };
+  const causal = buildView(g, new Map(), undefined, { mode: 'causal' });
+  expect(followTarget({ view: causal, positions, layoutMode: 'live' })).toEqual({ x: 180, y: 414 });
+  expect(followTarget({ view: causal, positions, layoutMode: 'causal' })).toEqual({ x: 240, y: 428 });
+});
