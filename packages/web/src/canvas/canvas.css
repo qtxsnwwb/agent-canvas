@@ -72,7 +72,7 @@
 .cc-kind-unknown { padding-top: 3px; padding-bottom: 3px; gap: 2px; }
 .cc-kind-unknown .cc-row { height: 14px; line-height: 14px; }
 .cc-oneline { padding-top: 0; padding-bottom: 0; }
-.cc-kind-thinking { background: #f8fafc; color: #64748b; font-style: italic; border-left-width: 3px; }
+.cc-kind-thinking { background: #f8fafc; color: #64748b; border-left-width: 3px; }
 .cc-kind-system { background: #f8fafc; color: #475569; font-size: 11px; }
 
 .cc-unconfirmed { border-style: dashed; border-left-style: solid; }
