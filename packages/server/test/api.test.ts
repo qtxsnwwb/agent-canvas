@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import WebSocket from 'ws';
 import type { FastifyInstance } from 'fastify';
-import type { SeqChange } from '@claude-canvas/shared';
+import type { Change, GraphNode, SeqChange, ServerMessage } from '@claude-canvas/shared';
 import { buildServer, isAllowedRequest } from '../src/api/server.js';
 import { loadConfig, type Config } from '../src/config.js';
 import { Pipeline } from '../src/pipeline.js';
@@ -20,6 +20,7 @@ describe('http api', () => {
   let pipeline: Pipeline;
   let app: FastifyInstance;
   const sockets: WebSocket[] = [];
+  const received = new WeakMap<WebSocket, string[]>();
 
   const abs = (rel: string): string => path.join(config.projectsDir, ...rel.split('/'));
   const get = (url: string) => app.inject({ method: 'GET', url });
@@ -45,18 +46,24 @@ describe('http api', () => {
     const address = app.server.listening ? `http://127.0.0.1:${(app.server.address() as { port: number }).port}` : await app.listen({ port: 0, host: '127.0.0.1' });
     const ws = new WebSocket(address.replace('http', 'ws') + '/ws');
     sockets.push(ws);
+    // Record from the start: `hello` can arrive before the caller attaches its own listener.
+    const raw: string[] = [];
+    received.set(ws, raw);
+    ws.on('message', (d) => raw.push(d.toString()));
     await new Promise<void>((resolve, reject) => {
       ws.once('open', () => resolve());
       ws.once('error', reject);
     });
     return ws;
   }
-  function collect(ws: WebSocket): { changes: () => SeqChange[]; raw: () => string[] } {
-    const raw: string[] = [];
-    ws.on('message', (d) => raw.push(d.toString()));
+  function collect(ws: WebSocket): { changes: () => SeqChange[]; raw: () => string[]; messages: () => ServerMessage[] } {
+    const raw = received.get(ws)!;
+    const messages = (): ServerMessage[] => raw.map((r) => JSON.parse(r) as ServerMessage);
     return {
-      changes: () => raw.flatMap((r) => (JSON.parse(r) as { changes: SeqChange[] }).changes),
+      // hello / resync carry no changes
+      changes: () => messages().flatMap((m) => (m.type === 'changes' ? m.changes : [])),
       raw: () => raw,
+      messages,
     };
   }
 
@@ -395,6 +402,80 @@ describe('http api', () => {
       expect((await app2.inject({ method: 'GET', url: '/api/nope' })).statusCode).toBe(404);
     } finally {
       await app2.close();
+    }
+  });
+
+  // ---- final fix wave, group 7: WebSocket protocol ----
+
+  const mkTextNode = (id: string): GraphNode => ({
+    id, sessionId: 's1', turnId: null, agentId: null, parentId: null, kind: 'text', status: null,
+    timestamp: '2026-01-01T00:00:00.000Z', confirmed: true, title: 'Text', summary: '', toolName: null,
+    toolUseId: null, messageId: null, durationMs: null, usage: null, systemSubtype: null,
+  });
+  const manyNodes = (n: number, prefix = 'n'): Change[] =>
+    Array.from({ length: n }, (_, i): Change => ({ type: 'node_added', node: mkTextNode(`${prefix}${i}`), detail: {} }));
+
+  test('连接打开后先收到 hello，带数据库 epoch', async () => {
+    const ws = await connect();
+    const got = collect(ws);
+    await vi.waitFor(() => expect(got.messages().length).toBeGreaterThan(0));
+    expect(got.messages()[0]).toEqual({ type: 'hello', epoch: store.epoch() });
+  });
+
+  test('补发按每条消息最多 1000 个变更分块', async () => {
+    await seed();
+    store.applyChanges(manyNodes(2500));
+    const ws = await connect();
+    const got = collect(ws);
+    ws.send(JSON.stringify({ type: 'subscribe', scope: 'session', sessionId: 's1', sinceSeq: 0 }));
+    const total = store.changesSince(0, 's1').length;
+    await vi.waitFor(() => expect(got.changes()).toHaveLength(total));
+    const sizes = got.messages().flatMap((m) => (m.type === 'changes' ? [m.changes.length] : []));
+    expect(Math.max(...sizes)).toBeLessThanOrEqual(1000);
+    expect(sizes.length).toBeGreaterThanOrEqual(3);
+  });
+
+  test('需要补发的变更超过 5000 时发 resync，之后照常实时推送', async () => {
+    await seed();
+    store.applyChanges(manyNodes(5001));
+    const ws = await connect();
+    const got = collect(ws);
+    ws.send(JSON.stringify({ type: 'subscribe', scope: 'session', sessionId: 's1', sinceSeq: 0 }));
+    await vi.waitFor(() => expect(got.messages()).toContainEqual({ type: 'resync', sessionId: 's1' }));
+    expect(got.changes()).toEqual([]);
+    await appendToSession('proj/s1.jsonl', [assistantBlock('a9', 'u1', { type: 'text', text: 'more' })]);
+    await vi.waitFor(() => expect(got.changes().some((c) => c.type === 'node_added' && c.node.id === 'a9')).toBe(true));
+  });
+
+  test('sinceSeq 早于保留的最小 seq 时发 resync', async () => {
+    await seed();
+    const old = store.getGraph('s1')!.seq;
+    pipeline.rebuild(); // clears the change log; seqs keep increasing
+    expect(store.minSeq()).toBeGreaterThan(old);
+    const ws = await connect();
+    const got = collect(ws);
+    ws.send(JSON.stringify({ type: 'subscribe', scope: 'session', sessionId: 's1', sinceSeq: old - 1 }));
+    await vi.waitFor(() => expect(got.messages()).toContainEqual({ type: 'resync', sessionId: 's1' }));
+    expect(got.changes()).toEqual([]);
+    // a client resubscribing with the snapshot's seq is not told to resync again
+    const ws2 = await connect();
+    const got2 = collect(ws2);
+    ws2.send(JSON.stringify({ type: 'subscribe', scope: 'session', sessionId: 's1', sinceSeq: store.getGraph('s1')!.seq }));
+    await new Promise((r) => setTimeout(r, 100));
+    expect(got2.messages().filter((m) => m.type !== 'hello')).toEqual([]);
+  });
+
+  test('发送缓冲超过上限的 socket 被断开', async () => {
+    const ws = await connect();
+    ws.send(JSON.stringify({ type: 'subscribe', scope: 'sessions' }));
+    await new Promise((r) => setTimeout(r, 50));
+    const closed = new Promise<void>((resolve) => ws.once('close', () => resolve()));
+    const spy = vi.spyOn(WebSocket.prototype, 'bufferedAmount', 'get').mockReturnValue(16 * 1024 * 1024 + 1);
+    try {
+      pipeline.ingestHook('UserPromptSubmit', 's5', JSON.stringify({ session_id: 's5', hook_event_name: 'UserPromptSubmit' }));
+      await closed;
+    } finally {
+      spy.mockRestore();
     }
   });
 });

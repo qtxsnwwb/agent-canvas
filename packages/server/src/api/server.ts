@@ -8,6 +8,12 @@ import type { Pipeline } from '../pipeline.js';
 import type { Store } from '../store/store.js';
 
 const HOOK_BODY_LIMIT = 64 * 1024 * 1024;
+/** More changes than this to catch up on: tell the client to refetch the snapshot instead. */
+export const CATCHUP_MAX = 5000;
+/** Changes per catch-up message. */
+export const CATCHUP_CHUNK = 1000;
+/** A socket whose unsent data exceeds this is too slow to keep up and is terminated. */
+export const MAX_BUFFERED_BYTES = 16 * 1024 * 1024;
 const RESERVED_PREFIXES = ['/api', '/ws', '/hooks'];
 
 interface Connection {
@@ -131,12 +137,19 @@ export function buildServer(deps: { store: Store; pipeline: Pipeline; config: Co
         sessionsScope: false,
         sessionId: null,
         send: (message) => {
-          if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(message));
+          if (socket.readyState !== socket.OPEN) return;
+          socket.send(JSON.stringify(message));
+          if (socket.bufferedAmount > MAX_BUFFERED_BYTES) {
+            // Backpressure: a client this far behind cannot catch up live; it reconnects and resyncs.
+            connections.delete(conn);
+            socket.terminate();
+          }
         },
       };
       connections.add(conn);
       socket.on('close', () => connections.delete(conn));
       socket.on('error', () => connections.delete(conn));
+      conn.send({ type: 'hello', epoch: store.epoch() });
       socket.on('message', (data) => {
         const msg = parseClientMessage(data.toString());
         if (msg === null) return;
@@ -146,8 +159,16 @@ export function buildServer(deps: { store: Store; pipeline: Pipeline; config: Co
         }
         conn.sessionId = msg.sessionId;
         try {
-          const backlog = store.changesSince(msg.sinceSeq, msg.sessionId);
-          if (backlog.length > 0) conn.send({ type: 'changes', changes: backlog.map(stripDetail) });
+          // Pruned past the client's position, or too far behind: the snapshot is cheaper than the backlog.
+          const backlog =
+            msg.sinceSeq < store.minSeq() - 1 ? null : store.changesSince(msg.sinceSeq, msg.sessionId, CATCHUP_MAX + 1);
+          if (backlog === null || backlog.length > CATCHUP_MAX) {
+            conn.send({ type: 'resync', sessionId: msg.sessionId });
+            return;
+          }
+          for (let i = 0; i < backlog.length; i += CATCHUP_CHUNK) {
+            conn.send({ type: 'changes', changes: backlog.slice(i, i + CATCHUP_CHUNK).map(stripDetail) });
+          }
         } catch {
           socket.terminate();
         }

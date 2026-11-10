@@ -314,3 +314,26 @@ test('文件数据库的 WAL 由后台线程检查点，主连接不做自动检
     await fsp.rm(dir, { recursive: true, force: true, maxRetries: 10 });
   }
 }, 30_000);
+
+test('epoch 在建库时生成，重开和 clearDerived 后不变，新库不同', async () => {
+  const fsp = await import('node:fs/promises');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'cc-epoch-'));
+  try {
+    const s1 = openStore(path.join(dir, 'a.db'));
+    const e = s1.epoch();
+    expect(e).toMatch(/^[0-9a-f-]{20,}$/);
+    s1.clearDerived();
+    expect(s1.epoch()).toBe(e);
+    s1.close();
+    const again = openStore(path.join(dir, 'a.db'));
+    expect(again.epoch()).toBe(e);
+    again.close();
+    const other = openStore(path.join(dir, 'b.db'));
+    expect(other.epoch()).not.toBe(e);
+    other.close();
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true, maxRetries: 10 });
+  }
+});

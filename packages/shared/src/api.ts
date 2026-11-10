@@ -10,4 +10,12 @@ export interface Diagnostics {
 export type ClientMessage =
   | { type: 'subscribe'; scope: 'sessions' }
   | { type: 'subscribe'; scope: 'session'; sessionId: string; sinceSeq: number };
-export type ServerMessage = { type: 'changes'; changes: SeqChange[] };
+/**
+ * `hello` is sent once, right after the socket opens; `epoch` identifies the database (a different epoch after a
+ * reconnect means seqs are not comparable: resync). `resync`: refetch the snapshot of that session instead of
+ * expecting a backlog. Catch-up `changes` come in chunks of at most 1000; node detail is never on the socket.
+ */
+export type ServerMessage =
+  | { type: 'hello'; epoch: string }
+  | { type: 'changes'; changes: SeqChange[] }
+  | { type: 'resync'; sessionId: string };

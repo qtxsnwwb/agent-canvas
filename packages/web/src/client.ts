@@ -1,4 +1,5 @@
 import {
+  applyChanges,
   type ClientMessage,
   type Graph,
   type GraphNode,
@@ -42,12 +43,12 @@ function createBrowserSocket(): WebSocketLike {
 }
 
 /**
- * Keeps one socket open: sends `subscribe()` on every open, hands each batch of changes to `onChanges`,
+ * Keeps one socket open: sends `subscribe()` on every open, hands each server message to `onMessage`,
  * and reconnects 1 s after a drop until the returned function (close) is called.
  */
 function connect(
   subscribe: () => ClientMessage,
-  onChanges: (changes: SeqChange[]) => void,
+  onMessage: (msg: ServerMessage) => void,
   createSocket: () => WebSocketLike,
   onReconnect?: () => void,
 ): () => void {
@@ -73,7 +74,7 @@ function connect(
       } catch {
         return;
       }
-      if (msg.type === 'changes') onChanges(msg.changes);
+      onMessage(msg);
     };
     s.onclose = () => {
       if (closed || sock !== s) return;
@@ -109,38 +110,73 @@ export async function openLiveSession(
   deps: { fetchGraph?: typeof api.graph; createSocket?: () => WebSocketLike } = {},
 ): Promise<LiveSession> {
   const fetchGraph = deps.fetchGraph ?? api.graph;
-  const snap = await fetchGraph(sessionId);
   // Build the records directly: applyChange copies the whole map per call, which is quadratic here.
-  let graph: Graph = {
+  const fromSnapshot = (snap: GraphSnapshot): Graph => ({
     nodes: Object.fromEntries(snap.nodes.map((n) => [n.id, n])),
     edges: Object.fromEntries(snap.edges.map((e) => [e.id, e])),
-  };
+  });
+  const snap = await fetchGraph(sessionId);
+  let graph = fromSnapshot(snap);
   let session = snap.session;
   let seq = snap.seq;
+  let epoch: string | null = null;
+  let closed = false;
+  /** Non-null while a snapshot refetch is in flight: changes received meanwhile, applied once it lands. */
+  let buffered: SeqChange[] | null = null;
   const listeners = new Set<() => void>();
+  const notify = (): void => {
+    for (const fn of [...listeners]) fn();
+  };
+
+  /** Applies the changes newer than `seq` (one copy of each map, one notification). */
+  const apply = (changes: SeqChange[]): boolean => {
+    const fresh = changes.filter((c) => c.seq > seq);
+    if (fresh.length === 0) return false;
+    seq = fresh[fresh.length - 1]!.seq;
+    for (const c of fresh) if (c.type === 'session_upserted') session = c.session;
+    graph = applyChanges(graph, fresh);
+    return true;
+  };
+
+  /** Replaces the graph with a fresh snapshot; changes arriving meanwhile are kept and replayed on top of it. */
+  const resync = (): void => {
+    if (buffered !== null || closed) return; // already refetching
+    buffered = [];
+    fetchGraph(sessionId).then(
+      (fresh) => {
+        const pending = buffered ?? [];
+        buffered = null;
+        if (closed) return;
+        graph = fromSnapshot(fresh);
+        session = fresh.session;
+        seq = fresh.seq;
+        apply(pending);
+        notify();
+      },
+      () => {
+        const pending = buffered ?? [];
+        buffered = null;
+        if (closed) return;
+        if (apply(pending)) notify();
+        setTimeout(resync, RECONNECT_MS); // the server still expects us to refetch
+      },
+    );
+  };
 
   const close = connect(
     () => ({ type: 'subscribe', scope: 'session', sessionId, sinceSeq: seq }),
-    (changes) => {
-      // One copy of each map per message (mutated locally, then published), one notification per message.
-      const nodes = { ...graph.nodes };
-      const edges = { ...graph.edges };
-      let touched = false;
-      for (const c of changes) {
-        if (c.seq <= seq) continue;
-        seq = c.seq;
-        touched = true;
-        // Same semantics as the shared applyChange, minus the per-change copying.
-        if (c.type === 'session_upserted') session = c.session;
-        else if (c.type === 'node_added') nodes[c.node.id] = c.node;
-        else if (c.type === 'edge_added') edges[c.edge.id] = c.edge;
-        else {
-          const existing = nodes[c.id];
-          if (existing) nodes[c.id] = { ...existing, ...c.patch };
-        }
+    (msg) => {
+      if (msg.type === 'hello') {
+        // A different database (deleted and recreated): seqs are not comparable any more.
+        if (epoch !== null && msg.epoch !== epoch) resync();
+        epoch = msg.epoch;
+      } else if (msg.type === 'resync') {
+        if (msg.sessionId === sessionId) resync();
+      } else if (buffered !== null) {
+        buffered.push(...msg.changes);
+      } else if (apply(msg.changes)) {
+        notify();
       }
-      if (touched) graph = { nodes, edges };
-      if (touched) for (const fn of [...listeners]) fn();
     },
     deps.createSocket ?? createBrowserSocket,
   );
@@ -152,7 +188,10 @@ export async function openLiveSession(
       listeners.add(fn);
       return () => void listeners.delete(fn);
     },
-    close,
+    close() {
+      closed = true;
+      close();
+    },
   };
 }
 
@@ -163,8 +202,9 @@ export function openLiveSessions(
 ): { close(): void } {
   const close = connect(
     () => ({ type: 'subscribe', scope: 'sessions' }),
-    (changes) => {
-      for (const c of changes) if (c.type === 'session_upserted') onSession(c.session);
+    (msg) => {
+      if (msg.type !== 'changes') return;
+      for (const c of msg.changes) if (c.type === 'session_upserted') onSession(c.session);
     },
     deps.createSocket ?? createBrowserSocket,
     deps.onReconnect,

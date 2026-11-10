@@ -29,3 +29,32 @@ export function applyChange(graph: Graph, change: Change): Graph {
       return graph;
   }
 }
+
+/**
+ * Batched form of folding applyChange over `changes`: same result, but each map is copied at most once.
+ * Returns `graph` itself when nothing changed.
+ */
+export function applyChanges(graph: Graph, changes: Change[]): Graph {
+  let nodes: Graph['nodes'] | null = null;
+  let edges: Graph['edges'] | null = null;
+  for (const c of changes) {
+    switch (c.type) {
+      case 'node_added':
+        (nodes ??= { ...graph.nodes })[c.node.id] = c.node;
+        break;
+      case 'node_updated': {
+        const existing = (nodes ?? graph.nodes)[c.id];
+        if (!existing) break;
+        (nodes ??= { ...graph.nodes })[c.id] = { ...existing, ...c.patch };
+        break;
+      }
+      case 'edge_added':
+        (edges ??= { ...graph.edges })[c.edge.id] = c.edge;
+        break;
+      case 'session_upserted':
+        break;
+    }
+  }
+  if (nodes === null && edges === null) return graph;
+  return { ...graph, nodes: nodes ?? graph.nodes, edges: edges ?? graph.edges };
+}

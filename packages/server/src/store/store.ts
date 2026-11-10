@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -66,7 +66,8 @@ export interface Store {
   /** The GraphSnapshot already serialized, built from the stored bodies without parsing them. */
   getGraphJson(sessionId: string): string | null;
   getNodeDetail(sessionId: string, nodeId: string): NodeDetail | null;
-  changesSince(seq: number, sessionId?: string): SeqChange[];
+  /** Ascending; with `limit`, at most that many (session-scoped only). */
+  changesSince(seq: number, sessionId?: string, limit?: number): SeqChange[];
   /** Smallest retained seq, or the next seq when the change log is empty. */
   minSeq(): number;
   /** Ordered by ingestId ascending. */
@@ -79,6 +80,8 @@ export interface Store {
   /** Clears derived tables and the change log; keeps raw_event and file_offset. */
   clearDerived(): void;
   bumpUnknown(recordType: string, sample: string): void;
+  /** Random id generated when the database file was created; stable across restarts and rebuilds. */
+  epoch(): string;
   /** Latest receivedAt of any stored hook event (kept in `meta`, no raw_event scan). */
   lastHookAt(): string | null;
   diagnostics(): Diagnostics;
@@ -217,6 +220,8 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
      ON CONFLICT(file) DO UPDATE SET "offset" = excluded."offset", size = excluded.size`,
   );
   const selectMeta = db.prepare(`SELECT value FROM meta WHERE key = ?`).pluck();
+  db.prepare(`INSERT OR IGNORE INTO meta (key, value) VALUES ('epoch', ?)`).run(randomUUID());
+  const epoch = selectMeta.get('epoch') as string;
   const upsertLaterMeta = db.prepare(
     `INSERT INTO meta (key, value) VALUES (?, ?)
      ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE excluded.value > meta.value`,
@@ -257,6 +262,9 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   const selectChanges = db.prepare(`SELECT seq, body FROM change_log WHERE seq > ? ORDER BY seq`);
   const selectChangesForSession = db.prepare(
     `SELECT seq, body FROM change_log WHERE seq > ? AND session_id = ? ORDER BY seq`,
+  );
+  const selectChangesForSessionLimit = db.prepare(
+    `SELECT seq, body FROM change_log WHERE seq > ? AND session_id = ? ORDER BY seq LIMIT ?`,
   );
   const selectMinSeq = db.prepare(`SELECT MIN(seq) FROM change_log`).pluck();
   const selectSeqCounter = db.prepare(`SELECT seq FROM sqlite_sequence WHERE name = 'change_log'`).pluck();
@@ -428,8 +436,11 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
       const d = row.detail === null ? {} : (JSON.parse(row.detail) as Partial<NodeDetail>);
       return { input: null, output: null, text: null, raw: null, ...d, nodeId };
     },
-    changesSince(seq, sessionId) {
-      return toChanges(sessionId === undefined ? selectChanges.all(seq) : selectChangesForSession.all(seq, sessionId));
+    changesSince(seq, sessionId, limit) {
+      if (sessionId === undefined) return toChanges(selectChanges.all(seq));
+      return toChanges(
+        limit === undefined ? selectChangesForSession.all(seq, sessionId) : selectChangesForSessionLimit.all(seq, sessionId, limit),
+      );
     },
     minSeq() {
       const min = selectMinSeq.get() as number | null;
@@ -456,6 +467,7 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
       upsertUnknown.run(recordType, sample.slice(0, SAMPLE_MAX));
     },
     lastHookAt,
+    epoch: () => epoch,
     diagnostics() {
       return {
         unknownRecords: (selectUnknown.all() as { record_type: string; count: number; sample: string }[]).map((r) => ({
