@@ -1,7 +1,6 @@
-import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import type { Change, SeqChange } from '@claude-canvas/shared';
+import { STALE_AFTER_MS, type Change, type SeqChange } from '@claude-canvas/shared';
 import type { Config } from './config.js';
 import { Normalizer } from './normalize/normalizer.js';
 import { NORMALIZER_VERSION } from './normalize/version.js';
@@ -13,8 +12,10 @@ import type { RawEvent, Store, StoredRawEvent } from './store/store.js';
 const READ_BUDGET_BYTES = 64 * 1024;
 /** Time budget of one synchronous hydration slice. */
 const HYDRATE_SLICE_MS = 8;
-/** Rows read from the store per hydration page. */
+/** A hydration/rebuild page stops at this many rows or this much raw text, whichever comes first (at least one row). */
 const HYDRATE_PAGE_ROWS = 200;
+const HYDRATE_PAGE_BYTES = 256 * 1024;
+const LIVE_STATUSES: ReadonlySet<string> = new Set(['running', 'awaiting_permission', 'awaiting_input']);
 const UNKNOWN_PROJECT = 'unknown';
 const REBUILD_PROGRESS_EVERY = 100;
 /** meta keys */
@@ -55,6 +56,8 @@ export class Pipeline {
   /** Session ids whose main source file is gone; sourceDeleted stays true for them. */
   private readonly deleted = new Set<string>();
   private readonly failures = new Map<string, string>();
+  /** sessionId -> absolute paths of its files seen so far (the hot-set rescan stats only these). */
+  private readonly filesBySession = new Map<string, Set<string>>();
   /** Known file sizes (mirror of file_offset.size) and last hook time, loaded from the store once. */
   private sizes: Map<string, number> | null = null;
   private lastHook: string | null = null;
@@ -161,53 +164,51 @@ export class Pipeline {
     }, onError);
   }
 
+  /**
+   * Full scan: one directory listing; ingests files that are new or whose size differs from the stored size (this
+   * also picks up files chokidar missed), evicts cold sessions, and derives deleted sources from the same listing.
+   */
   async scanAll(): Promise<void> {
+    const files = await this.listFiles();
     const groups = new Map<string, { sessionId: string; files: string[] }>();
-    for (const file of await this.listFiles()) {
+    for (const file of files) {
       const cls = classifyPath(this.config.projectsDir, file);
       if (cls === null) continue;
+      this.registerFile(cls.sessionId, file);
       const key = `${cls.projectId}\u0000${cls.sessionId}`;
       const g = groups.get(key) ?? { sessionId: cls.sessionId, files: [] };
       g.files.push(file);
       groups.set(key, g);
     }
-    const sizes = this.sizeMap();
-    for (const { sessionId, files } of groups.values()) {
-      for (const file of files) {
-        const kind = classifyPath(this.config.projectsDir, file)?.kind;
-        if (kind === 'title' || kind === 'agent_meta') {
-          const known = sizes.get(this.rel(file));
-          try {
-            if (known !== undefined && (await fsp.stat(file)).size === known) continue;
-          } catch {
-            continue;
-          }
-        }
+    for (const { sessionId, files: group } of groups.values()) {
+      for (const file of group) {
+        if (await this.unchanged(file)) continue;
         await this.safeIngest(file);
       }
       this.evictIfOld(sessionId);
     }
-    this.markDeletedSources();
+    this.markDeletedSources(new Set(files.map((f) => this.rel(f))));
   }
 
-  /** Cheap periodic check: ingest files whose size differs from the stored size, plus files not seen yet. */
+  /**
+   * Cheap periodic check (every rescanMs): stats only the files of hot sessions (touched within evictAfterMs) plus
+   * files whose last ingest failed, ingests those whose size changed, then evicts sessions untouched for evictAfterMs.
+   * New files and deletions are left to chokidar and the full scan.
+   */
   async rescan(): Promise<void> {
-    const sizes = this.sizeMap();
-    for (const file of await this.listFiles()) {
-      const storedSize = sizes.get(this.rel(file));
-      if (storedSize !== undefined) {
-        try {
-          if ((await fsp.stat(file)).size === storedSize) continue;
-        } catch {
-          continue;
-        }
-      }
+    const now = Date.now();
+    const targets = new Set<string>();
+    for (const [id, touched] of this.lastTouch) {
+      if (now - touched > this.config.evictAfterMs) continue;
+      for (const file of this.filesBySession.get(id) ?? []) targets.add(file);
+    }
+    for (const key of this.failures.keys()) if (!key.startsWith('hook:')) targets.add(key);
+    for (const file of [...targets].sort()) {
+      if (await this.unchanged(file)) continue;
       await this.safeIngest(file);
     }
-    this.markDeletedSources();
-    const now = Date.now();
     for (const [id, touched] of [...this.lastTouch]) {
-      if (now - touched > this.config.evictAfterMs && !this.tails.has(id)) this.drop(id);
+      if (now - touched > this.config.evictAfterMs && !this.tails.has(id) && this.mayEvict(id)) this.drop(id);
     }
   }
 
@@ -234,7 +235,7 @@ export class Pipeline {
         const unknown: [string, string][] = [];
         let after = 0;
         for (;;) {
-          const page = this.store.rawForSessionAfter(id, after, HYDRATE_PAGE_ROWS);
+          const page = this.store.rawForSessionAfter(id, after, HYDRATE_PAGE_ROWS, HYDRATE_PAGE_BYTES);
           if (page.length === 0) break;
           for (const ev of page) {
             const out = this.normalizer.apply(ev, this.projectOf(ev));
@@ -259,7 +260,8 @@ export class Pipeline {
     }
     this.store.setMeta(NORMALIZER_VERSION_KEY, String(NORMALIZER_VERSION));
     this.store.deleteMeta(REBUILD_FLAG);
-    this.markDeletedSources();
+    // sourceDeleted flags were cleared with the derived tables; the next full scan's listing restores them.
+    this.flagsChecked = false;
   }
 
   /** Files under projectsDir that classifyPath recognizes, in stable order. */
@@ -288,6 +290,36 @@ export class Pipeline {
   private sizeMap(): Map<string, number> {
     this.seed();
     return this.sizes!;
+  }
+
+  /** True when the file's size equals the stored size (nothing new can be complete), or when it is gone. */
+  private async unchanged(absPath: string): Promise<boolean> {
+    const stored = this.sizeMap().get(this.rel(absPath));
+    if (stored === undefined) return false;
+    try {
+      return (await fsp.stat(absPath)).size === stored;
+    } catch {
+      return true; // gone: the full scan's listing marks the session
+    }
+  }
+
+  private registerFile(sessionId: string, absPath: string): void {
+    let set = this.filesBySession.get(sessionId);
+    if (!set) {
+      set = new Set();
+      this.filesBySession.set(sessionId, set);
+    }
+    set.add(absPath);
+  }
+
+  /**
+   * A session whose stored status is running / awaiting_* with activity within STALE_AFTER_MS is never evicted: it is
+   * live, and re-hydrating it on every event would be wasted work.
+   */
+  private mayEvict(sessionId: string): boolean {
+    const session = this.store.getSession(sessionId);
+    if (session === null || !LIVE_STATUSES.has(session.status)) return true;
+    return Date.now() - Date.parse(session.lastActivityAt) > STALE_AFTER_MS;
   }
 
   /** Store key of a file: path relative to projectsDir with `/` separators. */
@@ -362,6 +394,7 @@ export class Pipeline {
 
     const agentId = cls.kind === 'agent' ? cls.agentId : null;
     const file = this.rel(absPath);
+    this.registerFile(cls.sessionId, absPath);
     for (;;) {
       let size: number;
       try {
@@ -392,6 +425,10 @@ export class Pipeline {
       } else if (progressed) {
         // Reads that only consumed blank lines still persist their progress.
         this.recordOffset(file, res.newOffset, size);
+      } else if (this.sizeMap().get(file) !== size) {
+        // No complete line yet (trailing partial line, or growth during the read): record the size so the rescan does
+        // not reopen the file every tick; the next size change brings it back.
+        this.recordOffset(file, from, size);
       }
       if (res.newOffset === from) return;
       await yieldToEventLoop();
@@ -408,6 +445,7 @@ export class Pipeline {
     const size = Buffer.byteLength(content);
     const agentId = cls.kind === 'agent_meta' ? cls.agentId : null;
     const file = this.rel(absPath);
+    this.registerFile(cls.sessionId, absPath);
     await this.enqueue(cls.sessionId, () => {
       // Compare against what is stored (not an in-memory cache) so the check survives restarts;
       // a file that was never recorded cannot have a stored copy, so skip the lookup.
@@ -458,9 +496,9 @@ export class Pipeline {
       while (!done) {
         const start = performance.now();
         while (!done && performance.now() - start < HYDRATE_SLICE_MS) {
-          const page = this.store.rawForSessionAfter(sessionId, after, HYDRATE_PAGE_ROWS);
+          const page = this.store.rawForSessionAfter(sessionId, after, HYDRATE_PAGE_ROWS, HYDRATE_PAGE_BYTES);
           for (const ev of page) this.replayOne(ev);
-          if (page.length < HYDRATE_PAGE_ROWS) done = true;
+          if (page.length === 0) done = true;
           else after = page[page.length - 1]!.ingestId;
         }
         if (!done) {
@@ -493,7 +531,7 @@ export class Pipeline {
     if (this.tails.has(sessionId) || !this.lastTouch.has(sessionId)) return;
     const session = this.store.getSession(sessionId);
     const recent = session !== null && Date.now() - Date.parse(session.lastActivityAt) <= this.config.evictAfterMs;
-    if (!recent) this.drop(sessionId);
+    if (!recent && this.mayEvict(sessionId)) this.drop(sessionId);
   }
 
   /**
@@ -549,17 +587,17 @@ export class Pipeline {
   }
 
   /**
-   * Flags sessions whose recorded source file no longer exists (data is kept; the flag is sticky) and
-   * clears the flag for sessions whose file is back, including flags left over from a previous run.
+   * Flags sessions whose recorded source file is missing from the full scan's directory listing (data is kept; the
+   * flag is sticky) and clears it for sessions whose file is back, including flags left over from a previous run.
    */
-  private markDeletedSources(): void {
+  private markDeletedSources(listed: ReadonlySet<string>): void {
     const changes: Change[] = [];
     const firstPass = !this.flagsChecked;
     this.flagsChecked = true;
     for (const file of this.sizeMap().keys()) {
       const cls = classifyRelPath(file);
       if (cls?.kind !== 'session') continue;
-      if (fs.existsSync(path.join(this.config.projectsDir, ...file.split('/')))) {
+      if (listed.has(file)) {
         if (firstPass || this.deleted.has(cls.sessionId)) {
           this.deleted.delete(cls.sessionId);
           const session = this.store.getSession(cls.sessionId);

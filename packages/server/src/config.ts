@@ -7,7 +7,10 @@ export interface Config {
   dbPath: string;
   host: '127.0.0.1';
   port: number;
+  /** Hot-set rescan period: stats only files of recently touched sessions and failed files. */
   rescanMs: number;
+  /** Full directory listing period: new files chokidar missed, deletions. */
+  fullScanMs: number;
   /** Normalizer state of sessions untouched for this long is dropped (re-hydrated on demand). */
   evictAfterMs: number;
   /** Built web UI directory, served by a later task. */
@@ -22,6 +25,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, overrides: Part
     host: '127.0.0.1',
     port: 4317,
     rescanMs: 3000,
+    fullScanMs: 60_000,
     evictAfterMs: 600_000,
     webDist: null,
     ...overrides,

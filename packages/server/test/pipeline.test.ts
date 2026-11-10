@@ -1,3 +1,4 @@
+import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -10,13 +11,14 @@ import { startWatcher } from '../src/sources/transcript/watcher.js';
 import { openStore, type RawEvent, type Store } from '../src/store/store.js';
 import { assistantBlock, toolResult, userPrompt } from './fixtures.js';
 
-const reads = vi.hoisted(() => ({ active: 0, max: 0, failFor: null as string | null }));
+const reads = vi.hoisted(() => ({ active: 0, max: 0, calls: 0, failFor: null as string | null }));
 vi.mock('../src/sources/transcript/reader.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../src/sources/transcript/reader.js')>();
   return {
     ...orig,
     readNewLines: async (...args: Parameters<typeof orig.readNewLines>) => {
       if (args[0] === reads.failFor) throw Object.assign(new Error('EPERM: simulated'), { code: 'EPERM' });
+      reads.calls += 1;
       reads.active += 1;
       reads.max = Math.max(reads.max, reads.active);
       try {
@@ -238,8 +240,14 @@ describe('pipeline', () => {
     expect(store.getSession('s1')).not.toBeNull();
     expect(pipeline.ingestFailures().map((f) => f.file)).toEqual([abs('proj/aaa.jsonl')]);
     await append('proj/s1.jsonl', [assistantBlock('a1', 'u1', { type: 'text', text: 'hi' })]);
-    await pipeline.rescan();
+    // Ruling 9: s1 is cold (evicted after the scan), so its append is found by the full scan, not the hot rescan.
+    await pipeline.scanAll();
     expect(store.getGraph('s1')!.nodes).toHaveLength(2);
+    // A file with a recorded failure is retried by every rescan.
+    reads.failFor = null;
+    await pipeline.rescan();
+    expect(store.getSession('aaa')).not.toBeNull();
+    expect(pipeline.ingestFailures()).toEqual([]);
   });
 
   test('rescan 与 lastHookAt 不会反复调用 diagnostics', async () => {
@@ -307,7 +315,7 @@ describe('pipeline', () => {
     await pipeline.scanAll();
     expect(store.getSession('s1')!.sourceDeleted).toBe(true);
     await write('proj/s1.jsonl', events); // same bytes, same size
-    await pipeline.rescan();
+    await pipeline.scanAll(); // ruling 9: deletion state comes from the full scan's directory listing
     expect(store.getSession('s1')!.sourceDeleted).toBe(false);
 
     await fs.rm(abs('proj/s1.jsonl'));
@@ -560,5 +568,126 @@ describe('pipeline', () => {
     expect(store.getMeta('rebuild_in_progress')).toBeNull();
     expect(store.getMeta('normalizer_version')).toBe(String(NORMALIZER_VERSION));
     for (let k = 0; k < 3; k++) expect(store.getGraph(`s${k}`)!.nodes.map((n) => n.id)).toEqual([`u${k}`]);
+  });
+
+  // ---- final fix wave, group 9: scan cadences and eviction ----
+
+  test('删除检测使用目录列表，不逐个 existsSync', async () => {
+    await write('proj/s1.jsonl', [userPrompt('u1', null, 'x')]);
+    await write('proj/s2.jsonl', [userPrompt('v1', null, 'x')]);
+    await pipeline.scanAll();
+    await fs.rm(abs('proj/s2.jsonl'));
+    const spy = vi.spyOn(fsSync, 'existsSync');
+    try {
+      await pipeline.scanAll();
+      await pipeline.rescan();
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+    expect(store.getSession('s2')!.sourceDeleted).toBe(true);
+    expect(store.getSession('s1')!.sourceDeleted).toBe(false);
+  });
+
+  test('rescan 只检查热会话的文件和失败过的文件', async () => {
+    for (const k of ['s1', 's2', 's3']) await write(`proj/${k}.jsonl`, [userPrompt(`u-${k}`, null, 'x')]);
+    await pipeline.scanAll(); // all cold afterwards (old timestamps)
+    expect(pipeline.loadedSessionCount()).toBe(0);
+    await append('proj/s1.jsonl', [assistantBlock('a1', 'u-s1', { type: 'text', text: 'hi' })]);
+    await pipeline.ingestFile(abs('proj/s1.jsonl')); // s1 is hot now
+    await append('proj/s1.jsonl', [assistantBlock('a2', 'a1', { type: 'text', text: 'more' })]);
+    await append('proj/s2.jsonl', [assistantBlock('b1', 'u-s2', { type: 'text', text: 'cold' })]);
+    const spy = vi.spyOn(fs, 'stat');
+    let statted: string[];
+    try {
+      await pipeline.rescan();
+      statted = spy.mock.calls.map((c) => path.relative(config.projectsDir, String(c[0])).split(path.sep).join('/'));
+    } finally {
+      spy.mockRestore();
+    }
+    expect([...new Set(statted)]).toEqual(['proj/s1.jsonl']);
+    expect(store.getGraph('s1')!.nodes.map((n) => n.id)).toEqual(['u-s1', 'a1', 'a2']);
+    expect(store.getGraph('s2')!.nodes.map((n) => n.id)).toEqual(['u-s2']); // waits for the full scan
+    await pipeline.scanAll();
+    expect(store.getGraph('s2')!.nodes.map((n) => n.id)).toEqual(['u-s2', 'b1']);
+  });
+
+  test('fullScanMs 默认 60 秒；watcher 按两种节奏扫描', async () => {
+    expect(loadConfig({}).fullScanMs).toBe(60_000);
+    const scans = vi.spyOn(pipeline, 'scanAll');
+    const rescans = vi.spyOn(pipeline, 'rescan');
+    const w = startWatcher(pipeline, { ...config, rescanMs: 50, fullScanMs: 300 });
+    try {
+      await w.ready;
+      await new Promise((r) => setTimeout(r, 750));
+    } finally {
+      await w.close();
+    }
+    expect(scans.mock.calls.length).toBeGreaterThanOrEqual(2); // initial + periodic
+    expect(scans.mock.calls.length).toBeLessThanOrEqual(4);
+    expect(rescans.mock.calls.length).toBeGreaterThan(scans.mock.calls.length);
+  });
+
+  test('只有半行时记录文件大小，rescan 不再反复打开文件；补全后照常读到', async () => {
+    const file = abs('proj/s1.jsonl');
+    await write('proj/s1.jsonl', [userPrompt('u1', null, 'x')]);
+    const partial = JSON.stringify(JSON.parse(linesOf([assistantBlock('a1', 'u1', { type: 'text', text: 'hi' })])));
+    await fs.appendFile(file, partial.slice(0, 20));
+    await pipeline.ingestFile(file);
+    const size = (await fs.stat(file)).size;
+    expect(store.diagnostics().files).toContainEqual({ path: 'proj/s1.jsonl', offset: size - 20, size });
+    reads.calls = 0;
+    await pipeline.rescan();
+    await pipeline.rescan();
+    await new Pipeline(store, config).scanAll(); // a full scan (another instance, so s1 stays hot here) skips it too
+    expect(reads.calls).toBe(0);
+    await fs.appendFile(file, partial.slice(20) + '\n');
+    await pipeline.rescan();
+    expect(store.getGraph('s1')!.nodes.map((n) => n.id)).toEqual(['u1', 'a1']);
+  });
+
+  test('运行中且最近有活动的会话不会被淘汰', async () => {
+    const now = new Date().toISOString();
+    const p = new Pipeline(store, { ...config, evictAfterMs: 50 });
+    await write('proj/s1.jsonl', [userPrompt('u1', null, 'x', { timestamp: now })]); // running, fresh
+    await write('proj/s2.jsonl', [
+      userPrompt('v1', null, 'x', { timestamp: now }),
+      assistantBlock('v2', 'v1', { type: 'text', text: 'done' }, { stopReason: 'end_turn', timestamp: now }),
+    ]); // idle, fresh
+    await p.ingestFile(abs('proj/s1.jsonl'));
+    await p.ingestFile(abs('proj/s2.jsonl'));
+    expect(store.getSession('s1')!.status).toBe('running');
+    expect(store.getSession('s2')!.status).toBe('idle');
+    await new Promise((r) => setTimeout(r, 120));
+    await p.rescan();
+    expect(p.loadedSessionCount()).toBe(1);
+    await p.scanAll();
+    expect(p.loadedSessionCount()).toBe(1);
+  });
+
+  test('水合按行数和字节数分页（每页至少一行）', async () => {
+    const file = 'proj/s1.jsonl';
+    for (let i = 0; i < 6; i++) {
+      const ev = assistantBlock(`a${i}`, i ? `a${i - 1}` : null, { type: 'text', text: 'x'.repeat(100_000) });
+      if (ev.source === 'transcript') store.insertRaw({ ...ev, file });
+    }
+    expect(store.rawForSessionAfter('s1', 0, 200, 256 * 1024)).toHaveLength(3);
+    expect(store.rawForSessionAfter('s1', 0, 200, 10)).toHaveLength(1);
+    expect(store.rawForSessionAfter('s1', 0, 2, 10 ** 9)).toHaveLength(2);
+    store.applyChanges([
+      {
+        type: 'session_upserted',
+        session: {
+          id: 's1', projectId: 'proj', cwd: null, title: null, gitBranch: null, status: 'idle',
+          sourceDeleted: false, startedAt: '2026-01-01T00:00:00.000Z', lastActivityAt: '2026-01-01T00:00:00.000Z',
+        },
+      },
+    ]);
+    const spy = vi.spyOn(store, 'rawForSessionAfter');
+    const p = new Pipeline(store, config);
+    p.ingestHook('Stop', 's1', JSON.stringify({ session_id: 's1', hook_event_name: 'Stop' }));
+    await p.idle();
+    expect(spy.mock.calls.length).toBeGreaterThanOrEqual(3);
+    for (const call of spy.mock.calls) expect(call.slice(2)).toEqual([200, 256 * 1024]);
   });
 });

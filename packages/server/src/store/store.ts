@@ -72,8 +72,11 @@ export interface Store {
   minSeq(): number;
   /** Ordered by ingestId ascending. */
   rawForSession(sessionId: string): StoredRawEvent[];
-  /** Keyset page over rawForSession: ingestId strictly greater than afterIngestId, ascending, at most limit rows. */
-  rawForSessionAfter(sessionId: string, afterIngestId: number, limit: number): StoredRawEvent[];
+  /**
+   * Keyset page over rawForSession: ingestId strictly greater than afterIngestId, ascending, at most `limit` rows and,
+   * when `maxBytes` is given, stopping once the rows' raw text reaches it (always at least one row).
+   */
+  rawForSessionAfter(sessionId: string, afterIngestId: number, limit: number, maxBytes?: number): StoredRawEvent[];
   /** Payload of the most recent meta raw event for that file, or null. */
   latestMeta(file: string): string | null;
   allSessionIdsInRaw(): string[];
@@ -458,8 +461,16 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     rawForSession(sessionId) {
       return (selectRawForSession.all(sessionId) as RawRow[]).map(toStoredRaw);
     },
-    rawForSessionAfter(sessionId, afterIngestId, limit) {
-      return (selectRawAfter.all(sessionId, afterIngestId, limit) as RawRow[]).map(toStoredRaw);
+    rawForSessionAfter(sessionId, afterIngestId, limit, maxBytes) {
+      if (maxBytes === undefined) return (selectRawAfter.all(sessionId, afterIngestId, limit) as RawRow[]).map(toStoredRaw);
+      const out: StoredRawEvent[] = [];
+      let bytes = 0;
+      for (const row of selectRawAfter.iterate(sessionId, afterIngestId, limit) as IterableIterator<RawRow>) {
+        out.push(toStoredRaw(row));
+        bytes += row.body.length;
+        if (bytes >= maxBytes) break; // ends the iteration (and the statement)
+      }
+      return out;
     },
     latestMeta(file) {
       const row = selectLatestMeta.get(file) as { body: string } | undefined;
