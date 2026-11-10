@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS raw_event (
 CREATE UNIQUE INDEX IF NOT EXISTS raw_event_transcript_dedupe
   ON raw_event (file, line_hash) WHERE source = 'transcript';
 CREATE INDEX IF NOT EXISTS raw_event_session ON raw_event (session_id, ingest_id);
+CREATE INDEX IF NOT EXISTS raw_event_meta ON raw_event (file, ingest_id) WHERE source = 'meta';
 
 CREATE TABLE IF NOT EXISTS file_offset (
   file     TEXT PRIMARY KEY,

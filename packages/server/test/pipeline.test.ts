@@ -341,4 +341,101 @@ describe('pipeline', () => {
     await p.rescan();
     expect(p.loadedSessionCount()).toBe(0);
   });
+  test('10 万行的冷会话水合分页读取，事件循环间隔 < 100ms', async () => {
+    const file = abs('proj/s1.jsonl');
+    for (let i = 0; i < 100_000; i++) {
+      const ev = assistantBlock(`a${i}`, i ? `a${i - 1}` : null, { type: 'text', text: 'x'.repeat(450) });
+      if (ev.source === 'transcript') store.insertRaw({ ...ev, file });
+    }
+    store.applyChanges([
+      {
+        type: 'session_upserted',
+        session: {
+          id: 's1', projectId: 'proj', cwd: null, title: null, gitBranch: null, status: 'idle',
+          sourceDeleted: false, startedAt: '2026-01-01T00:00:00.000Z', lastActivityAt: '2026-01-01T00:00:00.000Z',
+        },
+      },
+    ]);
+    const p2 = new Pipeline(store, config);
+    let maxGap = 0;
+    let last = performance.now();
+    const timer = setInterval(() => {
+      const now = performance.now();
+      maxGap = Math.max(maxGap, now - last);
+      last = now;
+    }, 5);
+    try {
+      p2.ingestHook(
+        'PreToolUse',
+        's1',
+        JSON.stringify({ session_id: 's1', hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: {}, tool_use_id: 'tuH' }),
+      );
+      await p2.idle();
+    } finally {
+      clearInterval(timer);
+    }
+    expect(maxGap).toBeLessThan(100);
+    expect(store.getGraph('s1')!.nodes.map((n) => n.id)).toContain('tool:tuH');
+  }, 180_000);
+
+  test('rebuild 在有待处理工作时抛错；rebuild 后不留下未被追踪的会话', async () => {
+    await write('proj/s1.jsonl', [userPrompt('u1', null, 'x')]);
+    const pending = pipeline.ingestFile(abs('proj/s1.jsonl'));
+    expect(() => pipeline.rebuild()).toThrow(/pending/);
+    await pending;
+    expect(pipeline.loadedSessionCount()).toBe(1);
+    pipeline.rebuild();
+    expect(pipeline.loadedSessionCount()).toBe(0);
+    await append('proj/s1.jsonl', [assistantBlock('a1', 'u1', { type: 'text', text: 'hi' })]);
+    await pipeline.ingestFile(abs('proj/s1.jsonl'));
+    expect(store.getGraph('s1')!.nodes.map((n) => n.id)).toEqual(['u1', 'a1']);
+  });
+
+  test('文件重建（大小不变）或重启后，粘性的 sourceDeleted 会被清除', async () => {
+    const events = [userPrompt('u1', null, 'x')];
+    await write('proj/s1.jsonl', events);
+    await pipeline.scanAll();
+    await fs.rm(abs('proj/s1.jsonl'));
+    await pipeline.scanAll();
+    expect(store.getSession('s1')!.sourceDeleted).toBe(true);
+    await write('proj/s1.jsonl', events); // same bytes, same size
+    await pipeline.rescan();
+    expect(store.getSession('s1')!.sourceDeleted).toBe(false);
+
+    await fs.rm(abs('proj/s1.jsonl'));
+    await pipeline.scanAll();
+    expect(store.getSession('s1')!.sourceDeleted).toBe(true);
+    await write('proj/s1.jsonl', events);
+    await new Pipeline(store, config).scanAll(); // restart: no in-memory flag
+    expect(store.getSession('s1')!.sourceDeleted).toBe(false);
+  });
+
+  test('排队的 hook 在水合失败时记录错误且原始事件不丢', async () => {
+    await write('proj/s1.jsonl', [userPrompt('u1', null, 'x')]);
+    await pipeline.ingestFile(abs('proj/s1.jsonl'));
+    const p2 = new Pipeline(store, config);
+    vi.spyOn(store, 'rawForSessionAfter').mockImplementationOnce(() => {
+      throw new Error('boom');
+    });
+    p2.ingestHook('Stop', 's1', JSON.stringify({ session_id: 's1', hook_event_name: 'Stop' }));
+    await p2.idle();
+    expect(p2.ingestFailures()).toContainEqual({ file: 'hook:s1', error: 'boom' });
+    expect(store.rawForSession('s1').filter((e) => e.source === 'hook')).toHaveLength(1);
+    // the next event hydrates normally
+    await append('proj/s1.jsonl', [assistantBlock('a1', 'u1', { type: 'text', text: 'hi' })]);
+    await p2.ingestFile(abs('proj/s1.jsonl'));
+    expect(store.getGraph('s1')!.nodes.map((n) => n.id)).toEqual(['u1', 'a1']);
+  });
+
+  test('meta 变化时不加载整个会话历史', async () => {
+    await write('proj/s1.jsonl', [userPrompt('u1', null, 'x')]);
+    await fs.mkdir(abs('proj/s1'), { recursive: true });
+    await fs.writeFile(abs('proj/s1/custom-title.json'), JSON.stringify({ customTitle: 'T' }));
+    await pipeline.scanAll();
+    await fs.writeFile(abs('proj/s1/custom-title.json'), JSON.stringify({ customTitle: 'T2' }));
+    const spy = vi.spyOn(store, 'rawForSession');
+    await new Pipeline(store, config).ingestFile(abs('proj/s1/custom-title.json'));
+    expect(spy).not.toHaveBeenCalled();
+    expect(store.getSession('s1')!.title).toBe('T2');
+  });
 });

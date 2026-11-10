@@ -132,3 +132,28 @@ test('clearDerived 之后 seq 仍然单调递增', () => {
   const after = store.applyChanges([sessionUpsert('s1', 'p1')]);
   expect(after[0].seq).toBeGreaterThan(maxBefore);
 });
+
+test('rawForSessionAfter pages by ingestId in ascending order', () => {
+  const ids: number[] = [];
+  for (let i = 0; i < 5; i++) {
+    ids.push(store.insertRaw({ source: 'hook', receivedAt: `t${i}`, eventName: 'Stop', sessionId: 's1', payload: `{"i":${i}}` })!);
+    store.insertRaw({ source: 'hook', receivedAt: `o${i}`, eventName: 'Stop', sessionId: 'other', payload: '{}' });
+  }
+  const page1 = store.rawForSessionAfter('s1', 0, 2);
+  expect(page1.map((e) => e.ingestId)).toEqual([ids[0], ids[1]]);
+  const page2 = store.rawForSessionAfter('s1', page1[1]!.ingestId, 2);
+  expect(page2.map((e) => e.ingestId)).toEqual([ids[2], ids[3]]);
+  expect(store.rawForSessionAfter('s1', ids[3]!, 10).map((e) => e.ingestId)).toEqual([ids[4]]);
+  expect(store.rawForSessionAfter('s1', ids[4]!, 10)).toEqual([]);
+  expect(store.rawForSessionAfter('missing', 0, 10)).toEqual([]);
+  expect(store.rawForSession('s1').map((e) => e.ingestId)).toEqual(ids);
+});
+
+test('latestMeta returns the newest meta payload of a file', () => {
+  expect(store.latestMeta('m.json')).toBeNull();
+  store.insertRaw({ source: 'meta', file: 'm.json', sessionId: 's1', agentId: null, payload: 'one' });
+  store.insertRaw({ source: 'meta', file: 'other.json', sessionId: 's1', agentId: null, payload: 'x' });
+  store.insertRaw({ source: 'meta', file: 'm.json', sessionId: 's1', agentId: null, payload: 'two' });
+  expect(store.latestMeta('m.json')).toBe('two');
+  expect(store.latestMeta('other.json')).toBe('x');
+});

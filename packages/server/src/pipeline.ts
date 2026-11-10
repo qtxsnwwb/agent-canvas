@@ -12,6 +12,8 @@ import type { RawEvent, Store, StoredRawEvent } from './store/store.js';
 const READ_BUDGET_BYTES = 64 * 1024;
 /** Time budget of one synchronous hydration slice. */
 const HYDRATE_SLICE_MS = 8;
+/** Rows read from the store per hydration page. */
+const HYDRATE_PAGE_ROWS = 200;
 const UNKNOWN_PROJECT = 'unknown';
 
 type Listener = (changes: SeqChange[]) => void;
@@ -51,6 +53,9 @@ export class Pipeline {
   /** Known file sizes (mirror of file_offset.size) and last hook time, loaded from the store once. */
   private sizes: Map<string, number> | null = null;
   private lastHook: string | null = null;
+  /** Hook events already inserted into raw_event (so a failed task does not insert them twice). */
+  private readonly persistedHooks = new WeakSet<object>();
+  private flagsChecked = false;
 
   constructor(
     private readonly store: Store,
@@ -124,7 +129,24 @@ export class Pipeline {
       this.applyHook(event);
       return;
     }
-    this.enqueue(sessionId, () => this.applyHook(event)).catch(() => undefined);
+    const key = `hook:${sessionId}`;
+    this.enqueue(sessionId, () => this.applyHook(event)).then(
+      () => {
+        this.failures.delete(key);
+      },
+      (err: unknown) => {
+        this.failures.set(key, err instanceof Error ? err.message : String(err));
+        // Keep the raw event so it is applied by the next hydration or rebuild.
+        if (!this.persistedHooks.has(event)) {
+          try {
+            this.store.insertRaw(event);
+            this.persistedHooks.add(event);
+          } catch {
+            // nothing more we can do
+          }
+        }
+      },
+    );
   }
 
   async scanAll(): Promise<void> {
@@ -179,15 +201,18 @@ export class Pipeline {
 
   /** Re-derives everything from the raw log. */
   rebuild(): void {
+    if (this.active.size > 0 || this.tails.size > 0) throw new Error('rebuild refused: ingest work is pending (await idle() first)');
     this.store.clearDerived();
     this.normalizer = new Normalizer();
-    this.lastTouch.clear();
     const changes: Change[] = [];
     for (const id of this.store.allSessionIdsInRaw()) {
       const projectBySession = new Map<string, string>();
       for (const ev of this.store.rawForSession(id)) changes.push(...this.replayOne(ev, projectBySession));
     }
     this.commit(changes);
+    // Sessions are re-hydrated on demand; leave nothing loaded-but-untracked.
+    this.normalizer = new Normalizer();
+    this.lastTouch.clear();
     this.markDeletedSources();
   }
 
@@ -224,13 +249,17 @@ export class Pipeline {
     this.sizeMap().set(file, size);
   }
 
-  private track<T>(p: Promise<T>): Promise<T> {
-    const done = p.then(
-      () => undefined,
-      () => undefined,
+  /** Registers p in `active`; the cleanup runs before any consumer awaiting p resumes. */
+  private track<T>(p: Promise<T>, onDone?: (self: Promise<void>) => void): Promise<T> {
+    const done: Promise<void> = p.then(
+      () => finish(),
+      () => finish(),
     );
+    const finish = (): void => {
+      this.active.delete(done);
+      onDone?.(done);
+    };
     this.active.add(done);
-    void done.then(() => this.active.delete(done));
     return p;
   }
 
@@ -260,10 +289,9 @@ export class Pipeline {
       () => undefined,
     );
     this.tails.set(sessionId, tail);
-    void tail.then(() => {
+    this.track(p, () => {
       if (this.tails.get(sessionId) === tail) this.tails.delete(sessionId);
     });
-    this.track(tail);
     return p;
   }
 
@@ -331,14 +359,8 @@ export class Pipeline {
     const agentId = cls.kind === 'agent_meta' ? cls.agentId : null;
     await this.enqueue(cls.sessionId, () => {
       // Compare against what is stored (not an in-memory cache) so the check survives restarts;
-      // a file that was never recorded cannot have a stored copy, so skip the history lookup.
-      if (this.store.getOffset(absPath) > 0) {
-        const last = this.store
-          .rawForSession(cls.sessionId)
-          .filter((e) => e.source === 'meta' && e.file === absPath)
-          .pop();
-        if (last?.source === 'meta' && last.payload === content) return;
-      }
+      // a file that was never recorded cannot have a stored copy, so skip the lookup.
+      if (this.store.getOffset(absPath) > 0 && this.store.latestMeta(absPath) === content) return;
       const event: RawEvent = { source: 'meta', file: absPath, sessionId: cls.sessionId, agentId, payload: content };
       this.store.insertRaw(event);
       this.commit(this.normalizer.apply(event, cls.projectId).changes);
@@ -351,6 +373,7 @@ export class Pipeline {
     const sessionId = event.sessionId;
     if (sessionId !== null) this.lastTouch.set(sessionId, Date.now());
     this.store.insertRaw(event);
+    this.persistedHooks.add(event);
     const projectId = (sessionId !== null ? this.store.getSession(sessionId)?.projectId : undefined) ?? UNKNOWN_PROJECT;
     const out = this.normalizer.apply(event, projectId);
     if (out.unknownRecordType !== undefined) this.store.bumpUnknown(out.unknownRecordType, event.payload);
@@ -363,16 +386,28 @@ export class Pipeline {
    * work chain, before the event about to be applied is inserted, so replay never includes it.
    */
   private async hydrate(sessionId: string): Promise<void> {
-    if (this.normalizer.hasSession(sessionId) || this.store.getSession(sessionId) === null) return;
-    const events = this.store.rawForSession(sessionId);
+    const normalizer = this.normalizer;
+    if (normalizer.hasSession(sessionId) || this.store.getSession(sessionId) === null) return;
     const projectBySession = new Map<string, string>();
-    let i = 0;
-    while (i < events.length) {
-      const start = performance.now();
-      while (i < events.length && performance.now() - start < HYDRATE_SLICE_MS) {
-        this.replayOne(events[i++]!, projectBySession);
+    let after = 0;
+    let done = false;
+    try {
+      while (!done) {
+        const start = performance.now();
+        while (!done && performance.now() - start < HYDRATE_SLICE_MS) {
+          const page = this.store.rawForSessionAfter(sessionId, after, HYDRATE_PAGE_ROWS);
+          for (const ev of page) this.replayOne(ev, projectBySession);
+          if (page.length < HYDRATE_PAGE_ROWS) done = true;
+          else after = page[page.length - 1]!.ingestId;
+        }
+        if (!done) {
+          await yieldToEventLoop();
+          if (normalizer !== this.normalizer) return; // rebuilt meanwhile: this replay is obsolete
+        }
       }
-      if (i < events.length) await yieldToEventLoop();
+    } catch (err) {
+      normalizer.dropSession(sessionId); // never leave a half-replayed session behind
+      throw err;
     }
   }
 
@@ -427,12 +462,25 @@ export class Pipeline {
     if (session?.sourceDeleted) this.commit([{ type: 'session_upserted', session: { ...session, sourceDeleted: false } }]);
   }
 
-  /** Flags sessions whose recorded source file no longer exists. Data is kept; the flag is sticky. */
+  /**
+   * Flags sessions whose recorded source file no longer exists (data is kept; the flag is sticky) and
+   * clears the flag for sessions whose file is back, including flags left over from a previous run.
+   */
   private markDeletedSources(): void {
     const changes: Change[] = [];
+    const firstPass = !this.flagsChecked;
+    this.flagsChecked = true;
     for (const file of this.sizeMap().keys()) {
       const cls = classifyPath(this.config.projectsDir, file);
-      if (cls?.kind !== 'session' || fs.existsSync(file)) continue;
+      if (cls?.kind !== 'session') continue;
+      if (fs.existsSync(file)) {
+        if (firstPass || this.deleted.has(cls.sessionId)) {
+          this.deleted.delete(cls.sessionId);
+          const session = this.store.getSession(cls.sessionId);
+          if (session?.sourceDeleted) changes.push({ type: 'session_upserted', session: { ...session, sourceDeleted: false } });
+        }
+        continue;
+      }
       this.deleted.add(cls.sessionId);
       const session = this.store.getSession(cls.sessionId);
       if (session && !session.sourceDeleted) changes.push({ type: 'session_upserted', session: { ...session, sourceDeleted: true } });

@@ -36,6 +36,10 @@ export interface Store {
   changesSince(seq: number, sessionId?: string): SeqChange[];
   /** Ordered by ingestId ascending. */
   rawForSession(sessionId: string): StoredRawEvent[];
+  /** Keyset page over rawForSession: ingestId strictly greater than afterIngestId, ascending, at most limit rows. */
+  rawForSessionAfter(sessionId: string, afterIngestId: number, limit: number): StoredRawEvent[];
+  /** Payload of the most recent meta raw event for that file, or null. */
+  latestMeta(file: string): string | null;
   allSessionIdsInRaw(): string[];
   /** Clears derived tables and the change log; keeps raw_event and file_offset. */
   clearDerived(): void;
@@ -163,6 +167,12 @@ export function openStore(dbPath: string): Store {
     `SELECT seq, body FROM change_log WHERE seq > ? AND session_id = ? ORDER BY seq`,
   );
   const selectRawForSession = db.prepare(`SELECT * FROM raw_event WHERE session_id = ? ORDER BY ingest_id`);
+  const selectRawAfter = db.prepare(
+    `SELECT * FROM raw_event WHERE session_id = ? AND ingest_id > ? ORDER BY ingest_id LIMIT ?`,
+  );
+  const selectLatestMeta = db.prepare(
+    `SELECT body FROM raw_event WHERE source = 'meta' AND file = ? ORDER BY ingest_id DESC LIMIT 1`,
+  );
   const selectRawSessionIds = db.prepare(
     `SELECT DISTINCT session_id AS id FROM raw_event WHERE session_id IS NOT NULL ORDER BY session_id`,
   );
@@ -277,6 +287,13 @@ export function openStore(dbPath: string): Store {
     },
     rawForSession(sessionId) {
       return (selectRawForSession.all(sessionId) as RawRow[]).map(toStoredRaw);
+    },
+    rawForSessionAfter(sessionId, afterIngestId, limit) {
+      return (selectRawAfter.all(sessionId, afterIngestId, limit) as RawRow[]).map(toStoredRaw);
+    },
+    latestMeta(file) {
+      const row = selectLatestMeta.get(file) as { body: string } | undefined;
+      return row?.body ?? null;
     },
     allSessionIdsInRaw() {
       return (selectRawSessionIds.all() as { id: string }[]).map((r) => r.id);
