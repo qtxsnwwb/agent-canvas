@@ -20,6 +20,7 @@ import './canvas.css';
 import { TURN_HEADER } from './layout';
 import { followTarget, resumeZoom, viewportMoved } from './follow';
 import { sizeOf } from './sizes';
+import { edgeZ, groupDepths, nodeZ } from './stacking';
 import type { CanvasSnapshot } from './useCanvas';
 import { forkSources, type TurnSummary, type ViewEdge } from './view';
 import { isActivationKey } from './format';
@@ -31,6 +32,8 @@ export interface CanvasProps {
   onSelect(id: string | null): void;
   onToggleTurn(turnKey: string): void;
   onShowFullTurn(turnKey: string): void;
+  /** Expands a subagent (by its childAgentId) into a container of its inner nodes, or collapses it again. */
+  onToggleAgent(agentId: string): void;
   /** Called with the follow state whenever it changes (and on mount). */
   onFollowingChange?(following: boolean): void;
 }
@@ -81,7 +84,7 @@ function useFlowNodes(snapshot: CanvasSnapshot, selectedId: string | null): Flow
     const prev = cache.current;
     const next = new Map<string, FlowNode>();
     const out: FlowNode[] = [];
-    const { view, positions, turnBoxes } = snapshot;
+    const { view, positions, turnBoxes, containerBoxes } = snapshot;
 
     // Headers first so they render beneath the nodes. A turn whose nodes have no position yet (an expand in flight)
     // gets no header: its box is still the old layout's.
@@ -106,20 +109,32 @@ function useFlowNodes(snapshot: CanvasSnapshot, selectedId: string | null): Flow
       out.push(n);
     }
 
+    const depths = groupDepths(view);
+    const live = view.mode === 'live';
     for (const vn of view.nodes.values()) {
       const position = positions[vn.id];
       if (!position) continue;
-      const { width, height } = sizeOf(vn);
+      // An expanded agent is drawn as a container once its box has landed; until then it keeps the collapsed size.
+      const box = vn.type === 'node' && vn.expanded ? containerBoxes[vn.id] : undefined;
+      const { width, height } = box ?? sizeOf(vn);
+      const zIndex = nodeZ(depths, vn);
       const selected = vn.id === selectedId;
       const old = prev.get(vn.id);
       let n: FlowNode;
       if (vn.type === 'node') {
-        n = old && old.type === 'graphNode' && old.data.node === vn.node && old.data.innerCount === vn.innerCount
+        const container = box !== undefined;
+        const expandable = live && vn.expandable;
+        const d = old?.type === 'graphNode' ? old.data : undefined;
+        n = old && d && d.node === vn.node && d.innerCount === vn.innerCount && d.expanded === vn.expanded
+          && d.expandable === expandable && d.container === container && old.zIndex === zIndex
           && samePos(old.position, position) && old.selected === selected && old.width === width && old.height === height
           ? old
           : {
-            id: vn.id, type: 'graphNode', position, width, height, selected, ariaLabel: graphNodeAriaLabel(vn.node),
-            data: { node: vn.node, innerCount: vn.innerCount },
+            id: vn.id, type: 'graphNode', position, width, height, selected, zIndex,
+            ariaLabel: graphNodeAriaLabel(vn.node, container),
+            // The wrapper of a container lets clicks on its body through (see canvas.css); its head stays clickable.
+            className: container ? 'cc-container-node' : undefined,
+            data: { node: vn.node, innerCount: vn.innerCount, expanded: vn.expanded, expandable, container },
             handles: handlesFor(width, height), draggable: false, connectable: false,
           };
       } else if (vn.type === 'turn_summary') {
@@ -154,7 +169,7 @@ function useFlowNodes(snapshot: CanvasSnapshot, selectedId: string | null): Flow
  * colour; an edge into a running or awaiting-permission node is animated.
  */
 function useFlowEdges(snapshot: CanvasSnapshot): Edge[] {
-  type Cached = { src: ViewEdge; animated: boolean; fork: boolean; edge: Edge };
+  type Cached = { src: ViewEdge; animated: boolean; fork: boolean; zIndex: number; edge: Edge };
   const cache = useRef(new Map<string, Cached>());
   const last = useRef<Edge[] | null>(null);
   return useMemo(() => {
@@ -163,26 +178,29 @@ function useFlowEdges(snapshot: CanvasSnapshot): Edge[] {
     const out: Edge[] = [];
     const { view, positions } = snapshot;
     const forks = forkSources(view.edges, (id) => view.nodes.get(id)?.type === 'earlier');
+    const depths = groupDepths(view);
     for (const e of view.edges) {
       if (!positions[e.from] || !positions[e.to]) continue;
       const target = view.nodes.get(e.to);
       const animated = target?.type === 'node' && isActive(target.node.status);
       const fork = forks.has(e.from);
+      // Inside a container: above its background, below the nodes of the same group.
+      const zIndex = edgeZ(view, depths, e);
       const old = prev.get(e.id);
       let edge: Edge;
-      if (old && old.animated === animated && old.fork === fork && old.src.from === e.from && old.src.to === e.to) {
+      if (old && old.animated === animated && old.fork === fork && old.zIndex === zIndex && old.src.from === e.from && old.src.to === e.to) {
         edge = old.edge;
       } else {
         const color = fork ? EDGE_COLOR.fork : EDGE_COLOR.sequence;
         edge = {
-          id: e.id, source: e.from, target: e.to, type: 'smoothstep', animated,
+          id: e.id, source: e.from, target: e.to, type: 'smoothstep', animated, zIndex,
           selectable: false, focusable: false,
           className: `cc-edge cc-edge-${fork ? 'fork' : 'sequence'}`,
           style: { stroke: color, strokeWidth: 1.5 },
           markerEnd: { type: MarkerType.ArrowClosed, color, width: 14, height: 14 },
         };
       }
-      next.set(e.id, { src: e, animated, fork, edge });
+      next.set(e.id, { src: e, animated, fork, zIndex, edge });
       out.push(edge);
     }
     cache.current = next;
@@ -195,6 +213,10 @@ function miniMapColor(n: FlowNode): string {
   if (n.type === 'turnSummary') return summaryColor(n.data.summary);
   if (n.type === 'earlier') return '#cbd5e1';
   return 'transparent';
+}
+/** Containers are drawn see-through in the minimap so their inner nodes stay visible (see canvas.css). */
+function miniMapClass(n: FlowNode): string {
+  return n.type === 'graphNode' && n.data.container ? 'cc-minimap-container' : '';
 }
 
 /** Share of the viewport height by which the view is centred above the latest node, leaving it below centre. */
@@ -292,18 +314,31 @@ function useHeaderFocus(): (turnKey: string) => void {
   }, []);
 }
 
-function CanvasInner({ snapshot, selectedId, onSelect, onToggleTurn, onShowFullTurn, onFollowingChange }: CanvasProps) {
+function CanvasInner({ snapshot, selectedId, onSelect, onToggleTurn, onShowFullTurn, onToggleAgent, onFollowingChange }: CanvasProps) {
   const nodes = useFlowNodes(snapshot, selectedId);
   const edges = useFlowEdges(snapshot);
   const follow = useFollow(snapshot);
   const { following } = follow;
   useEffect(() => { onFollowingChange?.(following); }, [following, onFollowingChange]);
 
+  // A view switch (live / topology) resumes following, as "回到最新" does.
+  const mode = snapshot.view.mode;
+  const lastMode = useRef(mode);
+  const resumeRef = useRef(follow.resume);
+  resumeRef.current = follow.resume;
+  useEffect(() => {
+    if (lastMode.current === mode) return;
+    lastMode.current = mode;
+    if (!following) resumeRef.current(); // while following, the new view's latest node is followed anyway
+  }, [mode, following]);
+
   // Stable identity for the context value; the latest callback is read through the ref.
   const toggleRef = useRef(onToggleTurn);
   toggleRef.current = onToggleTurn;
   const showFullRef = useRef(onShowFullTurn);
   showFullRef.current = onShowFullTurn;
+  const toggleAgentRef = useRef(onToggleAgent);
+  toggleAgentRef.current = onToggleAgent;
   const followChangeRef = useRef(onFollowingChange);
   followChangeRef.current = onFollowingChange;
   const focusHeader = useHeaderFocus();
@@ -311,14 +346,19 @@ function CanvasInner({ snapshot, selectedId, onSelect, onToggleTurn, onShowFullT
   // A UI layout change stops following; auto-fold is switched off right away (not only through the follow effect
   // after the next render), so the rebuild this action triggers already keeps everything expanded in place.
   const actions = useMemo(() => {
-    const before = (key: string, fromKeyboard?: boolean): void => {
+    const stop = (): void => {
       stopFollowing();
       followChangeRef.current?.(false);
+    };
+    const before = (key: string, fromKeyboard?: boolean): void => {
+      stop();
       if (fromKeyboard) focusHeader(key);
     };
     return {
       toggleTurn: (key: string, fromKeyboard?: boolean) => { before(key, fromKeyboard); toggleRef.current(key); },
       showFullTurn: (key: string, fromKeyboard?: boolean) => { before(key, fromKeyboard); showFullRef.current(key); },
+      // The subagent node (and its button, which keeps the focus) stays in place, so no focus handling is needed.
+      toggleAgent: (agentId: string) => { stop(); toggleAgentRef.current(agentId); },
     };
   }, [stopFollowing, focusHeader]);
 
@@ -359,6 +399,9 @@ function CanvasInner({ snapshot, selectedId, onSelect, onToggleTurn, onShowFullT
         onMoveStart={follow.onMoveStart}
         onMove={follow.onMove}
         onMoveEnd={follow.onMoveEnd}
+        // zIndex values are used as given (see stacking.ts): no elevation of selected nodes, which would lift a
+        // selected container above its own inner nodes.
+        zIndexMode="manual"
         nodesDraggable={false}
         nodesConnectable={false}
         elementsSelectable
@@ -375,7 +418,7 @@ function CanvasInner({ snapshot, selectedId, onSelect, onToggleTurn, onShowFullT
             <button type="button" className="cc-follow-btn" onClick={follow.resume}>回到最新</button>
           </Panel>
         )}
-        <MiniMap<FlowNode> nodeColor={miniMapColor} nodeStrokeWidth={0} pannable zoomable />
+        <MiniMap<FlowNode> nodeColor={miniMapColor} nodeClassName={miniMapClass} nodeStrokeWidth={0} pannable zoomable />
       </ReactFlow>
     </CanvasActions.Provider>
   );

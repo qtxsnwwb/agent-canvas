@@ -92,6 +92,37 @@
 .cc-expand:hover { background: #eff6ff; border-color: #93c5fd; }
 .cc-failed { color: #dc2626; font-weight: 600; }
 
+/* Subagent: its rows sit in a head block, so the expanded container keeps the same element tree (and focus). */
+.cc-agent-head { display: flex; flex-direction: column; justify-content: center; gap: 2px; min-width: 0; flex: none; }
+
+/* Expanded subagent drawn as a container: the 68 px head (CONTAINER_HEADER) looks like the collapsed node, the body is a
+   light tint of the status colour; inner nodes are separate nodes drawn above it. The React Flow wrapper lets
+   clicks on the body through to the pane, so they never land on the container; the head stays clickable. */
+.cc-canvas .react-flow__node.cc-container-node { pointer-events: none; }
+.cc-container-node .cc-agent-head { pointer-events: auto; }
+.cc-node.cc-container {
+  justify-content: flex-start;
+  gap: 0;
+  padding: 0;
+  border-width: 1px;
+  background: color-mix(in srgb, var(--cc-color) 5%, #fff);
+  cursor: default;
+}
+.cc-node.cc-container:hover { box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06); }
+.cc-container .cc-agent-head {
+  box-sizing: border-box;
+  height: 68px;
+  /* 3 px inset bar + the 1 px border = the collapsed node's 4 px left bar; text lines up with it. */
+  padding: 5px 10px 5px 12px;
+  background: #fff;
+  box-shadow: inset 3px 0 0 var(--cc-color);
+  border-bottom: 1px solid color-mix(in srgb, var(--cc-color) 35%, #fff);
+  cursor: pointer;
+}
+.cc-container .cc-agent-head:hover { background: #f8fafc; }
+.cc-container-body { flex: 1 1 auto; min-height: 0; }
+.cc-canvas .react-flow__minimap-node.cc-minimap-container { fill-opacity: 0.18; }
+
 /* Folded middle of a long turn. */
 .cc-earlier { background: #f1f5f9; border-style: dashed; border-left-style: solid; color: #475569; cursor: default; }
 .cc-earlier .cc-fold { height: 20px; }

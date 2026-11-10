@@ -1,8 +1,10 @@
 import { memo, useCallback, useEffect, useReducer, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { openLiveSession, type LiveSession } from '../client';
 import { Canvas } from '../canvas/Canvas';
 import { Drawer } from '../canvas/Drawer';
 import { useCanvas } from '../canvas/useCanvas';
+import type { ViewMode } from '../canvas/view';
 import { sessionStatusView } from '../labels';
 import { useNow } from '../useNow';
 
@@ -11,11 +13,30 @@ function hasKeys(obj: object): boolean {
   return false;
 }
 
+const VIEW_MODES: { mode: ViewMode; label: string }[] = [
+  { mode: 'live', label: '实时' },
+  { mode: 'topology', label: '拓扑' },
+];
+
+/** Segmented live / topology switch; the mode itself lives in the canvas model. */
+function ViewSwitch({ mode, onChange }: { mode: ViewMode; onChange(mode: ViewMode): void }) {
+  return (
+    <div className="view-switch" role="group" aria-label="视角">
+      {VIEW_MODES.map((m) => (
+        <button key={m.mode} type="button" aria-pressed={mode === m.mode} onClick={() => onChange(m.mode)}>
+          {m.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 /**
- * Memoized on `live` alone, so the info bar's per-second and per-update re-renders do not reach React Flow; it
- * re-renders when the canvas snapshot or the selection changes. Every handler passed to Canvas is stable.
+ * Memoized on `live` and the info bar's slot for the view switch, so the info bar's per-second and per-update
+ * re-renders do not reach React Flow; it re-renders when the canvas snapshot or the selection changes. Every handler
+ * passed to Canvas is stable.
  */
-const SessionCanvas = memo(function SessionCanvas({ live }: { live: LiveSession }) {
+const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: LiveSession; toolbar: HTMLElement | null }) {
   const canvas = useCanvas(live);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // Drop a selection whose node is no longer in the view (its turn was folded, it went into an "earlier" node, a
@@ -38,6 +59,7 @@ const SessionCanvas = memo(function SessionCanvas({ live }: { live: LiveSession 
     && (!canvas.ready || (canvas.view.nodes.size > 0 && !hasKeys(canvas.positions)));
   return (
     <>
+      {toolbar !== null && createPortal(<ViewSwitch mode={canvas.view.mode} onChange={canvas.setMode} />, toolbar)}
       {canvas.layoutError !== null && <div className="canvas-error">布局失败，正在自动重试：{canvas.layoutError}</div>}
       <div className={`canvas-area${selectedNode !== null ? ' cc-drawer-open' : ''}`}>
         <Canvas
@@ -46,6 +68,7 @@ const SessionCanvas = memo(function SessionCanvas({ live }: { live: LiveSession 
           onSelect={setSelectedId}
           onToggleTurn={canvas.toggleTurn}
           onShowFullTurn={canvas.showFullTurn}
+          onToggleAgent={canvas.toggleAgent}
           onFollowingChange={canvas.setAutoFold}
         />
         {selectedNode !== null && <Drawer sessionId={live.getSession().id} node={selectedNode} onClose={closeDrawer} />}
@@ -60,6 +83,8 @@ export function SessionPage({ sessionId }: { sessionId: string }) {
   const [live, setLive] = useState<LiveSession | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [, rerender] = useReducer((n: number) => n + 1, 0);
+  /** The info bar's right-hand slot; the canvas renders its view switch into it (it owns the mode). */
+  const [toolbar, setToolbar] = useState<HTMLElement | null>(null);
   const now = useNow();
 
   useEffect(() => {
@@ -94,8 +119,9 @@ export function SessionPage({ sessionId }: { sessionId: string }) {
         <span className={`status status-${status.status}`}>{status.label}</span>
         {session.gitBranch !== null && <span className="muted branch" title={session.gitBranch}>{session.gitBranch}</span>}
         {session.sourceDeleted && <span className="tag">源文件已删除</span>}
+        <div className="session-bar-end" ref={setToolbar} />
       </div>
-      <SessionCanvas key={session.id} live={live} />
+      <SessionCanvas key={session.id} live={live} toolbar={toolbar} />
     </div>
   );
 }

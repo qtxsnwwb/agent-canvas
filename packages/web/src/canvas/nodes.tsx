@@ -1,4 +1,4 @@
-import { createContext, memo, useContext, type CSSProperties, type MouseEvent } from 'react';
+import { createContext, memo, useContext, type CSSProperties, type MouseEvent, type ReactNode } from 'react';
 import { Handle, Position, type Node, type NodeProps, type NodeTypes } from '@xyflow/react';
 import type { GraphNode, NodeKind, NodeStatus } from '@claude-canvas/shared';
 import { NODE_STATUS_LABEL } from '../labels';
@@ -42,8 +42,11 @@ export function summaryColor(s: TurnSummary): string {
   return SUMMARY_COLOR;
 }
 /** Accessible name for a graph node: kind, title and status. */
-export function graphNodeAriaLabel(node: GraphNode): string {
-  return nodeAriaLabel([KIND_LABEL[node.kind] ?? node.kind, node.title, node.status !== null ? NODE_STATUS_LABEL[node.status] ?? node.status : null]);
+export function graphNodeAriaLabel(node: GraphNode, expanded = false): string {
+  return nodeAriaLabel([
+    KIND_LABEL[node.kind] ?? node.kind, node.title, node.status !== null ? NODE_STATUS_LABEL[node.status] ?? node.status : null,
+    expanded ? '已展开' : null,
+  ]);
 }
 export function summaryAriaLabel(s: TurnSummary): string {
   return nodeAriaLabel(['已折叠的轮次', s.promptSummary, `${s.nodeCount} 个节点`, s.running ? '运行中' : null]);
@@ -53,7 +56,13 @@ export function isActive(status: NodeStatus | null): boolean {
   return status === 'running' || status === 'awaiting_permission';
 }
 
-export type GraphFlowNode = Node<{ node: GraphNode; innerCount: number }, 'graphNode'>;
+/**
+ * `expandable`: show the expand / collapse button (a subagent with inner nodes, live mode only). `expanded`: the agent
+ * is expanded in the view. `container`: drawn as a container (expanded and its box has landed; until then it keeps the
+ * collapsed size).
+ */
+export type GraphNodeData = { node: GraphNode; innerCount: number; expandable: boolean; expanded: boolean; container: boolean };
+export type GraphFlowNode = Node<GraphNodeData, 'graphNode'>;
 export type SummaryFlowNode = Node<{ summary: TurnSummary }, 'turnSummary'>;
 export type HeaderFlowNode = Node<{ turnKey: string; startedAt: string; nodeCount: number }, 'turnHeader'>;
 export type EarlierFlowNode = Node<{ turnKey: string; count: number; toolCount: number; failedCount: number }, 'earlier'>;
@@ -63,9 +72,11 @@ export type FlowNode = GraphFlowNode | SummaryFlowNode | HeaderFlowNode | Earlie
 export interface CanvasActionsValue {
   toggleTurn(turnKey: string, fromKeyboard?: boolean): void;
   showFullTurn(turnKey: string, fromKeyboard?: boolean): void;
+  /** Expands or collapses the agent (a subagent node's childAgentId). */
+  toggleAgent(agentId: string): void;
 }
 /** Callbacks for controls inside nodes; a context keeps them out of node data (which must stay stable). */
-export const CanvasActions = createContext<CanvasActionsValue>({ toggleTurn() {}, showFullTurn() {} });
+export const CanvasActions = createContext<CanvasActionsValue>({ toggleTurn() {}, showFullTurn() {}, toggleAgent() {} });
 
 function boxStyle(width: number | undefined, height: number | undefined, color: string): CSSProperties {
   return { width, height, ['--cc-color' as string]: color };
@@ -89,7 +100,7 @@ function pulseClass(status: NodeStatus | null): string {
 }
 
 function GraphNodeView({ data, width, height, selected }: NodeProps<GraphFlowNode>) {
-  const { node, innerCount } = data;
+  const { node } = data;
   const duration = node.durationMs !== null ? formatDuration(node.durationMs) : '';
   const unconfirmed = node.confirmed === false;
   const className = `cc-node cc-kind-${node.kind}${pulseClass(node.status)}${selected ? ' cc-selected' : ''}${unconfirmed ? ' cc-unconfirmed' : ''}`;
@@ -114,26 +125,67 @@ function GraphNodeView({ data, width, height, selected }: NodeProps<GraphFlowNod
   }
 
   const showTitle = node.kind === 'tool' || node.kind === 'subagent';
-  return (
-    <div className={className} style={style}>
-      <Handles />
+  const rows = (button: ReactNode) => (
+    <>
       <div className="cc-row">
         <span className="cc-kind">{kindLabel}</span>
         <span className="cc-title cc-ellipsis cc-grow">{showTitle ? node.title : ''}</span>
         {node.status !== null && <span className="cc-status">{NODE_STATUS_LABEL[node.status] ?? node.status}</span>}
         {duration !== '' && <span className="cc-duration">{duration}</span>}
         {tag}
+        {button}
       </div>
       {node.summary !== '' && (
         <div className="cc-row cc-summary">
           <span className="cc-ellipsis cc-grow">{node.summary}</span>
         </div>
       )}
-      {node.kind === 'subagent' && (
+    </>
+  );
+  if (node.kind === 'subagent') return <SubagentView data={data} className={className} style={style} rows={rows} />;
+  return (
+    <div className={className} style={style}>
+      <Handles />
+      {rows(null)}
+    </div>
+  );
+}
+
+/**
+ * A subagent node, collapsed or drawn as a container (its expanded box: the 68 px head is the collapsed node, the
+ * inner nodes are separate React Flow nodes drawn above the body). The same element tree in both states, so the
+ * expand / collapse button keeps the keyboard focus across the switch.
+ */
+function SubagentView({ data, className, style, rows }: {
+  data: GraphNodeData; className: string; style: CSSProperties; rows(button: ReactNode): ReactNode;
+}) {
+  const { toggleAgent } = useContext(CanvasActions);
+  const { node, innerCount, expandable, expanded, container } = data;
+  const agentId = node.childAgentId;
+  const onToggle = (e: MouseEvent): void => {
+    e.stopPropagation(); // not a node click: does not select the node
+    if (agentId !== null) toggleAgent(agentId);
+  };
+  const verb = expanded ? '收起' : '展开';
+  // "nokey": React Flow's node key handler ignores keys from inside it (Enter would select the node).
+  const button = expandable && agentId !== null
+    ? (
+      <button type="button" className="cc-expand nodrag nopan nokey" onClick={onToggle}
+        aria-expanded={expanded} aria-label={`${verb}子代理 ${node.title}`}>
+        {verb}
+      </button>
+    )
+    : null;
+  return (
+    <div className={`${className}${container ? ' cc-container' : ''}`} style={style}>
+      <Handles />
+      <div className="cc-agent-head">
+        {rows(button)}
         <div className="cc-row cc-inner">
-          <span className="cc-ellipsis cc-grow">内部 {innerCount} 个节点</span>
+          <span className="cc-ellipsis cc-grow">{innerCount > 0 ? `内部 ${innerCount} 个节点` : '暂无内部节点'}</span>
         </div>
-      )}
+      </div>
+      {container && <div className="cc-container-body" />}
     </div>
   );
 }
