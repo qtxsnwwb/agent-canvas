@@ -44,7 +44,7 @@ export function assistantBlock(
   uuid: string,
   parentUuid: string | null,
   block: object,
-  over: { messageId?: string; stopReason?: string; agentId?: string; thinkingDurationMs?: number } = {},
+  over: { messageId?: string; stopReason?: string; agentId?: string; thinkingDurationMs?: number; timestamp?: string } = {},
 ): RawEvent {
   const record: Record<string, unknown> = {
     ...baseRecord('assistant', uuid, parentUuid),
@@ -56,6 +56,7 @@ export function assistantBlock(
       usage: { input_tokens: 10, output_tokens: 5 },
     },
   };
+  if (over.timestamp !== undefined) record.timestamp = over.timestamp;
   if (over.thinkingDurationMs !== undefined) record.thinkingDurationMs = over.thinkingDurationMs;
   if (over.agentId !== undefined) {
     record.agentId = over.agentId;
@@ -106,10 +107,10 @@ export function customTitle(title: string): RawEvent {
   };
 }
 
-export function hook(eventName: string, body: object = {}): RawEvent {
+export function hook(eventName: string, body: object = {}, receivedAt: string = nextTimestamp()): RawEvent {
   return {
     source: 'hook',
-    receivedAt: nextTimestamp(),
+    receivedAt,
     eventName,
     sessionId: 's1',
     payload: JSON.stringify({ session_id: 's1', hook_event_name: eventName, cwd: '/w', ...body }),

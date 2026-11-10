@@ -261,3 +261,50 @@ test('未知事件名和损坏载荷不抛出', () => {
   expect(n.apply(withPayload(hook('Stop', {}), 'not json'), 'p')).toEqual({ changes: [], unknownRecordType: 'hook:invalid' });
   expect(n.apply(withPayload(hook('Stop', {}), '{}'), 'p').unknownRecordType).toBe('hook:invalid');
 });
+
+const T = (sec: number) => new Date(Date.parse('2026-02-01T00:00:00.000Z') + sec * 1000).toISOString();
+const lagScenario = () => [
+  hook('UserPromptSubmit', {}, T(10)),
+  pre(),
+  hook('PermissionRequest', { tool_name: 'Bash', tool_input: { command: 'ls' } }, T(12)),
+  userPrompt('u1', null, 'x', { timestamp: T(9) }),
+];
+
+test('迟到的 transcript prompt 不覆盖较新的 hook 状态', () => {
+  const events = lagScenario();
+  events.splice(1, 1, hook('PreToolUse', { tool_name: 'Bash', tool_input: { command: 'ls' }, tool_use_id: 'tu1' }, T(11)));
+  const { graph, changes } = run(n, events);
+  expect(lastStatus(changes)).toBe('awaiting_permission');
+  expect(graph.nodes.u1).toBeDefined();
+  expect(graph.nodes['tool:tu1']!.status).toBe('awaiting_permission');
+});
+
+test('迟到的 prompt 不把 Stop 之后的 idle 改回 running', () => {
+  const { changes } = run(n, [hook('Stop', {}, T(20)), userPrompt('u1', null, 'x', { timestamp: T(15) })]);
+  expect(lastStatus(changes)).toBe('idle');
+});
+
+test('迟到的 end_turn 不把 running 改回 idle', () => {
+  const { changes } = run(n, [
+    hook('UserPromptSubmit', {}, T(30)),
+    assistantBlock('a1', null, { type: 'text', text: 'done' }, { stopReason: 'end_turn', timestamp: T(25) }),
+  ]);
+  expect(lastStatus(changes)).toBe('running');
+});
+
+test('正常顺序的 transcript 状态照常推进', () => {
+  const { changes } = run(n, [
+    userPrompt('u1', null, 'x', { timestamp: T(1) }),
+    assistantBlock('a1', 'u1', { type: 'text', text: 'ok' }, { stopReason: 'end_turn', timestamp: T(2) }),
+  ]);
+  expect(lastStatus(changes)).toBe('idle');
+  const r = n.apply(userPrompt('u2', 'a1', 'y', { timestamp: T(3) }), 'p1');
+  expect(lastStatus(r.changes)).toBe('running');
+});
+
+test('相同事件序列重放结果一致', () => {
+  const events = lagScenario();
+  const a = run(new Normalizer(), events).changes;
+  const b = run(new Normalizer(), events).changes;
+  expect(a).toEqual(b);
+});

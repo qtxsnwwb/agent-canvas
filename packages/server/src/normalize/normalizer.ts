@@ -23,6 +23,8 @@ const KNOWN_TYPES = new Set(['user', 'assistant', 'system', 'attachment']);
 /** In-memory state for one session; later tasks extend this with batch/subagent bookkeeping. */
 interface SessionState {
   session: Session;
+  /** Event time at which the session status was last set (transcript timestamp or hook receivedAt). */
+  statusAt: string;
   nodes: Map<string, GraphNode>;
   /** tool node id -> original tool input (permission matching needs it). */
   toolInputs: Map<string, unknown>;
@@ -198,6 +200,7 @@ export class Normalizer {
     const state = this.stateFor(hook.sessionId, { type: 'hook', uuid: '', timestamp: at, cwd: hook.cwd }, projectId, changes);
     // An ended session only comes back on SessionStart / UserPromptSubmit.
     const status = state.session.status === 'ended' && !hook.resumes ? null : hook.status;
+    if (status !== null && at > state.statusAt) state.statusAt = at;
     this.updateSession(state, { type: 'hook', uuid: '', timestamp: at }, projectId, status, false, changes);
     if (hook.node) this.applyHookNode(state, hook, hook.node, at, changes);
     return { changes };
@@ -317,7 +320,14 @@ export class Normalizer {
     const classified = classifyRecord(record);
     const agentId = event.agentId;
 
-    this.updateSession(state, record, projectId, impliedStatus(classified, agentId !== null), agentId !== null, changes);
+    // A record older than the last status observation (e.g. a lagging transcript) must not overwrite it.
+    const recordTime = str(record.timestamp);
+    let implied = impliedStatus(classified, agentId !== null);
+    if (implied !== null && recordTime !== null) {
+      if (recordTime < state.statusAt) implied = null;
+      else state.statusAt = recordTime;
+    }
+    this.updateSession(state, record, projectId, implied, agentId !== null, changes);
     if (classified.kind === 'prompt' && agentId === null) state.turnByAgent.set('', str(record.promptId) ?? uuid);
 
     const parentUuid = str(record.parentUuid);
@@ -397,6 +407,7 @@ export class Normalizer {
       };
       state = {
         session,
+        statusAt: ts,
         nodes: new Map(),
         toolInputs: new Map(),
         lastNodeByUuid: new Map(),
