@@ -6,6 +6,7 @@ import {
   type NodeDetail,
   type Project,
   type SeqChange,
+  type SearchHit,
   type ServerMessage,
   type Session,
 } from '@claude-canvas/shared';
@@ -26,6 +27,7 @@ export const api = {
   graph: (sessionId: string) => getJson<GraphSnapshot>(`/api/sessions/${enc(sessionId)}/graph`),
   nodeDetail: (sessionId: string, nodeId: string) =>
     getJson<NodeDetail>(`/api/sessions/${enc(sessionId)}/nodes/${enc(nodeId)}`),
+  search: (q: string) => getJson<SearchHit[]>(`/api/search?q=${enc(q)}`),
 };
 
 export interface WebSocketLike {

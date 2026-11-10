@@ -1,11 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
-import type { Project, Session } from '@claude-canvas/shared';
+import { SEARCH_MIN_CHARS, type Project, type SearchField, type SearchHit, type Session } from '@claude-canvas/shared';
 import { api, openLiveSessions } from '../client';
 import { sessionStatusView } from '../labels';
+import { createSearcher, highlightParts, type SearchResult } from '../search';
 import { createThrottle } from '../throttle';
 import { useNow } from '../useNow';
 
 const PROJECTS_REFRESH_MS = 500;
+
+const FIELD_LABEL: Record<SearchField, string> = { title: '标题', id: '会话 id', branch: '分支', cwd: '目录', prompt: '提示' };
 
 const byActivityDesc = (a: Session, b: Session): number =>
   a.lastActivityAt < b.lastActivityAt ? 1 : a.lastActivityAt > b.lastActivityAt ? -1 : 0;
@@ -13,6 +16,46 @@ const byActivityDesc = (a: Session, b: Session): number =>
 function formatTime(iso: string): string {
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+}
+
+function Highlighted({ text, q }: { text: string; q: string }) {
+  return (
+    <>
+      {highlightParts(text, q).map((p, i) => (p.match ? <mark key={i}>{p.text}</mark> : <span key={i}>{p.text}</span>))}
+    </>
+  );
+}
+
+function SearchResults({ result, q, now }: { result: SearchResult | null; q: string; now: number }) {
+  if (result === null || result.q !== q) return <p className="muted search-note">搜索中…</p>;
+  if (result.error !== null) return <p className="error">搜索失败：{result.error}</p>;
+  const hits: SearchHit[] = result.hits ?? [];
+  if (hits.length === 0) return <p className="muted search-note">没有匹配的会话</p>;
+  return (
+    <ul className="search-results">
+      {hits.map(({ session: s, matches }) => {
+        const status = sessionStatusView(s, now);
+        return (
+          <li key={s.id}>
+            <a href={`#/s/${encodeURIComponent(s.id)}`}>
+              <div className="session-title">{s.title ?? s.id.slice(0, 8)}</div>
+              <div className="muted">
+                {s.cwd !== null && <span>{s.cwd} · </span>}
+                <span className={`status status-${status.status}`}>{status.label}</span>
+                <span> · {formatTime(s.lastActivityAt)}</span>
+              </div>
+              {matches.map((m, i) => (
+                <div key={i} className="search-match">
+                  <span className="search-field">{FIELD_LABEL[m.field]}</span>
+                  <Highlighted text={m.snippet} q={q} />
+                </div>
+              ))}
+            </a>
+          </li>
+        );
+      })}
+    </ul>
+  );
 }
 
 export function Home({ projectId }: { projectId: string | null }) {
@@ -71,7 +114,36 @@ export function Home({ projectId }: { projectId: string | null }) {
     return () => { alive = false; };
   }, [projectId]);
 
+  const [query, setQuery] = useState('');
+  const [result, setResult] = useState<SearchResult | null>(null);
+  const searcher = useRef<ReturnType<typeof createSearcher> | null>(null);
+  useEffect(() => {
+    const s = createSearcher({ search: api.search, onResult: setResult });
+    searcher.current = s;
+    return () => { s.dispose(); searcher.current = null; };
+  }, []);
+  const onQuery = (value: string): void => {
+    setQuery(value);
+    searcher.current?.query(value);
+  };
+  const q = query.trim();
+  const searching = q.length >= SEARCH_MIN_CHARS;
+
   return (
+    <>
+    <div className="search-bar">
+      <input
+        type="search"
+        value={query}
+        placeholder="搜索历史会话：标题、分支、目录、提示内容"
+        aria-label="搜索历史会话"
+        onChange={(e) => onQuery(e.target.value)}
+        onKeyDown={(e) => { if (e.key === 'Escape') onQuery(''); }}
+      />
+    </div>
+    {searching ? (
+      <SearchResults result={result} q={q} now={now} />
+    ) : (
     <div className="home">
       {error !== null && <p className="error">加载失败：{error}</p>}
       <nav className="projects">
@@ -112,5 +184,7 @@ export function Home({ projectId }: { projectId: string | null }) {
         </ul>
       </section>
     </div>
+    )}
+    </>
   );
 }
