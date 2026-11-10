@@ -41,6 +41,8 @@ export type StoreDiagnostics = Pick<Diagnostics, 'unknownRecords' | 'lastHookAt'
 export interface StoreOptions {
   changeLogMaxRows?: number;
   pruneCheckEvery?: number;
+  /** Size the WAL file is truncated to when it restarts (default 64 MB). */
+  walSizeLimitBytes?: number;
   /** Receives every SQL statement executed (tests). */
   verbose?: (sql: unknown) => void;
 }
@@ -174,6 +176,8 @@ function withoutDetail(c: Change): Change {
 }
 
 const CHECKPOINT_INTERVAL_MS = 1000;
+/** The WAL file is truncated to this size when it restarts; without a limit it keeps its high-water mark on disk. */
+const WAL_SIZE_LIMIT_BYTES = 64 * 1024 * 1024;
 
 /**
  * Auto-checkpoints on the main connection copy the WAL into the database file synchronously, stalling the event loop
@@ -205,6 +209,8 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   const pruneEvery = options.pruneCheckEvery ?? PRUNE_CHECK_EVERY;
   const db = new Database(dbPath, options.verbose ? { verbose: options.verbose } : {});
   db.pragma('journal_mode = WAL');
+  // A WAL that grew during an import is cut back to this size the next time it restarts after a full checkpoint.
+  db.pragma(`journal_size_limit = ${options.walSizeLimitBytes ?? WAL_SIZE_LIMIT_BYTES}`);
   db.exec(SCHEMA_SQL);
   const checkpointer = dbPath === ':memory:' || dbPath === '' ? null : startCheckpointer(db, dbPath);
 

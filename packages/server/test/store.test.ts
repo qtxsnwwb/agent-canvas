@@ -315,6 +315,26 @@ test('文件数据库的 WAL 由后台线程检查点，主连接不做自动检
   }
 }, 30_000);
 
+test('WAL 在检查点后被截断到上限，不保留导入时的峰值大小', async () => {
+  const fsp = await import('node:fs/promises');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'cc-wal-limit-'));
+  const file = path.join(dir, 'data.db');
+  const s = openStore(file, { walSizeLimitBytes: 1_000_000 });
+  try {
+    const big = 'z'.repeat(4000);
+    for (let i = 0; i < 3000; i++) s.applyChanges([{ type: 'node_added', node: mkNode(`n${i}`, 's1'), detail: { output: big } }]);
+    expect((await fsp.stat(`${file}-wal`)).size).toBeGreaterThan(8_000_000);
+    await new Promise((r) => setTimeout(r, 2500)); // the worker checkpoints
+    s.applyChanges([{ type: 'node_added', node: mkNode('last', 's1'), detail: {} }]);
+    expect((await fsp.stat(`${file}-wal`)).size).toBeLessThanOrEqual(1_100_000);
+  } finally {
+    s.close();
+    await fsp.rm(dir, { recursive: true, force: true, maxRetries: 10 });
+  }
+}, 30_000);
+
 test('epoch 在建库时生成，重开和 clearDerived 后不变，新库不同', async () => {
   const fsp = await import('node:fs/promises');
   const os = await import('node:os');

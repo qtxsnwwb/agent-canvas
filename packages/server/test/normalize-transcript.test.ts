@@ -253,6 +253,8 @@ test.each([
   '<bash-stderr>b</bash-stderr>',
   '<task-notification>done</task-notification>',
   '\n  <system-reminder>r</system-reminder>',
+  '<ci-monitor-event>x</ci-monitor-event>',
+  '<side-sessions-event>x</side-sessions-event>',
 ])('非提示的 user 记录静默：%s', (text) => {
   for (const content of [text, [{ type: 'text', text }]]) {
     const m = new Normalizer();

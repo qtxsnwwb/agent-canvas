@@ -92,6 +92,9 @@ export const NOT_A_PROMPT_PREFIXES: readonly string[] = [
   '<bash-stderr>',
   '<task-notification>',
   '<system-reminder>',
+  // Injected by the desktop app, seen in real transcripts (acceptance, 2026-11-10).
+  '<ci-monitor-event>',
+  '<side-sessions-event>',
 ];
 
 /** Interrupt marker / not-a-prompt check on the record's text (string content, or the joined text blocks). */
