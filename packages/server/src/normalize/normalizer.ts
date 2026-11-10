@@ -5,6 +5,7 @@ import {
   type GraphEdge,
   type GraphNode,
   type NodeDetail,
+  type NodeStatus,
   type Session,
 } from '@claude-canvas/shared';
 import type { RawEvent } from '../store/store.js';
@@ -28,6 +29,11 @@ interface SessionState {
   nodes: Map<string, GraphNode>;
   /** tool node id -> original tool input (permission matching needs it). */
   toolInputs: Map<string, unknown>;
+  /**
+   * Tool nodes whose terminal status came from a transcript tool_result (final). A terminal status not listed here
+   * was set by a hook and is still corrected by a later tool_result (content plane wins), except `denied`.
+   */
+  terminalFromContent: Set<string>;
   /** record uuid -> id of the last node that record produced. */
   lastNodeByUuid: Map<string, string>;
   /** uuid of a record that produced no node -> its parentUuid. */
@@ -419,6 +425,7 @@ export class Normalizer {
         statusAt: ts,
         nodes: new Map(),
         toolInputs: new Map(),
+        terminalFromContent: new Set(),
         lastNodeByUuid: new Map(),
         passthrough: new Map(),
         turnByAgent: new Map(),
@@ -687,13 +694,14 @@ export class Normalizer {
       const id = `tool:${r.toolUseId}`;
       const node = state.nodes.get(id);
       if (!node) continue;
-      if (node.status !== null && TERMINAL_STATUSES.includes(node.status)) {
-        // Already terminal (e.g. a hook got there first): keep status, still record the output.
-        changes.push({ type: 'node_updated', sessionId: state.session.id, id, patch: {}, detail: { output: r.content } });
-        continue;
-      }
-      const patch: Partial<GraphNode> = { status: r.isError ? 'failed' : 'succeeded' };
-      state.nodes.set(id, { ...node, ...patch });
+      const status: NodeStatus = r.isError ? 'failed' : 'succeeded';
+      const terminal = node.status !== null && TERMINAL_STATUSES.includes(node.status);
+      // Final: denied (never overridden) and a status that already came from a tool_result. A hook-derived
+      // succeeded/failed is corrected by the content plane.
+      const final = terminal && (node.status === 'denied' || state.terminalFromContent.has(id));
+      const patch: Partial<GraphNode> = !final && node.status !== status ? { status } : {};
+      if (!final) state.terminalFromContent.add(id);
+      if (patch.status !== undefined) state.nodes.set(id, { ...node, ...patch });
       changes.push({ type: 'node_updated', sessionId: state.session.id, id, patch, detail: { output: r.content } });
     }
   }

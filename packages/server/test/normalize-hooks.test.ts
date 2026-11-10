@@ -308,3 +308,88 @@ test('相同事件序列重放结果一致', () => {
   const b = run(new Normalizer(), events).changes;
   expect(a).toEqual(b);
 });
+
+// ---- final fix wave, group 2: the content plane overrides hook-derived terminal status ----
+
+const statusUpdates = (changes: Change[], id = 'tool:tu1') =>
+  changes.flatMap((c) => (c.type === 'node_updated' && c.id === id && c.patch.status !== undefined ? [c.patch.status] : []));
+
+test.each([
+  ['PostToolUse 后 tool_result 报错', hook('PostToolUse', { tool_use_id: 'tu1', tool_response: 'ok' }), true, 'failed'],
+  ['PostToolUseFailure 后 tool_result 成功', hook('PostToolUseFailure', { tool_use_id: 'tu1', error: 'x' }), false, 'succeeded'],
+])('hook 设的终态被 tool_result 纠正：%s', (_name, settle, isError, expected) => {
+  const { graph, changes } = run(n, [userPrompt('u1', null, 'x'), pre(), use(), settle, toolResult('u2', 'a1', 'tu1', 'out', isError)]);
+  expect(graph.nodes['tool:tu1']!.status).toBe(expected);
+  expect(changes.at(-1)).toMatchObject({ type: 'node_updated', id: 'tool:tu1', detail: { output: 'out' } });
+});
+
+test('SubagentStop 设的 succeeded 被报错的 tool_result 纠正为 failed', () => {
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x'),
+    pre('tu1', { description: 'd' }, 'Agent'),
+    use('tu1', { description: 'd' }, 'Agent'),
+    agentMeta('ag1', { toolUseId: 'tu1', agentType: 'Explore', description: 'd' }),
+    hook('SubagentStop', { agent_id: 'ag1' }),
+    toolResult('u2', 'a1', 'tu1', 'crashed', true),
+  ]);
+  expect(graph.nodes['tool:tu1']!.status).toBe('failed');
+});
+
+test('denied 不被 tool_result 改写，但 output 仍写入', () => {
+  const { graph, changes } = run(n, [
+    userPrompt('u1', null, 'x'),
+    pre(),
+    use(),
+    hook('PermissionDenied', { tool_use_id: 'tu1' }),
+    toolResult('u2', 'a1', 'tu1', 'rejected', true),
+  ]);
+  expect(graph.nodes['tool:tu1']!.status).toBe('denied');
+  expect(changes.at(-1)).toMatchObject({ type: 'node_updated', patch: {}, detail: { output: 'rejected' } });
+});
+
+test('来自 tool_result 的终态是最终的：之后的 hook 和重复 tool_result 都不改', () => {
+  const { graph, changes } = run(n, [
+    userPrompt('u1', null, 'x'),
+    pre(),
+    use(),
+    hook('PostToolUse', { tool_use_id: 'tu1', tool_response: 'ok' }),
+    toolResult('u2', 'a1', 'tu1', 'boom', true),
+    hook('PostToolUse', { tool_use_id: 'tu1', tool_response: 'ok' }),
+    toolResult('u3', 'u2', 'tu1', 'ok', false),
+  ]);
+  expect(graph.nodes['tool:tu1']!.status).toBe('failed');
+  expect(statusUpdates(changes)).toEqual(['succeeded', 'failed']);
+});
+
+test('tool_result 先到时之后的 PostToolUseFailure 不改终态', () => {
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x'),
+    use(),
+    toolResult('u2', 'a1', 'tu1', 'ok'),
+    hook('PostToolUseFailure', { tool_use_id: 'tu1', error: 'late' }),
+  ]);
+  expect(graph.nodes['tool:tu1']!.status).toBe('succeeded');
+});
+
+test('hook 终态与 tool_result 一致时不重复发状态变更', () => {
+  const { changes } = run(n, [
+    userPrompt('u1', null, 'x'),
+    pre(),
+    use(),
+    hook('PostToolUse', { tool_use_id: 'tu1', tool_response: 'ok' }),
+    toolResult('u2', 'a1', 'tu1', 'ok'),
+  ]);
+  expect(statusUpdates(changes)).toEqual(['succeeded']);
+});
+
+test('终态来源在重放时一致', () => {
+  const events = [
+    userPrompt('u1', null, 'x'),
+    pre(),
+    use(),
+    hook('PostToolUse', { tool_use_id: 'tu1', tool_response: 'ok' }),
+    toolResult('u2', 'a1', 'tu1', 'boom', true),
+    hook('PostToolUse', { tool_use_id: 'tu1', tool_response: 'ok' }),
+  ];
+  expect(run(new Normalizer(), events).changes).toEqual(run(new Normalizer(), events).changes);
+});
