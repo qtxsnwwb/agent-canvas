@@ -258,6 +258,15 @@ test('拓扑视角：没有可见节点的轮次 nodeIds 为空，补的轮间�
   expect(view(g, opts({ mode: 'topology' })).edges.map((x) => x.id).sort()).toEqual(['p1->x1', 'x1->p3']);
 });
 
+test('因果视角的节点、分组、边与实时视角相同，只有 mode 不同', () => {
+  const g = topologyFixture(); const o = { expandedAgents: new Set(['a1']) };
+  const live = view(g, opts(o)); const causal = view(g, opts({ ...o, mode: 'causal' }));
+  expect([...causal.nodes.keys()]).toEqual([...live.nodes.keys()]);
+  expect(causal.edges).toEqual(live.edges);
+  expect(causal.agentGroups).toEqual(live.agentGroups);
+  expect(causal.mode).toBe('causal');
+});
+
 test('agentGroupKey', () => {
   expect(agentGroupKey('a1')).toBe('agent:a1');
 });

@@ -39,7 +39,7 @@ export function groupInput(view: CanvasView, groupKey: string, nodeIds: readonly
   for (const id of nodeIds) {
     const vn = view.nodes.get(id);
     if (vn) {
-      const size = sizes.get(id) ?? sizeOf(vn);
+      const size = sizes.get(id) ?? sizeOf(vn, view.mode);
       nodes.push({ id, width: size.width, height: size.height });
       ids.add(id);
     }

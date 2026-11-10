@@ -5,7 +5,7 @@ import { agentGroupKey, buildView, type AgentGroup, type CanvasView } from '../s
 import {
   groupInput, layoutTurn, placeAgentGroups, stackTurns, turnInput, turnSignature, TURN_GAP, TURN_HEADER, type ElkLike, type TurnLayout,
 } from '../src/canvas/layout';
-import { containerSize } from '../src/canvas/sizes';
+import { containerSize, sizeOf } from '../src/canvas/sizes';
 
 const EPOCH = Date.parse('2026-01-01T00:00:00Z');
 function node(id: string, kind: NodeKind, turnId: string, tMs: number): GraphNode {
@@ -185,4 +185,17 @@ test('stackTurns：没有节点的轮次不占纵向空间，也没有轮次框'
   expect(s.turnBoxes.t2).toBeUndefined();
   expect(s.turnBoxes.t3!.y).toBe(TURN_HEADER + 100 + TURN_GAP);
   expect(s.turnBoxes.t3).toEqual(stackTurns([t1, t3]).turnBoxes.t3);
+});
+
+test('因果视角下思考节点用大尺寸，其余尺寸不变', () => {
+  const nodes = [node('th', 'thinking', 't1', 1), node('tl', 'tool', 't1', 2)];
+  const g: Graph = { ...emptyGraph(), nodes: Object.fromEntries(nodes.map((x) => [x.id, x])), edges: {} };
+  const v = buildView(g, new Map());
+  const thinkingViewNode = v.nodes.get('th')!;
+  const toolViewNode = v.nodes.get('tl')!;
+  expect(sizeOf(thinkingViewNode, 'causal')).toEqual({ width: 280, height: 56 });
+  expect(sizeOf(thinkingViewNode)).toEqual({ width: 160, height: 28 });
+  expect(sizeOf(toolViewNode, 'causal')).toEqual(sizeOf(toolViewNode));
+  const causal = buildView(g, new Map(), undefined, { mode: 'causal' });
+  expect(groupInput(causal, 't1', ['th', 'tl'], new Map()).nodes[0]).toMatchObject({ width: 280, height: 56 });
 });
