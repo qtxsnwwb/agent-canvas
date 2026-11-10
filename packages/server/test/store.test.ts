@@ -205,6 +205,14 @@ test('多种写法都能对上项目 id 时取出现次数最多的，并列取�
   expect(by).toEqual({ 'a-b': 'a_b', 'c-d': 'c d' });
 });
 
+test('cwd 大小写不同或带结尾分隔符时对不上项目 id，项目目录为 null', () => {
+  store.applyChanges([
+    sessionUpsert('k1', 'D--work-app', 'idle', 'd:/work/app'),
+    sessionUpsert('k2', 'D--work-app', 'idle', 'D:/work/app/'),
+  ]);
+  expect(store.listProjects(Date.now())[0]).toMatchObject({ id: 'D--work-app', cwd: null, sessionCount: 2 });
+});
+
 test('没有任何 cwd 能对上项目 id 时为 null', () => {
   store.applyChanges([sessionUpsert('n1', 'proj', 'idle', '/somewhere/else'), sessionUpsert('n2', 'proj', 'idle', null)]);
   expect(store.listProjects(Date.now())[0]).toMatchObject({ id: 'proj', cwd: null, sessionCount: 2 });

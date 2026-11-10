@@ -208,3 +208,24 @@ test('resync 时 500：按原有间隔重试', async () => {
   expect(f.calls()).toBe(3);
   live.close();
 });
+
+test('会话已不存在后，再来的 resync 消息或换 epoch 的 hello 不再取图也不再通知；socket 被关闭', async () => {
+  vi.useFakeTimers();
+  const sock = fakeSocket();
+  const closeSpy = vi.spyOn(sock, 'close');
+  const f = failingResync(httpError(404));
+  const live = await openLiveSession('s1', { fetchGraph: f.fetchGraph, createSocket: () => sock });
+  const fn = vi.fn();
+  live.subscribe(fn);
+  sock.receive({ type: 'hello', epoch: 'e1' });
+  sock.receive({ type: 'resync', sessionId: 's1' });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(live.isGone()).toBe(true);
+  expect(closeSpy).toHaveBeenCalled();
+  sock.receive({ type: 'resync', sessionId: 's1' });
+  sock.receive({ type: 'hello', epoch: 'e2' });
+  await vi.advanceTimersByTimeAsync(10_000);
+  expect(f.calls()).toBe(2);
+  expect(fn).toHaveBeenCalledTimes(1);
+  live.close();
+});

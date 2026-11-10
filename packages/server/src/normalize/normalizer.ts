@@ -31,6 +31,13 @@ const TITLE_PRIORITY = ['custom', 'agentName', 'hook', 'prompt'] as const;
 type TitleSource = (typeof TITLE_PRIORITY)[number];
 const PROMPT_TITLE_CHARS = 60;
 
+/** Prompt text as a title: trimmed, line breaks folded into single spaces, first 60 code points; null when nothing is left. */
+function promptTitle(text: string): string | null {
+  const folded = text.trim().replace(/\s*(?:\r\n|[\r\n])\s*/g, ' ');
+  if (folded.replace(/\[image\]/g, '').trim() === '') return null; // empty, or only image placeholders
+  return Array.from(folded).slice(0, PROMPT_TITLE_CHARS).join('');
+}
+
 const KNOWN_TYPES = new Set(['user', 'assistant', 'system', 'attachment']);
 
 /** In-memory state for one session; later tasks extend this with batch/subagent bookkeeping. */
@@ -62,6 +69,8 @@ interface SessionState {
   agentMetas: Map<string, AgentMeta>;
   /** agents whose spawn edge was already emitted. */
   spawned: Set<string>;
+  /** The first main-thread prompt has been seen (whether or not it gave a title). */
+  firstPromptSeen: boolean;
 }
 
 interface Placement {
@@ -361,7 +370,8 @@ export class Normalizer {
     if (!isObject(parsed)) return { changes: [], unknownRecordType: 'invalid-json' };
     const type = parsed.type;
     if (typeof type !== 'string') return { changes: [], unknownRecordType: 'missing-type' };
-    if ((type === 'custom-title' || type === 'agent-name') && event.agentId === null) {
+    if (type === 'custom-title' || type === 'agent-name') {
+      if (event.agentId !== null) return { changes: [] }; // a subagent file's title records say nothing about the session
       const changes: Change[] = [];
       this.setTitle(event.sessionId, type === 'custom-title' ? 'custom' : 'agentName', str(parsed[type === 'custom-title' ? 'customTitle' : 'agentName']), changes);
       return { changes };
@@ -410,8 +420,11 @@ export class Normalizer {
         break;
       case 'prompt':
         if (agentId === null) {
-          const first = Array.from(classified.text.replace(/\r?\n/g, ' ')).slice(0, PROMPT_TITLE_CHARS).join('');
-          if (this.titleSources.get(state.session.id)?.prompt === undefined) this.setTitle(state.session.id, 'prompt', first, changes);
+          // Only the first main-thread prompt can name the session, even when it yields no usable text.
+          if (!state.firstPromptSeen) {
+            state.firstPromptSeen = true;
+            this.setTitle(state.session.id, 'prompt', promptTitle(classified.text), changes);
+          }
         }
         this.addNode(state, record, agentId, changes, {
           kind: 'prompt',
@@ -522,6 +535,7 @@ export class Normalizer {
         dispatchByAgent: new Map(),
         agentMetas: new Map(),
         spawned: new Set(),
+        firstPromptSeen: false,
       };
       this.sessions.set(sessionId, state);
       changes.push({ type: 'session_upserted', session });

@@ -151,7 +151,7 @@ export async function openLiveSession(
 
   /** Replaces the graph with a fresh snapshot; changes arriving meanwhile are kept and replayed on top of it. */
   const resync = (): void => {
-    if (buffered !== null || closed) return; // already refetching
+    if (buffered !== null || closed || gone) return; // already refetching, or the session no longer exists
     buffered = [];
     fetchGraph(sessionId).then(
       (fresh) => {
@@ -169,7 +169,8 @@ export async function openLiveSession(
         buffered = null;
         if (closed) return;
         if (isNotFound(err)) {
-          gone = true; // the session was deleted: stop refetching
+          gone = true; // the session was deleted: stop refetching and stop listening
+          close();
           notify();
           return;
         }

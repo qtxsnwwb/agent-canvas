@@ -321,6 +321,10 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
 
   // Active = effective status running/awaiting_*: a `running` session older than STALE_AFTER_MS is stale, not active.
   // strftime normalizes the stored ISO timestamp so it compares correctly with the cutoff's toISOString().
+  // The stale rule below (running and last activity older than STALE_AFTER_MS) must stay in sync with
+  // effectiveStatus in shared/status.ts. One divergence: an unparseable last_activity_at is not counted active
+  // here (strftime gives NULL, so the >= test is false), while effectiveStatus is never stale for it (a NaN
+  // comparison is false), i.e. it would count as active.
   const selectProjects = db.prepare(
     `SELECT project_id AS id, json_extract(body, '$.cwd') AS cwd, COUNT(*) AS sessionCount,
             SUM(CASE WHEN status IN ('awaiting_input', 'awaiting_permission') THEN 1
