@@ -518,6 +518,18 @@ describe('http api', () => {
     expect(d).toHaveProperty('files');
   });
 
+  test('GET /api/diagnostics 带 hookEvents', async () => {
+    expect((await get('/api/diagnostics')).json().hookEvents).toEqual([]);
+    await post('/hooks', { hook_event_name: 'Stop', session_id: 'sd1' });
+    await post('/hooks', { hook_event_name: 'Stop', session_id: 'sd1' });
+    await post('/hooks', { hook_event_name: 'SessionStart', session_id: 'sd1' });
+    await vi.waitFor(async () => {
+      const d = (await get('/api/diagnostics')).json();
+      expect(d.hookEvents.map((e: { eventName: string; count: number }) => [e.eventName, e.count])).toEqual([['SessionStart', 1], ['Stop', 2]]);
+      expect(typeof d.hookEvents[0].lastAt).toBe('string');
+    });
+  });
+
   test('所有响应带 nosniff', async () => {
     await seed();
     for (const res of [

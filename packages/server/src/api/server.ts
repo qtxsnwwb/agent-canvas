@@ -229,6 +229,7 @@ export function buildServer(deps: { store: Store; pipeline: Pipeline; config: Co
     '/api/diagnostics',
     async (): Promise<Diagnostics> => ({
       ...store.diagnostics(),
+      hookEvents: store.hookEventStats(),
       lastHookAt: pipeline.lastHookAt(),
       ingestFailures: pipeline.ingestFailures(),
       importing: pipeline.importing(),

@@ -1,6 +1,7 @@
 import { beforeEach, afterEach, expect, test, vi } from 'vitest';
 import type { Change, GraphNode, Session, SessionStatus } from '@claude-canvas/shared';
 import { CHANGE_LOG_MAX_ROWS, openStore, type Store } from '../src/store/store.js';
+import { SCHEMA_SQL } from '../src/store/schema.js';
 
 let store: Store;
 beforeEach(() => {
@@ -286,6 +287,33 @@ test('diagnostics 不扫描 raw_event，仍给出最近 hook 时间', () => {
     expect(s.diagnostics().lastHookAt).toBe('2026-01-01T00:00:02.000Z');
     expect(s.lastHookAt()).toBe('2026-01-01T00:00:02.000Z');
     expect(sql.filter((q) => q.includes('raw_event'))).toEqual([]);
+  } finally {
+    s.close();
+  }
+});
+
+test('hookEventStats 按事件名聚合次数和最近时间，不含 transcript 行', () => {
+  expect(store.hookEventStats()).toEqual([]);
+  const hook = (eventName: string, receivedAt: string) =>
+    store.insertRaw({ source: 'hook', receivedAt, eventName, sessionId: 's1', payload: '{}' });
+  hook('Stop', '2026-01-01T00:00:02.000Z');
+  hook('PreToolUse', '2026-01-01T00:00:01.000Z');
+  hook('Stop', '2026-01-01T00:00:05.000Z');
+  hook('Stop', '2026-01-01T00:00:03.000Z');
+  store.insertRaw({ source: 'transcript', file: 'p/a.jsonl', offset: 0, line: '{"type":"user"}', recordType: 'user', sessionId: 's1', agentId: null });
+  expect(store.hookEventStats()).toEqual([
+    { eventName: 'PreToolUse', count: 1, lastAt: '2026-01-01T00:00:01.000Z' },
+    { eventName: 'Stop', count: 3, lastAt: '2026-01-01T00:00:05.000Z' },
+  ]);
+});
+
+test('hookEventStats 的部分索引只覆盖 hook 行，且查询限定 source = hook', () => {
+  expect(SCHEMA_SQL).toMatch(/CREATE INDEX IF NOT EXISTS raw_event_hook[^;]*\(event_name, received_at\) WHERE source = 'hook'/);
+  const sql: string[] = [];
+  const s = openStore(':memory:', { verbose: (q) => sql.push(String(q)) });
+  try {
+    s.hookEventStats();
+    expect(sql.some((q) => q.includes('raw_event') && q.includes("source = 'hook'") && q.includes('GROUP BY'))).toBe(true);
   } finally {
     s.close();
   }

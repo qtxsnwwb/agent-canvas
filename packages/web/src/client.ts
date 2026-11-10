@@ -1,6 +1,7 @@
 import {
   applyChanges,
   type ClientMessage,
+  type Diagnostics,
   type Graph,
   type GraphSnapshot,
   type NodeDetail,
@@ -27,6 +28,7 @@ export const api = {
   graph: (sessionId: string) => getJson<GraphSnapshot>(`/api/sessions/${enc(sessionId)}/graph`),
   nodeDetail: (sessionId: string, nodeId: string) =>
     getJson<NodeDetail>(`/api/sessions/${enc(sessionId)}/nodes/${enc(nodeId)}`),
+  diagnostics: () => getJson<Diagnostics>('/api/diagnostics'),
   search: (q: string) => getJson<SearchHit[]>(`/api/search?q=${enc(q)}`),
 };
 

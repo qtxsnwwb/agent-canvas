@@ -5,6 +5,8 @@ export interface GraphSnapshot { session: Session; nodes: GraphNode[]; edges: Gr
 export interface Diagnostics {
   unknownRecords: { recordType: string; count: number; sample: string }[];
   lastHookAt: string | null;
+  /** Hook events received, by event name ascending; an event never received does not appear. */
+  hookEvents: { eventName: string; count: number; lastAt: string }[];
   /** path is relative to the projects directory, `/` separators. */
   files: { path: string; offset: number; size: number }[];
   /** Files (relative path) and hook sessions (`hook:<sessionId>`) whose last ingest attempt failed. */

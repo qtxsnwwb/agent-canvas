@@ -140,6 +140,8 @@ export interface Store {
   epoch(): string;
   /** Latest receivedAt of any stored hook event (kept in `meta`, no raw_event scan). */
   lastHookAt(): string | null;
+  /** Hook rows aggregated by event name (ascending), served by the partial index over hook rows. */
+  hookEventStats(): Diagnostics['hookEvents'];
   /** The stored part of Diagnostics; the API adds the pipeline's live fields. */
   diagnostics(): StoreDiagnostics;
   close(): void;
@@ -374,6 +376,11 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   const upsertUnknown = db.prepare(
     `INSERT INTO unknown_stat (record_type, count, sample) VALUES (?, 1, ?)
      ON CONFLICT(record_type) DO UPDATE SET count = count + 1`,
+  );
+  const selectHookStats = db.prepare(
+    `SELECT event_name AS eventName, COUNT(*) AS count, MAX(received_at) AS lastAt
+     FROM raw_event WHERE source = 'hook' AND event_name IS NOT NULL
+     GROUP BY event_name ORDER BY event_name`,
   );
   const selectUnknown = db.prepare(`SELECT record_type, count, sample FROM unknown_stat ORDER BY record_type`);
   const selectFiles = db.prepare(`SELECT file, "offset", size FROM file_offset ORDER BY file`);
@@ -613,6 +620,7 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     deleteMeta(key) {
       deleteMeta.run(key);
     },
+    hookEventStats: () => selectHookStats.all() as Diagnostics['hookEvents'],
     hasRawEvents: () => selectAnyRaw.get() !== undefined,
     diagnostics() {
       return {
