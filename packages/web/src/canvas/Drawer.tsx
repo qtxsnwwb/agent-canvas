@@ -40,7 +40,8 @@ function LazyDetails({ label, children }: { label: string; children: () => React
  * shown only for a chain that was not cut short.
  */
 function ReasoningList({ rows, truncated, onSelect, onExpand, pendingFocus }: {
-  rows: ReasoningRow[]; truncated: boolean; onSelect(id: string): void; onExpand(): void; pendingFocus: { current: boolean };
+  rows: ReasoningRow[]; truncated: boolean; onSelect(id: string): void; onExpand(): void;
+  pendingFocus: { current: boolean };
 }) {
   const currentRef = useRef<HTMLDivElement>(null);
   useEffect(() => {

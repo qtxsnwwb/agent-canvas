@@ -3,7 +3,7 @@ import type { CanvasView } from './view';
 
 export const THINKING_NOT_RECORDED = '思考内容未记录';
 export const NO_REASONING = '这一步之前没有记录到思考或回复';
-/** Shown under the rows when a fold cut the chain short (UpstreamChain.truncated). */
+/** Shown above the rows when a fold cut the chain short (UpstreamChain.truncated). */
 export const CHAIN_FOLDED = '更早的部分已折叠';
 
 /**

@@ -36,8 +36,8 @@ export interface CanvasModel {
   /**
    * Default true. While false nothing visible is folded away under a reader: turns expanded by the default "last 3"
    * rule stay expanded when newer turns arrive, and each expanded turn's and agent group's `earlier` fold is frozen (the
-   * nodes hidden when the freeze started stay hidden, everything else stays visible however long it grows). Turning it back
-   * on drops both and applies the default rules again.
+   * nodes hidden when the freeze started stay hidden, everything else stays visible however long it grows). Turning it
+   * back on drops both and applies the default rules again.
    */
   setAutoFold(enabled: boolean): void;
   /** A node (the selection) that is never folded into `earlier` and whose turn is not auto-collapsed; null for none. */
@@ -48,7 +48,7 @@ export interface CanvasModel {
    * (topology mode ignores it).
    */
   toggleAgent(agentId: string): void;
-  /** Switches between the live and topology views; rebuilds at once. Default 'live'. */
+  /** Switches between the live, topology and causal views; rebuilds at once. Default 'live'. */
   setMode(mode: ViewMode): void;
   getMode(): ViewMode;
   dispose(): void;

@@ -41,8 +41,9 @@ function indexOf(view: CanvasView): Index {
 
 /**
  * Walks the view's edges backwards (breadth first, each node once) from `nodeId`. A prompt, a turn summary and an
- * `earlier` node end the walk (the last two mark the chain `truncated`). A node that starts an agent group (no incoming edge from its own group) continues
- * from the group's container node. Returns EMPTY_CHAIN for null or an id not in the view.
+ * `earlier` node end the walk (the last two mark the chain `truncated` and are listed in `cutAt`). A node that starts
+ * an agent group (no incoming edge from its own group) continues from the group's container node. Returns EMPTY_CHAIN
+ * for null or an id not in the view.
  */
 export function upstreamChain(view: CanvasView, nodeId: string | null): UpstreamChain {
   if (nodeId === null || !view.nodes.has(nodeId)) return EMPTY_CHAIN;

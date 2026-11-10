@@ -104,8 +104,8 @@ export function stackTurns(layouts: TurnLayout[]): { positions: Record<string, {
 /**
  * Places agent groups on top of the stackTurns result: inner node position = container position + (PADDING,
  * HEADER + PADDING) + its position relative to the group, shifted right by (container width - 2 * PADDING - inner
- * width) / 2 when the container was widened to its minimum width (so a narrow inner layout is centred). `groups` must be ordered by depth ascending (outer groups
- * first). A group whose container has no position is skipped (and so are the groups nested in it). Returns new
+ * width) / 2 when the container was widened to its minimum width (so a narrow inner layout is centred). `groups` must
+ * be ordered by depth ascending (outer groups first). A group whose container has no position is skipped (and so are the groups nested in it). Returns new
  * positions (with the inner nodes) and each placed container's box (its expanded size, see containerSize).
  */
 export function placeAgentGroups(
