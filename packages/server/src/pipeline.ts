@@ -462,6 +462,10 @@ export class Pipeline {
       const from = this.store.getOffset(file);
       const res = await readNewLines(absPath, from, READ_BUDGET_BYTES);
       const progressed = res.newOffset !== from || res.truncated;
+      // The size stored with an offset is the size this read accounts for: the whole file only when the read reached
+      // its end. A slice cut short (read budget, kill, failure) leaves a stored size below the real one, so unchanged()
+      // sends the next scan back to finish the file.
+      const seen = res.newOffset >= size ? size : res.newOffset;
       if (res.lines.length > 0) {
         // One transaction per slice: raw rows + unknown stats + derived changes + offset, all or nothing.
         const slice = (): Change[] => {
@@ -474,13 +478,13 @@ export class Pipeline {
             changes.push(...out.changes);
             if (out.unknownRecordType !== undefined) this.store.bumpUnknown(out.unknownRecordType, text);
           }
-          this.store.setOffset(file, res.newOffset, size);
+          this.store.setOffset(file, res.newOffset, seen);
           return changes;
         };
-        await this.enqueue(cls.sessionId, () => this.atomically(cls.sessionId, slice, () => this.sizeMap().set(file, size)));
+        await this.enqueue(cls.sessionId, () => this.atomically(cls.sessionId, slice, () => this.sizeMap().set(file, seen)));
       } else if (progressed) {
         // Reads that only consumed blank lines still persist their progress.
-        this.recordOffset(file, res.newOffset, size);
+        this.recordOffset(file, res.newOffset, seen);
       } else if (this.sizeMap().get(file) !== size) {
         // No complete line yet (trailing partial line, or growth during the read): record the size so the rescan does
         // not reopen the file every tick; the next size change brings it back.

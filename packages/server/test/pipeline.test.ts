@@ -458,6 +458,51 @@ describe('pipeline', () => {
     expect(store.rawForSession('s1')).toHaveLength(2);
   });
 
+  test('导入在文件中途失败后，同一进程的热扫描从断点重试', async () => {
+    // Three ~40 KB prompts: the 64 KB read budget splits the file into several slices.
+    const big = (id: string, parent: string | null): RawEvent => userPrompt(id, parent, id + 'x'.repeat(40_000));
+    await write('proj/s1.jsonl', [big('u1', null), big('u2', 'u1'), big('u3', 'u2')]);
+    let calls = 0;
+    const dying = {
+      ...store,
+      setOffset: (file: string, offset: number, size: number) => {
+        if (++calls === 2) throw new Error('simulated crash');
+        store.setOffset(file, offset, size);
+      },
+    } as Store;
+    const p = new Pipeline(dying, config);
+    await p.scanAll(); // the scan records the failure instead of throwing
+    expect(p.ingestFailures()).toHaveLength(1);
+    const done = store.getGraph('s1')!.nodes.length;
+    expect(done).toBeGreaterThan(0);
+    expect(done).toBeLessThan(3);
+
+    // Same process: the failed file is retried by the hot rescan.
+    await p.rescan();
+    await p.idle();
+    expect(store.getGraph('s1')!.nodes.map((n) => n.id)).toEqual(['u1', 'u2', 'u3']);
+  });
+
+  test('进程在文件中途被杀后，重启的全量扫描从断点续上', async () => {
+    const big = (id: string, parent: string | null): RawEvent => userPrompt(id, parent, id + 'x'.repeat(40_000));
+    await write('proj/s1.jsonl', [big('u1', null), big('u2', 'u1'), big('u3', 'u2')]);
+    let calls = 0;
+    const dying = {
+      ...store,
+      setOffset: (file: string, offset: number, size: number) => {
+        if (++calls === 2) throw new Error('simulated crash');
+        store.setOffset(file, offset, size);
+      },
+    } as Store;
+    await new Pipeline(dying, config).ingestFile(abs('proj/s1.jsonl')).catch(() => undefined);
+    expect(store.getGraph('s1')!.nodes.length).toBeLessThan(3);
+
+    await new Pipeline(store, config).scanAll(); // restart: nothing in memory, only the stored offsets
+    expect(store.getGraph('s1')!.nodes.map((n) => n.id)).toEqual(['u1', 'u2', 'u3']);
+    const off = store.listOffsets().find((f) => f.path === 'proj/s1.jsonl')!;
+    expect(off.offset).toBe(off.size);
+  });
+
   test('已有会话的片段失败后，重试结果与一次成功相同', async () => {
     await write('proj/s1.jsonl', [userPrompt('u1', null, 'x')]);
     await pipeline.ingestFile(abs('proj/s1.jsonl'));
