@@ -251,7 +251,8 @@ describe('pipeline', () => {
     p2.lastHookAt();
     p2.ingestHook('Stop', 's1', JSON.stringify({ session_id: 's1', hook_event_name: 'Stop' }));
     expect(p2.lastHookAt()).not.toBeNull();
-    expect(spy.mock.calls.length).toBeLessThanOrEqual(1);
+    // Ruling 6d: the pipeline never calls diagnostics() (it scanned raw_event for the last hook time).
+    expect(spy).not.toHaveBeenCalled();
   });
 
   test('重启后 scanAll 不会为未变化的 meta 文件读取会话历史', async () => {
@@ -408,5 +409,99 @@ describe('pipeline', () => {
     pipeline.rebuild();
     expect(store.getSession('h1')!.projectId).toBe('proj');
     expect(store.getSession('h2')!.projectId).toBe('unknown');
+  });
+
+  // ---- final fix wave, group 6: atomic slices, no raw_event scans on hot paths ----
+
+  /** The real store, except that `method` throws on its first call (or on every call while `fail.on`). */
+  function failingOnce<K extends keyof Store>(method: K): Store & { fail: { on: boolean } } {
+    const fail = { on: true };
+    const real = store[method] as unknown as (...args: unknown[]) => unknown;
+    const wrapped = {
+      ...store,
+      fail,
+      [method]: (...args: unknown[]) => {
+        if (fail.on) {
+          fail.on = false;
+          throw new Error('simulated crash');
+        }
+        return real(...args);
+      },
+    };
+    return wrapped as unknown as Store & { fail: { on: boolean } };
+  }
+
+  test('读取片段是原子的：中途失败时不留下任何东西，重试后完整导入', async () => {
+    await write('proj/s1.jsonl', [userPrompt('u1', null, 'x'), assistantBlock('a1', 'u1', { type: 'text', text: 'hi' })]);
+    const s2 = failingOnce('setOffset');
+    const p = new Pipeline(s2, config);
+    const seen: SeqChange[] = [];
+    p.onChanges((c) => seen.push(...c));
+    await expect(p.ingestFile(abs('proj/s1.jsonl'))).rejects.toThrow('simulated crash');
+    expect(store.rawForSession('s1')).toEqual([]);
+    expect(store.getSession('s1')).toBeNull();
+    expect(store.changesSince(0)).toEqual([]);
+    expect(store.getOffset('proj/s1.jsonl')).toBe(0);
+    expect(seen).toEqual([]);
+    expect(p.loadedSessionCount()).toBe(0);
+    await p.ingestFile(abs('proj/s1.jsonl'));
+    expect(store.getGraph('s1')!.nodes.map((n) => n.id)).toEqual(['u1', 'a1']);
+    expect(store.rawForSession('s1')).toHaveLength(2);
+  });
+
+  test('已有会话的片段失败后，重试结果与一次成功相同', async () => {
+    await write('proj/s1.jsonl', [userPrompt('u1', null, 'x')]);
+    await pipeline.ingestFile(abs('proj/s1.jsonl'));
+    await append('proj/s1.jsonl', [assistantBlock('a1', 'u1', { type: 'tool_use', id: 'tu1', name: 'Read', input: {} })]);
+    const s2 = failingOnce('applyChanges');
+    const p = new Pipeline(s2, config);
+    await p.ingestFile(abs('proj/s1.jsonl')).catch(() => undefined);
+    await append('proj/s1.jsonl', [toolResult('u2', 'a1', 'tu1', 'ok')]);
+    await p.ingestFile(abs('proj/s1.jsonl'));
+    expect(store.getGraph('s1')!.nodes.map((n) => [n.id, n.status])).toEqual([['u1', null], ['tool:tu1', 'succeeded']]);
+  });
+
+  test('meta 导入是原子的', async () => {
+    await write('proj/s1.jsonl', [userPrompt('u1', null, 'x')]);
+    await pipeline.ingestFile(abs('proj/s1.jsonl'));
+    await fs.mkdir(abs('proj/s1'), { recursive: true });
+    await fs.writeFile(abs('proj/s1/custom-title.json'), JSON.stringify({ customTitle: 'T' }));
+    const p = new Pipeline(failingOnce('setOffset'), config);
+    await expect(p.ingestFile(abs('proj/s1/custom-title.json'))).rejects.toThrow('simulated crash');
+    expect(store.rawForSession('s1').filter((e) => e.source === 'meta')).toEqual([]);
+    expect(store.getSession('s1')!.title).toBeNull();
+    await p.ingestFile(abs('proj/s1/custom-title.json'));
+    expect(store.getSession('s1')!.title).toBe('T');
+  });
+
+  test('hook 导入是原子的：失败时派生数据不落库，原始事件只保留一份供重建', async () => {
+    const p = new Pipeline(failingOnce('applyChanges'), config);
+    expect(() => p.ingestHook('UserPromptSubmit', 'n1', JSON.stringify({ session_id: 'n1', hook_event_name: 'UserPromptSubmit' }))).not.toThrow();
+    await p.idle();
+    expect(store.getSession('n1')).toBeNull();
+    expect(store.rawForSession('n1')).toHaveLength(1);
+    expect(p.ingestFailures().map((f) => f.file)).toContain('hook:n1');
+    p.rebuild();
+    expect(store.getSession('n1')!.status).toBe('running');
+  });
+
+  test('管线的热路径不发出扫描 raw_event 的查询', async () => {
+    const sql: string[] = [];
+    const s = openStore(':memory:', { verbose: (q) => sql.push(String(q)) });
+    try {
+      await write('proj/s1.jsonl', [userPrompt('u1', null, 'x')]);
+      const p = new Pipeline(s, config);
+      await p.scanAll();
+      await p.rescan();
+      p.ingestHook('Stop', 's1', JSON.stringify({ session_id: 's1', hook_event_name: 'Stop' }));
+      p.lastHookAt();
+      await p.idle();
+      const scans = sql.filter((q) => /FROM raw_event/i.test(q) && !/WHERE[^]*(session_id|file|line_hash)\s*=/i.test(q));
+      expect(sql.length).toBeGreaterThan(0);
+      expect(scans).toEqual([]);
+      expect(sql.some((q) => /MAX\(received_at\)/i.test(q))).toBe(false);
+    } finally {
+      s.close();
+    }
   });
 });

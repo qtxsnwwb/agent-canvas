@@ -86,6 +86,15 @@ describe('http api', () => {
     expect((await get('/api/sessions/s1/nodes/tool%3Atu1')).json().output).toBe('file body');
   });
 
+  test('图快照按存储的 JSON 原样发送', async () => {
+    await seed();
+    const spy = vi.spyOn(store, 'getGraph');
+    const res = await get('/api/sessions/s1/graph');
+    expect(res.headers['content-type']).toMatch(/^application\/json/);
+    expect(res.body).toBe(store.getGraphJson('s1'));
+    expect(spy).not.toHaveBeenCalled();
+  });
+
   test('不存在的会话和节点返回 404', async () => {
     await seed();
     expect((await get('/api/sessions/nope/graph')).statusCode).toBe(404);

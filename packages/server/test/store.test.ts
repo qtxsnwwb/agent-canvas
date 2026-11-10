@@ -1,6 +1,6 @@
 import { beforeEach, afterEach, expect, test, vi } from 'vitest';
 import type { Change, GraphNode, Session, SessionStatus } from '@claude-canvas/shared';
-import { openStore, type Store } from '../src/store/store.js';
+import { CHANGE_LOG_MAX_ROWS, openStore, type Store } from '../src/store/store.js';
 
 let store: Store;
 beforeEach(() => {
@@ -176,3 +176,141 @@ test('listProjects 不把长时间无活动的 running 会话计为活跃', () =
   vi.setSystemTime(new Date('2026-01-02T00:00:00.000Z'));
   expect(store.listProjects()[0]).toMatchObject({ activeSessionCount: 2 });
 });
+
+// ---- final fix wave, group 6: storage integrity ----
+
+test('transaction 全部提交或全部回滚', () => {
+  const hookEv = { source: 'hook', receivedAt: 't', eventName: 'Stop', sessionId: 's1', payload: '{}' } as const;
+  expect(store.transaction(() => store.insertRaw(hookEv))).toBe(1);
+  expect(() =>
+    store.transaction(() => {
+      store.insertRaw(hookEv);
+      store.applyChanges([sessionUpsert('s1', 'p1')]);
+      store.setOffset('a.jsonl', 5, 5);
+      throw new Error('boom');
+    }),
+  ).toThrow('boom');
+  expect(store.rawForSession('s1')).toHaveLength(1);
+  expect(store.getSession('s1')).toBeNull();
+  expect(store.getOffset('a.jsonl')).toBe(0);
+  expect(store.changesSince(0)).toEqual([]);
+});
+
+test('不带 detail 的 node_updated 不读写 node_detail', () => {
+  const sql: string[] = [];
+  const s = openStore(':memory:', { verbose: (q) => sql.push(String(q)) });
+  try {
+    s.applyChanges([sessionUpsert('s1', 'p1'), { type: 'node_added', node: mkNode('n1', 's1'), detail: { input: 1 } }]);
+    sql.length = 0;
+    s.applyChanges([nodeUpdated('n1', 's1', { status: 'succeeded' })]);
+    expect(sql.filter((q) => q.includes('node_detail'))).toEqual([]);
+    expect(sql.length).toBeGreaterThan(0);
+    expect(s.getNodeDetail('s1', 'n1')).toMatchObject({ input: 1 });
+    expect(s.getGraph('s1')!.nodes[0]!.status).toBe('succeeded');
+  } finally {
+    s.close();
+  }
+});
+
+test('getGraphJson 直接返回序列化好的快照', () => {
+  store.applyChanges([
+    sessionUpsert('s1', 'p1'),
+    { type: 'node_added', node: mkNode('n1', 's1'), detail: { output: 'big' } },
+    nodeAdded('n2', 's1'),
+    { type: 'edge_added', edge: { id: 'n1->n2', sessionId: 's1', from: 'n1', to: 'n2', kind: 'sequence' } },
+  ]);
+  const json = store.getGraphJson('s1')!;
+  expect(typeof json).toBe('string');
+  expect(JSON.parse(json)).toEqual(store.getGraph('s1'));
+  expect(json).not.toContain('big');
+  expect(store.getGraphJson('nope')).toBeNull();
+});
+
+test('change_log 不含 detail，返回的变更也不含', () => {
+  const out = store.applyChanges([
+    sessionUpsert('s1', 'p1'),
+    { type: 'node_added', node: mkNode('n1', 's1'), detail: { input: 'x'.repeat(1000) } },
+    { type: 'node_updated', sessionId: 's1', id: 'n1', patch: { status: 'succeeded' }, detail: { output: 'y' } },
+  ]);
+  for (const list of [out, store.changesSince(0)]) {
+    expect(list[1]).toMatchObject({ type: 'node_added', detail: {} });
+    expect('detail' in list[2]!).toBe(false);
+  }
+  expect(store.getNodeDetail('s1', 'n1')).toMatchObject({ input: 'x'.repeat(1000), output: 'y' });
+});
+
+test('同一次 applyChanges 里每个会话只记录最后一次 session_upserted', () => {
+  const a = sessionUpsert('s1', 'p1', 'idle');
+  const c = sessionUpsert('s1', 'p1', 'ended');
+  const out = store.applyChanges([a, nodeAdded('n1', 's1'), sessionUpsert('s1', 'p1', 'running'), sessionUpsert('s2', 'p1'), c]);
+  expect(out.map((x) => [x.type, x.type === 'session_upserted' ? x.session.id : '', x.seq])).toEqual([
+    ['node_added', '', 1],
+    ['session_upserted', 's2', 2],
+    ['session_upserted', 's1', 3],
+  ]);
+  expect(store.changesSince(0)).toEqual(out);
+  expect(store.getSession('s1')!.status).toBe('ended');
+});
+
+test('change_log 超过上限时裁剪到 90%，minSeq 随之前移', () => {
+  const s = openStore(':memory:', { changeLogMaxRows: 100, pruneCheckEvery: 10 });
+  try {
+    expect(s.minSeq()).toBe(1);
+    s.applyChanges([sessionUpsert('s1', 'p1')]);
+    for (let i = 0; i < 250; i++) s.applyChanges([nodeUpdated('n', 's1', { summary: String(i) })]);
+    const kept = s.changesSince(0);
+    expect(kept.length).toBeLessThanOrEqual(100);
+    expect(kept.length).toBeGreaterThanOrEqual(90);
+    expect(s.minSeq()).toBe(kept[0]!.seq);
+    expect(kept.at(-1)!.seq).toBe(251);
+    s.clearDerived();
+    expect(s.minSeq()).toBe(252);
+  } finally {
+    s.close();
+  }
+});
+
+test('CHANGE_LOG_MAX_ROWS 默认 20 万', () => {
+  expect(CHANGE_LOG_MAX_ROWS).toBe(200_000);
+});
+
+test('diagnostics 不扫描 raw_event，仍给出最近 hook 时间', () => {
+  const sql: string[] = [];
+  const s = openStore(':memory:', { verbose: (q) => sql.push(String(q)) });
+  try {
+    s.insertRaw({ source: 'hook', receivedAt: '2026-01-01T00:00:02.000Z', eventName: 'Stop', sessionId: 's1', payload: '{}' });
+    s.insertRaw({ source: 'hook', receivedAt: '2026-01-01T00:00:01.000Z', eventName: 'Stop', sessionId: 's1', payload: '{}' });
+    sql.length = 0;
+    expect(s.diagnostics().lastHookAt).toBe('2026-01-01T00:00:02.000Z');
+    expect(s.lastHookAt()).toBe('2026-01-01T00:00:02.000Z');
+    expect(sql.filter((q) => q.includes('raw_event'))).toEqual([]);
+  } finally {
+    s.close();
+  }
+});
+
+test('文件数据库的 WAL 由后台线程检查点，主连接不做自动检查点', async () => {
+  const fsp = await import('node:fs/promises');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'cc-wal-'));
+  const file = path.join(dir, 'data.db');
+  const s = openStore(file);
+  try {
+    const big = 'z'.repeat(4000);
+    const write = (round: number) => {
+      for (let i = 0; i < 3000; i++) s.applyChanges([{ type: 'node_added', node: mkNode(`n${round}-${i}`, 's1'), detail: { output: big } }]);
+    };
+    write(0);
+    const walAfterFirst = (await fsp.stat(`${file}-wal`)).size;
+    // No automatic checkpoint on the main connection: the WAL holds all ~12 MB (SQLite's default would cap it near 4 MB).
+    expect(walAfterFirst).toBeGreaterThan(8_000_000);
+    // The worker checkpoints within a second or two; the WAL is then reused from its start instead of growing.
+    await new Promise((r) => setTimeout(r, 2500));
+    write(1);
+    expect((await fsp.stat(`${file}-wal`)).size).toBeLessThan(walAfterFirst * 1.5);
+  } finally {
+    s.close();
+    await fsp.rm(dir, { recursive: true, force: true, maxRetries: 10 });
+  }
+}, 30_000);

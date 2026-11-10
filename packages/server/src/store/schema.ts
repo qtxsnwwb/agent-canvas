@@ -1,5 +1,5 @@
 /** Tables holding data derived from raw events; cleared by Store.clearDerived(). */
-export const DERIVED_TABLES = ['session', 'node', 'edge', 'change_log'] as const;
+export const DERIVED_TABLES = ['session', 'node', 'node_detail', 'edge', 'change_log'] as const;
 
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS raw_event (
@@ -36,12 +36,19 @@ CREATE TABLE IF NOT EXISTS session (
 );
 CREATE INDEX IF NOT EXISTS session_project ON session (project_id, last_activity_at);
 
+-- body only: node detail (full input/output/text) lives in node_detail, off the snapshot path.
 CREATE TABLE IF NOT EXISTS node (
   session_id TEXT NOT NULL,
   id         TEXT NOT NULL,
   body       TEXT NOT NULL,
-  detail     TEXT NOT NULL DEFAULT '{}',
   PRIMARY KEY (session_id, id)
+);
+
+CREATE TABLE IF NOT EXISTS node_detail (
+  session_id TEXT NOT NULL,
+  node_id    TEXT NOT NULL,
+  detail     TEXT NOT NULL,
+  PRIMARY KEY (session_id, node_id)
 );
 
 CREATE TABLE IF NOT EXISTS edge (
@@ -51,6 +58,7 @@ CREATE TABLE IF NOT EXISTS edge (
   PRIMARY KEY (session_id, id)
 );
 
+-- Bounded (see CHANGE_LOG_MAX_ROWS); bodies never carry node detail.
 CREATE TABLE IF NOT EXISTS change_log (
   seq        INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id TEXT NOT NULL,
@@ -62,5 +70,11 @@ CREATE TABLE IF NOT EXISTS unknown_stat (
   record_type TEXT PRIMARY KEY,
   count       INTEGER NOT NULL,
   sample      TEXT NOT NULL
+);
+
+-- Small key/value table: epoch, last_hook_at, normalizer_version, rebuild_in_progress.
+CREATE TABLE IF NOT EXISTS meta (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
 );
 `;

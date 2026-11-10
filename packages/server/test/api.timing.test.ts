@@ -38,10 +38,14 @@ test('全量导入进行中 /hooks 仍在 100ms 内应答', async () => {
   await fs.mkdir(path.dirname(file), { recursive: true });
   await fs.writeFile(file, events.map((e) => (e.source === 'transcript' ? e.line : '') + '\n').join(''));
   const importing = pipeline.scanAll();
-  const t0 = performance.now();
-  const res = await app.inject({ method: 'POST', url: '/hooks', payload: { hook_event_name: 'Stop', session_id: 's1' } });
-  expect(res.statusCode).toBe(200);
-  expect(performance.now() - t0).toBeLessThan(100);
-  await importing;
-  await pipeline.idle();
+  try {
+    const t0 = performance.now();
+    const res = await app.inject({ method: 'POST', url: '/hooks', payload: { hook_event_name: 'Stop', session_id: 's1' } });
+    expect(res.statusCode).toBe(200);
+    expect(performance.now() - t0).toBeLessThan(100);
+  } finally {
+    // never close the store under a running import (a failed attempt is retried)
+    await importing;
+    await pipeline.idle();
+  }
 }, 60_000);

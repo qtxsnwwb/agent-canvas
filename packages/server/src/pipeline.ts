@@ -128,31 +128,34 @@ export class Pipeline {
     const event: RawEvent = { source: 'hook', receivedAt, eventName, sessionId, payload, projectId };
     this.seed();
     if (this.lastHook === null || receivedAt > this.lastHook) this.lastHook = receivedAt;
+    const key = `hook:${sessionId}`;
+    const onError = (err: unknown): void => {
+      this.failures.set(key, err instanceof Error ? err.message : String(err));
+      // The slice rolled back; keep the raw event alone so the next hydration or rebuild applies it.
+      if (!this.persistedHooks.has(event)) {
+        try {
+          this.store.insertRaw(event);
+          this.persistedHooks.add(event);
+        } catch {
+          // nothing more we can do
+        }
+      }
+    };
     const needsQueue =
       sessionId !== null &&
       (this.tails.has(sessionId) || (!this.normalizer.hasSession(sessionId) && this.store.getSession(sessionId) !== null));
     if (!needsQueue) {
-      this.applyHook(event);
+      try {
+        this.applyHook(event);
+        this.failures.delete(key);
+      } catch (err) {
+        onError(err);
+      }
       return;
     }
-    const key = `hook:${sessionId}`;
-    this.enqueue(sessionId, () => this.applyHook(event)).then(
-      () => {
-        this.failures.delete(key);
-      },
-      (err: unknown) => {
-        this.failures.set(key, err instanceof Error ? err.message : String(err));
-        // Keep the raw event so it is applied by the next hydration or rebuild.
-        if (!this.persistedHooks.has(event)) {
-          try {
-            this.store.insertRaw(event);
-            this.persistedHooks.add(event);
-          } catch {
-            // nothing more we can do
-          }
-        }
-      },
-    );
+    this.enqueue(sessionId, () => this.applyHook(event)).then(() => {
+      this.failures.delete(key);
+    }, onError);
   }
 
   async scanAll(): Promise<void> {
@@ -237,11 +240,11 @@ export class Pipeline {
 
   // ---------------------------------------------------------------- internals
 
+  /** Loads the size mirror and the last hook time once (file_offset and a meta key; never a raw_event scan). */
   private seed(): void {
     if (this.sizes !== null) return;
-    const d = this.store.diagnostics();
-    this.sizes = new Map(d.files.map((f) => [f.path, f.size]));
-    this.lastHook = d.lastHookAt;
+    this.sizes = new Map(this.store.listOffsets().map((f) => [f.path, f.size]));
+    this.lastHook = this.store.lastHookAt();
   }
 
   private sizeMap(): Map<string, number> {
@@ -331,30 +334,27 @@ export class Pipeline {
       if (cls.kind === 'session') this.clearDeleted(cls.sessionId);
       const from = this.store.getOffset(file);
       const res = await readNewLines(absPath, from, READ_BUDGET_BYTES);
+      const progressed = res.newOffset !== from || res.truncated;
       if (res.lines.length > 0) {
-        await this.enqueue(cls.sessionId, () => {
+        // One transaction per slice: raw rows + unknown stats + derived changes + offset, all or nothing.
+        const slice = (): Change[] => {
           const changes: Change[] = [];
           for (const { offset, text } of res.lines) {
             const recordType = topLevelType(text);
-            const event: RawEvent = {
-              source: 'transcript',
-              file,
-              offset,
-              line: text,
-              recordType,
-              sessionId: cls.sessionId,
-              agentId,
-            };
+            const event: RawEvent = { source: 'transcript', file, offset, line: text, recordType, sessionId: cls.sessionId, agentId };
             if (this.store.insertRaw(event) === null) continue;
             const out = this.normalizer.apply(event, cls.projectId);
             changes.push(...out.changes);
             if (out.unknownRecordType !== undefined) this.store.bumpUnknown(out.unknownRecordType, text);
           }
-          this.commit(changes);
-        });
+          this.store.setOffset(file, res.newOffset, size);
+          return changes;
+        };
+        await this.enqueue(cls.sessionId, () => this.atomically(cls.sessionId, slice, () => this.sizeMap().set(file, size)));
+      } else if (progressed) {
+        // Reads that only consumed blank lines still persist their progress.
+        this.recordOffset(file, res.newOffset, size);
       }
-      // Persist on any progress, including reads that only consumed blank lines.
-      if (res.newOffset !== from || res.truncated) this.recordOffset(file, res.newOffset, size);
       if (res.newOffset === from) return;
       await yieldToEventLoop();
     }
@@ -375,23 +375,35 @@ export class Pipeline {
       // a file that was never recorded cannot have a stored copy, so skip the lookup.
       if (this.store.getOffset(file) > 0 && this.store.latestMeta(file) === content) return;
       const event: RawEvent = { source: 'meta', file, sessionId: cls.sessionId, agentId, payload: content };
-      this.store.insertRaw(event);
-      this.commit(this.normalizer.apply(event, cls.projectId).changes);
-      // Recorded so the rescan timer treats the file as known and only revisits it when its size changes.
-      this.recordOffset(file, size, size);
+      this.atomically(
+        cls.sessionId,
+        () => {
+          this.store.insertRaw(event);
+          const changes = this.normalizer.apply(event, cls.projectId).changes;
+          // Recorded so the rescan timer treats the file as known and only revisits it when its size changes.
+          this.store.setOffset(file, size, size);
+          return changes;
+        },
+        () => this.sizeMap().set(file, size),
+      );
     });
   }
 
   private applyHook(event: Extract<RawEvent, { source: 'hook' }>): void {
     const sessionId = event.sessionId;
     if (sessionId !== null) this.lastTouch.set(sessionId, Date.now());
-    this.store.insertRaw(event);
-    this.persistedHooks.add(event);
-    // The Normalizer only uses projectId for a new session or to upgrade 'unknown', so the stored value alone
-    // (null -> 'unknown') gives the same result live and on replay.
-    const out = this.normalizer.apply(event, event.projectId ?? UNKNOWN_PROJECT);
-    if (out.unknownRecordType !== undefined) this.store.bumpUnknown(out.unknownRecordType, event.payload);
-    this.commit(out.changes);
+    this.atomically(
+      sessionId,
+      () => {
+        this.store.insertRaw(event);
+        // The Normalizer only uses projectId for a new session or to upgrade 'unknown', so the stored value alone
+        // (null -> 'unknown') gives the same result live and on replay.
+        const out = this.normalizer.apply(event, event.projectId ?? UNKNOWN_PROJECT);
+        if (out.unknownRecordType !== undefined) this.store.bumpUnknown(out.unknownRecordType, event.payload);
+        return out.changes;
+      },
+      () => this.persistedHooks.add(event),
+    );
   }
 
   /**
@@ -444,8 +456,29 @@ export class Pipeline {
     if (!recent) this.drop(sessionId);
   }
 
+  /**
+   * Runs `work` (store writes + Normalizer) and persists the changes it returns in one transaction, then notifies
+   * listeners. On failure nothing of the slice is in the database; the session's Normalizer state, which may now be
+   * ahead of the database, is dropped so the next event re-hydrates it from what was committed.
+   */
+  private atomically(sessionId: string | null, work: () => Change[], afterCommit?: () => void): void {
+    let applied: SeqChange[];
+    try {
+      applied = this.store.transaction(() => this.persist(work()));
+    } catch (err) {
+      if (sessionId !== null) this.drop(sessionId);
+      throw err;
+    }
+    afterCommit?.();
+    this.notify(applied);
+  }
+
   private commit(changes: Change[]): void {
-    if (changes.length === 0) return;
+    this.atomically(null, () => changes);
+  }
+
+  private persist(changes: Change[]): SeqChange[] {
+    if (changes.length === 0) return [];
     const fixed =
       this.deleted.size === 0
         ? changes
@@ -454,7 +487,11 @@ export class Pipeline {
               ? { ...c, session: { ...c.session, sourceDeleted: true } }
               : c,
           );
-    const applied = this.store.applyChanges(fixed);
+    return this.store.applyChanges(fixed);
+  }
+
+  private notify(applied: SeqChange[]): void {
+    if (applied.length === 0) return;
     for (const listener of [...this.listeners]) {
       try {
         listener(applied);

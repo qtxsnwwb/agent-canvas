@@ -1,11 +1,13 @@
 import { createHash } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { Worker } from 'node:worker_threads';
 import Database from 'better-sqlite3';
 import {
   STALE_AFTER_MS,
   type Change,
   type Diagnostics,
-  type GraphEdge,
-  type GraphNode,
   type GraphSnapshot,
   type NodeDetail,
   type Project,
@@ -29,21 +31,44 @@ export type RawEvent =
   | { source: 'meta'; file: string; sessionId: string; agentId: string | null; payload: string }; // custom-title.json, agent-*.meta.json contents
 export type StoredRawEvent = RawEvent & { ingestId: number };
 
+/** The change log keeps at most this many rows; older ones are pruned down to 90% of it. */
+export const CHANGE_LOG_MAX_ROWS = 200_000;
+/** Rows inserted into the change log between two size checks. */
+const PRUNE_CHECK_EVERY = 10_000;
+
+export interface StoreOptions {
+  changeLogMaxRows?: number;
+  pruneCheckEvery?: number;
+  /** Receives every SQL statement executed (tests). */
+  verbose?: (sql: unknown) => void;
+}
+
 export interface Store {
+  /** Runs `fn` in one SQLite transaction (nested calls become savepoints); all or nothing. */
+  transaction<T>(fn: () => T): T;
   /** Returns the ingestId, or null for a duplicate transcript line. */
   insertRaw(event: RawEvent): number | null;
   /** 0 when the file has no recorded offset. */
   getOffset(file: string): number;
   setOffset(file: string, offset: number, size: number): void;
-  /** Single transaction; assigns consecutive seq values. */
+  /** Every recorded file offset (file is the relative store key). */
+  listOffsets(): { path: string; offset: number; size: number }[];
+  /**
+   * Single transaction; assigns consecutive seq values. Within one call only the last session_upserted per session
+   * is logged and returned. Logged and returned changes carry no node detail (node_added has `detail: {}`).
+   */
   applyChanges(changes: Change[]): SeqChange[];
   listProjects(): Project[];
   /** Ordered by lastActivityAt descending. */
   listSessions(projectId: string): Session[];
   getSession(sessionId: string): Session | null;
   getGraph(sessionId: string): GraphSnapshot | null;
+  /** The GraphSnapshot already serialized, built from the stored bodies without parsing them. */
+  getGraphJson(sessionId: string): string | null;
   getNodeDetail(sessionId: string, nodeId: string): NodeDetail | null;
   changesSince(seq: number, sessionId?: string): SeqChange[];
+  /** Smallest retained seq, or the next seq when the change log is empty. */
+  minSeq(): number;
   /** Ordered by ingestId ascending. */
   rawForSession(sessionId: string): StoredRawEvent[];
   /** Keyset page over rawForSession: ingestId strictly greater than afterIngestId, ascending, at most limit rows. */
@@ -54,6 +79,8 @@ export interface Store {
   /** Clears derived tables and the change log; keeps raw_event and file_offset. */
   clearDerived(): void;
   bumpUnknown(recordType: string, sample: string): void;
+  /** Latest receivedAt of any stored hook event (kept in `meta`, no raw_event scan). */
+  lastHookAt(): string | null;
   diagnostics(): Diagnostics;
   close(): void;
 }
@@ -122,10 +149,50 @@ function changeSessionId(c: Change): string {
   }
 }
 
-export function openStore(dbPath: string): Store {
-  const db = new Database(dbPath);
+/** The form a change takes in the change log and on the wire: node detail is fetched on demand over REST. */
+function withoutDetail(c: Change): Change {
+  if (c.type === 'node_added') return { ...c, detail: {} };
+  if (c.type === 'node_updated' && 'detail' in c) {
+    const { detail: _detail, ...rest } = c;
+    return rest;
+  }
+  return c;
+}
+
+const CHECKPOINT_INTERVAL_MS = 1000;
+
+/**
+ * Auto-checkpoints on the main connection copy the WAL into the database file synchronously, stalling the event loop
+ * for hundreds of milliseconds during an import. They are disabled here and a worker thread checkpoints instead.
+ */
+function startCheckpointer(db: Database.Database, dbPath: string): Worker | null {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const script = ['checkpointer.js', 'checkpointer.ts'].map((f) => path.join(here, f)).find((f) => fs.existsSync(f));
+  if (script === undefined) return null; // keep SQLite's automatic checkpoints
+  try {
+    const worker = new Worker(script, { workerData: { dbPath, intervalMs: CHECKPOINT_INTERVAL_MS } });
+    worker.on('error', () => {
+      try {
+        if (db.open) db.pragma('wal_autocheckpoint = 1000'); // fall back to automatic checkpoints
+      } catch {
+        // closing
+      }
+    });
+    worker.unref();
+    db.pragma('wal_autocheckpoint = 0');
+    return worker;
+  } catch {
+    return null;
+  }
+}
+
+export function openStore(dbPath: string, options: StoreOptions = {}): Store {
+  const maxRows = options.changeLogMaxRows ?? CHANGE_LOG_MAX_ROWS;
+  const pruneEvery = options.pruneCheckEvery ?? PRUNE_CHECK_EVERY;
+  const db = new Database(dbPath, options.verbose ? { verbose: options.verbose } : {});
   db.pragma('journal_mode = WAL');
   db.exec(SCHEMA_SQL);
+  const checkpointer = dbPath === ':memory:' || dbPath === '' ? null : startCheckpointer(db, dbPath);
 
   // INSERT ... SELECT ... WHERE NOT EXISTS (rather than INSERT OR IGNORE): with AUTOINCREMENT, an
   // ignored insert would still consume an ingest_id and leave gaps.
@@ -149,6 +216,11 @@ export function openStore(dbPath: string): Store {
     `INSERT INTO file_offset (file, "offset", size) VALUES (@file, @offset, @size)
      ON CONFLICT(file) DO UPDATE SET "offset" = excluded."offset", size = excluded.size`,
   );
+  const selectMeta = db.prepare(`SELECT value FROM meta WHERE key = ?`).pluck();
+  const upsertLaterMeta = db.prepare(
+    `INSERT INTO meta (key, value) VALUES (?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE excluded.value > meta.value`,
+  );
 
   const insertChange = db.prepare(`INSERT INTO change_log (session_id, body) VALUES (?, ?)`);
   const upsertSession = db.prepare(
@@ -157,9 +229,16 @@ export function openStore(dbPath: string): Store {
      ON CONFLICT(id) DO UPDATE SET project_id = excluded.project_id, status = excluded.status,
        last_activity_at = excluded.last_activity_at, body = excluded.body`,
   );
-  const insertNode = db.prepare(`INSERT OR REPLACE INTO node (session_id, id, body, detail) VALUES (?, ?, ?, ?)`);
-  const selectNode = db.prepare(`SELECT body, detail FROM node WHERE session_id = ? AND id = ?`);
-  const updateNode = db.prepare(`UPDATE node SET body = ?, detail = ? WHERE session_id = ? AND id = ?`);
+  const insertNode = db.prepare(`INSERT OR REPLACE INTO node (session_id, id, body) VALUES (?, ?, ?)`);
+  const selectNodeBody = db.prepare(`SELECT body FROM node WHERE session_id = ? AND id = ?`).pluck();
+  const updateNode = db.prepare(`UPDATE node SET body = ? WHERE session_id = ? AND id = ?`);
+  const upsertDetail = db.prepare(`INSERT OR REPLACE INTO node_detail (session_id, node_id, detail) VALUES (?, ?, ?)`);
+  const selectDetail = db.prepare(`SELECT detail FROM node_detail WHERE session_id = ? AND node_id = ?`).pluck();
+  const selectNodeWithDetail = db.prepare(
+    `SELECT d.detail AS detail FROM node n
+     LEFT JOIN node_detail d ON d.session_id = n.session_id AND d.node_id = n.id
+     WHERE n.session_id = ? AND n.id = ?`,
+  );
   const insertEdge = db.prepare(`INSERT OR REPLACE INTO edge (session_id, id, body) VALUES (?, ?, ?)`);
 
   // Active = effective status running/awaiting_*: a `running` session older than STALE_AFTER_MS is stale, not active.
@@ -172,13 +251,18 @@ export function openStore(dbPath: string): Store {
      FROM session GROUP BY project_id ORDER BY project_id`,
   );
   const selectSessions = db.prepare(`SELECT body FROM session WHERE project_id = ? ORDER BY last_activity_at DESC, id`);
-  const selectSession = db.prepare(`SELECT body FROM session WHERE id = ?`);
-  const selectNodes = db.prepare(`SELECT body FROM node WHERE session_id = ? ORDER BY rowid`);
-  const selectEdges = db.prepare(`SELECT body FROM edge WHERE session_id = ? ORDER BY rowid`);
-  const selectMaxSeq = db.prepare(`SELECT COALESCE(MAX(seq), 0) AS seq FROM change_log WHERE session_id = ?`);
+  const selectSession = db.prepare(`SELECT body FROM session WHERE id = ?`).pluck();
+  const selectNodeBodies = db.prepare(`SELECT body FROM node WHERE session_id = ? ORDER BY rowid`).pluck();
+  const selectEdgeBodies = db.prepare(`SELECT body FROM edge WHERE session_id = ? ORDER BY rowid`).pluck();
   const selectChanges = db.prepare(`SELECT seq, body FROM change_log WHERE seq > ? ORDER BY seq`);
   const selectChangesForSession = db.prepare(
     `SELECT seq, body FROM change_log WHERE seq > ? AND session_id = ? ORDER BY seq`,
+  );
+  const selectMinSeq = db.prepare(`SELECT MIN(seq) FROM change_log`).pluck();
+  const selectSeqCounter = db.prepare(`SELECT seq FROM sqlite_sequence WHERE name = 'change_log'`).pluck();
+  const countChanges = db.prepare(`SELECT COUNT(*) FROM change_log`).pluck();
+  const pruneChanges = db.prepare(
+    `DELETE FROM change_log WHERE seq < (SELECT seq FROM change_log ORDER BY seq DESC LIMIT 1 OFFSET ?)`,
   );
   const selectRawForSession = db.prepare(`SELECT * FROM raw_event WHERE session_id = ? ORDER BY ingest_id`);
   const selectRawAfter = db.prepare(
@@ -195,7 +279,6 @@ export function openStore(dbPath: string): Store {
      ON CONFLICT(record_type) DO UPDATE SET count = count + 1`,
   );
   const selectUnknown = db.prepare(`SELECT record_type, count, sample FROM unknown_stat ORDER BY record_type`);
-  const selectLastHook = db.prepare(`SELECT MAX(received_at) AS at FROM raw_event WHERE source = 'hook'`);
   const selectFiles = db.prepare(`SELECT file, "offset", size FROM file_offset ORDER BY file`);
 
   function applyOne(c: Change): void {
@@ -210,14 +293,19 @@ export function openStore(dbPath: string): Store {
         });
         break;
       case 'node_added':
-        insertNode.run(c.node.sessionId, c.node.id, JSON.stringify(c.node), JSON.stringify(c.detail ?? {}));
+        insertNode.run(c.node.sessionId, c.node.id, JSON.stringify(c.node));
+        upsertDetail.run(c.node.sessionId, c.node.id, JSON.stringify(c.detail ?? {}));
         break;
       case 'node_updated': {
-        const row = selectNode.get(c.sessionId, c.id) as { body: string; detail: string } | undefined;
-        if (!row) break; // updates to unknown nodes are ignored, as in shared applyChange
-        const node = { ...(JSON.parse(row.body) as GraphNode), ...c.patch };
-        const detail = { ...(JSON.parse(row.detail) as object), ...(c.detail ?? {}) };
-        updateNode.run(JSON.stringify(node), JSON.stringify(detail), c.sessionId, c.id);
+        const body = selectNodeBody.get(c.sessionId, c.id) as string | undefined;
+        if (body === undefined) break; // updates to unknown nodes are ignored, as in shared applyChange
+        updateNode.run(JSON.stringify({ ...(JSON.parse(body) as object), ...c.patch }), c.sessionId, c.id);
+        if (c.detail !== undefined) {
+          // node_detail is touched only when the update carries detail.
+          const prev = selectDetail.get(c.sessionId, c.id) as string | undefined;
+          const merged = { ...(prev === undefined ? {} : (JSON.parse(prev) as object)), ...c.detail };
+          upsertDetail.run(c.sessionId, c.id, JSON.stringify(merged));
+        }
         break;
       }
       case 'edge_added':
@@ -226,13 +314,31 @@ export function openStore(dbPath: string): Store {
     }
   }
 
+  let insertedSincePruneCheck = pruneEvery; // check on the first call
+  function maybePrune(inserted: number): void {
+    insertedSincePruneCheck += inserted;
+    if (insertedSincePruneCheck < pruneEvery) return;
+    insertedSincePruneCheck = 0;
+    if ((countChanges.get() as number) <= maxRows) return;
+    const keep = Math.max(1, Math.floor(maxRows * 0.9));
+    pruneChanges.run(keep - 1);
+  }
+
   const applyChangesTx = db.transaction((changes: Change[]): SeqChange[] => {
+    // Only the last session_upserted per session survives (relative order of the rest is kept).
+    const lastUpsert = new Map<string, number>();
+    changes.forEach((c, i) => {
+      if (c.type === 'session_upserted') lastUpsert.set(c.session.id, i);
+    });
     const out: SeqChange[] = [];
-    for (const c of changes) {
-      const seq = Number(insertChange.run(changeSessionId(c), JSON.stringify(c)).lastInsertRowid);
+    changes.forEach((c, i) => {
+      if (c.type === 'session_upserted' && lastUpsert.get(c.session.id) !== i) return;
       applyOne(c);
-      out.push({ ...c, seq });
-    }
+      const logged = withoutDetail(c);
+      const seq = Number(insertChange.run(changeSessionId(c), JSON.stringify(logged)).lastInsertRowid);
+      out.push({ ...logged, seq });
+    });
+    maybePrune(out.length);
     return out;
   });
 
@@ -246,18 +352,45 @@ export function openStore(dbPath: string): Store {
     (rows as { seq: number; body: string }[]).map((r) => ({ ...(JSON.parse(r.body) as Change), seq: r.seq }));
 
   const getSession = (sessionId: string): Session | null => {
-    const row = selectSession.get(sessionId) as { body: string } | undefined;
-    return row ? (JSON.parse(row.body) as Session) : null;
+    const body = selectSession.get(sessionId) as string | undefined;
+    return body === undefined ? null : (JSON.parse(body) as Session);
   };
 
+  const getGraphJson = (sessionId: string): string | null => {
+    const session = selectSession.get(sessionId) as string | undefined;
+    if (session === undefined) return null;
+    const nodes = selectNodeBodies.all(sessionId) as string[];
+    const edges = selectEdgeBodies.all(sessionId) as string[];
+    // The last assigned seq (not the session's own max): the snapshot reflects every change up to it, and it is never
+    // below minSeq() - 1, so a client resubscribing with it is never told to resync again.
+    const seq = lastSeq();
+    return `{"session":${session},"nodes":[${nodes.join(',')}],"edges":[${edges.join(',')}],"seq":${seq}}`;
+  };
+
+  const lastSeq = (): number => (selectSeqCounter.get() as number | undefined) ?? 0;
+  const lastHookAt = (): string | null => (selectMeta.get('last_hook_at') as string | undefined) ?? null;
+  const listOffsets = (): { path: string; offset: number; size: number }[] =>
+    (selectFiles.all() as { file: string; offset: number; size: number }[]).map((r) => ({
+      path: r.file,
+      offset: r.offset,
+      size: r.size,
+    }));
+
   return {
+    transaction<T>(fn: () => T): T {
+      return db.transaction(fn)();
+    },
     insertRaw(event) {
       if (event.source === 'transcript') {
         const lineHash = createHash('sha1').update(event.line).digest('hex');
         const res = insertRawTranscript.run({ ...event, lineHash });
         return res.changes === 0 ? null : Number(res.lastInsertRowid);
       }
-      if (event.source === 'hook') return Number(insertRawHook.run({ ...event, projectId: event.projectId ?? null }).lastInsertRowid);
+      if (event.source === 'hook') {
+        const id = Number(insertRawHook.run({ ...event, projectId: event.projectId ?? null }).lastInsertRowid);
+        upsertLaterMeta.run('last_hook_at', event.receivedAt);
+        return id;
+      }
       return Number(insertRawMeta.run(event).lastInsertRowid);
     },
     getOffset(file) {
@@ -267,6 +400,7 @@ export function openStore(dbPath: string): Store {
     setOffset(file, offset, size) {
       upsertOffset.run({ file, offset, size });
     },
+    listOffsets,
     applyChanges(changes) {
       return applyChangesTx(changes);
     },
@@ -284,21 +418,23 @@ export function openStore(dbPath: string): Store {
     },
     getSession,
     getGraph(sessionId) {
-      const session = getSession(sessionId);
-      if (!session) return null;
-      const nodes = (selectNodes.all(sessionId) as { body: string }[]).map((r) => JSON.parse(r.body) as GraphNode);
-      const edges = (selectEdges.all(sessionId) as { body: string }[]).map((r) => JSON.parse(r.body) as GraphEdge);
-      const { seq } = selectMaxSeq.get(sessionId) as { seq: number };
-      return { session, nodes, edges, seq };
+      const json = getGraphJson(sessionId);
+      return json === null ? null : (JSON.parse(json) as GraphSnapshot);
     },
+    getGraphJson,
     getNodeDetail(sessionId, nodeId) {
-      const row = selectNode.get(sessionId, nodeId) as { detail: string } | undefined;
+      const row = selectNodeWithDetail.get(sessionId, nodeId) as { detail: string | null } | undefined;
       if (!row) return null;
-      const d = JSON.parse(row.detail) as Partial<NodeDetail>;
+      const d = row.detail === null ? {} : (JSON.parse(row.detail) as Partial<NodeDetail>);
       return { input: null, output: null, text: null, raw: null, ...d, nodeId };
     },
     changesSince(seq, sessionId) {
       return toChanges(sessionId === undefined ? selectChanges.all(seq) : selectChangesForSession.all(seq, sessionId));
+    },
+    minSeq() {
+      const min = selectMinSeq.get() as number | null;
+      if (min !== null) return min;
+      return lastSeq() + 1;
     },
     rawForSession(sessionId) {
       return (selectRawForSession.all(sessionId) as RawRow[]).map(toStoredRaw);
@@ -319,6 +455,7 @@ export function openStore(dbPath: string): Store {
     bumpUnknown(recordType, sample) {
       upsertUnknown.run(recordType, sample.slice(0, SAMPLE_MAX));
     },
+    lastHookAt,
     diagnostics() {
       return {
         unknownRecords: (selectUnknown.all() as { record_type: string; count: number; sample: string }[]).map((r) => ({
@@ -326,15 +463,12 @@ export function openStore(dbPath: string): Store {
           count: r.count,
           sample: r.sample,
         })),
-        lastHookAt: (selectLastHook.get() as { at: string | null }).at,
-        files: (selectFiles.all() as { file: string; offset: number; size: number }[]).map((r) => ({
-          path: r.file,
-          offset: r.offset,
-          size: r.size,
-        })),
+        lastHookAt: lastHookAt(),
+        files: listOffsets(),
       };
     },
     close() {
+      checkpointer?.postMessage('close');
       db.close();
     },
   };

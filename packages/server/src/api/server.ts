@@ -158,9 +158,10 @@ export function buildServer(deps: { store: Store; pipeline: Pipeline; config: Co
   app.get('/api/projects', async () => store.listProjects());
   app.get<{ Params: { id: string } }>('/api/projects/:id/sessions', async (req) => store.listSessions(req.params.id));
   app.get<{ Params: { id: string } }>('/api/sessions/:id/graph', async (req, reply) => {
-    const graph = store.getGraph(req.params.id);
-    if (graph === null) return reply.code(404).send({ error: 'session not found' });
-    return graph;
+    // Built from the stored bodies and sent as-is: no parse/re-serialize of every node.
+    const json = store.getGraphJson(req.params.id);
+    if (json === null) return reply.code(404).send({ error: 'session not found' });
+    return reply.header('content-type', 'application/json; charset=utf-8').send(json);
   });
   app.get<{ Params: { id: string; nodeId: string } }>('/api/sessions/:id/nodes/:nodeId', async (req, reply) => {
     const detail = store.getNodeDetail(req.params.id, req.params.nodeId);
