@@ -159,6 +159,7 @@ hooks 里没有"权限已批准、开始执行"的独立事件：`PreToolUse` �
 | `unknown` | JSONL | 无法解析的对话记录，保留原始内容 |
 
 所有节点共有：`id`、`sessionId`、`turnId`、`agentId`（主线为空）、`parentId`、`timestamp`、`confirmed`、`usage`（token 用量，有则填）。
+subagent 节点另有 `childAgentId`：它派出的代理的 id（元数据到达前为空）；`agentId` 仍是它自己所属的线程。
 
 ### 4.3 状态
 

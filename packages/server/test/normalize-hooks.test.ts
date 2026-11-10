@@ -54,7 +54,7 @@ test('PreToolUse 带 agent_id 和 Agent 工具名', () => {
   const { graph } = run(n, [
     hook('PreToolUse', { tool_name: 'Task', tool_input: { description: 'd' }, tool_use_id: 'tu9', agent_id: 'ag1' }),
   ]);
-  expect(graph.nodes['tool:tu9']).toMatchObject({ kind: 'subagent', agentId: 'ag1' });
+  expect(graph.nodes['tool:tu9']).toMatchObject({ kind: 'subagent', agentId: 'ag1', childAgentId: null });
 });
 
 test('JSONL 先到：PreToolUse 不产生节点变更', () => {

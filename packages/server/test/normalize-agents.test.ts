@@ -80,7 +80,7 @@ test.each([
   const { graph, changes } = run(n, order(spawnEvents()));
   expect(graph.edges['tool:tu1->s1']).toMatchObject({ kind: 'spawn' });
   expect(graph.nodes.s1).toMatchObject({ agentId: 'ag1', parentId: 'tool:tu1', turnId: null });
-  expect(graph.nodes['tool:tu1']).toMatchObject({ agentId: 'ag1', title: 'Explore', summary: '找入口' });
+  expect(graph.nodes['tool:tu1']).toMatchObject({ agentId: null, childAgentId: 'ag1', title: 'Explore', summary: '找入口' });
   expect(changes.filter((c) => c.type === 'edge_added' && c.edge.kind === 'spawn')).toHaveLength(1);
 });
 
@@ -146,7 +146,7 @@ const parallelEvents = (): RawEvent[] => [
 
 const edgeSummary = (g: Graph) => Object.values(g.edges).map((e) => `${e.id}:${e.kind}`).sort();
 const nodeSummary = (g: Graph) =>
-  Object.values(g.nodes).map((x) => `${x.id}|${x.parentId}|${x.agentId}|${x.title}|${x.summary}`).sort();
+  Object.values(g.nodes).map((x) => `${x.id}|${x.parentId}|${x.agentId}|${x.childAgentId}|${x.title}|${x.summary}`).sort();
 
 test('已存在的占位工具节点：并行批次结果与新建一致', () => {
   const direct = run(new Normalizer(), parallelEvents()).graph;
@@ -174,7 +174,7 @@ test.each([
   const { graph, changes } = runWithPlaceholders([{ id: 'tu1', name: 'Agent' }], order(spawnEvents()));
   expect(graph.edges['tool:tu1->s1']).toMatchObject({ kind: 'spawn' });
   expect(graph.nodes.s1).toMatchObject({ agentId: 'ag1', parentId: 'tool:tu1' });
-  expect(graph.nodes['tool:tu1']).toMatchObject({ agentId: 'ag1', title: 'Explore', summary: '找入口' });
+  expect(graph.nodes['tool:tu1']).toMatchObject({ agentId: null, childAgentId: 'ag1', title: 'Explore', summary: '找入口' });
   expect(changes.filter((c) => c.type === 'edge_added' && c.edge.kind === 'spawn')).toHaveLength(1);
 });
 
@@ -196,4 +196,59 @@ test('子代理记录不改会话 cwd 与 gitBranch', () => {
     userPrompt('s1', null, 'y', { agentId: 'ag1', cwd: '/wt', gitBranch: 'wt' }),
   ]);
   expect(lastSession(changes)).toMatchObject({ cwd: '/main', gitBranch: 'main' });
+});
+
+const agentTool = (uuid: string, parent: string | null, id: string, over: { agentId?: string; input?: object } = {}): RawEvent =>
+  assistantBlock(uuid, parent, { type: 'tool_use', id, name: 'Agent', input: over.input ?? { description: 'd' } }, {
+    ...(over.agentId !== undefined ? { agentId: over.agentId } : {}),
+  });
+const meta = (agentId: string, toolUseId: string): RawEvent => agentMeta(agentId, { toolUseId, agentType: 'Explore', description: 'd' });
+
+test('派发节点保留自己所属的线程，派出的代理记在 childAgentId', () => {
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x'),
+    agentTool('a1', 'u1', 'tu1'),
+    meta('ag1', 'tu1'),
+    userPrompt('r1', null, 'sub', { agentId: 'ag1' }),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ kind: 'subagent', agentId: null, childAgentId: 'ag1' });
+  expect(graph.nodes.r1).toMatchObject({ agentId: 'ag1', childAgentId: null });
+  expect(Object.values(graph.edges).filter((e) => e.kind === 'spawn')).toEqual([
+    expect.objectContaining({ from: 'tool:tu1', to: 'r1' }),
+  ]);
+});
+
+test('代理内部再派发：内层派发节点的 agentId 是外层代理', () => {
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x'),
+    agentTool('a1', 'u1', 'tu1'),
+    meta('ag1', 'tu1'),
+    agentTool('b1', null, 'tu2', { agentId: 'ag1' }),
+    meta('ag2', 'tu2'),
+  ]);
+  expect(graph.nodes['tool:tu2']).toMatchObject({ agentId: 'ag1', childAgentId: 'ag2' });
+});
+
+test('元数据到达后，主线对 Agent 工具的 PermissionRequest 仍能匹配到派发节点', () => {
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x'),
+    agentTool('a1', 'u1', 'tu1', { input: { prompt: 'p' } }),
+    meta('ag1', 'tu1'),
+    hook('PermissionRequest', { tool_name: 'Agent', tool_input: { prompt: 'p' } }),
+  ]);
+  expect(graph.nodes['tool:tu1']!.status).toBe('awaiting_permission');
+});
+
+test('除派发边外，没有边连接不同线程的节点', () => {
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x'),
+    agentTool('a1', 'u1', 'tu1'),
+    meta('ag1', 'tu1'),
+    userPrompt('r1', null, 'sub', { agentId: 'ag1' }),
+    toolResult('u2', 'a1', 'tu1', 'done'),
+    assistantBlock('a2', 'u2', { type: 'text', text: 't2' }),
+  ]);
+  for (const e of Object.values(graph.edges)) {
+    if (e.kind !== 'spawn') expect(graph.nodes[e.from]!.agentId).toBe(graph.nodes[e.to]!.agentId);
+  }
 });

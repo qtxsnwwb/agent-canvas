@@ -157,7 +157,7 @@ export class Normalizer {
     const id = `tool:${meta.toolUseId}`;
     const node = state.nodes.get(id);
     if (!node) return;
-    const patch: Partial<GraphNode> = { agentId: meta.agentId, title: meta.agentType, summary: summarize(meta.description) };
+    const patch: Partial<GraphNode> = { childAgentId: meta.agentId, title: meta.agentType, summary: summarize(meta.description) };
     state.nodes.set(id, { ...node, ...patch });
     changes.push({ type: 'node_updated', sessionId: state.session.id, id, patch });
     this.trySpawn(state, meta.agentId, changes);
@@ -206,6 +206,7 @@ export class Normalizer {
       durationMs: null,
       usage: null,
       systemSubtype: null,
+      childAgentId: null,
     };
     state.nodes.set(id, node);
     state.toolInputs.set(id, spec.input);
@@ -270,6 +271,7 @@ export class Normalizer {
           durationMs: null,
           usage: null,
           systemSubtype: 'compact',
+          childAgentId: null,
         };
         state.nodes.set(id, node);
         changes.push({ type: 'node_added', node, detail: { text: effect.summary } });
@@ -574,6 +576,7 @@ export class Normalizer {
       durationMs: null,
       usage: null,
       systemSubtype: null,
+      childAgentId: null,
     };
   }
 
@@ -727,7 +730,7 @@ export class Normalizer {
       // The incoming edge is only new when the parent actually changed.
       this.emitPlacementEdges(state, placed, placed.node.parentId !== null && placed.node.parentId !== existing.parentId, changes);
       this.registerFirstNode(state, agentId, id, changes);
-      if (pending && existing.agentId !== pending.agentId) this.applyAgentMeta(state, pending, changes);
+      if (pending && existing.childAgentId !== pending.agentId) this.applyAgentMeta(state, pending, changes);
       return id;
     }
     const node: GraphNode = {
