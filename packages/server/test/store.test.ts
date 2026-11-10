@@ -486,28 +486,61 @@ test('子代理内部的 prompt 节点不参与检索', () => {
   expect(store.searchSessions('secret', 10)[0]!.matches.map((m) => m.nodeId)).toEqual(['main']);
 });
 
-test('提示检索使用 node_prompt 部分索引', async () => {
+test('两条检索语句都走 node_main_prompt 部分索引，不全表扫描 node', () => {
+  const plans = store.searchPlans();
+  for (const [name, lines] of Object.entries(plans)) {
+    const text = lines.join('\n');
+    expect(text, name).toContain('node_main_prompt');
+    expect(text, name).not.toMatch(/SCAN (node|n)\b/);
+  }
+});
+
+test('升级：旧的 node_prompt 索引被删除', async () => {
   const fsp = await import('node:fs/promises');
   const os = await import('node:os');
   const path = await import('node:path');
   const { default: Database } = await import('better-sqlite3');
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'cc-search-idx-'));
   const file = path.join(dir, 'a.db');
-  openStore(file).close();
   try {
-    const raw = new Database(file, { readonly: true });
-    try {
-      const plan = raw
-        .prepare(
-          `EXPLAIN QUERY PLAN SELECT 1 FROM node n WHERE n.session_id = ? AND json_extract(n.body, '$.kind') = 'prompt'
-           AND json_extract(n.body, '$.agentId') IS NULL AND json_extract(n.body, '$.summary') LIKE ? ESCAPE '\\'`,
-        )
-        .all('s1', '%x%') as { detail: string }[];
-      expect(plan.map((r) => r.detail).join('\n')).toContain('node_prompt');
-    } finally {
-      raw.close();
-    }
+    openStore(file).close();
+    const raw = new Database(file);
+    raw.exec(`CREATE INDEX node_prompt ON node (session_id) WHERE json_extract(body, '$.kind') = 'prompt'`);
+    raw.close();
+    openStore(file).close();
+    const check = new Database(file, { readonly: true });
+    const names = (check.prepare(`SELECT name FROM sqlite_master WHERE type = 'index'`).all() as { name: string }[]).map((r) => r.name);
+    check.close();
+    expect(names).toContain('node_main_prompt');
+    expect(names).not.toContain('node_prompt');
   } finally {
     await fsp.rm(dir, { recursive: true, force: true, maxRetries: 10 });
+  }
+});
+
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+const EMOJI = '\u{1F600}';
+
+test('查询按码点截断：200 字符的切口不会劈开代理对', () => {
+  // 199 ASCII + emoji = exactly 200 code points (201 UTF-16 units): a unit-based cut would split the pair
+  const title = 'a'.repeat(199) + EMOJI;
+  seedSession('emo', { title });
+  const hits = store.searchSessions(title + 'ZZZ', 10);
+  expect(hits.map((h) => h.session.id)).toEqual(['emo']);
+  for (const m of hits[0]!.matches) expect(m.snippet).not.toMatch(LONE_SURROGATE);
+  expect(() => store.searchSessions(EMOJI.repeat(150), 10)).not.toThrow();
+});
+
+test('片段窗口不劈开代理对', () => {
+  seedSession('emo2', { title: 'plain' });
+  [60, 61, 62].forEach((pre, i) => {
+    seedPrompt('emo2', `p${i}`, `${EMOJI.repeat(pre)}NEEDLE${EMOJI.repeat(60)}`.slice(0, 200), `2026-01-01T00:00:0${i}.000Z`);
+  });
+  const matches = store.searchSessions('needle', 10)[0]!.matches;
+  expect(matches).toHaveLength(3);
+  for (const m of matches) {
+    expect(m.snippet).not.toMatch(LONE_SURROGATE);
+    expect(m.snippet).toContain('NEEDLE');
+    expect(Array.from(m.snippet).length).toBeLessThanOrEqual(80);
   }
 });

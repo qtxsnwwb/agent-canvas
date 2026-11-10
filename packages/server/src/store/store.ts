@@ -69,15 +69,18 @@ function asciiLower(s: string): string {
  * At most SEARCH_SNIPPET_CHARS characters including the `…` marks on truncated sides, centred on the match. A match
  * longer than the window is cut at the window's end.
  */
-function snippetAround(text: string, at: number, matchLen: number): string {
+function snippetAround(text: string, atUnits: number, needle: string): string {
   const max = SEARCH_SNIPPET_CHARS;
-  if (text.length <= max) return text;
+  const cps = Array.from(text); // code points: a window edge never splits a surrogate pair
+  if (cps.length <= max) return text;
+  const at = Array.from(text.slice(0, atUnits)).length;
+  const matchLen = Array.from(needle).length;
   const inner = max - 2;
-  let start = Math.max(0, Math.min(at - Math.floor((inner - Math.min(matchLen, inner)) / 2), text.length - inner));
-  let end = Math.min(text.length, start + inner);
-  if (start === 0) end = Math.min(text.length, end + 1);
-  if (end === text.length) start = Math.max(0, start - 1);
-  return `${start > 0 ? '…' : ''}${text.slice(start, end)}${end < text.length ? '…' : ''}`;
+  let start = Math.max(0, Math.min(at - Math.floor((inner - Math.min(matchLen, inner)) / 2), cps.length - inner));
+  let end = Math.min(cps.length, start + inner);
+  if (start === 0) end = Math.min(cps.length, end + 1);
+  if (end === cps.length) start = Math.max(0, start - 1);
+  return `${start > 0 ? '…' : ''}${cps.slice(start, end).join('')}${end < cps.length ? '…' : ''}`;
 }
 
 export interface Store {
@@ -105,6 +108,8 @@ export interface Store {
    * after trimming gives []. `limit` is clamped to 1..SEARCH_MAX_LIMIT.
    */
   searchSessions(query: string, limit: number): SearchHit[];
+  /** Query plans (EXPLAIN QUERY PLAN detail lines) of the two statements searchSessions runs; for tests. */
+  searchPlans(): { sessions: string[]; prompts: string[] };
   getGraph(sessionId: string): GraphSnapshot | null;
   /** The GraphSnapshot already serialized, built from the stored bodies without parsing them. */
   getGraphJson(sessionId: string): string | null;
@@ -317,7 +322,9 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   const selectSessions = db.prepare(`SELECT body FROM session WHERE project_id = ? ORDER BY last_activity_at DESC, id`);
   const selectSession = db.prepare(`SELECT body FROM session WHERE id = ?`).pluck();
   // Query text is only ever a bound parameter (already LIKE-escaped by likePattern). The prompt condition repeats
-  // the node_prompt partial index expression verbatim so the index is used.
+  // the node_main_prompt partial index predicate verbatim so the index is used. Cost per request, honestly: one pass
+  // over the session rows (the OR over title/id/branch/cwd cannot use an index) plus the main-thread prompt rows via
+  // the index; node bodies of other kinds (tools, text, ...) are never scanned.
   const searchSessionsStmt = db.prepare(
     `SELECT body FROM session
      WHERE json_extract(body, '$.title') LIKE @pattern ESCAPE '\\'
@@ -508,7 +515,7 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     },
     getSession,
     searchSessions(rawQuery, rawLimit) {
-      const query = rawQuery.trim().slice(0, SEARCH_MAX_CHARS).trim();
+      const query = Array.from(rawQuery.trim()).slice(0, SEARCH_MAX_CHARS).join('').trim();
       if ([...query].length < SEARCH_MIN_CHARS) return [];
       const limit = Number.isFinite(rawLimit) ? Math.min(SEARCH_MAX_LIMIT, Math.max(1, Math.trunc(rawLimit))) : SEARCH_DEFAULT_LIMIT;
       const pattern = likePattern(query);
@@ -526,7 +533,7 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
         for (const [field, text] of fields) {
           if (text === null || matches.length >= SEARCH_MAX_MATCHES) continue;
           const at = asciiLower(text).indexOf(needle);
-          if (at >= 0) matches.push({ field, nodeId: null, snippet: snippetAround(text, at, needle.length) });
+          if (at >= 0) matches.push({ field, nodeId: null, snippet: snippetAround(text, at, needle) });
         }
         if (matches.length < SEARCH_MAX_MATCHES) {
           const prompts = searchPromptsStmt.all({ sessionId: session.id, pattern, limit: SEARCH_MAX_MATCHES - matches.length }) as {
@@ -535,12 +542,18 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
           }[];
           for (const p of prompts) {
             const at = asciiLower(p.summary).indexOf(needle);
-            if (at >= 0) matches.push({ field: 'prompt', nodeId: p.id, snippet: snippetAround(p.summary, at, needle.length) });
+            if (at >= 0) matches.push({ field: 'prompt', nodeId: p.id, snippet: snippetAround(p.summary, at, needle) });
           }
         }
         hits.push({ session, matches });
       }
       return hits;
+    },
+    searchPlans() {
+      const params = { pattern: '%x%', limit: 1, sessionId: 's' };
+      const plan = (stmt: { source: string }) =>
+        (db.prepare(`EXPLAIN QUERY PLAN ${stmt.source}`).all(params) as { detail: string }[]).map((r) => r.detail);
+      return { sessions: plan(searchSessionsStmt), prompts: plan(searchPromptsStmt) };
     },
     getGraph(sessionId) {
       const json = getGraphJson(sessionId);

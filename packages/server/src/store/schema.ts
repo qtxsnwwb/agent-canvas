@@ -44,8 +44,11 @@ CREATE TABLE IF NOT EXISTS node (
   PRIMARY KEY (session_id, id)
 );
 
--- Search over main-thread prompts: queries repeat this exact expression so SQLite can use the index.
-CREATE INDEX IF NOT EXISTS node_prompt ON node (session_id) WHERE json_extract(body, '$.kind') = 'prompt';
+-- Search over main-thread prompts: the search statements repeat this exact predicate so SQLite can use the index.
+-- node_prompt was an earlier, broader version of it (it also covered subagent prompts).
+DROP INDEX IF EXISTS node_prompt;
+CREATE INDEX IF NOT EXISTS node_main_prompt ON node (session_id)
+  WHERE json_extract(body, '$.kind') = 'prompt' AND json_extract(body, '$.agentId') IS NULL;
 
 CREATE TABLE IF NOT EXISTS node_detail (
   session_id TEXT NOT NULL,

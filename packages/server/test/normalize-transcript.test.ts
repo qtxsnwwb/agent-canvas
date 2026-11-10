@@ -2,7 +2,8 @@ import { beforeEach, expect, test } from 'vitest';
 import type { Change } from '@claude-canvas/shared';
 import { Normalizer } from '../src/normalize/normalizer.js';
 import { summarize } from '../src/normalize/summary.js';
-import { assistantBlock, rawLine, run, toolResult, userPrompt } from './fixtures.js';
+import { openStore } from '../src/store/store.js';
+import { assistantBlock, hook, rawLine, run, toolResult, userPrompt } from './fixtures.js';
 
 let n: Normalizer;
 beforeEach(() => {
@@ -410,16 +411,57 @@ test('开始时间无法解析时 endedAt 照记，durationMs 保持为空', () 
   expect(graph.nodes['tool:tu1']).toMatchObject({ endedAt: '2026-03-01T10:00:05.000Z', durationMs: null });
 });
 
-test('重放同一串原始事件得到相同的 endedAt 和 durationMs', () => {
+test('重放：从库里取回的原始事件交给新的归一化器，得到相同的 endedAt 和 durationMs', () => {
   const events = [
     userPrompt('u1', null, 'x'),
-    toolUseAt('2026-03-01T10:00:00.000Z'),
-    toolResult('u2', 'a1', 'tu1', 'ok', undefined, { timestamp: '2026-03-01T10:00:03.000Z' }),
+    assistantBlock('a1', 'u1', { type: 'tool_use', id: 'tu1', name: 'Bash', input: { command: 'ls' } }, { messageId: 'm1', timestamp: '2026-03-01T10:00:00.000Z' }),
+    assistantBlock('a2', 'a1', { type: 'tool_use', id: 'tu2', name: 'Read', input: { file_path: '/x' } }, { messageId: 'm1', timestamp: '2026-03-01T10:00:01.000Z' }),
+    assistantBlock('a3', 'a2', { type: 'tool_use', id: 'tu3', name: 'Bash', input: { command: 'pwd' } }, { messageId: 'm1', timestamp: '2026-03-01T10:00:01.500Z' }),
+    hook('PostToolUse', { tool_use_id: 'tu1', tool_response: 'ok', duration_ms: 777 }, '2026-03-01T10:00:02.000Z'),
+    toolResult('r1', 'a3', 'tu1', 'late', true, { timestamp: '2026-03-01T10:00:09.000Z' }),
+    toolResult('r2', 'r1', 'tu2', 'ok', undefined, { timestamp: '2026-03-01T10:00:04.000Z' }),
+    hook('PermissionDenied', { tool_use_id: 'tu3', reason: 'no' }, '2026-03-01T10:00:06.000Z'),
   ];
-  const a = run(new Normalizer(), events).graph.nodes['tool:tu1']!;
-  const b = run(new Normalizer(), events).graph.nodes['tool:tu1']!;
-  expect(a).toMatchObject({ endedAt: '2026-03-01T10:00:03.000Z', durationMs: 3000 });
-  expect({ endedAt: b.endedAt, durationMs: b.durationMs }).toEqual({ endedAt: a.endedAt, durationMs: a.durationMs });
+  // First pass: the live path (apply, then persist the raw event like the pipeline does).
+  const store = openStore(':memory:');
+  try {
+    const live = new Normalizer();
+    for (const ev of events) {
+      store.insertRaw(ev);
+      store.applyChanges(live.apply(ev, 'p1').changes);
+    }
+    // Second pass: a fresh normalizer replays the stored raw events in order (how an evicted session is hydrated).
+    const replayed = run(new Normalizer(), store.rawForSession('s1')).graph;
+    const stored = store.getGraph('s1')!;
+    expect(stored.nodes.filter((nd) => nd.kind === 'tool')).toHaveLength(3);
+    for (const node of stored.nodes) {
+      expect(replayed.nodes[node.id], node.id).toMatchObject({ endedAt: node.endedAt, durationMs: node.durationMs });
+    }
+    expect(replayed.nodes['tool:tu1']).toMatchObject({ endedAt: '2026-03-01T10:00:02.000Z', durationMs: 777, status: 'failed' });
+    expect(replayed.nodes['tool:tu2']).toMatchObject({ endedAt: '2026-03-01T10:00:04.000Z', durationMs: 3000 });
+    expect(replayed.nodes['tool:tu3']).toMatchObject({ endedAt: '2026-03-01T10:00:06.000Z', status: 'denied' });
+  } finally {
+    store.close();
+  }
+});
+
+test('等待权限的节点被 tool_result 推到终态时记下 endedAt', () => {
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x'),
+    toolUseAt('2026-03-01T10:00:00.000Z'),
+    hook('PermissionRequest', { tool_name: 'Bash', tool_input: { command: 'ls' } }, '2026-03-01T10:00:01.000Z'),
+    toolResult('u2', 'a1', 'tu1', 'ok', undefined, { timestamp: '2026-03-01T10:00:07.000Z' }),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ status: 'succeeded', endedAt: '2026-03-01T10:00:07.000Z', durationMs: 7000 });
+});
+
+test('子代理派发节点由 tool_result 结算时记下 endedAt 和推出的耗时', () => {
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x'),
+    assistantBlock('a1', 'u1', { type: 'tool_use', id: 'tu1', name: 'Agent', input: { prompt: 'p' } }, { timestamp: '2026-03-01T10:00:00.000Z' }),
+    toolResult('u2', 'a1', 'tu1', 'done', undefined, { timestamp: '2026-03-01T10:00:05.000Z' }),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ kind: 'subagent', status: 'succeeded', endedAt: '2026-03-01T10:00:05.000Z', durationMs: 5000 });
 });
 
 test('没有可识别内容块的 assistant 记录仍是 unknown 节点', () => {
