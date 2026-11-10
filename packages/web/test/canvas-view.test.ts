@@ -6,7 +6,7 @@ const EPOCH = Date.parse('2026-01-01T00:00:00Z');
 
 function node(id: string, kind: NodeKind, turnId: string | null, agentId: string | null, tMs: number, extra: Partial<GraphNode> = {}): GraphNode {
   return {
-    id, sessionId: 's1', turnId, agentId, childAgentId: null, parentId: null, kind, status: null,
+    id, sessionId: 's1', turnId, agentId, childAgentId: null, endedAt: null, parentId: null, kind, status: null,
     timestamp: new Date(EPOCH + tMs).toISOString(), confirmed: true, title: kind, summary: '', toolName: null,
     toolUseId: null, messageId: null, durationMs: null, usage: null, systemSubtype: null, ...extra,
   };

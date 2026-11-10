@@ -5,7 +5,7 @@ const node = (over: Partial<GraphNode> = {}): GraphNode => ({
   id: 'n1', sessionId: 's1', turnId: null, agentId: null, parentId: null, kind: 'tool',
   status: 'running', timestamp: '2026-01-01T00:00:00.000Z', confirmed: false, title: 'Bash',
   summary: '', toolName: 'Bash', toolUseId: 'tu1', messageId: null, durationMs: null,
-  usage: null, systemSubtype: null, childAgentId: null, ...over,
+  usage: null, systemSubtype: null, childAgentId: null, endedAt: null, ...over,
 });
 
 test('node_added 加入节点', () => {

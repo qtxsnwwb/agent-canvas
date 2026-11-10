@@ -24,6 +24,7 @@ export interface GraphNode {
   toolUseId: string | null;
   messageId: string | null;      // assistant 记录的 message.id
   durationMs: number | null;
+  endedAt: string | null;       // ISO 8601；仅 tool、subagent：第一次进入终态的事件的时间，之后的状态纠正不改；其余为 null
   usage: Usage | null;
   systemSubtype: string | null;
 }

@@ -139,14 +139,24 @@ test('终态不回退', () => {
   expect(graph.nodes['tool:tu1']!.status).toBe('denied');
 });
 
-test('终态节点仍可补上 durationMs', () => {
+test('终态节点仍可补上 durationMs（起止时间推不出耗时时）', () => {
   const { graph } = run(n, [
     userPrompt('u1', null, 'x'),
-    use(),
+    assistantBlock('a1', 'u1', { type: 'tool_use', id: 'tu1', name: 'Bash', input: { command: 'ls' } }, { timestamp: 'not-a-time' }),
     toolResult('u2', 'a1', 'tu1', 'ok'),
     hook('PostToolUse', { tool_use_id: 'tu1', tool_response: 'ok', duration_ms: 7 }),
   ]);
   expect(graph.nodes['tool:tu1']).toMatchObject({ status: 'succeeded', durationMs: 7 });
+});
+
+test('tool_result 先到并已推出耗时：之后 hook 的 duration_ms 不覆盖（先到先得）', () => {
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x'),
+    assistantBlock('a1', 'u1', { type: 'tool_use', id: 'tu1', name: 'Bash', input: {} }, { timestamp: '2026-03-01T10:00:00.000Z' }),
+    toolResult('u2', 'a1', 'tu1', 'ok', undefined, { timestamp: '2026-03-01T10:00:02.000Z' }),
+    hook('PostToolUse', { tool_use_id: 'tu1', tool_response: 'ok', duration_ms: 7 }),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ durationMs: 2000, endedAt: '2026-03-01T10:00:02.000Z' });
 });
 
 test('PostToolUseFailure 标记 failed', () => {
@@ -413,4 +423,43 @@ test('hook 终态之后到达的 tool_use 不再记住入参', () => {
   run(n, [use()]);
   expect(n.toolInputCount('s1')).toBe(0);
   expect(n.toolInputCount('missing')).toBe(0);
+});
+
+test('PostToolUse 先到：endedAt 是 hook 的接收时间，耗时用 hook 的 duration_ms；之后的 tool_result 不改这两项', () => {
+  const HOOK_AT = '2026-03-01T10:00:02.000Z';
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x'),
+    use(),
+    hook('PostToolUse', { tool_use_id: 'tu1', tool_response: 'ok', duration_ms: 1234 }, HOOK_AT),
+    toolResult('u2', 'a1', 'tu1', 'ok', true, { timestamp: '2026-03-01T10:00:30.000Z' }),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ status: 'failed', endedAt: HOOK_AT, durationMs: 1234 });
+});
+
+test('hook 没带 duration_ms 时由起止时间推出耗时', () => {
+  const { graph } = run(n, [
+    hook('PreToolUse', { tool_name: 'Bash', tool_input: {}, tool_use_id: 'tu1' }, '2026-03-01T10:00:00.000Z'),
+    hook('PostToolUse', { tool_use_id: 'tu1', tool_response: 'ok' }, '2026-03-01T10:00:02.000Z'),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ endedAt: '2026-03-01T10:00:02.000Z', durationMs: 2000 });
+});
+
+test('被拒绝（PermissionDenied）也记 endedAt', () => {
+  const AT = '2026-03-01T10:00:05.000Z';
+  const { graph } = run(n, [pre(), hook('PermissionDenied', { tool_use_id: 'tu1', reason: 'no' }, AT)]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ status: 'denied', endedAt: AT });
+});
+
+test('PostToolUseFailure 与 SubagentStop 也记 endedAt', () => {
+  const FAIL_AT = '2026-03-01T10:00:05.000Z';
+  const STOP_AT = '2026-03-01T10:00:09.000Z';
+  const { graph } = run(n, [
+    pre('tu1'),
+    hook('PostToolUseFailure', { tool_use_id: 'tu1', error: 'x' }, FAIL_AT),
+    agentMeta('ag1', { toolUseId: 'tu2', agentType: 'Explore', description: 'd' }),
+    hook('PreToolUse', { tool_name: 'Agent', tool_input: { prompt: 'p' }, tool_use_id: 'tu2' }),
+    hook('SubagentStop', { agent_id: 'ag1' }, STOP_AT),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ status: 'failed', endedAt: FAIL_AT });
+  expect(graph.nodes['tool:tu2']).toMatchObject({ kind: 'subagent', status: 'succeeded', endedAt: STOP_AT });
 });

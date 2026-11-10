@@ -7,7 +7,7 @@ import { layoutTurn, stackTurns, turnInput, turnSignature, TURN_GAP, TURN_HEADER
 const EPOCH = Date.parse('2026-01-01T00:00:00Z');
 function node(id: string, kind: NodeKind, turnId: string, tMs: number): GraphNode {
   return {
-    id, sessionId: 's1', turnId, agentId: null, childAgentId: null, parentId: null, kind, status: null,
+    id, sessionId: 's1', turnId, agentId: null, childAgentId: null, endedAt: null, parentId: null, kind, status: null,
     timestamp: new Date(EPOCH + tMs).toISOString(), confirmed: true, title: kind, summary: `${kind} ${id}`, toolName: null,
     toolUseId: null, messageId: null, durationMs: null, usage: null, systemSubtype: null,
   };

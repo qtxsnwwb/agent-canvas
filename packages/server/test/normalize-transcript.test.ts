@@ -358,6 +358,70 @@ test('未知类型的内容块被跳过；块 id 用内容数组下标', () => {
   expect(unknown).toEqual([]);
 });
 
+const toolUseAt = (timestamp: string) =>
+  assistantBlock('a1', 'u1', { type: 'tool_use', id: 'tu1', name: 'Bash', input: { command: 'ls' } }, { timestamp });
+
+test('tool_result 到达时记下 endedAt，并由起止时间推出耗时', () => {
+  const T0 = '2026-03-01T10:00:00.000Z';
+  const T4 = '2026-03-01T10:00:04.000Z';
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x'),
+    toolUseAt(T0),
+    toolResult('u2', 'a1', 'tu1', 'ok', undefined, { timestamp: T4 }),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ status: 'succeeded', endedAt: T4, durationMs: 4000 });
+});
+
+test('失败的 tool_result 也记 endedAt', () => {
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x'),
+    toolUseAt('2026-03-01T10:00:00.000Z'),
+    toolResult('u2', 'a1', 'tu1', 'boom', true, { timestamp: '2026-03-01T10:00:02.500Z' }),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ status: 'failed', endedAt: '2026-03-01T10:00:02.500Z', durationMs: 2500 });
+});
+
+test('仍在执行的工具 endedAt 为 null；非工具节点 endedAt 恒为 null', () => {
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x'),
+    assistantBlock('t1', 'u1', { type: 'thinking', thinking: 'hm' }),
+    assistantBlock('x1', 't1', { type: 'text', text: 'hi' }),
+    assistantBlock('a1', 'x1', { type: 'tool_use', id: 'tu1', name: 'Bash', input: {} }),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ status: 'running', endedAt: null, durationMs: null });
+  for (const id of ['u1', 't1', 'x1']) expect(graph.nodes[id]!.endedAt).toBeNull();
+});
+
+test('结束时间早于开始时间时耗时为 0', () => {
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x'),
+    toolUseAt('2026-03-01T10:00:10.000Z'),
+    toolResult('u2', 'a1', 'tu1', 'ok', undefined, { timestamp: '2026-03-01T10:00:05.000Z' }),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ endedAt: '2026-03-01T10:00:05.000Z', durationMs: 0 });
+});
+
+test('开始时间无法解析时 endedAt 照记，durationMs 保持为空', () => {
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x'),
+    toolUseAt('not-a-time'),
+    toolResult('u2', 'a1', 'tu1', 'ok', undefined, { timestamp: '2026-03-01T10:00:05.000Z' }),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ endedAt: '2026-03-01T10:00:05.000Z', durationMs: null });
+});
+
+test('重放同一串原始事件得到相同的 endedAt 和 durationMs', () => {
+  const events = [
+    userPrompt('u1', null, 'x'),
+    toolUseAt('2026-03-01T10:00:00.000Z'),
+    toolResult('u2', 'a1', 'tu1', 'ok', undefined, { timestamp: '2026-03-01T10:00:03.000Z' }),
+  ];
+  const a = run(new Normalizer(), events).graph.nodes['tool:tu1']!;
+  const b = run(new Normalizer(), events).graph.nodes['tool:tu1']!;
+  expect(a).toMatchObject({ endedAt: '2026-03-01T10:00:03.000Z', durationMs: 3000 });
+  expect({ endedAt: b.endedAt, durationMs: b.durationMs }).toEqual({ endedAt: a.endedAt, durationMs: a.durationMs });
+});
+
 test('没有可识别内容块的 assistant 记录仍是 unknown 节点', () => {
   const { graph } = run(n, [userPrompt('u1', null, 'x'), multi('a1', 'u1', [{ type: 'server_tool_use' }, { type: 'thinking' }])]);
   expect(graph.nodes.a1).toMatchObject({ kind: 'unknown', parentId: 'u1' });

@@ -46,6 +46,7 @@ function mkNode(id: string, sessionId: string): GraphNode {
     usage: null,
     systemSubtype: null,
     childAgentId: null,
+    endedAt: null,
   };
 }
 

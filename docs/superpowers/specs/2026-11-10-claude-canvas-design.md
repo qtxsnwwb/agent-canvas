@@ -160,6 +160,7 @@ hooks 里没有"权限已批准、开始执行"的独立事件：`PreToolUse` �
 
 所有节点共有：`id`、`sessionId`、`turnId`、`agentId`（主线为空）、`parentId`、`timestamp`、`confirmed`、`usage`（token 用量，有则填）。
 subagent 节点另有 `childAgentId`：它派出的代理的 id（元数据到达前为空）；`agentId` 仍是它自己所属的线程。
+`tool`、`subagent` 节点另有 `endedAt`：节点第一次进入终态（成功、失败、被拒绝）的那个事件的时间——`tool_result` 记录的 `timestamp`，或 hook 的接收时间；之后的状态纠正（3.1 规则 4）不改它；仍在执行的节点和其余节点恒为空。进入终态时若 `durationMs` 仍为空，且 `endedAt` 与 `timestamp` 都能解析，则 `durationMs = max(0, endedAt − timestamp)`；hook 自带的 `duration_ms` 先到先得。
 
 ### 4.3 状态
 

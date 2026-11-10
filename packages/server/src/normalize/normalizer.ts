@@ -85,6 +85,13 @@ interface AgentMeta {
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 const str = (v: unknown): string | null => (typeof v === 'string' ? v : null);
 
+/** Milliseconds from `start` to `end` (never negative); null when either time cannot be parsed. */
+function elapsedMs(start: string, end: string): number | null {
+  const a = Date.parse(start);
+  const b = Date.parse(end);
+  return Number.isNaN(a) || Number.isNaN(b) ? null : Math.max(0, b - a);
+}
+
 export class Normalizer {
   private readonly sessions = new Map<string, SessionState>();
   /** Meta that arrived before its session existed. */
@@ -207,6 +214,7 @@ export class Normalizer {
       usage: null,
       systemSubtype: null,
       childAgentId: null,
+      endedAt: null,
     };
     state.nodes.set(id, node);
     state.toolInputs.set(id, spec.input);
@@ -243,11 +251,11 @@ export class Normalizer {
         this.markAwaitingPermission(state, hook.agentId, effect, changes);
         break;
       case 'settle':
-        this.settleTool(state, effect, changes);
+        this.settleTool(state, effect, at, changes);
         break;
       case 'subagent_stop': {
         const dispatch = state.dispatchByAgent.get(effect.agentId);
-        if (dispatch !== undefined) this.settleTool(state, { kind: 'settle', toolUseId: dispatch.slice('tool:'.length), status: 'succeeded', durationMs: null }, changes);
+        if (dispatch !== undefined) this.settleTool(state, { kind: 'settle', toolUseId: dispatch.slice('tool:'.length), status: 'succeeded', durationMs: null }, at, changes);
         break;
       }
       case 'compact': {
@@ -272,6 +280,7 @@ export class Normalizer {
           usage: null,
           systemSubtype: 'compact',
           childAgentId: null,
+          endedAt: null,
         };
         state.nodes.set(id, node);
         changes.push({ type: 'node_added', node, detail: { text: effect.summary } });
@@ -300,7 +309,12 @@ export class Normalizer {
   }
 
   /** Moves a tool node to a terminal status unless it is already terminal (then only a missing duration is filled in). */
-  private settleTool(state: SessionState, effect: Extract<HookNodeEffect, { kind: 'settle' }>, changes: Change[]): void {
+  private settleTool(
+    state: SessionState,
+    effect: Extract<HookNodeEffect, { kind: 'settle' }>,
+    at: string,
+    changes: Change[],
+  ): void {
     const id = `tool:${effect.toolUseId}`;
     const node = state.nodes.get(id);
     if (!node) return;
@@ -308,9 +322,14 @@ export class Normalizer {
     const patch: Partial<GraphNode> = {};
     if (!terminal) {
       patch.status = effect.status;
+      patch.endedAt = at;
       state.toolInputs.delete(id); // only non-terminal nodes are PermissionRequest candidates
     }
-    if (node.durationMs === null && effect.durationMs !== null) patch.durationMs = effect.durationMs;
+    if (node.durationMs === null) {
+      const derived = !terminal && effect.durationMs === null ? elapsedMs(node.timestamp, at) : null;
+      const durationMs = effect.durationMs ?? derived;
+      if (durationMs !== null) patch.durationMs = durationMs;
+    }
     const withOutput = !terminal && 'output' in effect;
     if (Object.keys(patch).length === 0) return;
     state.nodes.set(id, { ...node, ...patch });
@@ -365,7 +384,7 @@ export class Normalizer {
         break;
       case 'tool_results':
         state.passthrough.set(uuid, parentUuid);
-        this.applyToolResults(state, classified, changes);
+        this.applyToolResults(state, classified, str(record.timestamp) ?? state.session.lastActivityAt, changes);
         break;
       case 'malformed':
         this.addNode(state, record, agentId, changes, {
@@ -577,6 +596,7 @@ export class Normalizer {
       usage: null,
       systemSubtype: null,
       childAgentId: null,
+      endedAt: null,
     };
   }
 
@@ -753,6 +773,7 @@ export class Normalizer {
   private applyToolResults(
     state: SessionState,
     c: Extract<Classified, { kind: 'tool_results' }>,
+    at: string,
     changes: Change[],
   ): void {
     for (const r of c.results) {
@@ -765,9 +786,17 @@ export class Normalizer {
       // succeeded/failed is corrected by the content plane.
       const final = terminal && (node.status === 'denied' || state.terminalFromContent.has(id));
       const patch: Partial<GraphNode> = !final && node.status !== status ? { status } : {};
+      // endedAt marks the first terminal event only; a later correction keeps it (and the duration derived from it).
+      if (!terminal) {
+        patch.endedAt = at;
+        if (node.durationMs === null) {
+          const derived = elapsedMs(node.timestamp, at);
+          if (derived !== null) patch.durationMs = derived;
+        }
+      }
       if (!final) state.terminalFromContent.add(id);
       state.toolInputs.delete(id);
-      if (patch.status !== undefined) state.nodes.set(id, { ...node, ...patch });
+      if (Object.keys(patch).length > 0) state.nodes.set(id, { ...node, ...patch });
       changes.push({ type: 'node_updated', sessionId: state.session.id, id, patch, detail: { output: r.content } });
     }
   }

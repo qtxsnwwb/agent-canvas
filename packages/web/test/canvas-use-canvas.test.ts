@@ -8,7 +8,7 @@ const EPOCH = Date.parse('2026-01-01T00:00:00Z');
 
 function node(id: string, turnId: string, tMs: number): GraphNode {
   return {
-    id, sessionId: 's1', turnId, agentId: null, childAgentId: null, parentId: null, kind: 'text', status: null,
+    id, sessionId: 's1', turnId, agentId: null, childAgentId: null, endedAt: null, parentId: null, kind: 'text', status: null,
     timestamp: new Date(EPOCH + tMs).toISOString(), confirmed: true, title: 'text', summary: '', toolName: null,
     toolUseId: null, messageId: null, durationMs: null, usage: null, systemSubtype: null,
   };

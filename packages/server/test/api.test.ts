@@ -411,7 +411,7 @@ describe('http api', () => {
   const mkTextNode = (id: string): GraphNode => ({
     id, sessionId: 's1', turnId: null, agentId: null, parentId: null, kind: 'text', status: null,
     timestamp: '2026-01-01T00:00:00.000Z', confirmed: true, title: 'Text', summary: '', toolName: null,
-    toolUseId: null, messageId: null, durationMs: null, usage: null, systemSubtype: null, childAgentId: null,
+    toolUseId: null, messageId: null, durationMs: null, usage: null, systemSubtype: null, childAgentId: null, endedAt: null,
   });
   const manyNodes = (n: number, prefix = 'n'): Change[] =>
     Array.from({ length: n }, (_, i): Change => ({ type: 'node_added', node: mkTextNode(`${prefix}${i}`), detail: {} }));
