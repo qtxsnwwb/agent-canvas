@@ -1,15 +1,16 @@
 import { createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
-import type {
-  Change,
-  Diagnostics,
-  GraphEdge,
-  GraphNode,
-  GraphSnapshot,
-  NodeDetail,
-  Project,
-  SeqChange,
-  Session,
+import {
+  STALE_AFTER_MS,
+  type Change,
+  type Diagnostics,
+  type GraphEdge,
+  type GraphNode,
+  type GraphSnapshot,
+  type NodeDetail,
+  type Project,
+  type SeqChange,
+  type Session,
 } from '@claude-canvas/shared';
 import { DERIVED_TABLES, SCHEMA_SQL } from './schema.js';
 
@@ -49,7 +50,6 @@ export interface Store {
 }
 
 const SAMPLE_MAX = 500;
-const ACTIVE_STATUSES = ['running', 'awaiting_input', 'awaiting_permission'];
 
 interface RawRow {
   ingest_id: number;
@@ -151,10 +151,13 @@ export function openStore(dbPath: string): Store {
   const updateNode = db.prepare(`UPDATE node SET body = ?, detail = ? WHERE session_id = ? AND id = ?`);
   const insertEdge = db.prepare(`INSERT OR REPLACE INTO edge (session_id, id, body) VALUES (?, ?, ?)`);
 
-  const activePlaceholders = ACTIVE_STATUSES.map(() => '?').join(',');
+  // Active = effective status running/awaiting_*: a `running` session older than STALE_AFTER_MS is stale, not active.
+  // strftime normalizes the stored ISO timestamp so it compares correctly with the cutoff's toISOString().
   const selectProjects = db.prepare(
     `SELECT project_id AS id, MAX(json_extract(body, '$.cwd')) AS cwd, COUNT(*) AS sessionCount,
-            SUM(CASE WHEN status IN (${activePlaceholders}) THEN 1 ELSE 0 END) AS activeSessionCount
+            SUM(CASE WHEN status IN ('awaiting_input', 'awaiting_permission') THEN 1
+                     WHEN status = 'running' AND strftime('%Y-%m-%dT%H:%M:%fZ', last_activity_at) >= @cutoff THEN 1
+                     ELSE 0 END) AS activeSessionCount
      FROM session GROUP BY project_id ORDER BY project_id`,
   );
   const selectSessions = db.prepare(`SELECT body FROM session WHERE project_id = ? ORDER BY last_activity_at DESC, id`);
@@ -257,7 +260,8 @@ export function openStore(dbPath: string): Store {
       return applyChangesTx(changes);
     },
     listProjects() {
-      return (selectProjects.all(...ACTIVE_STATUSES) as Project[]).map((p) => ({
+      const cutoff = new Date(Date.now() - STALE_AFTER_MS).toISOString();
+      return (selectProjects.all({ cutoff }) as Project[]).map((p) => ({
         id: p.id,
         cwd: p.cwd ?? null,
         sessionCount: p.sessionCount,

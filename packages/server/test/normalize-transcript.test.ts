@@ -205,3 +205,93 @@ test('lastActivityAt 不会倒退', () => {
   expect(last).toMatchObject({ session: { lastActivityAt: '2026-02-01T00:00:10.000Z' } });
   expect(r2.changes).toEqual([]);
 });
+
+// ---- final fix wave, group 1: session status truthfulness ----
+
+const statusesOf = (changes: Change[]) => changes.flatMap((c) => (c.type === 'session_upserted' ? [c.session.status] : []));
+
+test.each([
+  ['字符串内容', '[Request interrupted by user]'],
+  ['数组内容', [{ type: 'text', text: '  [Request interrupted by user for tool use]' }]],
+])('中断标记产生 interrupt 系统节点并把会话置为 idle：%s', (_name, content) => {
+  const { graph, changes } = run(n, [
+    userPrompt('u1', null, 'x', { promptId: 'p1' }),
+    assistantBlock('a1', 'u1', { type: 'tool_use', id: 'tu1', name: 'Bash', input: {} }),
+    rawLine('user', { uuid: 'i1', parentUuid: 'a1', message: { role: 'user', content } }),
+  ]);
+  const text = typeof content === 'string' ? content : content[0]!.text;
+  expect(graph.nodes.i1).toMatchObject({ kind: 'system', systemSubtype: 'interrupt', title: 'Interrupted', summary: summarize(text.trimStart()), parentId: 'tool:tu1', turnId: 'p1' });
+  expect(statusesOf(changes).at(-1)).toBe('idle');
+});
+
+test('中断标记不开启新一轮', () => {
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x', { promptId: 'p1' }),
+    rawLine('user', { uuid: 'i1', parentUuid: 'u1', promptId: 'p2', message: { role: 'user', content: '[Request interrupted by user]' } }),
+    assistantBlock('a1', 'i1', { type: 'text', text: 'hi' }),
+  ]);
+  expect(graph.nodes.a1).toMatchObject({ turnId: 'p1', parentId: 'i1' });
+});
+
+test('子代理里的中断标记产生节点但不改会话状态', () => {
+  const { graph, changes } = run(n, [
+    userPrompt('u1', null, 'x'),
+    userPrompt('s1', null, '[Request interrupted by user]', { agentId: 'ag1' }),
+  ]);
+  expect(graph.nodes.s1).toMatchObject({ kind: 'system', systemSubtype: 'interrupt', agentId: 'ag1' });
+  expect(statusesOf(changes).at(-1)).toBe('running');
+});
+
+test.each([
+  '<local-command-stdout>ok</local-command-stdout>',
+  '<local-command-stderr>err</local-command-stderr>',
+  '<command-name>/clear</command-name>',
+  '<command-message>clear</command-message>',
+  '<command-args></command-args>',
+  '<bash-input>ls</bash-input>',
+  '<bash-stdout>a</bash-stdout>',
+  '<bash-stderr>b</bash-stderr>',
+  '<task-notification>done</task-notification>',
+  '\n  <system-reminder>r</system-reminder>',
+])('非提示的 user 记录静默：%s', (text) => {
+  for (const content of [text, [{ type: 'text', text }]]) {
+    const m = new Normalizer();
+    run(m, [userPrompt('u1', null, 'x'), assistantBlock('a1', 'u1', { type: 'text', text: 'done' }, { stopReason: 'end_turn' })]);
+    const { graph, changes } = run(m, [
+      rawLine('user', { uuid: 'c1', parentUuid: 'a1', message: { role: 'user', content } }),
+      assistantBlock('a2', 'c1', { type: 'text', text: 'more' }, { stopReason: 'end_turn' }),
+    ]);
+    expect(graph.nodes.c1).toBeUndefined();
+    expect(graph.nodes.a2!.parentId).toBe('a1');
+    expect(statusesOf(changes)).not.toContain('running');
+  }
+});
+
+test('isCompactSummary 的 user 记录静默', () => {
+  run(n, [userPrompt('u1', null, 'x'), assistantBlock('a1', 'u1', { type: 'text', text: 'done' }, { stopReason: 'end_turn' })]);
+  const { graph, changes } = run(n, [
+    userPrompt('c1', 'a1', 'This session is being continued...', { isCompactSummary: true }),
+    assistantBlock('a2', 'c1', { type: 'text', text: 'more' }, { stopReason: 'end_turn' }),
+  ]);
+  expect(graph.nodes.c1).toBeUndefined();
+  expect(graph.nodes.a2!.parentId).toBe('a1');
+  expect(statusesOf(changes)).not.toContain('running');
+});
+
+test.each([[null], ['tool_use'], ['max_tokens']])('非 end_turn 的主线 assistant 记录意味着 running：%s', (stopReason) => {
+  const { changes } = run(n, [
+    userPrompt('u1', null, 'x'),
+    assistantBlock('a1', 'u1', { type: 'text', text: 'done' }, { stopReason: 'end_turn' }),
+    assistantBlock('a2', 'a1', { type: 'text', text: 'again' }, stopReason === null ? {} : { stopReason }),
+  ]);
+  expect(statusesOf(changes).at(-1)).toBe('running');
+});
+
+test('迟到的非 end_turn assistant 记录不覆盖较新的状态', () => {
+  const { changes } = run(n, [
+    userPrompt('u1', null, 'x', { timestamp: '2026-03-01T00:00:01.000Z' }),
+    assistantBlock('a1', 'u1', { type: 'text', text: 'done' }, { stopReason: 'end_turn', timestamp: '2026-03-01T00:00:05.000Z' }),
+    assistantBlock('a0', 'u1', { type: 'text', text: 'earlier' }, { timestamp: '2026-03-01T00:00:03.000Z' }),
+  ]);
+  expect(statusesOf(changes).at(-1)).toBe('idle');
+});

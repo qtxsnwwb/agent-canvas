@@ -1,7 +1,8 @@
 import { useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react';
 import type { GraphNode, NodeDetail } from '@claude-canvas/shared';
 import { api, openLiveSession, orderNodes, type LiveSession } from '../client';
-import { NODE_STATUS_LABEL, SESSION_STATUS_LABEL } from '../labels';
+import { NODE_STATUS_LABEL, sessionStatusView } from '../labels';
+import { useNow } from '../useNow';
 
 const DETAIL_MAX_CHARS = 200_000;
 
@@ -75,6 +76,7 @@ export function SessionPage({ sessionId }: { sessionId: string }) {
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
   const [, rerender] = useReducer((n: number) => n + 1, 0);
   const stick = useRef(true);
+  const now = useNow();
 
   useEffect(() => {
     let alive = true;
@@ -120,13 +122,14 @@ export function SessionPage({ sessionId }: { sessionId: string }) {
   if (error !== null) return <p className="error">加载失败：{error}</p>;
   if (live === null) return <p className="muted">加载中…</p>;
   const session = live.getSession();
+  const status = sessionStatusView(session, now);
   return (
     <div className="session-page">
       <div className="session-head">
         <a href={`#/p/${encodeURIComponent(session.projectId)}`}>返回项目</a>
         <h2>{session.title ?? session.id.slice(0, 8)}</h2>
         <div className="muted">
-          <span className={`status status-${session.status}`}>{SESSION_STATUS_LABEL[session.status] ?? session.status}</span>
+          <span className={`status status-${status.status}`}>{status.label}</span>
           {session.gitBranch !== null && <span> · {session.gitBranch}</span>}
           {session.sourceDeleted && <span className="tag"> 源文件已删除</span>}
         </div>

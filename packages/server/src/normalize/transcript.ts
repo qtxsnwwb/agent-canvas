@@ -17,6 +17,7 @@ export type Classified =
   | { kind: 'tool_use'; toolUseId: string; name: string; input: unknown; meta: MessageMeta }
   | { kind: 'tool_results'; results: { toolUseId: string; content: unknown; isError: boolean }[] }
   | { kind: 'compact' }
+  | { kind: 'interrupt'; text: string } // "[Request interrupted by user…]": a system node, ends the turn
   | { kind: 'silent' } // produces no node; only keeps the parent chain intact
   | { kind: 'malformed' };
 
@@ -60,11 +61,43 @@ function classifyAssistant(record: TranscriptRecord): Classified {
   }
 }
 
+/** A user record whose text starts with this is an interrupt marker, not a prompt. */
+export const INTERRUPT_PREFIX = '[Request interrupted by user';
+
+/**
+ * User records whose text (after leading whitespace) starts with one of these are not user input: they produce no
+ * node and do not change the session status. To be validated against real transcripts during acceptance.
+ */
+export const NOT_A_PROMPT_PREFIXES: readonly string[] = [
+  '<local-command-stdout>',
+  '<local-command-stderr>',
+  '<command-name>',
+  '<command-message>',
+  '<command-args>',
+  '<bash-input>',
+  '<bash-stdout>',
+  '<bash-stderr>',
+  '<task-notification>',
+  '<system-reminder>',
+];
+
+/** Interrupt marker / not-a-prompt check on the record's text (string content, or the joined text blocks). */
+function nonPrompt(record: TranscriptRecord, text: string): Classified | null {
+  if (record.isCompactSummary === true) return { kind: 'silent' };
+  const t = text.trimStart();
+  if (t.startsWith(INTERRUPT_PREFIX)) return { kind: 'interrupt', text: t };
+  if (NOT_A_PROMPT_PREFIXES.some((p) => t.startsWith(p))) return { kind: 'silent' };
+  return null;
+}
+
 function classifyUser(record: TranscriptRecord): Classified {
   const message = record.message;
   if (!isObject(message)) return { kind: 'malformed' };
   const content = message.content;
-  if (typeof content === 'string') return record.isMeta === true ? { kind: 'silent' } : { kind: 'prompt', text: content };
+  if (typeof content === 'string') {
+    if (record.isMeta === true) return { kind: 'silent' };
+    return nonPrompt(record, content) ?? { kind: 'prompt', text: content };
+  }
   if (!Array.isArray(content)) return { kind: 'malformed' };
   const results: { toolUseId: string; content: unknown; isError: boolean }[] = [];
   for (const block of content as unknown[]) {
@@ -74,6 +107,11 @@ function classifyUser(record: TranscriptRecord): Classified {
   }
   if (results.length > 0) return { kind: 'tool_results', results };
   if (record.isMeta === true) return { kind: 'silent' };
+  const textOnly = (content as unknown[])
+    .flatMap((b) => (isObject(b) && b.type === 'text' && typeof b.text === 'string' ? [b.text] : []))
+    .join('\n');
+  const special = nonPrompt(record, textOnly);
+  if (special !== null) return special;
   // Array prompts (pasted images, multi-part text): text blocks joined, images as a literal marker.
   const parts: string[] = [];
   for (const block of content as unknown[]) {
@@ -101,6 +139,8 @@ export function classifyRecord(record: TranscriptRecord): Classified {
 export function impliedStatus(c: Classified, isSubagent: boolean): SessionStatus | null {
   if (isSubagent) return null; // subagent records never change the session status
   if (c.kind === 'prompt') return 'running';
-  if ((c.kind === 'thinking' || c.kind === 'text' || c.kind === 'tool_use') && c.meta.endTurn) return 'idle';
+  if (c.kind === 'interrupt') return 'idle';
+  // Activity implies running: a turn need not begin with a recognizable prompt record.
+  if (c.kind === 'thinking' || c.kind === 'text' || c.kind === 'tool_use') return c.meta.endTurn ? 'idle' : 'running';
   return null;
 }

@@ -13,6 +13,7 @@ pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
 .status-awaiting_permission, .status-awaiting_input { color: #b25e00; }
 .status-succeeded { color: #1e7a34; }
 .status-failed, .status-denied { color: #b3261e; }
+.status-stale { color: #777; }
 
 .home { display: flex; gap: 16px; padding: 16px; align-items: flex-start; }
 .projects { width: 320px; flex: none; }

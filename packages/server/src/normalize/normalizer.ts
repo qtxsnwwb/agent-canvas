@@ -374,6 +374,15 @@ export class Normalizer {
           detail: { text: classified.text },
         });
         break;
+      case 'interrupt':
+        this.addNode(state, record, agentId, changes, {
+          kind: 'system',
+          title: 'Interrupted',
+          summary: summarize(classified.text),
+          systemSubtype: 'interrupt',
+          detail: { text: classified.text },
+        });
+        break;
       case 'compact':
         this.addNode(state, record, agentId, changes, {
           kind: 'system',

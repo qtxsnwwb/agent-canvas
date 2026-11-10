@@ -1,4 +1,4 @@
-import { beforeEach, afterEach, expect, test } from 'vitest';
+import { beforeEach, afterEach, expect, test, vi } from 'vitest';
 import type { Change, GraphNode, Session, SessionStatus } from '@claude-canvas/shared';
 import { openStore, type Store } from '../src/store/store.js';
 
@@ -8,6 +8,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   store.close();
+  vi.useRealTimers();
 });
 
 function sessionUpsert(id: string, projectId: string, status: SessionStatus = 'idle'): Change {
@@ -101,6 +102,9 @@ test('node_updated 的 detail 与已有 detail 合并', () => {
 });
 
 test('listProjects 统计会话数和活跃数', () => {
+  // Group 1c: activity counts use the effective status, so "now" must be close to lastActivityAt.
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date('2026-01-01T00:05:00.000Z'));
   store.applyChanges([sessionUpsert('s1', 'p1', 'running'), sessionUpsert('s2', 'p1', 'idle'), sessionUpsert('s3', 'p2', 'ended')]);
   expect(store.listProjects()).toEqual(expect.arrayContaining([
     expect.objectContaining({ id: 'p1', sessionCount: 2, activeSessionCount: 1 }),
@@ -156,4 +160,19 @@ test('latestMeta returns the newest meta payload of a file', () => {
   store.insertRaw({ source: 'meta', file: 'm.json', sessionId: 's1', agentId: null, payload: 'two' });
   expect(store.latestMeta('m.json')).toBe('two');
   expect(store.latestMeta('other.json')).toBe('x');
+});
+
+test('listProjects 不把长时间无活动的 running 会话计为活跃', () => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  store.applyChanges([
+    sessionUpsert('s1', 'p1', 'running'),
+    sessionUpsert('s2', 'p1', 'awaiting_input'),
+    sessionUpsert('s3', 'p1', 'awaiting_permission'),
+  ]);
+  vi.setSystemTime(new Date('2026-01-01T00:14:00.000Z'));
+  expect(store.listProjects()[0]).toMatchObject({ sessionCount: 3, activeSessionCount: 3 });
+  vi.setSystemTime(new Date('2026-01-01T00:15:01.000Z'));
+  expect(store.listProjects()[0]).toMatchObject({ sessionCount: 3, activeSessionCount: 2 });
+  vi.setSystemTime(new Date('2026-01-02T00:00:00.000Z'));
+  expect(store.listProjects()[0]).toMatchObject({ activeSessionCount: 2 });
 });

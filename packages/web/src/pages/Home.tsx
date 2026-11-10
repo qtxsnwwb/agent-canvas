@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Project, Session } from '@claude-canvas/shared';
 import { api, openLiveSessions } from '../client';
-import { SESSION_STATUS_LABEL } from '../labels';
+import { sessionStatusView } from '../labels';
+import { useNow } from '../useNow';
 
 const byActivityDesc = (a: Session, b: Session): number =>
   a.lastActivityAt < b.lastActivityAt ? 1 : a.lastActivityAt > b.lastActivityAt ? -1 : 0;
@@ -15,6 +16,7 @@ export function Home({ projectId }: { projectId: string | null }) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const now = useNow();
   const selected = useRef(projectId);
   selected.current = projectId;
 
@@ -88,19 +90,22 @@ export function Home({ projectId }: { projectId: string | null }) {
         {projectId === null && <p className="muted">请选择一个项目</p>}
         {projectId !== null && sessions.length === 0 && <p className="muted">暂无会话</p>}
         <ul>
-          {sessions.map((s) => (
+          {sessions.map((s) => {
+            const status = sessionStatusView(s, now);
+            return (
             <li key={s.id}>
               <a href={`#/s/${encodeURIComponent(s.id)}`}>
                 <div className="session-title">{s.title ?? s.id.slice(0, 8)}</div>
                 <div className="muted">
-                  <span className={`status status-${s.status}`}>{SESSION_STATUS_LABEL[s.status] ?? s.status}</span>
+                  <span className={`status status-${status.status}`}>{status.label}</span>
                   {s.gitBranch !== null && <span> · {s.gitBranch}</span>}
                   <span> · {formatTime(s.lastActivityAt)}</span>
                   {s.sourceDeleted && <span className="tag"> 源文件已删除</span>}
                 </div>
               </a>
             </li>
-          ))}
+            );
+          })}
         </ul>
       </section>
     </div>
