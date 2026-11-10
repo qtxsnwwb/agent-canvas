@@ -106,6 +106,16 @@ export function customTitle(title: string): RawEvent {
   };
 }
 
+export function hook(eventName: string, body: object = {}): RawEvent {
+  return {
+    source: 'hook',
+    receivedAt: nextTimestamp(),
+    eventName,
+    sessionId: 's1',
+    payload: JSON.stringify({ session_id: 's1', hook_event_name: eventName, cwd: '/w', ...body }),
+  };
+}
+
 export function run(n: Normalizer, events: RawEvent[]): { changes: Change[]; graph: Graph; unknown: string[] } {
   const changes: Change[] = [];
   const unknown: string[] = [];

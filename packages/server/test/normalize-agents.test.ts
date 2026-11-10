@@ -2,7 +2,7 @@ import { beforeEach, expect, test } from 'vitest';
 import { applyChange, emptyGraph, type Change, type Graph } from '@claude-canvas/shared';
 import { Normalizer } from '../src/normalize/normalizer.js';
 import type { RawEvent } from '../src/store/store.js';
-import { agentMeta, assistantBlock, customTitle, run, toolResult, userPrompt } from './fixtures.js';
+import { agentMeta, assistantBlock, customTitle, hook, run, toolResult, userPrompt } from './fixtures.js';
 
 let n: Normalizer;
 beforeEach(() => {
@@ -117,13 +117,17 @@ function runWithPlaceholders(
   events: RawEvent[],
 ): { graph: Graph; changes: Change[] } {
   const pre = tools.flatMap((t) =>
-    n.applyPlaceholderForTest('s1', 'p1', {
-      toolUseId: t.id,
-      toolName: t.name ?? 'Read',
-      input: {},
-      agentId: t.agentId ?? null,
-      timestamp: '2026-01-01T00:00:00.000Z',
-    }),
+    n
+      .apply(
+        hook('PreToolUse', {
+          tool_name: t.name ?? 'Read',
+          tool_input: {},
+          tool_use_id: t.id,
+          ...(t.agentId ? { agent_id: t.agentId } : {}),
+        }),
+        'p1',
+      )
+      .changes,
   );
   const r = run(n, events);
   const graph = [...pre, ...r.changes].reduce(applyChange, emptyGraph());

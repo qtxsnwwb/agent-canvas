@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import {
   TERMINAL_STATUSES,
   type Change,
@@ -7,6 +8,7 @@ import {
   type Session,
 } from '@claude-canvas/shared';
 import type { RawEvent } from '../store/store.js';
+import { parseHook, type HookDescription, type HookNodeEffect } from './hooks.js';
 import { summarize } from './summary.js';
 import { classifyRecord, impliedStatus, type Classified, type MessageMeta, type TranscriptRecord } from './transcript.js';
 
@@ -78,7 +80,7 @@ export class Normalizer {
     try {
       if (event.source === 'transcript') return this.applyTranscript(event, projectId);
       if (event.source === 'meta') return this.applyMeta(event);
-      return { changes: [] }; // hook events arrive in a later task
+      return this.applyHook(event, projectId);
     } catch {
       return { changes: [], unknownRecordType: 'normalizer-error' };
     }
@@ -154,21 +156,6 @@ export class Normalizer {
     });
   }
 
-  /**
-   * Test seam for the hook path (Task 6 replaces this with PreToolUse handling): creates the unconfirmed
-   * `tool:<id>` node a hook would have created before its transcript record arrives.
-   */
-  applyPlaceholderForTest(
-    sessionId: string,
-    projectId: string,
-    spec: { toolUseId: string; toolName: string; input: unknown; agentId: string | null; timestamp: string },
-  ): Change[] {
-    const changes: Change[] = [];
-    const state = this.stateFor(sessionId, { type: 'hook', uuid: '', timestamp: spec.timestamp }, projectId, changes);
-    this.ensurePlaceholderTool(state, spec, changes);
-    return changes;
-  }
-
   private ensurePlaceholderTool(
     state: SessionState,
     spec: { toolUseId: string; toolName: string; input: unknown; agentId: string | null; timestamp: string },
@@ -200,6 +187,109 @@ export class Normalizer {
     changes.push({ type: 'node_added', node, detail: { input: spec.input } });
     const meta = state.agentMetas.get(spec.toolUseId);
     if (meta) this.applyAgentMeta(state, meta, changes);
+  }
+
+  private applyHook(event: Extract<RawEvent, { source: 'hook' }>, projectId: string): NormalizeResult {
+    const parsed = parseHook(event.eventName, event.payload);
+    if (!parsed.ok) return { changes: [], unknownRecordType: parsed.unknownRecordType };
+    const hook = parsed.hook;
+    const changes: Change[] = [];
+    const at = event.receivedAt;
+    const state = this.stateFor(hook.sessionId, { type: 'hook', uuid: '', timestamp: at, cwd: hook.cwd }, projectId, changes);
+    // An ended session only comes back on SessionStart / UserPromptSubmit.
+    const status = state.session.status === 'ended' && !hook.resumes ? null : hook.status;
+    this.updateSession(state, { type: 'hook', uuid: '', timestamp: at }, projectId, status, false, changes);
+    if (hook.node) this.applyHookNode(state, hook, hook.node, at, changes);
+    return { changes };
+  }
+
+  private applyHookNode(state: SessionState, hook: HookDescription, effect: HookNodeEffect, at: string, changes: Change[]): void {
+    switch (effect.kind) {
+      case 'pre_tool':
+        this.ensurePlaceholderTool(
+          state,
+          { toolUseId: effect.toolUseId, toolName: effect.toolName, input: effect.input, agentId: hook.agentId, timestamp: at },
+          changes,
+        );
+        break;
+      case 'permission_request':
+        this.markAwaitingPermission(state, hook.agentId, effect, changes);
+        break;
+      case 'settle':
+        this.settleTool(state, effect, changes);
+        break;
+      case 'subagent_stop': {
+        const dispatch = state.dispatchByAgent.get(effect.agentId);
+        if (dispatch !== undefined) this.settleTool(state, { kind: 'settle', toolUseId: dispatch.slice('tool:'.length), status: 'succeeded', durationMs: null }, changes);
+        break;
+      }
+      case 'compact': {
+        const id = `compact:${state.session.id}:${at}`;
+        if (state.nodes.has(id)) break;
+        const node: GraphNode = {
+          id,
+          sessionId: state.session.id,
+          turnId: null,
+          agentId: null,
+          parentId: null,
+          kind: 'system',
+          status: null,
+          timestamp: at,
+          confirmed: false,
+          title: 'Compact',
+          summary: summarize(effect.summary),
+          toolName: null,
+          toolUseId: null,
+          messageId: null,
+          durationMs: null,
+          usage: null,
+          systemSubtype: 'compact',
+        };
+        state.nodes.set(id, node);
+        changes.push({ type: 'node_added', node, detail: { text: effect.summary } });
+        break;
+      }
+    }
+  }
+
+  /** Newest running node of the same agent with the same tool name and deeply equal input. */
+  private markAwaitingPermission(
+    state: SessionState,
+    agentId: string | null,
+    effect: Extract<HookNodeEffect, { kind: 'permission_request' }>,
+    changes: Change[],
+  ): void {
+    let match: GraphNode | null = null;
+    for (const node of state.nodes.values()) {
+      if (node.status !== 'running' || node.agentId !== agentId || node.toolName !== effect.toolName) continue;
+      if (!isDeepStrictEqual(state.toolInputs.get(node.id), effect.input)) continue;
+      if (match === null || node.timestamp >= match.timestamp) match = node;
+    }
+    if (match === null) return;
+    const patch: Partial<GraphNode> = { status: 'awaiting_permission' };
+    state.nodes.set(match.id, { ...match, ...patch });
+    changes.push({ type: 'node_updated', sessionId: state.session.id, id: match.id, patch });
+  }
+
+  /** Moves a tool node to a terminal status unless it is already terminal (then only a missing duration is filled in). */
+  private settleTool(state: SessionState, effect: Extract<HookNodeEffect, { kind: 'settle' }>, changes: Change[]): void {
+    const id = `tool:${effect.toolUseId}`;
+    const node = state.nodes.get(id);
+    if (!node) return;
+    const terminal = node.status !== null && TERMINAL_STATUSES.includes(node.status);
+    const patch: Partial<GraphNode> = {};
+    if (!terminal) patch.status = effect.status;
+    if (node.durationMs === null && effect.durationMs !== null) patch.durationMs = effect.durationMs;
+    const withOutput = !terminal && 'output' in effect;
+    if (Object.keys(patch).length === 0) return;
+    state.nodes.set(id, { ...node, ...patch });
+    changes.push({
+      type: 'node_updated',
+      sessionId: state.session.id,
+      id,
+      patch,
+      ...(withOutput ? { detail: { output: effect.output } } : {}),
+    });
   }
 
   private applyTranscript(event: Extract<RawEvent, { source: 'transcript' }>, projectId: string): NormalizeResult {
