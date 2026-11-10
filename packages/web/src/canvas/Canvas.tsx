@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import {
   Background,
   BackgroundVariant,
@@ -305,6 +305,11 @@ function CanvasInner({ snapshot, selectedId, onSelect, onToggleTurn, onShowFullT
     if (vn.type === 'node') onSelectRef.current(vn.id);
     else actions.toggleTurn(vn.turnKey);
   }, [actions]);
+  const onNodeClick = useCallback((_: unknown, n: FlowNode) => {
+    if (n.type === 'turnSummary') actions.toggleTurn(n.data.summary.turnKey);
+    else if (n.type === 'graphNode') onSelectRef.current(n.id);
+  }, [actions]);
+  const onPaneClick = useCallback(() => onSelectRef.current(null), []);
 
   return (
     <CanvasActions.Provider value={actions}>
@@ -313,11 +318,8 @@ function CanvasInner({ snapshot, selectedId, onSelect, onToggleTurn, onShowFullT
         nodes={nodes}
         edges={edges}
         nodeTypes={nodeTypes}
-        onNodeClick={(_, n) => {
-          if (n.type === 'turnSummary') actions.toggleTurn(n.data.summary.turnKey);
-          else if (n.type === 'graphNode') onSelect(n.id);
-        }}
-        onPaneClick={() => onSelect(null)}
+        onNodeClick={onNodeClick}
+        onPaneClick={onPaneClick}
         onMoveStart={follow.onMoveStart}
         onMove={follow.onMove}
         onMoveEnd={follow.onMoveEnd}
@@ -343,7 +345,8 @@ function CanvasInner({ snapshot, selectedId, onSelect, onToggleTurn, onShowFullT
   );
 }
 
-export function Canvas(props: CanvasProps) {
+/** Memoized: re-renders only when the snapshot, the selection or a handler changes (pass stable handlers). */
+export const Canvas = memo(function Canvas(props: CanvasProps) {
   return (
     <div className="cc-canvas">
       <ReactFlowProvider>
@@ -351,4 +354,4 @@ export function Canvas(props: CanvasProps) {
       </ReactFlowProvider>
     </div>
   );
-}
+});

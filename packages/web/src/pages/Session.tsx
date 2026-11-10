@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useReducer, useState } from 'react';
+import { memo, useCallback, useEffect, useReducer, useState } from 'react';
 import { openLiveSession, type LiveSession } from '../client';
 import { Canvas } from '../canvas/Canvas';
 import { Drawer } from '../canvas/Drawer';
@@ -6,7 +6,11 @@ import { useCanvas } from '../canvas/useCanvas';
 import { sessionStatusView } from '../labels';
 import { useNow } from '../useNow';
 
-function SessionCanvas({ live }: { live: LiveSession }) {
+/**
+ * Memoized on `live` alone, so the info bar's per-second and per-update re-renders do not reach React Flow; it
+ * re-renders when the canvas snapshot or the selection changes. Every handler passed to Canvas is stable.
+ */
+const SessionCanvas = memo(function SessionCanvas({ live }: { live: LiveSession }) {
   const canvas = useCanvas(live);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // Drop a selection whose node is no longer in the view (its turn was folded, it went into an "earlier" node, a
@@ -20,6 +24,7 @@ function SessionCanvas({ live }: { live: LiveSession }) {
   const selectedNode = selectedView?.type === 'node' ? selectedView.node : null;
   const closeDrawer = useCallback(() => setSelectedId(null), []);
   const empty = canvas.view.nodes.size === 0;
+  const laying = !empty && canvas.layoutError === null && Object.keys(canvas.positions).length === 0;
   return (
     <>
       {canvas.layoutError !== null && <div className="canvas-error">布局失败：{canvas.layoutError}</div>}
@@ -34,10 +39,11 @@ function SessionCanvas({ live }: { live: LiveSession }) {
         />
         {selectedNode !== null && <Drawer sessionId={live.getSession().id} node={selectedNode} onClose={closeDrawer} />}
         {empty && <div className="canvas-empty muted">暂无节点</div>}
+        {laying && <div className="canvas-empty muted">布局中…</div>}
       </div>
     </>
   );
-}
+});
 
 export function SessionPage({ sessionId }: { sessionId: string }) {
   const [live, setLive] = useState<LiveSession | null>(null);
