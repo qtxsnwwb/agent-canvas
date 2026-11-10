@@ -1,5 +1,5 @@
 import { beforeEach, expect, test } from 'vitest';
-import type { Change } from '@claude-canvas/shared';
+import { applyChange, emptyGraph, type Change, type Graph } from '@claude-canvas/shared';
 import { Normalizer } from '../src/normalize/normalizer.js';
 import type { RawEvent } from '../src/store/store.js';
 import { agentMeta, assistantBlock, customTitle, run, toolResult, userPrompt } from './fixtures.js';
@@ -109,4 +109,87 @@ test('损坏的 meta 被忽略', () => {
 test('缺字段的 meta 被忽略', () => {
   const missing = { ...agentMeta('ag1', { toolUseId: 't', agentType: 'x', description: '' }), payload: '{"agentType":"x"}' };
   expect(n.apply(missing, 'p').changes).toEqual([]);
+});
+
+/** Pre-creates unconfirmed hook placeholders for the tools, then replays the transcript events. */
+function runWithPlaceholders(
+  tools: { id: string; name?: string; agentId?: string | null }[],
+  events: RawEvent[],
+): { graph: Graph; changes: Change[] } {
+  const pre = tools.flatMap((t) =>
+    n.applyPlaceholderForTest('s1', 'p1', {
+      toolUseId: t.id,
+      toolName: t.name ?? 'Read',
+      input: {},
+      agentId: t.agentId ?? null,
+      timestamp: '2026-01-01T00:00:00.000Z',
+    }),
+  );
+  const r = run(n, events);
+  const graph = [...pre, ...r.changes].reduce(applyChange, emptyGraph());
+  return { graph, changes: [...pre, ...r.changes] };
+}
+
+const parallelEvents = (): RawEvent[] => [
+  userPrompt('u1', null, 'x'),
+  assistantBlock('a1', 'u1', { type: 'text', text: '查两个文件' }, { messageId: 'm1' }),
+  assistantBlock('a2', 'a1', { type: 'tool_use', id: 'tA', name: 'Read', input: {} }, { messageId: 'm1' }),
+  assistantBlock('a3', 'a2', { type: 'tool_use', id: 'tB', name: 'Read', input: {} }, { messageId: 'm1' }),
+  toolResult('u2', 'a3', 'tA', 'a'),
+  toolResult('u3', 'u2', 'tB', 'b'),
+  assistantBlock('a4', 'u3', { type: 'text', text: '完成' }, { messageId: 'm2' }),
+];
+
+const edgeSummary = (g: Graph) => Object.values(g.edges).map((e) => `${e.id}:${e.kind}`).sort();
+const nodeSummary = (g: Graph) =>
+  Object.values(g.nodes).map((x) => `${x.id}|${x.parentId}|${x.agentId}|${x.title}|${x.summary}`).sort();
+
+test('已存在的占位工具节点：并行批次结果与新建一致', () => {
+  const direct = run(new Normalizer(), parallelEvents()).graph;
+  const { graph, changes } = runWithPlaceholders([{ id: 'tA' }, { id: 'tB' }], parallelEvents());
+  expect(edgeSummary(graph)).toEqual(edgeSummary(direct));
+  expect(graph.nodes['tool:tA']).toMatchObject({ parentId: 'a1', confirmed: true });
+  expect(graph.nodes['tool:tB']).toMatchObject({ parentId: 'a1', confirmed: true });
+  expect(graph.nodes.a4!.parentId).toBe('tool:tB');
+  const ids = changes.flatMap((c) => (c.type === 'edge_added' ? [c.edge.id] : []));
+  expect(new Set(ids).size).toBe(ids.length);
+});
+
+test('混合批次：第一个成员已存在，第二个新建', () => {
+  const direct = run(new Normalizer(), parallelEvents()).graph;
+  const { graph } = runWithPlaceholders([{ id: 'tA' }], parallelEvents());
+  expect(edgeSummary(graph)).toEqual(edgeSummary(direct));
+  expect(graph.nodes['tool:tB']!.parentId).toBe('a1');
+});
+
+test.each([
+  ['meta 先到', (e: Evs): RawEvent[] => [...e.main, e.meta, ...e.agent]],
+  ['子代理记录先到', (e: Evs): RawEvent[] => [...e.main, ...e.agent, e.meta]],
+  ['子代理记录早于主线', (e: Evs): RawEvent[] => [...e.agent, e.meta, ...e.main]],
+])('已存在的派发节点：派发边只发一次：%s', (_name, order) => {
+  const { graph, changes } = runWithPlaceholders([{ id: 'tu1', name: 'Agent' }], order(spawnEvents()));
+  expect(graph.edges['tool:tu1->s1']).toMatchObject({ kind: 'spawn' });
+  expect(graph.nodes.s1).toMatchObject({ agentId: 'ag1', parentId: 'tool:tu1' });
+  expect(graph.nodes['tool:tu1']).toMatchObject({ agentId: 'ag1', title: 'Explore', summary: '找入口' });
+  expect(changes.filter((c) => c.type === 'edge_added' && c.edge.kind === 'spawn')).toHaveLength(1);
+});
+
+test('已存在的占位工具节点会关闭未完成的批次', () => {
+  const { graph } = runWithPlaceholders([{ id: 'tB' }], [
+    userPrompt('u1', null, 'x'),
+    assistantBlock('a1', 'u1', { type: 'text', text: 't' }, { messageId: 'm1' }),
+    assistantBlock('a2', 'a1', { type: 'tool_use', id: 'tA', name: 'Read', input: {} }, { messageId: 'm1' }),
+    toolResult('u2', 'a2', 'tA', 'a'),
+    assistantBlock('a3', 'u2', { type: 'tool_use', id: 'tB', name: 'Read', input: {} }, { messageId: 'm2' }),
+  ]);
+  expect(graph.nodes['tool:tB']!.parentId).toBe('tool:tA');
+  expect(graph.edges['tool:tA->tool:tB']!.kind).toBe('sequence');
+});
+
+test('子代理记录不改会话 cwd 与 gitBranch', () => {
+  const { changes } = run(n, [
+    userPrompt('u1', null, 'x', { cwd: '/main', gitBranch: 'main' }),
+    userPrompt('s1', null, 'y', { agentId: 'ag1', cwd: '/wt', gitBranch: 'wt' }),
+  ]);
+  expect(lastSession(changes)).toMatchObject({ cwd: '/main', gitBranch: 'main' });
 });

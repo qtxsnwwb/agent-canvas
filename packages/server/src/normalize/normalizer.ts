@@ -42,6 +42,15 @@ interface SessionState {
   spawned: Set<string>;
 }
 
+interface Placement {
+  node: GraphNode;
+  edgeKind: GraphEdge['kind'];
+  /** first batch member that needs the retroactive `:fork` edge. */
+  forkFirst: string | null;
+  /** earlier batch members that join into this node. */
+  joinFrom: string[];
+}
+
 interface Batch {
   messageId: string;
   /** parent shared by every member (the first member's parent). */
@@ -145,6 +154,54 @@ export class Normalizer {
     });
   }
 
+  /**
+   * Test seam for the hook path (Task 6 replaces this with PreToolUse handling): creates the unconfirmed
+   * `tool:<id>` node a hook would have created before its transcript record arrives.
+   */
+  applyPlaceholderForTest(
+    sessionId: string,
+    projectId: string,
+    spec: { toolUseId: string; toolName: string; input: unknown; agentId: string | null; timestamp: string },
+  ): Change[] {
+    const changes: Change[] = [];
+    const state = this.stateFor(sessionId, { type: 'hook', uuid: '', timestamp: spec.timestamp }, projectId, changes);
+    this.ensurePlaceholderTool(state, spec, changes);
+    return changes;
+  }
+
+  private ensurePlaceholderTool(
+    state: SessionState,
+    spec: { toolUseId: string; toolName: string; input: unknown; agentId: string | null; timestamp: string },
+    changes: Change[],
+  ): void {
+    const id = `tool:${spec.toolUseId}`;
+    if (state.nodes.has(id)) return;
+    const node: GraphNode = {
+      id,
+      sessionId: state.session.id,
+      turnId: null,
+      agentId: spec.agentId,
+      parentId: null,
+      kind: spec.toolName === 'Agent' || spec.toolName === 'Task' ? 'subagent' : 'tool',
+      status: 'running',
+      timestamp: spec.timestamp,
+      confirmed: false,
+      title: spec.toolName,
+      summary: summarize(spec.input),
+      toolName: spec.toolName,
+      toolUseId: spec.toolUseId,
+      messageId: null,
+      durationMs: null,
+      usage: null,
+      systemSubtype: null,
+    };
+    state.nodes.set(id, node);
+    state.toolInputs.set(id, spec.input);
+    changes.push({ type: 'node_added', node, detail: { input: spec.input } });
+    const meta = state.agentMetas.get(spec.toolUseId);
+    if (meta) this.applyAgentMeta(state, meta, changes);
+  }
+
   private applyTranscript(event: Extract<RawEvent, { source: 'transcript' }>, projectId: string): NormalizeResult {
     let parsed: unknown;
     try {
@@ -170,7 +227,7 @@ export class Normalizer {
     const classified = classifyRecord(record);
     const agentId = event.agentId;
 
-    this.updateSession(state, record, projectId, impliedStatus(classified, agentId !== null), changes);
+    this.updateSession(state, record, projectId, impliedStatus(classified, agentId !== null), agentId !== null, changes);
     if (classified.kind === 'prompt' && agentId === null) state.turnByAgent.set('', str(record.promptId) ?? uuid);
 
     const parentUuid = str(record.parentUuid);
@@ -279,6 +336,7 @@ export class Normalizer {
     record: TranscriptRecord,
     projectId: string,
     status: Session['status'] | null,
+    isSubagent: boolean,
     changes: Change[],
   ): void {
     const s = state.session;
@@ -288,8 +346,9 @@ export class Normalizer {
     const next: Session = {
       ...s,
       lastActivityAt: ts !== null && ts > s.lastActivityAt ? ts : s.lastActivityAt,
-      cwd: cwd ?? s.cwd,
-      gitBranch: gitBranch ?? s.gitBranch,
+      // A subagent may run in another worktree: only the main thread moves cwd/gitBranch.
+      cwd: isSubagent ? s.cwd : (cwd ?? s.cwd),
+      gitBranch: isSubagent ? s.gitBranch : (gitBranch ?? s.gitBranch),
       projectId: s.projectId === 'unknown' && projectId !== 'unknown' ? projectId : s.projectId,
     };
     this.commitSession(state, next, changes);
@@ -388,6 +447,20 @@ export class Normalizer {
     isTool: boolean,
     changes: Change[],
   ): void {
+    const placed = this.placeInBatch(state, agentId, created, isTool);
+    const node = placed.node;
+    state.nodes.set(node.id, node);
+    state.lastNodeByUuid.set(uuid, node.id);
+    changes.push({ type: 'node_added', node, detail });
+    this.emitPlacementEdges(state, placed, true, changes);
+    this.registerFirstNode(state, agentId, node.id, changes);
+  }
+
+  /**
+   * Batch bookkeeping shared by new and confirmed nodes: joins/extends/closes the agent's open batch and
+   * returns the node with its final parent plus the extra edges the placement implies.
+   */
+  private placeInBatch(state: SessionState, agentId: string | null, created: GraphNode, isTool: boolean): Placement {
     const key = agentId ?? '';
     const batch = state.batches.get(key);
     let node = created;
@@ -411,27 +484,31 @@ export class Normalizer {
     if (isTool && node.messageId !== null && !state.batches.has(key)) {
       state.batches.set(key, { messageId: node.messageId, parentId: node.parentId, members: [node.id] });
     }
+    return { node, edgeKind, forkFirst, joinFrom };
+  }
 
-    state.nodes.set(node.id, node);
-    state.lastNodeByUuid.set(uuid, node.id);
-    changes.push({ type: 'node_added', node, detail });
-    this.emitSequenceEdge(state, node, changes, edgeKind);
-    if (forkFirst !== null && node.parentId !== null) {
+  /** Emits the edges of a placement; `withMain` is false when the node's incoming edge already exists. */
+  private emitPlacementEdges(state: SessionState, p: Placement, withMain: boolean, changes: Change[]): void {
+    const node = p.node;
+    if (withMain) this.emitSequenceEdge(state, node, changes, p.edgeKind);
+    if (p.forkFirst !== null && node.parentId !== null) {
       changes.push({
         type: 'edge_added',
-        edge: { id: `${node.parentId}->${forkFirst}:fork`, sessionId: state.session.id, from: node.parentId, to: forkFirst, kind: 'fork' },
+        edge: { id: `${node.parentId}->${p.forkFirst}:fork`, sessionId: state.session.id, from: node.parentId, to: p.forkFirst, kind: 'fork' },
       });
     }
-    for (const from of joinFrom) {
+    for (const from of p.joinFrom) {
       changes.push({
         type: 'edge_added',
         edge: { id: `${from}->${node.id}`, sessionId: state.session.id, from, to: node.id, kind: 'sequence' },
       });
     }
-    if (agentId !== null && !state.firstNodeByAgent.has(agentId)) {
-      state.firstNodeByAgent.set(agentId, node.id);
-      this.trySpawn(state, agentId, changes);
-    }
+  }
+
+  private registerFirstNode(state: SessionState, agentId: string | null, nodeId: string, changes: Change[]): void {
+    if (agentId === null || state.firstNodeByAgent.has(agentId)) return;
+    state.firstNodeByAgent.set(agentId, nodeId);
+    this.trySpawn(state, agentId, changes);
   }
 
   private emitSequenceEdge(state: SessionState, node: GraphNode, changes: Change[], kind: GraphEdge['kind'] = 'sequence'): void {
@@ -457,17 +534,22 @@ export class Normalizer {
     if (existing) {
       // A hook created this node first; the transcript record now confirms it. status is left alone.
       const base = this.baseNode(state, record, agentId, id);
+      const placed = this.placeInBatch(state, agentId, { ...base, messageId: c.meta.messageId }, true);
+      const pending = state.agentMetas.get(c.toolUseId);
       const patch: Partial<GraphNode> = {
         confirmed: true,
-        summary,
-        parentId: base.parentId,
+        parentId: placed.node.parentId,
         turnId: base.turnId,
         messageId: c.meta.messageId,
       };
-      const updated = { ...existing, ...patch };
-      state.nodes.set(id, updated);
+      // An agent meta's description already owns the summary of a dispatch node.
+      if (!pending) patch.summary = summary;
+      state.nodes.set(id, { ...existing, ...patch });
       changes.push({ type: 'node_updated', sessionId: state.session.id, id, patch, detail: { input: c.input } });
-      if (base.parentId !== null && base.parentId !== existing.parentId) this.emitSequenceEdge(state, updated, changes);
+      // The incoming edge is only new when the parent actually changed.
+      this.emitPlacementEdges(state, placed, placed.node.parentId !== null && placed.node.parentId !== existing.parentId, changes);
+      this.registerFirstNode(state, agentId, id, changes);
+      if (pending && existing.agentId !== pending.agentId) this.applyAgentMeta(state, pending, changes);
       return;
     }
     const node: GraphNode = {
