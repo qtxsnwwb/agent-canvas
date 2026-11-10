@@ -12,6 +12,14 @@ export function followTarget(snapshot: Pick<CanvasSnapshot, 'view' | 'positions'
   return { x: pos.x + width / 2, y: pos.y + height / 2 };
 }
 
+/** Below this zoom "回到最新" resumes at zoom 1 (the latest node would be unreadable); otherwise the zoom is kept. */
+export const RESUME_MIN_ZOOM = 0.5;
+
+/** The zoom to use when following resumes from `zoom`. */
+export function resumeZoom(zoom: number): number {
+  return zoom < RESUME_MIN_ZOOM ? 1 : zoom;
+}
+
 export interface ViewportLike { x: number; y: number; zoom: number }
 
 /** Whether the viewport really changed (under 0.5 px of pan or 0.001 zoom counts as no move). */

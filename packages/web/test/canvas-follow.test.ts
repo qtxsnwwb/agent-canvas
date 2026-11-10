@@ -1,7 +1,7 @@
 import { expect, test } from 'vitest';
 import { emptyGraph, type Graph, type GraphNode, type NodeKind } from '@claude-canvas/shared';
 import { buildView } from '../src/canvas/view';
-import { followTarget, viewportMoved } from '../src/canvas/follow';
+import { followTarget, resumeZoom, viewportMoved } from '../src/canvas/follow';
 
 const EPOCH = Date.parse('2026-01-01T00:00:00Z');
 function node(id: string, kind: NodeKind, turnId: string, tMs: number): GraphNode {
@@ -45,4 +45,10 @@ test('viewportMoved：相同或亚阈值抖动不算移动，平移或缩放算'
   expect(viewportMoved(a, { x: 10.3, y: 19.8, zoom: 1.0005 })).toBe(false);
   expect(viewportMoved(a, { x: 12, y: 20, zoom: 1 })).toBe(true);
   expect(viewportMoved(a, { x: 10, y: 20, zoom: 1.2 })).toBe(true);
+});
+
+test('resumeZoom：缩放低于 0.5 时回到 1，否则保持当前缩放', () => {
+  expect(resumeZoom(0.2)).toBe(1);
+  expect(resumeZoom(0.5)).toBe(0.5);
+  expect(resumeZoom(1.4)).toBe(1.4);
 });

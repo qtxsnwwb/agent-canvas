@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Background,
   BackgroundVariant,
@@ -18,7 +18,7 @@ import {
 import '@xyflow/react/dist/style.css';
 import './canvas.css';
 import { TURN_HEADER } from './layout';
-import { followTarget, viewportMoved } from './follow';
+import { followTarget, resumeZoom, viewportMoved } from './follow';
 import { sizeOf } from './sizes';
 import type { CanvasSnapshot } from './useCanvas';
 import { forkSources, type TurnSummary, type ViewEdge } from './view';
@@ -203,6 +203,11 @@ const FOLLOW_DURATION = 200;
 /** Longer than FOLLOW_DURATION: clears the programmatic flag if React Flow emits no move-end event. */
 const PROGRAMMATIC_TIMEOUT = FOLLOW_DURATION + 150;
 
+function prefersReducedMotion(): boolean {
+  return typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+    && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
 /**
  * Keeps the latest node in view (slightly below centre) until the viewport changes for a reason other than our own
  * setCenter. Move events do not say who moved the viewport (Controls and MiniMap look programmatic, a plain click can
@@ -214,6 +219,8 @@ function useFollow(snapshot: CanvasSnapshot) {
   const ready = useStore((s) => s.width > 0 && s.height > 0 && s.panZoom !== null);
   const height = useStore((s) => s.height);
   const placed = useRef(false);
+  /** Zoom for the first follow move after "回到最新" (see resumeZoom); null otherwise. */
+  const nextZoom = useRef<number | null>(null);
   const heightRef = useRef(height);
   heightRef.current = height;
   const programmatic = useRef(false);
@@ -228,19 +235,28 @@ function useFollow(snapshot: CanvasSnapshot) {
     if (!following || !ready || tx === undefined || ty === undefined) return;
     const first = !placed.current;
     placed.current = true;
-    const zoom = first ? 1 : getZoom();
+    const zoom = first ? 1 : nextZoom.current ?? getZoom();
+    nextZoom.current = null;
+    const duration = first || prefersReducedMotion() ? 0 : FOLLOW_DURATION;
     programmatic.current = true;
     clearTimeout(timer.current);
     timer.current = setTimeout(() => { programmatic.current = false; }, PROGRAMMATIC_TIMEOUT);
-    void setCenter(tx, ty - (FOLLOW_LIFT * heightRef.current) / zoom, first ? { zoom } : { zoom, duration: FOLLOW_DURATION });
+    void setCenter(tx, ty - (FOLLOW_LIFT * heightRef.current) / zoom, duration > 0 ? { zoom, duration } : { zoom });
   }, [following, ready, tx, ty, setCenter, getZoom]);
 
+  const stop = useCallback(() => setFollowing(false), []);
   const check = (vp: Viewport) => {
     if (!programmatic.current && startVp.current && viewportMoved(startVp.current, vp)) setFollowing(false);
   };
   return {
     following,
-    resume: () => { placed.current = true; setFollowing(true); }, // keep the user's zoom
+    resume: () => {
+      placed.current = true;
+      nextZoom.current = resumeZoom(getZoom()); // keep the user's zoom unless it is too small to read
+      setFollowing(true);
+    },
+    /** A UI action changed the layout (turn toggle, "展开全部"): stop following so the opened content stays put. */
+    stop,
     onMoveStart: (_: unknown, vp: Viewport) => { startVp.current = vp; },
     onMove: (_: unknown, vp: Viewport) => check(vp),
     onMoveEnd: (_: unknown, vp: Viewport) => {
@@ -263,10 +279,11 @@ function CanvasInner({ snapshot, selectedId, onSelect, onToggleTurn, onShowFullT
   toggleRef.current = onToggleTurn;
   const showFullRef = useRef(onShowFullTurn);
   showFullRef.current = onShowFullTurn;
+  const stopFollowing = follow.stop;
   const actions = useMemo(() => ({
-    toggleTurn: (key: string) => toggleRef.current(key),
-    showFullTurn: (key: string) => showFullRef.current(key),
-  }), []);
+    toggleTurn: (key: string) => { stopFollowing(); toggleRef.current(key); },
+    showFullTurn: (key: string) => { stopFollowing(); showFullRef.current(key); },
+  }), [stopFollowing]);
 
   return (
     <CanvasActions.Provider value={actions}>
@@ -275,7 +292,7 @@ function CanvasInner({ snapshot, selectedId, onSelect, onToggleTurn, onShowFullT
         edges={edges}
         nodeTypes={nodeTypes}
         onNodeClick={(_, n) => {
-          if (n.type === 'turnSummary') onToggleTurn(n.data.summary.turnKey);
+          if (n.type === 'turnSummary') actions.toggleTurn(n.data.summary.turnKey);
           else if (n.type === 'graphNode') onSelect(n.id);
         }}
         onPaneClick={() => onSelect(null)}
