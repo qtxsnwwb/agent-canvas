@@ -25,6 +25,8 @@ export interface HookDescription {
   /** True for the events that may bring an `ended` session back (SessionStart, UserPromptSubmit). */
   resumes: boolean;
   node: HookNodeEffect | null;
+  /** `session_title` of a UserPromptSubmit payload; null when absent or empty. */
+  title: string | null;
 }
 
 export type ParsedHook = { ok: true; hook: HookDescription } | { ok: false; unknownRecordType: string };
@@ -124,6 +126,7 @@ export function parseHook(eventName: string, payload: string): ParsedHook {
       status: sessionStatus(eventName, parsed),
       resumes: eventName === 'SessionStart' || eventName === 'UserPromptSubmit',
       node: nodeEffect(eventName, parsed, agentId),
+      title: eventName === 'UserPromptSubmit' && agentId === null ? (str(parsed.session_title) || null) : null,
     },
   };
 }

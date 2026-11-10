@@ -7,6 +7,8 @@ import { createThrottle } from '../throttle';
 import { useNow } from '../useNow';
 
 const PROJECTS_REFRESH_MS = 500;
+/** Active counts depend on the clock (running sessions go stale), so refetch even when no event arrives. */
+const PROJECTS_POLL_MS = 60_000;
 
 const FIELD_LABEL: Record<SearchField, string> = { title: '标题', id: '会话 id', branch: '分支', cwd: '目录', prompt: '提示' };
 
@@ -86,6 +88,7 @@ export function Home({ projectId }: { projectId: string | null }) {
     };
     loadProjects();
     const refresh = createThrottle(loadProjects, PROJECTS_REFRESH_MS);
+    const poll = setInterval(loadProjects, PROJECTS_POLL_MS);
     const live = openLiveSessions(
       (s) => {
         if (s.projectId === selected.current) {
@@ -98,6 +101,7 @@ export function Home({ projectId }: { projectId: string | null }) {
     );
     return () => {
       alive = false;
+      clearInterval(poll);
       refresh.cancel();
       live.close();
     };

@@ -144,6 +144,8 @@ hooks 里没有"权限已批准、开始执行"的独立事件：`PreToolUse` �
          └─ 子代理（agent_id，内部是又一串节点）
 ```
 
+项目显示的目录（`Project.cwd`）：该项目各会话的 `cwd` 中，把每个非字母数字字符换成 `-` 后等于项目 id 的那个（Claude Code 就是这样由目录得到项目目录名的）；有多个不同写法时取出现次数最多的，并列取字典序最小的；一个都没有则为空，页面显示项目 id。在子目录里启动的会话因此不会改变项目的显示目录。
+
 轮次没有单独的表：节点上的 `turnId` 就是它所属轮次的 `promptId`（缺失时取 prompt 记录的 uuid）。
 
 ### 4.2 节点
@@ -180,6 +182,7 @@ subagent 节点另有 `childAgentId`：它派出的代理的 id（元数据到�
 - transcript（只看主线，子代理记录不改会话状态）：用户 prompt → 运行中；`assistant` 记录的 `stop_reason` 为 `end_turn` → 空闲，其他值（含缺失）→ 运行中（“有活动即运行中”，轮次不一定以可识别的 prompt 开始）。
 - 不是用户输入的 `user` 记录：文本（字符串内容，或数组中各 `text` 块的拼接）去掉开头空白后以 `[Request interrupted by user` 开头的是中断标记，产生 `system`/`interrupt` 节点（标题 `Interrupted`），不开启新轮次，主线上把会话置为空闲；以 `<local-command-stdout>`、`<local-command-stderr>`、`<command-name>`、`<command-message>`、`<command-args>`、`<bash-input>`、`<bash-stdout>`、`<bash-stderr>`、`<task-notification>`、`<system-reminder>` 开头的，以及 `isCompactSummary` 为真的，不产生节点、不改状态，只保持父链。这份前缀清单待验收时用真实数据核对。
 - 时间顺序（`statusAt`）：会话记住最近一次状态观测的事件时间（transcript 的 `timestamp` 或 hook 的接收时间）；事件时间早于它的 transcript 记录不改变状态（迟到的记录不覆盖较新的状态）。
+- 会话标题按来源取优先级最高的非空值：`custom`（`custom-title.json` 文件，或 transcript 里 `type: "custom-title"` 记录的 `customTitle`）> `agentName`（`type: "agent-name"` 记录的 `agentName`）> `hook`（`UserPromptSubmit` 载荷的 `session_title`）> `prompt`（主线第一条用户提示的前 60 个字符，换行换成空格）。同一来源后到的覆盖先到的；低优先级来源不覆盖高优先级来源；之后的提示不改变 `prompt` 来源。各来源的当前值只记在归一器内存里，按原始事件顺序重放得到相同结果；`custom-title`、`agent-name` 记录不计入未识别统计。
 - `长时间无活动`（stale）是派生的显示状态，不存储：存储的状态为运行中且最近活动距今超过 15 分钟时显示为它。等待权限确认、等待输入不会降级（它们本来就在等用户）。首页的活跃会话数不计 stale 会话；页面至少每分钟重新计算一次。
 
 ### 4.4 边

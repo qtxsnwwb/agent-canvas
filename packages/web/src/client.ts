@@ -14,9 +14,14 @@ import {
 
 const RECONNECT_MS = 1000;
 
+/** An Error carrying the HTTP status of a failed request. */
+export type HttpError = Error & { status: number };
+
+const isNotFound = (e: unknown): boolean => typeof e === 'object' && e !== null && (e as { status?: unknown }).status === 404;
+
 async function getJson<T>(path: string): Promise<T> {
   const res = await fetch(path);
-  if (!res.ok) throw new Error(`${path}: HTTP ${res.status}`);
+  if (!res.ok) throw Object.assign(new Error(`${path}: HTTP ${res.status}`), { status: res.status }) as HttpError;
   return (await res.json()) as T;
 }
 
@@ -104,6 +109,8 @@ function connect(
 export interface LiveSession {
   getGraph(): Graph;
   getSession(): Session;
+  /** True once the server answered 404 to a resync: the session no longer exists and is not refetched. */
+  isGone(): boolean;
   subscribe(fn: () => void): () => void;
   close(): void;
 }
@@ -124,6 +131,7 @@ export async function openLiveSession(
   let seq = snap.seq;
   let epoch: string | null = null;
   let closed = false;
+  let gone = false;
   /** Non-null while a snapshot refetch is in flight: changes received meanwhile, applied once it lands. */
   let buffered: SeqChange[] | null = null;
   const listeners = new Set<() => void>();
@@ -156,10 +164,15 @@ export async function openLiveSession(
         apply(pending);
         notify();
       },
-      () => {
+      (err: unknown) => {
         const pending = buffered ?? [];
         buffered = null;
         if (closed) return;
+        if (isNotFound(err)) {
+          gone = true; // the session was deleted: stop refetching
+          notify();
+          return;
+        }
         if (apply(pending)) notify();
         setTimeout(resync, RECONNECT_MS); // the server still expects us to refetch
       },
@@ -187,6 +200,7 @@ export async function openLiveSession(
   return {
     getGraph: () => graph,
     getSession: () => session,
+    isGone: () => gone,
     subscribe(fn) {
       listeners.add(fn);
       return () => void listeners.delete(fn);

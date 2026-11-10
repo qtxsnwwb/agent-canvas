@@ -294,7 +294,7 @@ describe('http api', () => {
       const hit = (await get('/api/search?q=HELLO')).json();
       expect(hit).toHaveLength(1);
       expect(hit[0].session.id).toBe('s1');
-      expect(hit[0].matches).toEqual([{ field: 'prompt', nodeId: 'u1', snippet: 'hello' }]);
+      expect(hit[0].matches).toEqual([{ field: 'title', nodeId: null, snippet: 'hello' }, { field: 'prompt', nodeId: 'u1', snippet: 'hello' }]);
       for (const limit of ['0', 'abc', '1000', '-5', '1.5', '']) {
         const res = await get(`/api/search?q=hello&limit=${limit}`);
         expect(res.statusCode, limit).toBe(200);

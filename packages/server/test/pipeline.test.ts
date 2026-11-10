@@ -75,7 +75,7 @@ describe('pipeline', () => {
   test('ingestFile 把 JSONL 变成会话和节点', async () => {
     await write('proj/s1.jsonl', [userPrompt('u1', null, '你好'), assistantBlock('a1', 'u1', { type: 'text', text: 'hi' })]);
     await pipeline.ingestFile(abs('proj/s1.jsonl'));
-    expect(store.listProjects()).toEqual([expect.objectContaining({ id: 'proj', sessionCount: 1 })]);
+    expect(store.listProjects(Date.now())).toEqual([expect.objectContaining({ id: 'proj', sessionCount: 1 })]);
     expect(store.getGraph('s1')!.nodes.map((n) => n.id)).toEqual(['u1', 'a1']);
   });
 
@@ -523,7 +523,7 @@ describe('pipeline', () => {
     const p = new Pipeline(failingOnce('setOffset'), config);
     await expect(p.ingestFile(abs('proj/s1/custom-title.json'))).rejects.toThrow('simulated crash');
     expect(store.rawForSession('s1').filter((e) => e.source === 'meta')).toEqual([]);
-    expect(store.getSession('s1')!.title).toBeNull();
+    expect(store.getSession('s1')!.title).toBe('x'); // first prompt, until the custom title lands
     await p.ingestFile(abs('proj/s1/custom-title.json'));
     expect(store.getSession('s1')!.title).toBe('T');
   });

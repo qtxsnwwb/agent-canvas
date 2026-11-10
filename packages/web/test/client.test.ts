@@ -1,5 +1,5 @@
 import { afterEach, expect, test, vi } from 'vitest';
-import { openLiveSession, openLiveSessions } from '../src/client';
+import { api, openLiveSession, openLiveSessions } from '../src/client';
 import { baseSession, fakeSocket, mkNode, snapshot, type FakeSocket } from './helpers';
 
 
@@ -144,5 +144,67 @@ test('重连后 hello 的 epoch 变化视为 resync；不变则不重取', async
   await vi.waitFor(() => expect(Object.keys(live.getGraph().nodes)).toEqual(['fresh']));
   socks[2]!.receive({ type: 'changes', changes: [added(2, 'n2')] }); // seqs restart in the new database
   expect(Object.keys(live.getGraph().nodes).sort()).toEqual(['fresh', 'n2']);
+  live.close();
+});
+
+// ---- missing sessions (404) ----
+
+const httpError = (status: number): Error => Object.assign(new Error(`HTTP ${status}`), { status });
+
+test('getJson 失败时抛出的错误带 status', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => new Response('nope', { status: 404 })));
+  try {
+    await expect(api.graph('missing')).rejects.toMatchObject({ status: 404 });
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+test('首次取图 404：openLiveSession 以带 status 404 的错误 reject', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => new Response('nope', { status: 404 })));
+  try {
+    await expect(openLiveSession('missing', { createSocket: () => fakeSocket() })).rejects.toMatchObject({ status: 404 });
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+function failingResync(error: Error) {
+  let calls = 0;
+  const fetchGraph = (): Promise<GraphSnapshotLike> => {
+    calls += 1;
+    return calls === 1 ? Promise.resolve(snapshot({ seq: 1 })) : Promise.reject(error);
+  };
+  return { fetchGraph, calls: () => calls };
+}
+
+test('resync 时 404：不再重试，订阅者收到通知，isGone() 为真', async () => {
+  vi.useFakeTimers();
+  const sock = fakeSocket();
+  const f = failingResync(httpError(404));
+  const live = await openLiveSession('s1', { fetchGraph: f.fetchGraph, createSocket: () => sock });
+  const fn = vi.fn();
+  live.subscribe(fn);
+  expect(live.isGone()).toBe(false);
+  sock.receive({ type: 'resync', sessionId: 's1' });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(live.isGone()).toBe(true);
+  expect(fn).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(10_000);
+  expect(f.calls()).toBe(2);
+  live.close();
+});
+
+test('resync 时 500：按原有间隔重试', async () => {
+  vi.useFakeTimers();
+  const sock = fakeSocket();
+  const f = failingResync(httpError(500));
+  const live = await openLiveSession('s1', { fetchGraph: f.fetchGraph, createSocket: () => sock });
+  sock.receive({ type: 'resync', sessionId: 's1' });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(f.calls()).toBe(2);
+  expect(live.isGone()).toBe(false);
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(f.calls()).toBe(3);
   live.close();
 });

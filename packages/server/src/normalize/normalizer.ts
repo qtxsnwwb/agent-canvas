@@ -26,6 +26,11 @@ export interface NormalizeResult {
 }
 
 const EPOCH = '1970-01-01T00:00:00.000Z';
+/** Title sources, highest priority first. */
+const TITLE_PRIORITY = ['custom', 'agentName', 'hook', 'prompt'] as const;
+type TitleSource = (typeof TITLE_PRIORITY)[number];
+const PROMPT_TITLE_CHARS = 60;
+
 const KNOWN_TYPES = new Set(['user', 'assistant', 'system', 'attachment']);
 
 /** In-memory state for one session; later tasks extend this with batch/subagent bookkeeping. */
@@ -94,8 +99,11 @@ function elapsedMs(start: string, end: string): number | null {
 
 export class Normalizer {
   private readonly sessions = new Map<string, SessionState>();
-  /** Meta that arrived before its session existed. */
-  private readonly pendingTitles = new Map<string, string>();
+  /**
+   * Current title per source, per session. Kept outside SessionState so a title arriving before its session exists is
+   * not lost, and replaying raw events in order (also after an eviction) rebuilds the same values.
+   */
+  private readonly titleSources = new Map<string, Partial<Record<TitleSource, string>>>();
   private readonly pendingAgentMetas = new Map<string, AgentMeta[]>();
 
   apply(event: RawEvent, projectId: string): NormalizeResult {
@@ -110,6 +118,9 @@ export class Normalizer {
 
   dropSession(sessionId: string): void {
     this.sessions.delete(sessionId);
+    // Dropped state is rebuilt by replaying raw events in order, which restores every source's value (and discards
+    // values from an ingest that was rolled back).
+    this.titleSources.delete(sessionId);
   }
 
   hasSession(sessionId: string): boolean {
@@ -137,10 +148,7 @@ export class Normalizer {
     const changes: Change[] = [];
     const state = this.sessions.get(event.sessionId);
     if (event.agentId === null) {
-      const title = str(parsed.customTitle);
-      if (title === null) return { changes };
-      if (state) this.commitSession(state, { ...state.session, title }, changes);
-      else this.pendingTitles.set(event.sessionId, title);
+      this.setTitle(event.sessionId, 'custom', str(parsed.customTitle), changes);
       return { changes };
     }
     const toolUseId = str(parsed.toolUseId);
@@ -234,6 +242,7 @@ export class Normalizer {
     const status = state.session.status === 'ended' && !hook.resumes ? null : hook.status;
     if (status !== null && at > state.statusAt) state.statusAt = at;
     this.updateSession(state, { type: 'hook', uuid: '', timestamp: at }, projectId, status, false, changes);
+    this.setTitle(hook.sessionId, 'hook', hook.title, changes);
     if (hook.node) this.applyHookNode(state, hook, hook.node, at, changes);
     return { changes };
   }
@@ -352,6 +361,11 @@ export class Normalizer {
     if (!isObject(parsed)) return { changes: [], unknownRecordType: 'invalid-json' };
     const type = parsed.type;
     if (typeof type !== 'string') return { changes: [], unknownRecordType: 'missing-type' };
+    if ((type === 'custom-title' || type === 'agent-name') && event.agentId === null) {
+      const changes: Change[] = [];
+      this.setTitle(event.sessionId, type === 'custom-title' ? 'custom' : 'agentName', str(parsed[type === 'custom-title' ? 'customTitle' : 'agentName']), changes);
+      return { changes };
+    }
     if (!KNOWN_TYPES.has(type)) {
       // Keep the parent chain intact across records we do not understand (only once the session exists).
       const unknownUuid = str(parsed.uuid);
@@ -395,6 +409,10 @@ export class Normalizer {
         });
         break;
       case 'prompt':
+        if (agentId === null) {
+          const first = Array.from(classified.text.replace(/\r?\n/g, ' ')).slice(0, PROMPT_TITLE_CHARS).join('');
+          if (this.titleSources.get(state.session.id)?.prompt === undefined) this.setTitle(state.session.id, 'prompt', first, changes);
+        }
         this.addNode(state, record, agentId, changes, {
           kind: 'prompt',
           title: 'Prompt',
@@ -483,7 +501,7 @@ export class Normalizer {
         id: sessionId,
         projectId,
         cwd: str(record.cwd),
-        title: this.pendingTitles.get(sessionId) ?? null,
+        title: this.bestTitle(sessionId),
         gitBranch: str(record.gitBranch),
         status: 'idle',
         sourceDeleted: false,
@@ -506,7 +524,6 @@ export class Normalizer {
         spawned: new Set(),
       };
       this.sessions.set(sessionId, state);
-      this.pendingTitles.delete(sessionId);
       changes.push({ type: 'session_upserted', session });
       for (const meta of this.pendingAgentMetas.get(sessionId) ?? []) {
         state.agentMetas.set(meta.toolUseId, meta);
@@ -540,6 +557,23 @@ export class Normalizer {
     };
     this.commitSession(state, next, changes);
     if (status !== null) this.commitSession(state, { ...state.session, status }, changes);
+  }
+
+  private bestTitle(sessionId: string): string | null {
+    const sources = this.titleSources.get(sessionId);
+    if (!sources) return null;
+    for (const source of TITLE_PRIORITY) if (sources[source] !== undefined) return sources[source]!;
+    return null;
+  }
+
+  /** Records `value` as the source's current title (empty values are ignored) and applies the best title to the session. */
+  private setTitle(sessionId: string, source: TitleSource, value: string | null, changes: Change[]): void {
+    if (value === null || value.trim() === '') return;
+    const sources = this.titleSources.get(sessionId) ?? {};
+    sources[source] = value;
+    this.titleSources.set(sessionId, sources);
+    const state = this.sessions.get(sessionId);
+    if (state) this.commitSession(state, { ...state.session, title: this.bestTitle(sessionId) }, changes);
   }
 
   private commitSession(state: SessionState, next: Session, changes: Change[]): void {

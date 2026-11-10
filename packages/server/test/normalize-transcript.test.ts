@@ -1,9 +1,10 @@
 import { beforeEach, expect, test } from 'vitest';
 import type { Change } from '@claude-canvas/shared';
+import type { RawEvent } from '../src/store/store.js';
 import { Normalizer } from '../src/normalize/normalizer.js';
 import { summarize } from '../src/normalize/summary.js';
 import { openStore } from '../src/store/store.js';
-import { assistantBlock, hook, rawLine, run, toolResult, userPrompt } from './fixtures.js';
+import { assistantBlock, customTitle, hook, rawLine, run, toolResult, userPrompt } from './fixtures.js';
 
 let n: Normalizer;
 beforeEach(() => {
@@ -128,8 +129,8 @@ test('hook 先到的 tool 节点被 JSONL 记录确认，不改 status', () => {
 test('会话变更：每次实际变化发一次，无变化不发', () => {
   const r1 = n.apply(userPrompt('u1', null, 'x'), 'p1');
   const sessions1 = r1.changes.filter((c) => c.type === 'session_upserted');
-  expect(sessions1).toHaveLength(2);
-  expect(r1.changes.slice(0, 2).every((c) => c.type === 'session_upserted')).toBe(true);
+  expect(sessions1).toHaveLength(3); // created, titled from the first prompt, status
+  expect(r1.changes.slice(0, 3).every((c) => c.type === 'session_upserted')).toBe(true);
   expect(n.hasSession('s1')).toBe(true);
   n.dropSession('s1');
   expect(n.hasSession('s1')).toBe(false);
@@ -475,4 +476,79 @@ test('多块记录的 end_turn 把会话置为 idle', () => {
     multi('a1', 'u1', [{ type: 'thinking', thinking: '' }, { type: 'text', text: 'done' }], { stopReason: 'end_turn' }),
   ]);
   expect(statusesOf(changes).at(-1)).toBe('idle');
+});
+
+// ---- session titles by source ----
+const titleEvent = (source: string): RawEvent => {
+  switch (source) {
+    case 'custom': return rawLine('custom-title', { customTitle: 'T-custom' });
+    case 'agentName': return rawLine('agent-name', { agentName: 'T-agent' });
+    case 'hook': return hook('UserPromptSubmit', { prompt: 'p', session_title: 'T-hook' });
+    default: return userPrompt('u1', null, 'T-prompt');
+  }
+};
+const expectedTitle: Record<string, string> = { custom: 'T-custom', agentName: 'T-agent', hook: 'T-hook', prompt: 'T-prompt' };
+const finalTitle = (changes: Change[]) => {
+  const last = changes.filter((c) => c.type === 'session_upserted').at(-1);
+  return last?.type === 'session_upserted' ? last.session.title : undefined;
+};
+
+test.each([
+  [['prompt', 'hook', 'agentName', 'custom'], 'custom'],
+  [['custom', 'agentName', 'hook', 'prompt'], 'custom'],
+  [['prompt', 'agentName'], 'agentName'],
+  [['hook', 'prompt'], 'hook'],
+  [['prompt'], 'prompt'],
+])('标题来源按 %j 的顺序到达，最终取 %s', (order, winner) => {
+  const { changes } = run(n, order.map(titleEvent));
+  expect(finalTitle(changes)).toBe(expectedTitle[winner!]);
+});
+
+test('custom-title.json 文件与 transcript 记录同属 custom，后到的覆盖先到的', () => {
+  expect(finalTitle(run(n, [userPrompt('u1', null, 'x'), customTitle('文件标题'), rawLine('custom-title', { customTitle: '记录标题' })]).changes)).toBe('记录标题');
+  const n2 = new Normalizer();
+  expect(finalTitle(run(n2, [userPrompt('u1', null, 'x'), rawLine('custom-title', { customTitle: '记录标题' }), customTitle('文件标题')]).changes)).toBe('文件标题');
+  const n3 = new Normalizer();
+  expect(finalTitle(run(n3, [userPrompt('u1', null, 'x'), rawLine('custom-title', { customTitle: '记录标题' }), rawLine('custom-title', { customTitle: '' })]).changes)).toBe('记录标题');
+});
+
+test('同一来源后到的覆盖先到的；空值不覆盖', () => {
+  const { changes } = run(n, [
+    hook('UserPromptSubmit', { prompt: 'p', session_title: 'A' }),
+    hook('UserPromptSubmit', { prompt: 'p', session_title: 'B' }),
+    hook('UserPromptSubmit', { prompt: 'p', session_title: '' }),
+    hook('UserPromptSubmit', { prompt: 'p' }),
+  ]);
+  expect(finalTitle(changes)).toBe('B');
+});
+
+test('首条提示作标题：取前 60 个字符，换行换成空格；之后的提示不改标题', () => {
+  const long = '第一行\n第二行' + 'x'.repeat(100);
+  const { changes } = run(n, [userPrompt('u1', null, long), userPrompt('u2', 'u1', '另一条提示')]);
+  expect(finalTitle(changes)).toBe(('第一行 第二行' + 'x'.repeat(100)).slice(0, 60));
+  expect(finalTitle(changes)).toHaveLength(60);
+});
+
+test('子代理的提示不作标题', () => {
+  const { changes } = run(n, [userPrompt('u1', null, 'sub', { agentId: 'ag1' }), userPrompt('u2', null, '主线')]);
+  expect(finalTitle(changes)).toBe('主线');
+});
+
+test('custom-title 和 agent-name 记录不再计入未识别统计', () => {
+  const r1 = n.apply(rawLine('custom-title', { customTitle: 'x' }), 'p');
+  const r2 = n.apply(rawLine('agent-name', { agentName: 'y' }), 'p');
+  expect(r1.unknownRecordType).toBeUndefined();
+  expect(r2.unknownRecordType).toBeUndefined();
+});
+
+test('按原始事件顺序重放（含被淘汰后的新归一器）得到相同标题', () => {
+  const events = [titleEvent('prompt'), titleEvent('hook'), titleEvent('agentName')];
+  const a = run(n, events);
+  expect(finalTitle(a.changes)).toBe('T-agent');
+  n.dropSession('s1'); // eviction, or a rolled-back ingest: the session is rebuilt by replay
+  expect(finalTitle(run(n, events).changes)).toBe('T-agent');
+  n.dropSession('s1');
+  // A value only from a dropped, un-replayed event does not leak into the replayed session.
+  expect(finalTitle(run(n, [titleEvent('prompt'), titleEvent('hook')]).changes)).toBe('T-hook');
+  expect(finalTitle(run(new Normalizer(), events).changes)).toBe('T-agent');
 });

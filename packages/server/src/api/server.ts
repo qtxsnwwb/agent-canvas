@@ -205,7 +205,7 @@ export function buildServer(deps: { store: Store; pipeline: Pipeline; config: Co
     });
   });
 
-  app.get('/api/projects', async () => store.listProjects());
+  app.get('/api/projects', async () => store.listProjects(Date.now()));
   app.get<{ Params: { id: string } }>('/api/projects/:id/sessions', async (req) => store.listSessions(req.params.id));
   app.get<{ Querystring: { q?: unknown; limit?: unknown } }>('/api/search', async (req): Promise<SearchHit[]> => {
     const { q, limit } = req.query;

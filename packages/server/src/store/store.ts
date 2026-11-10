@@ -98,7 +98,12 @@ export interface Store {
    * is logged and returned. Logged and returned changes carry no node detail (node_added has `detail: {}`).
    */
   applyChanges(changes: Change[]): SeqChange[];
-  listProjects(): Project[];
+  /**
+   * `nowMs` decides which running sessions are stale (not counted active). A project's cwd is the session cwd that
+   * encodes to the project id (every non-alphanumeric character becomes `-`): the most frequent, ties to the
+   * lexicographically smallest; null when none does.
+   */
+  listProjects(nowMs: number): Project[];
   /** Ordered by lastActivityAt descending. */
   listSessions(projectId: string): Session[];
   getSession(sessionId: string): Session | null;
@@ -315,11 +320,11 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   // Active = effective status running/awaiting_*: a `running` session older than STALE_AFTER_MS is stale, not active.
   // strftime normalizes the stored ISO timestamp so it compares correctly with the cutoff's toISOString().
   const selectProjects = db.prepare(
-    `SELECT project_id AS id, MAX(json_extract(body, '$.cwd')) AS cwd, COUNT(*) AS sessionCount,
+    `SELECT project_id AS id, json_extract(body, '$.cwd') AS cwd, COUNT(*) AS sessionCount,
             SUM(CASE WHEN status IN ('awaiting_input', 'awaiting_permission') THEN 1
                      WHEN status = 'running' AND strftime('%Y-%m-%dT%H:%M:%fZ', last_activity_at) >= @cutoff THEN 1
                      ELSE 0 END) AS activeSessionCount
-     FROM session GROUP BY project_id ORDER BY project_id`,
+     FROM session GROUP BY project_id, cwd ORDER BY project_id`,
   );
   const selectSessions = db.prepare(`SELECT body FROM session WHERE project_id = ? ORDER BY last_activity_at DESC, id`);
   const selectSession = db.prepare(`SELECT body FROM session WHERE id = ?`).pluck();
@@ -508,14 +513,24 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     applyChanges(changes) {
       return applyChangesTx(changes);
     },
-    listProjects() {
-      const cutoff = new Date(Date.now() - STALE_AFTER_MS).toISOString();
-      return (selectProjects.all({ cutoff }) as Project[]).map((p) => ({
-        id: p.id,
-        cwd: p.cwd ?? null,
-        sessionCount: p.sessionCount,
-        activeSessionCount: p.activeSessionCount,
-      }));
+    listProjects(nowMs) {
+      const cutoff = new Date(nowMs - STALE_AFTER_MS).toISOString();
+      const rows = selectProjects.all({ cutoff }) as { id: string; cwd: string | null; sessionCount: number; activeSessionCount: number }[];
+      const byId = new Map<string, { project: Project; best: { cwd: string; n: number } | null }>();
+      for (const r of rows) {
+        let entry = byId.get(r.id);
+        if (!entry) {
+          entry = { project: { id: r.id, cwd: null, sessionCount: 0, activeSessionCount: 0 }, best: null };
+          byId.set(r.id, entry);
+        }
+        entry.project.sessionCount += r.sessionCount;
+        entry.project.activeSessionCount += r.activeSessionCount;
+        if (r.cwd !== null && r.cwd.replace(/[^A-Za-z0-9]/g, '-') === r.id) {
+          const b = entry.best;
+          if (b === null || r.sessionCount > b.n || (r.sessionCount === b.n && r.cwd < b.cwd)) entry.best = { cwd: r.cwd, n: r.sessionCount };
+        }
+      }
+      return [...byId.values()].map(({ project, best }) => ({ ...project, cwd: best?.cwd ?? null }));
     },
     listSessions(projectId) {
       return (selectSessions.all(projectId) as { body: string }[]).map((r) => JSON.parse(r.body) as Session);

@@ -12,11 +12,11 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-function sessionUpsert(id: string, projectId: string, status: SessionStatus = 'idle'): Change {
+function sessionUpsert(id: string, projectId: string, status: SessionStatus = 'idle', cwd: string | null = null): Change {
   const session: Session = {
     id,
     projectId,
-    cwd: null,
+    cwd,
     title: null,
     gitBranch: null,
     status,
@@ -109,7 +109,7 @@ test('listProjects 统计会话数和活跃数', () => {
   vi.useFakeTimers({ toFake: ['Date'] });
   vi.setSystemTime(new Date('2026-01-01T00:05:00.000Z'));
   store.applyChanges([sessionUpsert('s1', 'p1', 'running'), sessionUpsert('s2', 'p1', 'idle'), sessionUpsert('s3', 'p2', 'ended')]);
-  expect(store.listProjects()).toEqual(expect.arrayContaining([
+  expect(store.listProjects(Date.now())).toEqual(expect.arrayContaining([
     expect.objectContaining({ id: 'p1', sessionCount: 2, activeSessionCount: 1 }),
     expect.objectContaining({ id: 'p2', sessionCount: 1, activeSessionCount: 0 }),
   ]));
@@ -173,11 +173,52 @@ test('listProjects 不把长时间无活动的 running 会话计为活跃', () =
     sessionUpsert('s3', 'p1', 'awaiting_permission'),
   ]);
   vi.setSystemTime(new Date('2026-01-01T00:14:00.000Z'));
-  expect(store.listProjects()[0]).toMatchObject({ sessionCount: 3, activeSessionCount: 3 });
+  expect(store.listProjects(Date.now())[0]).toMatchObject({ sessionCount: 3, activeSessionCount: 3 });
   vi.setSystemTime(new Date('2026-01-01T00:15:01.000Z'));
-  expect(store.listProjects()[0]).toMatchObject({ sessionCount: 3, activeSessionCount: 2 });
+  expect(store.listProjects(Date.now())[0]).toMatchObject({ sessionCount: 3, activeSessionCount: 2 });
   vi.setSystemTime(new Date('2026-01-02T00:00:00.000Z'));
-  expect(store.listProjects()[0]).toMatchObject({ activeSessionCount: 2 });
+  expect(store.listProjects(Date.now())[0]).toMatchObject({ activeSessionCount: 2 });
+});
+
+test('项目目录取编码后等于项目 id 的 cwd；子目录里启动的会话不影响', () => {
+  const root = String.raw`D:\work\app`;
+  const sub = String.raw`D:\work\app\packages\web`;
+  store.applyChanges([
+    sessionUpsert('a1', 'D--work-app', 'idle', root),
+    sessionUpsert('a2', 'D--work-app', 'idle', root),
+    sessionUpsert('a3', 'D--work-app', 'idle', sub),
+    sessionUpsert('a4', 'D--work-app', 'idle', sub),
+    sessionUpsert('a5', 'D--work-app', 'idle', sub),
+  ]);
+  expect(store.listProjects(Date.now())[0]).toMatchObject({ id: 'D--work-app', cwd: root, sessionCount: 5 });
+});
+
+test('多种写法都能对上项目 id 时取出现次数最多的，并列取字典序最小的', () => {
+  store.applyChanges([
+    sessionUpsert('b1', 'a-b', 'idle', 'a b'),
+    sessionUpsert('b2', 'a-b', 'idle', 'a_b'),
+    sessionUpsert('b3', 'a-b', 'idle', 'a_b'),
+    sessionUpsert('c1', 'c-d', 'idle', 'c_d'),
+    sessionUpsert('c2', 'c-d', 'idle', 'c d'),
+  ]);
+  const by = Object.fromEntries(store.listProjects(Date.now()).map((p) => [p.id, p.cwd]));
+  expect(by).toEqual({ 'a-b': 'a_b', 'c-d': 'c d' });
+});
+
+test('没有任何 cwd 能对上项目 id 时为 null', () => {
+  store.applyChanges([sessionUpsert('n1', 'proj', 'idle', '/somewhere/else'), sessionUpsert('n2', 'proj', 'idle', null)]);
+  expect(store.listProjects(Date.now())[0]).toMatchObject({ id: 'proj', cwd: null, sessionCount: 2 });
+});
+
+test('运行中但 15 分钟无活动的会话不计入 activeSessionCount；等待输入、等待权限确认的照常计入', () => {
+  store.applyChanges([
+    sessionUpsert('r1', 'p1', 'running'),
+    sessionUpsert('r2', 'p1', 'awaiting_input'),
+    sessionUpsert('r3', 'p1', 'awaiting_permission'),
+  ]);
+  const t0 = Date.parse('2026-01-01T00:00:00.000Z');
+  expect(store.listProjects(t0 + 14 * 60_000)[0]).toMatchObject({ activeSessionCount: 3 });
+  expect(store.listProjects(t0 + 16 * 60_000)[0]).toMatchObject({ sessionCount: 3, activeSessionCount: 2 });
 });
 
 // ---- final fix wave, group 6: storage integrity ----
