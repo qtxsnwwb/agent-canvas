@@ -246,6 +246,7 @@
 .cc-section summary { cursor: pointer; }
 
 /* Causal view: "推理链" at the top of the drawer body, one row per thinking / text node on the upstream chain. */
+.cc-reason-folded { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
 .cc-reason-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 2px; }
 .cc-reason {
   box-sizing: border-box; display: flex; align-items: baseline; gap: 8px; width: 100%; min-width: 0; margin: 0;

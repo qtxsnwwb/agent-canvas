@@ -139,7 +139,8 @@ function useFlowNodes(snapshot: CanvasSnapshot, selectedId: string | null, chain
     }
 
     const depths = groupDepths(view);
-    const live = view.mode === 'live';
+    // Agents can be expanded and collapsed in every view except topology (which shows every subagent collapsed).
+    const canExpand = view.mode !== 'topology';
     const causal = view.mode === 'causal';
     for (const vn of view.nodes.values()) {
       const position = positions[vn.id];
@@ -154,7 +155,7 @@ function useFlowNodes(snapshot: CanvasSnapshot, selectedId: string | null, chain
       let n: FlowNode;
       if (vn.type === 'node') {
         const container = box !== undefined;
-        const expandable = live && vn.expandable;
+        const expandable = canExpand && vn.expandable;
         const d = old?.type === 'graphNode' ? old.data : undefined;
         n = old && d && d.node === vn.node && d.innerCount === vn.innerCount && d.expanded === vn.expanded
           && d.expandable === expandable && d.container === container && d.causal === causal && d.highlight === highlight
@@ -363,15 +364,19 @@ function CanvasInner({ snapshot, selectedId, chain, onSelect, onToggleTurn, onSh
   const { following } = follow;
   useEffect(() => { onFollowingChange?.(following); }, [following, onFollowingChange]);
 
-  // A view switch (live / topology / causal) resumes following, as "回到最新" does.
+  // A view switch (live / topology / causal) resumes following, as "回到最新" does, unless a node is selected (the
+  // reader is looking at it).
   const mode = snapshot.view.mode;
   const lastMode = useRef(mode);
   const resumeRef = useRef(follow.resume);
   resumeRef.current = follow.resume;
+  const selectedRef = useRef(selectedId);
+  selectedRef.current = selectedId;
   useEffect(() => {
     if (lastMode.current === mode) return;
     lastMode.current = mode;
-    if (!following) resumeRef.current(); // while following, the new view's latest node is followed anyway
+    // While following, the new view's latest node is followed anyway.
+    if (!following && selectedRef.current === null) resumeRef.current();
   }, [mode, following]);
 
   // Stable identity for the context value; the latest callback is read through the ref.
@@ -397,12 +402,20 @@ function CanvasInner({ snapshot, selectedId, chain, onSelect, onToggleTurn, onSh
       if (fromKeyboard) focusHeader(key);
     };
     return {
+      stopFollowing: stop,
       toggleTurn: (key: string, fromKeyboard?: boolean) => { before(key, fromKeyboard); toggleRef.current(key); },
       showFullTurn: (key: string, fromKeyboard?: boolean) => { before(key, fromKeyboard); showFullRef.current(key); },
       // The subagent node (and its button, which keeps the focus) stays in place, so no focus handling is needed.
       toggleAgent: (agentId: string) => { stop(); toggleAgentRef.current(agentId); },
     };
   }, [stopFollowing, focusHeader]);
+
+  // A selection in the causal view stops following (and so auto-fold): its upstream chain must not be folded away
+  // under the reader by later updates.
+  const causalSelection = mode === 'causal' && selectedId !== null;
+  useEffect(() => {
+    if (causalSelection) actions.stopFollowing();
+  }, [causalSelection, actions]);
 
   // Enter / Space on a focused node. React Flow's own key handler on the node wrapper only updates its internal
   // selection and never calls onNodeClick; the wrapper (not our node component) holds the focus, so the key is

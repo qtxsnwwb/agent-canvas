@@ -6,7 +6,7 @@ import type { UpstreamChain } from './chain';
 import { formatDuration } from './format';
 import { DETAIL_MAX_CHARS, detailSections } from './detail';
 import { KIND_LABEL, nodeColor } from './nodes';
-import { NO_REASONING, reasoningRows, type ReasoningRow } from './reasoning';
+import { CHAIN_FOLDED, NO_REASONING, reasoningRows, type ReasoningRow } from './reasoning';
 import type { CanvasView } from './view';
 
 /** Kind chip colours of the "推理链" rows (the canvas's thinking / text colours). */
@@ -35,10 +35,12 @@ function LazyDetails({ label, children }: { label: string; children: () => React
  * Causal view: the thinking / text nodes on the selection's upstream chain, oldest first. Each other row is a button
  * that selects its node; the selected node's own row is marked current. When a row selects a node, that node's row
  * (now current, no longer a button) takes the focus, so it does not fall back to the page body. `pendingFocus` is
- * owned by the drawer: the list is remounted with the body when the selection changes.
+ * owned by the drawer: the list is remounted with the body when the selection changes. When a fold cut the chain short
+ * (`truncated`), a line above the rows says so, with a button that expands what cut it; the "nothing recorded" text is
+ * shown only for a chain that was not cut short.
  */
-function ReasoningList({ rows, onSelect, pendingFocus }: {
-  rows: ReasoningRow[]; onSelect(id: string): void; pendingFocus: { current: boolean };
+function ReasoningList({ rows, truncated, onSelect, onExpand, pendingFocus }: {
+  rows: ReasoningRow[]; truncated: boolean; onSelect(id: string): void; onExpand(): void; pendingFocus: { current: boolean };
 }) {
   const currentRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -59,8 +61,14 @@ function ReasoningList({ rows, onSelect, pendingFocus }: {
   return (
     <section className="cc-section cc-reasoning">
       <h3>推理链</h3>
+      {truncated && (
+        <div className="cc-reason-folded">
+          <span className="cc-muted">{CHAIN_FOLDED}</span>
+          <button type="button" className="cc-fold" onClick={onExpand}>展开</button>
+        </div>
+      )}
       {rows.length === 0
-        ? <div className="cc-muted">{NO_REASONING}</div>
+        ? !truncated && <div className="cc-muted">{NO_REASONING}</div>
         : (
           <ol className="cc-reason-list">
             {rows.map((r) => (
@@ -133,10 +141,12 @@ export interface DrawerProps {
   view: CanvasView;
   /** Selects another node (a row of the "推理链" list). */
   onSelect(id: string): void;
+  /** Expands the folds that cut the chain short (chain.cutAt; see expandCut). */
+  onExpandCut(): void;
   onClose(): void;
 }
 
-export function Drawer({ sessionId, node, chain, view, onSelect, onClose }: DrawerProps) {
+export function Drawer({ sessionId, node, chain, view, onSelect, onExpandCut, onClose }: DrawerProps) {
   const closeRef = useRef<HTMLButtonElement>(null);
   // Focus the close button on open; give focus back to whatever had it when the drawer closes.
   useEffect(() => {
@@ -177,7 +187,9 @@ export function Drawer({ sessionId, node, chain, view, onSelect, onClose }: Draw
         key={node.id}
         sessionId={sessionId}
         node={node}
-        prefix={causal ? <ReasoningList rows={rows} onSelect={onSelect} pendingFocus={reasonFocus} /> : null}
+        prefix={causal
+          ? <ReasoningList rows={rows} truncated={chain.truncated} onSelect={onSelect} onExpand={onExpandCut} pendingFocus={reasonFocus} />
+          : null}
       />
     </aside>
   );

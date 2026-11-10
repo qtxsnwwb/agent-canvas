@@ -58,7 +58,7 @@ export function isActive(status: NodeStatus | null): boolean {
 }
 
 /**
- * `expandable`: show the expand / collapse button (a subagent with inner nodes, live mode only). `expanded`: the agent
+ * `expandable`: show the expand / collapse button (a subagent with inner nodes; every view but topology). `expanded`: the agent
  * is expanded in the view. `container`: drawn as a container (expanded and its box has landed; until then it keeps the
  * collapsed size).
  */

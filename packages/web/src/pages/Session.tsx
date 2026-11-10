@@ -2,7 +2,7 @@ import { memo, useCallback, useEffect, useMemo, useReducer, useState } from 'rea
 import { createPortal } from 'react-dom';
 import { openLiveSession, type LiveSession } from '../client';
 import { Canvas } from '../canvas/Canvas';
-import { EMPTY_CHAIN, upstreamChain } from '../canvas/chain';
+import { EMPTY_CHAIN, expandCut, upstreamChain } from '../canvas/chain';
 import { Drawer } from '../canvas/Drawer';
 import { useCanvas } from '../canvas/useCanvas';
 import type { ViewMode } from '../canvas/view';
@@ -60,6 +60,13 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
   const view = canvas.view;
   const chainStart = view.mode === 'causal' && selectedNode !== null ? selectedNode.id : null;
   const chain = useMemo(() => (chainStart !== null ? upstreamChain(view, chainStart) : EMPTY_CHAIN), [view, chainStart]);
+  // The drawer's "展开" under a chain cut short by a fold: show the `earlier` folds in full, expand the collapsed turns.
+  const { showFullTurn, toggleTurn } = canvas;
+  const expandChainCut = useCallback(() => {
+    const { fullTurns, turns } = expandCut(view, chain.cutAt);
+    for (const key of fullTurns) showFullTurn(key);
+    for (const key of turns) toggleTurn(key);
+  }, [view, chain, showFullTurn, toggleTurn]);
   // "暂无节点" only when the live graph really has no nodes; "布局中…" while the model is starting or the view has
   // nodes none of which is placed yet.
   const empty = !hasKeys(live.getGraph().nodes);
@@ -87,6 +94,7 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
             chain={chain}
             view={view}
             onSelect={setSelectedId}
+            onExpandCut={expandChainCut}
             onClose={closeDrawer}
           />
         )}

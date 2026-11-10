@@ -1,7 +1,7 @@
 import { expect, test } from 'vitest';
 import type { Graph, GraphEdge, GraphNode, NodeKind } from '@claude-canvas/shared';
 import { buildView, type CanvasView, type ViewMode } from '../src/canvas/view';
-import { EMPTY_CHAIN, upstreamChain } from '../src/canvas/chain';
+import { EMPTY_CHAIN, expandCut, upstreamChain } from '../src/canvas/chain';
 
 const EPOCH = Date.parse('2026-01-01T00:00:00Z');
 function node(id: string, kind: NodeKind, turnId: string | null, agentId: string | null, tMs: number, extra: Partial<GraphNode> = {}): GraphNode {
@@ -165,4 +165,38 @@ test('时间戳相同的推理节点按 id 排序', () => {
     [e('p1', 'zz'), e('p1', 'aa'), e('zz', 'c1'), e('aa', 'c1')],
   );
   expect(upstreamChain(buildV(g, opts({ mode: 'causal' })), 'c1').reasoning).toEqual(['aa', 'zz']);
+});
+
+test('被折叠截断：走到 earlier 时 truncated 为真，cutAt 是 earlier 节点', () => {
+  const v = buildV(longChain(70), opts({ mode: 'causal' }));
+  const c = upstreamChain(v, 'n69');
+  expect(c.truncated).toBe(true);
+  expect(c.cutAt).toEqual(['earlier:t1']);
+});
+
+test('被折叠截断：走到折叠轮次的摘要节点时 truncated 为真，cutAt 是摘要节点', () => {
+  const c = upstreamChain(buildV(chainIntoCollapsedTurn(), opts({ mode: 'causal' })), 'x9');
+  expect(c.truncated).toBe(true);
+  expect(c.cutAt).toEqual(['turn:t1']);
+});
+
+test('走到提示为止的链不算截断；起点本身是摘要节点时也不算', () => {
+  const v = buildV(twoTurnChain(), opts({ mode: 'causal' }));
+  const c = upstreamChain(v, 'b2');
+  expect(c.truncated).toBe(false);
+  expect(c.cutAt).toEqual([]);
+  const s = upstreamChain(buildV(chainIntoCollapsedTurn(), opts({ mode: 'causal' })), 'turn:t1');
+  expect(s.truncated).toBe(false);
+  expect(s.cutAt).toEqual([]);
+  expect(EMPTY_CHAIN.truncated).toBe(false);
+  expect(EMPTY_CHAIN.cutAt).toEqual([]);
+  expect(Object.isFrozen(EMPTY_CHAIN.cutAt)).toBe(true);
+});
+
+test('expandCut：earlier 对应 showFullTurn(groupKey)，摘要节点对应展开该轮次', () => {
+  const v1 = buildV(longChain(70), opts({ mode: 'causal' }));
+  expect(expandCut(v1, upstreamChain(v1, 'n69').cutAt)).toEqual({ fullTurns: ['t1'], turns: [] });
+  const v2 = buildV(chainIntoCollapsedTurn(), opts({ mode: 'causal' }));
+  expect(expandCut(v2, upstreamChain(v2, 'x9').cutAt)).toEqual({ fullTurns: [], turns: ['t1'] });
+  expect(expandCut(v2, ['gone', 'x9'])).toEqual({ fullTurns: [], turns: [] });
 });
