@@ -2,7 +2,6 @@ import {
   applyChanges,
   type ClientMessage,
   type Graph,
-  type GraphNode,
   type GraphSnapshot,
   type NodeDetail,
   type Project,
@@ -210,11 +209,4 @@ export function openLiveSessions(
     deps.onReconnect,
   );
   return { close };
-}
-
-/** Ascending by timestamp, ties broken by id. */
-export function orderNodes(graph: Graph): GraphNode[] {
-  return Object.values(graph.nodes).sort((a, b) =>
-    a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
-  );
 }

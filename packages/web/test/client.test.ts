@@ -1,5 +1,5 @@
 import { afterEach, expect, test, vi } from 'vitest';
-import { openLiveSession, openLiveSessions, orderNodes } from '../src/client';
+import { openLiveSession, openLiveSessions } from '../src/client';
 import { baseSession, fakeSocket, mkNode, snapshot, type FakeSocket } from './helpers';
 
 
@@ -44,11 +44,6 @@ test('does not reconnect after close', async () => {
   live.close();
   await vi.advanceTimersByTimeAsync(5000);
   expect(created).toBe(1);
-});
-
-test('orderNodes sorts by timestamp then id', () => {
-  const g = { nodes: { b: mkNode('b', '2026-01-01T00:00:01Z'), a: mkNode('a', '2026-01-01T00:00:01Z'), c: mkNode('c', '2026-01-01T00:00:00Z') }, edges: {} };
-  expect(orderNodes(g).map((n) => n.id)).toEqual(['c', 'a', 'b']);
 });
 
 test('openLiveSessions subscribes on open and forwards session_upserted', async () => {

@@ -1,6 +1,7 @@
+:root { --header-h: 37px; }
 body { margin: 0; font: 14px/1.5 system-ui, sans-serif; color: #1c1c1e; background: #fafafa; }
 a { color: #1a56c4; text-decoration: none; }
-header { padding: 8px 16px; background: #1c1c1e; }
+header { box-sizing: border-box; height: var(--header-h); padding: 8px 16px; background: #1c1c1e; line-height: 21px; }
 header a { color: #fff; font-weight: 600; }
 h2 { font-size: 15px; margin: 0 0 8px; }
 ul { list-style: none; margin: 0; padding: 0; }
@@ -21,15 +22,16 @@ pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
 .home li a { display: block; padding: 6px 8px; border-radius: 4px; color: inherit; overflow-wrap: anywhere; }
 .home li a:hover, .home li.selected a { background: #e8eefc; }
 
-.session-page { padding: 16px; }
-.session-head { margin-bottom: 12px; }
-.node { border-bottom: 1px solid #e4e4e7; }
-.node-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; padding: 4px 0; cursor: pointer; }
-.node-row:hover { background: #f0f0f3; }
-.subagent-node { margin-left: 24px; }
-.time { color: #6b6b70; font-variant-numeric: tabular-nums; }
-.kind { font-family: ui-monospace, monospace; font-size: 12px; }
-.title { font-weight: 600; }
-.summary { overflow-wrap: anywhere; min-width: 0; }
-.detail { margin: 4px 0 8px; padding: 8px; background: #fff; border: 1px solid #e4e4e7; border-radius: 4px; }
-.detail pre { max-height: 400px; overflow: auto; font: 12px/1.4 ui-monospace, monospace; }
+/* Session page: a one-line info bar, then the canvas filling the rest of the viewport. */
+.session-loading { padding: 8px 16px; }
+.session-page { display: flex; flex-direction: column; height: calc(100vh - var(--header-h)); overflow: hidden; }
+.session-bar {
+  display: flex; align-items: center; gap: 12px; flex: none; min-width: 0;
+  padding: 6px 16px; border-bottom: 1px solid #e4e4e7; background: #fff; white-space: nowrap;
+}
+.session-bar h2 { margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.session-bar .branch { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-family: ui-monospace, monospace; }
+.session-bar .tag { margin: 0; }
+.canvas-error { flex: none; padding: 4px 16px; background: #fef2f2; color: #b3261e; font-size: 12px; border-bottom: 1px solid #fecaca; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.canvas-area { position: relative; flex: 1; min-height: 0; }
+.canvas-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none; font-size: 14px; }

@@ -1,0 +1,147 @@
+/* Canvas and node styles. Every node is drawn at exactly the size sizeOf() gives it (inline width/height); nothing
+   inside may grow it: overflow is hidden and text is single-line with an ellipsis. */
+
+.cc-canvas { width: 100%; height: 100%; background: #f8fafc; }
+.cc-canvas .react-flow { --xy-background-color: #f8fafc; }
+
+.cc-handle { opacity: 0; pointer-events: none; }
+
+.cc-node {
+  --cc-color: #64748b;
+  position: relative;
+  box-sizing: border-box;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  padding: 5px 10px 5px 9px;
+  border: 1px solid var(--cc-color);
+  border-left-width: 4px;
+  border-radius: 6px;
+  background: #fff;
+  color: #0f172a;
+  font: 12px/16px system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+  cursor: pointer;
+  transition: outline-color 120ms;
+}
+.cc-node:hover { box-shadow: 0 2px 6px rgba(15, 23, 42, 0.12); }
+
+.cc-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  height: 16px;
+  white-space: nowrap;
+  flex: none;
+}
+.cc-grow { flex: 1 1 auto; min-width: 0; }
+.cc-ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; word-break: normal; overflow-wrap: normal; }
+
+.cc-kind {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: var(--cc-color);
+  color: #fff;
+  font-size: 11px;
+  line-height: 15px;
+  font-weight: 600;
+}
+.cc-title { font-weight: 600; }
+.cc-status { flex: none; color: var(--cc-color); font-size: 11px; font-weight: 600; }
+.cc-duration { flex: none; color: #64748b; font-size: 11px; font-variant-numeric: tabular-nums; }
+.cc-summary { color: #475569; }
+.cc-inner { color: #64748b; font-size: 11px; }
+.cc-tag {
+  flex: none;
+  padding: 0 4px;
+  border: 1px dashed #94a3b8;
+  border-radius: 3px;
+  color: #64748b;
+  font-size: 10px;
+  line-height: 13px;
+}
+.cc-muted { color: #94a3b8; }
+
+/* Kind-specific layouts. */
+.cc-kind-prompt { background: #faf5ff; }
+.cc-kind-prompt .cc-summary { color: #1e1b4b; }
+.cc-kind-unknown { padding-top: 3px; padding-bottom: 3px; gap: 2px; }
+.cc-kind-unknown .cc-row { height: 14px; line-height: 14px; }
+.cc-oneline { padding-top: 0; padding-bottom: 0; }
+.cc-kind-thinking { background: #f8fafc; color: #64748b; font-style: italic; border-left-width: 3px; }
+.cc-kind-system { background: #f8fafc; color: #475569; font-size: 11px; }
+
+.cc-unconfirmed { border-style: dashed; border-left-style: solid; }
+
+.cc-selected { outline: 3px solid var(--cc-color); outline-offset: 2px; }
+
+/* Collapsed turn. */
+.cc-turn-summary { background: #f1f5f9; }
+.cc-turn-summary .cc-kind { background: #e2e8f0; color: #334155; }
+.cc-turn-summary .cc-title { color: #0f172a; }
+.cc-turn-summary:hover { background: #e8eef6; }
+.cc-expand { flex: none; color: #2563eb; font-size: 11px; }
+.cc-failed { color: #dc2626; font-weight: 600; }
+
+/* Turn header strip at the top of an expanded turn's box. */
+.cc-turn-header {
+  box-sizing: border-box;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 2px;
+  border-top: 1px solid #cbd5e1;
+  color: #475569;
+  font: 11px/16px system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.cc-fold {
+  flex: none;
+  margin: 0;
+  padding: 0 6px;
+  border: 1px solid #cbd5e1;
+  border-radius: 3px;
+  background: #fff;
+  color: #334155;
+  font: inherit;
+  line-height: 16px;
+  cursor: pointer;
+}
+.cc-fold:hover { background: #f1f5f9; border-color: #94a3b8; }
+
+/* Activity: pulsing border for running / awaiting-permission nodes (1.2 s period). */
+@keyframes cc-pulse-running {
+  0% { box-shadow: 0 0 0 0 rgba(37, 99, 235, 0.55); }
+  70% { box-shadow: 0 0 0 7px rgba(37, 99, 235, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(37, 99, 235, 0); }
+}
+@keyframes cc-pulse-awaiting {
+  0% { box-shadow: 0 0 0 0 rgba(217, 119, 6, 0.6); }
+  70% { box-shadow: 0 0 0 7px rgba(217, 119, 6, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(217, 119, 6, 0); }
+}
+.cc-pulse-running { animation: cc-pulse-running 1.2s ease-out infinite; }
+.cc-pulse-awaiting { animation: cc-pulse-awaiting 1.2s ease-out infinite; }
+.cc-running-dot::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  vertical-align: 1px;
+  animation: cc-blink 1.2s ease-in-out infinite;
+}
+@keyframes cc-blink { 50% { opacity: 0.25; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .cc-pulse-running, .cc-pulse-awaiting, .cc-running-dot::before { animation: none; }
+  .cc-canvas .react-flow__edge.animated path { animation: none; }
+}
