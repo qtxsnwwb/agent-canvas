@@ -2,8 +2,9 @@ import fs from 'node:fs';
 import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyStatic from '@fastify/static';
 import fastifyWebsocket from '@fastify/websocket';
-import type { Change, ClientMessage, SeqChange, ServerMessage } from '@claude-canvas/shared';
+import type { Change, ClientMessage, Diagnostics, SeqChange, ServerMessage } from '@claude-canvas/shared';
 import type { Config } from '../config.js';
+import { NORMALIZER_VERSION } from '../normalize/version.js';
 import type { Pipeline } from '../pipeline.js';
 import type { Store } from '../store/store.js';
 
@@ -45,6 +46,11 @@ function stripDetail(c: SeqChange): SeqChange {
   return c;
 }
 
+/** Content-Security-Policy of the HTML page. */
+export const CSP =
+  "default-src 'self'; connect-src 'self' ws://127.0.0.1:* ws://localhost:*; style-src 'self' 'unsafe-inline'; " +
+  "img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+
 const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
 
 function hostnameOf(urlLike: string): string | null {
@@ -57,9 +63,16 @@ function hostnameOf(urlLike: string): string | null {
 
 /**
  * The service has no auth; loopback binding alone does not stop browsers, so every request must carry a loopback Host
- * and (when present) a loopback Origin. A missing Origin (Claude Code's hook client, curl) is allowed.
+ * and (when present) a loopback Origin, and must not be marked `Sec-Fetch-Site: cross-site`. A missing Origin (Claude
+ * Code's hook client, curl) is allowed.
  */
-export function isAllowedRequest(headers: { host?: string | undefined; origin?: string | undefined }): boolean {
+export function isAllowedRequest(headers: {
+  host?: string | undefined;
+  origin?: string | undefined;
+  'sec-fetch-site'?: string | undefined;
+}): boolean {
+  // Browsers mark requests initiated by another site; same rule as a foreign Origin.
+  if (headers['sec-fetch-site'] === 'cross-site') return false;
   if (headers.host !== undefined) {
     const h = hostnameOf(`http://${headers.host}`);
     if (h === null || !LOOPBACK_HOSTNAMES.has(h)) return false;
@@ -102,6 +115,13 @@ export function buildServer(deps: { store: Store; pipeline: Pipeline; config: Co
   const { store, pipeline, config } = deps;
   const app = Fastify();
   const connections = new Set<Connection>();
+
+  app.addHook('onSend', async (_req, reply, payload) => {
+    reply.header('X-Content-Type-Options', 'nosniff');
+    const type = reply.getHeader('content-type');
+    if (typeof type === 'string' && type.startsWith('text/html')) reply.header('Content-Security-Policy', CSP);
+    return payload;
+  });
 
   // Runs before body parsing and the WebSocket upgrade handler.
   app.addHook('onRequest', async (req, reply) => {
@@ -189,7 +209,17 @@ export function buildServer(deps: { store: Store; pipeline: Pipeline; config: Co
     if (detail === null) return reply.code(404).send({ error: 'node not found' });
     return detail;
   });
-  app.get('/api/diagnostics', async () => ({ ...store.diagnostics(), lastHookAt: pipeline.lastHookAt() }));
+  app.get(
+    '/api/diagnostics',
+    async (): Promise<Diagnostics> => ({
+      ...store.diagnostics(),
+      lastHookAt: pipeline.lastHookAt(),
+      ingestFailures: pipeline.ingestFailures(),
+      importing: pipeline.importing(),
+      normalizerVersion: NORMALIZER_VERSION,
+      dbEpoch: store.epoch(),
+    }),
+  );
 
   // Encapsulated so its catch-all parser and error handler only affect /hooks: whatever arrives, the answer is an empty 200.
   void app.register(async (instance) => {
@@ -214,8 +244,9 @@ export function buildServer(deps: { store: Store; pipeline: Pipeline; config: Co
           const sessionId = typeof obj.session_id === 'string' ? obj.session_id : null;
           const transcriptPath = typeof obj.transcript_path === 'string' ? obj.transcript_path : null;
           pipeline.ingestHook(eventName, sessionId, text, transcriptPath);
-        } catch {
+        } catch (err) {
           // best effort: the hook has already been answered
+          pipeline.reportFailure('hook', err);
         }
       });
     });

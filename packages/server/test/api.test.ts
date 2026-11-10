@@ -5,7 +5,8 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import WebSocket from 'ws';
 import type { FastifyInstance } from 'fastify';
 import type { Change, GraphNode, SeqChange, ServerMessage } from '@claude-canvas/shared';
-import { buildServer, isAllowedRequest } from '../src/api/server.js';
+import { buildServer, CSP, isAllowedRequest } from '../src/api/server.js';
+import { NORMALIZER_VERSION } from '../src/normalize/version.js';
 import { loadConfig, type Config } from '../src/config.js';
 import { Pipeline } from '../src/pipeline.js';
 import { openStore, type RawEvent, type Store } from '../src/store/store.js';
@@ -477,5 +478,72 @@ describe('http api', () => {
     } finally {
       spy.mockRestore();
     }
+  });
+
+  // ---- final fix wave, group 10: diagnostics and API hardening ----
+
+  test('diagnostics 带导入失败、导入状态、归一化版本和数据库 epoch', async () => {
+    const d = (await get('/api/diagnostics')).json();
+    expect(d).toMatchObject({ ingestFailures: [], importing: false, normalizerVersion: NORMALIZER_VERSION, dbEpoch: store.epoch() });
+    expect(d).toHaveProperty('unknownRecords');
+    expect(d).toHaveProperty('files');
+  });
+
+  test('所有响应带 nosniff', async () => {
+    await seed();
+    for (const res of [
+      await get('/api/projects'),
+      await get('/api/sessions/s1/graph'),
+      await get('/api/sessions/nope/graph'),
+      await app.inject({ method: 'GET', url: '/api/projects', headers: { origin: 'https://evil.example' } }),
+      await post('/hooks', { hook_event_name: 'Stop', session_id: 's1' }),
+    ]) {
+      expect(res.headers['x-content-type-options']).toBe('nosniff');
+    }
+  });
+
+  test('index.html 带 CSP，静态资源不带', async () => {
+    const dist = path.join(tmp, 'dist');
+    await fs.mkdir(dist);
+    await fs.writeFile(path.join(dist, 'index.html'), '<html>app</html>');
+    await fs.writeFile(path.join(dist, 'a.js'), 'x=1');
+    const app2 = buildServer({ store, pipeline, config: { ...config, webDist: dist } });
+    try {
+      for (const url of ['/', '/some/route']) {
+        const res = await app2.inject({ method: 'GET', url });
+        expect(res.headers['content-security-policy']).toBe(CSP);
+        expect(res.headers['x-content-type-options']).toBe('nosniff');
+      }
+      const js = await app2.inject({ method: 'GET', url: '/a.js' });
+      expect(js.headers['content-security-policy']).toBeUndefined();
+      expect(js.headers['x-content-type-options']).toBe('nosniff');
+    } finally {
+      await app2.close();
+    }
+  });
+
+  test('Sec-Fetch-Site: cross-site 的请求按外来 Origin 处理', async () => {
+    expect(isAllowedRequest({ 'sec-fetch-site': 'cross-site' })).toBe(false);
+    for (const v of ['same-origin', 'same-site', 'none']) expect(isAllowedRequest({ 'sec-fetch-site': v })).toBe(true);
+    expect((await app.inject({ method: 'GET', url: '/api/projects', headers: { 'sec-fetch-site': 'cross-site' } })).statusCode).toBe(403);
+    const spy = vi.spyOn(pipeline, 'ingestHook');
+    const res = await app.inject({
+      method: 'POST',
+      url: '/hooks',
+      payload: JSON.stringify({ hook_event_name: 'UserPromptSubmit', session_id: 'forged' }),
+      headers: { 'content-type': 'text/plain', 'sec-fetch-site': 'cross-site' },
+    });
+    expect(res.statusCode).toBe(200);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  test('/hooks 处理中被吞掉的异常写日志', async () => {
+    const report = vi.spyOn(pipeline, 'reportFailure');
+    vi.spyOn(pipeline, 'ingestHook').mockImplementation(() => {
+      throw new Error('kaboom');
+    });
+    await post('/hooks', { hook_event_name: 'Stop', session_id: 's1' });
+    await vi.waitFor(() => expect(report).toHaveBeenCalledWith('hook', expect.objectContaining({ message: 'kaboom' })));
   });
 });

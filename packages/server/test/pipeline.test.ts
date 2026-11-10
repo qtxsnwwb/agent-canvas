@@ -238,7 +238,7 @@ describe('pipeline', () => {
     await write('proj/s1.jsonl', [userPrompt('u1', null, 'x')]);
     await pipeline.scanAll();
     expect(store.getSession('s1')).not.toBeNull();
-    expect(pipeline.ingestFailures().map((f) => f.file)).toEqual([abs('proj/aaa.jsonl')]);
+    expect(pipeline.ingestFailures().map((f) => f.file)).toEqual(['proj/aaa.jsonl']); // group 10: relative path
     await append('proj/s1.jsonl', [assistantBlock('a1', 'u1', { type: 'text', text: 'hi' })]);
     // Ruling 9: s1 is cold (evicted after the scan), so its append is found by the full scan, not the hot rescan.
     await pipeline.scanAll();
@@ -335,7 +335,7 @@ describe('pipeline', () => {
     });
     p2.ingestHook('Stop', 's1', JSON.stringify({ session_id: 's1', hook_event_name: 'Stop' }));
     await p2.idle();
-    expect(p2.ingestFailures()).toContainEqual({ file: 'hook:s1', error: 'boom' });
+    expect(p2.ingestFailures()).toContainEqual(expect.objectContaining({ file: 'hook:s1', error: 'boom' }));
     expect(store.rawForSession('s1').filter((e) => e.source === 'hook')).toHaveLength(1);
     // the next event hydrates normally
     await append('proj/s1.jsonl', [assistantBlock('a1', 'u1', { type: 'text', text: 'hi' })]);
@@ -689,5 +689,74 @@ describe('pipeline', () => {
     await p.idle();
     expect(spy.mock.calls.length).toBeGreaterThanOrEqual(3);
     for (const call of spy.mock.calls) expect(call.slice(2)).toEqual([200, 256 * 1024]);
+  });
+
+  // ---- final fix wave, group 10: visibility of failures ----
+
+  test('ingestFailures 带时间，失败写到日志且每个文件每分钟最多一行', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-03-01T00:00:00.000Z'));
+      const lines: string[] = [];
+      const p = new Pipeline(store, config, { log: (l) => lines.push(l) });
+      await write('proj/aaa.jsonl', [userPrompt('b1', null, 'secret prompt text')]);
+      reads.failFor = abs('proj/aaa.jsonl');
+      await p.scanAll();
+      expect(p.ingestFailures()).toEqual([{ file: 'proj/aaa.jsonl', error: 'EPERM: simulated', at: '2026-03-01T00:00:00.000Z' }]);
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('proj/aaa.jsonl');
+      expect(lines[0]).toContain('EPERM: simulated');
+      expect(lines[0]).not.toContain('secret');
+      await p.rescan();
+      await p.scanAll();
+      expect(lines).toHaveLength(1);
+      vi.setSystemTime(new Date('2026-03-01T00:01:01.000Z'));
+      await p.rescan();
+      expect(lines).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test('被吞掉的 hook 失败也写日志', async () => {
+    await write('proj/s1.jsonl', [userPrompt('u1', null, 'x')]);
+    await pipeline.ingestFile(abs('proj/s1.jsonl'));
+    const lines: string[] = [];
+    const p2 = new Pipeline(store, config, { log: (l) => lines.push(l) });
+    vi.spyOn(store, 'rawForSessionAfter').mockImplementationOnce(() => {
+      throw new Error('boom');
+    });
+    p2.ingestHook('Stop', 's1', JSON.stringify({ session_id: 's1', hook_event_name: 'Stop', last_assistant_message: 'private' }));
+    await p2.idle();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('hook:s1');
+    expect(lines[0]).toContain('boom');
+    expect(lines[0]).not.toContain('private');
+  });
+
+  test('importing 在首次全量扫描和重建期间为 true', async () => {
+    await write('proj/s1.jsonl', [userPrompt('u1', null, 'x')]);
+    expect(pipeline.importing()).toBe(false);
+    const scanning = pipeline.scanAll();
+    expect(pipeline.importing()).toBe(true);
+    await scanning;
+    expect(pipeline.importing()).toBe(false);
+    const seen: boolean[] = [];
+    const real = store.applyChanges.bind(store);
+    const spy = vi.spyOn(store, 'applyChanges').mockImplementation((cs) => {
+      seen.push(pipeline.importing());
+      return real(cs);
+    });
+    try {
+      pipeline.rebuild();
+    } finally {
+      spy.mockRestore();
+    }
+    expect(seen).toContain(true);
+    expect(pipeline.importing()).toBe(false);
+    await write('proj/s2.jsonl', [userPrompt('v1', null, 'x')]);
+    const later = pipeline.scanAll(); // periodic full scans are not "importing"
+    expect(pipeline.importing()).toBe(false);
+    await later;
   });
 });

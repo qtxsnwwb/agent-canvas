@@ -36,6 +36,8 @@ export const CHANGE_LOG_MAX_ROWS = 200_000;
 /** Rows inserted into the change log between two size checks. */
 const PRUNE_CHECK_EVERY = 10_000;
 
+export type StoreDiagnostics = Pick<Diagnostics, 'unknownRecords' | 'lastHookAt' | 'files'>;
+
 export interface StoreOptions {
   changeLogMaxRows?: number;
   pruneCheckEvery?: number;
@@ -92,7 +94,8 @@ export interface Store {
   epoch(): string;
   /** Latest receivedAt of any stored hook event (kept in `meta`, no raw_event scan). */
   lastHookAt(): string | null;
-  diagnostics(): Diagnostics;
+  /** The stored part of Diagnostics; the API adds the pipeline's live fields. */
+  diagnostics(): StoreDiagnostics;
   close(): void;
 }
 

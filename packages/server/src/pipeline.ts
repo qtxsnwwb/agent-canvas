@@ -18,6 +18,13 @@ const HYDRATE_PAGE_BYTES = 256 * 1024;
 const LIVE_STATUSES: ReadonlySet<string> = new Set(['running', 'awaiting_permission', 'awaiting_input']);
 const UNKNOWN_PROJECT = 'unknown';
 const REBUILD_PROGRESS_EVERY = 100;
+/** At most one failure log line per file (or hook session) per minute. */
+const LOG_EVERY_MS = 60_000;
+
+export interface PipelineOptions {
+  /** Receives failure lines (stderr in the CLI). No conversation content is ever passed. */
+  log?: (line: string) => void;
+}
 /** meta keys */
 export const REBUILD_FLAG = 'rebuild_in_progress';
 export const NORMALIZER_VERSION_KEY = 'normalizer_version';
@@ -55,7 +62,13 @@ export class Pipeline {
   private readonly lastTouch = new Map<string, number>();
   /** Session ids whose main source file is gone; sourceDeleted stays true for them. */
   private readonly deleted = new Set<string>();
-  private readonly failures = new Map<string, string>();
+  /** Absolute file path or `hook:<sessionId>` -> last failure. */
+  private readonly failures = new Map<string, { error: string; at: string }>();
+  /** Failure key -> time (ms) of the last log line written for it (rate limit). */
+  private readonly lastLogged = new Map<string, number>();
+  private initialScanDone = false;
+  private importDepth = 0;
+  private readonly log: (line: string) => void;
   /** sessionId -> absolute paths of its files seen so far (the hot-set rescan stats only these). */
   private readonly filesBySession = new Map<string, Set<string>>();
   /** Known file sizes (mirror of file_offset.size) and last hook time, loaded from the store once. */
@@ -68,7 +81,30 @@ export class Pipeline {
   constructor(
     private readonly store: Store,
     private readonly config: Config,
-  ) {}
+    options: PipelineOptions = {},
+  ) {
+    this.log = options.log ?? (() => {});
+  }
+
+  /** True while the initial full scan or a rebuild is running. */
+  importing(): boolean {
+    return this.importDepth > 0;
+  }
+
+  /**
+   * Records a failure for diagnostics and writes one stderr line (file path / session and error message only, never
+   * content), at most once per key per minute.
+   */
+  reportFailure(key: string, err: unknown): void {
+    const error = err instanceof Error ? err.message : String(err);
+    const now = Date.now();
+    if (key !== 'hook') this.failures.set(key, { error, at: new Date(now).toISOString() });
+    const last = this.lastLogged.get(key);
+    if (last !== undefined && now - last < LOG_EVERY_MS) return;
+    this.lastLogged.set(key, now);
+    const what = key.startsWith('hook') ? key : this.rel(key);
+    this.log(`claude-canvas: ingest failed: ${what}: ${error}`);
+  }
 
   onChanges(listener: Listener): () => void {
     this.listeners.add(listener);
@@ -88,8 +124,8 @@ export class Pipeline {
   }
 
   /** Files whose last ingest attempt failed (unreadable, locked, ...). */
-  ingestFailures(): { file: string; error: string }[] {
-    return [...this.failures].map(([file, error]) => ({ file, error }));
+  ingestFailures(): { file: string; error: string; at: string }[] {
+    return [...this.failures].map(([key, f]) => ({ file: key.startsWith('hook:') ? key : this.rel(key), error: f.error, at: f.at }));
   }
 
   /** Resolves when no ingest or hydration work is pending. */
@@ -136,7 +172,7 @@ export class Pipeline {
     if (this.lastHook === null || receivedAt > this.lastHook) this.lastHook = receivedAt;
     const key = `hook:${sessionId}`;
     const onError = (err: unknown): void => {
-      this.failures.set(key, err instanceof Error ? err.message : String(err));
+      this.reportFailure(key, err);
       // The slice rolled back; keep the raw event alone so the next hydration or rebuild applies it.
       if (!this.persistedHooks.has(event)) {
         try {
@@ -169,6 +205,17 @@ export class Pipeline {
    * also picks up files chokidar missed), evicts cold sessions, and derives deleted sources from the same listing.
    */
   async scanAll(): Promise<void> {
+    const initial = !this.initialScanDone;
+    this.initialScanDone = true;
+    if (initial) this.importDepth += 1;
+    try {
+      await this.fullScan();
+    } finally {
+      if (initial) this.importDepth -= 1;
+    }
+  }
+
+  private async fullScan(): Promise<void> {
     const files = await this.listFiles();
     const groups = new Map<string, { sessionId: string; files: string[] }>();
     for (const file of files) {
@@ -223,6 +270,15 @@ export class Pipeline {
    */
   rebuild(progress?: (done: number, total: number) => void): void {
     if (this.active.size > 0 || this.tails.size > 0) throw new Error('rebuild refused: ingest work is pending (await idle() first)');
+    this.importDepth += 1;
+    try {
+      this.rebuildAll(progress);
+    } finally {
+      this.importDepth -= 1;
+    }
+  }
+
+  private rebuildAll(progress?: (done: number, total: number) => void): void {
     this.store.setMeta(REBUILD_FLAG, '1');
     this.store.clearDerived();
     this.normalizer = new Normalizer();
@@ -352,7 +408,7 @@ export class Pipeline {
       await this.ingestFile(file);
       this.failures.delete(file);
     } catch (err) {
-      this.failures.set(file, err instanceof Error ? err.message : String(err));
+      this.reportFailure(file, err);
     }
   }
 

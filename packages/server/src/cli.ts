@@ -65,7 +65,7 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
   let pipeline: Pipeline;
   try {
     store = openStore(config.dbPath);
-    pipeline = new Pipeline(store, config);
+    pipeline = new Pipeline(store, config, { log: (line) => process.stderr.write(`${line}\n`) });
     const reason = rebuildReason(store);
     if (reason !== null) {
       options.log?.(`claude-canvas rebuilding derived data (reason: ${reason})`);

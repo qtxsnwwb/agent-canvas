@@ -5,7 +5,14 @@ export interface GraphSnapshot { session: Session; nodes: GraphNode[]; edges: Gr
 export interface Diagnostics {
   unknownRecords: { recordType: string; count: number; sample: string }[];
   lastHookAt: string | null;
+  /** path is relative to the projects directory, `/` separators. */
   files: { path: string; offset: number; size: number }[];
+  /** Files (relative path) and hook sessions (`hook:<sessionId>`) whose last ingest attempt failed. */
+  ingestFailures: { file: string; error: string; at: string }[];
+  /** True while the initial full scan or a rebuild is running. */
+  importing: boolean;
+  normalizerVersion: number;
+  dbEpoch: string;
 }
 export type ClientMessage =
   | { type: 'subscribe'; scope: 'sessions' }
