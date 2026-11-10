@@ -356,11 +356,95 @@ test('hookEventStats 按事件名聚合次数和最近时间，不含 transcript
   ]);
 });
 
-test('hookEventStats 的查询计划走只覆盖 hook 行的部分索引，不全表扫描 raw_event', () => {
-  const plan = store.hookEventPlan();
-  const text = plan.join(' | ');
-  expect(text).toContain('raw_event_hook');
-  expect(plan.filter((l) => /SCAN raw_event(?! USING)/.test(l))).toEqual([]);
+const hookAt = (s: Store, eventName: string, receivedAt: string) =>
+  s.insertRaw({ source: 'hook', receivedAt, eventName, sessionId: 's1', payload: '{}' });
+
+test('hookEventStats 只读 hook_stat 计数表，不扫描 raw_event；计数与从头聚合一致', () => {
+  const sql: string[] = [];
+  const s = openStore(':memory:', { verbose: (q) => sql.push(String(q)) });
+  try {
+    const times = ['2026-01-01T00:00:04.000Z', '2026-01-01T00:00:01.000Z', '2026-01-01T00:00:09.000Z', '2026-01-01T00:00:02.000Z'];
+    const names = ['Stop', 'PreToolUse', 'PostToolUse', 'Stop', 'Notification', 'PreToolUse', 'Stop'];
+    names.forEach((name, i) => hookAt(s, name, times[i % times.length]!));
+    s.insertRaw({ source: 'transcript', file: 'p/a.jsonl', offset: 0, line: '{"type":"user"}', recordType: 'user', sessionId: 's1', agentId: null });
+    s.insertRaw({ source: 'meta', file: 'p/s1/custom-title.json', sessionId: 's1', agentId: null, payload: '{}' });
+    const expected = new Map<string, { count: number; lastAt: string }>();
+    names.forEach((name, i) => {
+      const at = times[i % times.length]!;
+      const prev = expected.get(name);
+      expected.set(name, { count: (prev?.count ?? 0) + 1, lastAt: prev && prev.lastAt > at ? prev.lastAt : at });
+    });
+    const fromScratch = [...expected.entries()].sort(([a], [b]) => (a < b ? -1 : 1)).map(([eventName, v]) => ({ eventName, ...v }));
+    sql.length = 0;
+    expect(s.hookEventStats()).toEqual(fromScratch);
+    expect(sql.filter((q) => q.includes('raw_event'))).toEqual([]);
+  } finally {
+    s.close();
+  }
+});
+
+test('回滚的 hook 插入不增加计数', () => {
+  hookAt(store, 'Stop', '2026-01-01T00:00:01.000Z');
+  expect(() =>
+    store.transaction(() => {
+      hookAt(store, 'Stop', '2026-01-01T00:00:05.000Z');
+      hookAt(store, 'PreToolUse', '2026-01-01T00:00:06.000Z');
+      throw new Error('boom');
+    }),
+  ).toThrow('boom');
+  expect(store.hookEventStats()).toEqual([{ eventName: 'Stop', count: 1, lastAt: '2026-01-01T00:00:01.000Z' }]);
+});
+
+test('清空派生数据（重建）不重置 hook 计数', () => {
+  hookAt(store, 'Stop', '2026-01-01T00:00:01.000Z');
+  store.clearDerived();
+  expect(store.hookEventStats()).toEqual([{ eventName: 'Stop', count: 1, lastAt: '2026-01-01T00:00:01.000Z' }]);
+});
+
+test('升级：已有数据库打开时从 raw_event 回填一次 hook_stat，并删掉不再使用的 raw_event_hook 索引', async () => {
+  const fsp = await import('node:fs/promises');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const { default: Database } = await import('better-sqlite3');
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'cc-hook-stat-'));
+  const file = path.join(dir, 'a.db');
+  try {
+    const old = openStore(file);
+    hookAt(old, 'Stop', '2026-01-01T00:00:02.000Z');
+    hookAt(old, 'Stop', '2026-01-01T00:00:07.000Z');
+    hookAt(old, 'PreToolUse', '2026-01-01T00:00:03.000Z');
+    old.close();
+    // Simulate a database written before hook_stat existed (it carried the old index).
+    const raw = new Database(file);
+    raw.exec(`DROP TABLE hook_stat`);
+    raw.exec(`DELETE FROM meta WHERE key = 'hook_stat_ready'`);
+    raw.exec(`CREATE INDEX raw_event_hook ON raw_event (event_name, received_at) WHERE source = 'hook'`);
+    raw.close();
+    const s = openStore(file);
+    try {
+      expect(s.hookEventStats()).toEqual([
+        { eventName: 'PreToolUse', count: 1, lastAt: '2026-01-01T00:00:03.000Z' },
+        { eventName: 'Stop', count: 2, lastAt: '2026-01-01T00:00:07.000Z' },
+      ]);
+      hookAt(s, 'Stop', '2026-01-01T00:00:01.000Z');
+      expect(s.hookEventStats()).toContainEqual({ eventName: 'Stop', count: 3, lastAt: '2026-01-01T00:00:07.000Z' });
+    } finally {
+      s.close();
+    }
+    // Reopening does not backfill again (the table is no longer empty).
+    const again = openStore(file);
+    try {
+      expect(again.hookEventStats()).toContainEqual({ eventName: 'Stop', count: 3, lastAt: '2026-01-01T00:00:07.000Z' });
+    } finally {
+      again.close();
+    }
+    const check = new Database(file, { readonly: true });
+    const names = (check.prepare(`SELECT name FROM sqlite_master WHERE type = 'index'`).all() as { name: string }[]).map((r) => r.name);
+    check.close();
+    expect(names).not.toContain('raw_event_hook');
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true, maxRetries: 10 });
+  }
 });
 
 test('文件数据库的 WAL 由后台线程检查点，主连接不做自动检查点', async () => {

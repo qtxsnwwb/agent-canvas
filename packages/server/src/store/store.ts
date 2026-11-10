@@ -115,8 +115,6 @@ export interface Store {
   searchSessions(query: string, limit: number): SearchHit[];
   /** Query plans (EXPLAIN QUERY PLAN detail lines) of the two statements searchSessions runs; for tests. */
   searchPlans(): { sessions: string[]; prompts: string[] };
-  /** Query plan (EXPLAIN QUERY PLAN detail lines) of the statement hookEventStats runs; for tests. */
-  hookEventPlan(): string[];
   getGraph(sessionId: string): GraphSnapshot | null;
   /** The GraphSnapshot already serialized, built from the stored bodies without parsing them. */
   getGraphJson(sessionId: string): string | null;
@@ -147,7 +145,7 @@ export interface Store {
   epoch(): string;
   /** Latest receivedAt of any stored hook event (kept in `meta`, no raw_event scan). */
   lastHookAt(): string | null;
-  /** Hook rows aggregated by event name (ascending), served by the partial index over hook rows. */
+  /** Hook counts and latest receivedAt per event name (ascending), read from the hook_stat counters only. */
   hookEventStats(): Diagnostics['hookEvents'];
   /** The stored part of Diagnostics; the API adds the pipeline's live fields. */
   diagnostics(): StoreDiagnostics;
@@ -155,6 +153,8 @@ export interface Store {
 }
 
 const SAMPLE_MAX = 500;
+/** meta key set once hook_stat holds every stored hook row (backfilled, or created empty with a new database). */
+const HOOK_STAT_READY = 'hook_stat_ready';
 
 interface RawRow {
   ingest_id: number;
@@ -290,7 +290,7 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
      ON CONFLICT(file) DO UPDATE SET "offset" = excluded."offset", size = excluded.size`,
   );
   const selectMeta = db.prepare(`SELECT value FROM meta WHERE key = ?`).pluck();
-  db.prepare(`INSERT OR IGNORE INTO meta (key, value) VALUES ('epoch', ?)`).run(randomUUID());
+  const created = db.prepare(`INSERT OR IGNORE INTO meta (key, value) VALUES ('epoch', ?)`).run(randomUUID()).changes === 1;
   const epoch = selectMeta.get('epoch') as string;
   const upsertMeta = db.prepare(`INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`);
   const deleteMeta = db.prepare(`DELETE FROM meta WHERE key = ?`);
@@ -389,10 +389,32 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
      ON CONFLICT(record_type) DO UPDATE SET count = count + 1`,
   );
   const selectHookStats = db.prepare(
-    `SELECT event_name AS eventName, COUNT(*) AS count, MAX(received_at) AS lastAt
-     FROM raw_event WHERE source = 'hook' AND event_name IS NOT NULL
-     GROUP BY event_name ORDER BY event_name`,
+    `SELECT event_name AS eventName, count, last_at AS lastAt FROM hook_stat ORDER BY event_name`,
   );
+  const bumpHookStat = db.prepare(
+    `INSERT INTO hook_stat (event_name, count, last_at) VALUES (?, 1, ?)
+     ON CONFLICT(event_name) DO UPDATE SET count = count + 1, last_at = MAX(last_at, excluded.last_at)`,
+  );
+  const insertHookTx = db.transaction((event: Extract<RawEvent, { source: 'hook' }>): number => {
+    const id = Number(insertRawHook.run({ ...event, projectId: event.projectId ?? null }).lastInsertRowid);
+    upsertLaterMeta.run('last_hook_at', event.receivedAt);
+    bumpHookStat.run(event.eventName, event.receivedAt);
+    return id;
+  });
+  // Databases from before hook_stat existed: backfill it once (one transaction, one raw_event pass), then never again.
+  // A database created just now has nothing to backfill.
+  db.transaction(() => {
+    if (selectMeta.get(HOOK_STAT_READY) !== undefined) return;
+    if (!created && db.prepare(`SELECT 1 FROM hook_stat LIMIT 1`).get() === undefined) {
+      db.exec(
+        `INSERT INTO hook_stat (event_name, count, last_at)
+         SELECT event_name, COUNT(*), MAX(received_at) FROM raw_event
+         WHERE source = 'hook' AND event_name IS NOT NULL AND received_at IS NOT NULL
+         GROUP BY event_name`,
+      );
+    }
+    upsertMeta.run(HOOK_STAT_READY, '1');
+  })();
   const selectUnknown = db.prepare(`SELECT record_type, count, sample FROM unknown_stat ORDER BY record_type`);
   const selectFiles = db.prepare(`SELECT file, "offset", size FROM file_offset ORDER BY file`);
 
@@ -501,11 +523,7 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
         const res = insertRawTranscript.run({ ...event, lineHash });
         return res.changes === 0 ? null : Number(res.lastInsertRowid);
       }
-      if (event.source === 'hook') {
-        const id = Number(insertRawHook.run({ ...event, projectId: event.projectId ?? null }).lastInsertRowid);
-        upsertLaterMeta.run('last_hook_at', event.receivedAt);
-        return id;
-      }
+      if (event.source === 'hook') return insertHookTx(event);
       return Number(insertRawMeta.run(event).lastInsertRowid);
     },
     getOffset(file) {
@@ -582,9 +600,6 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
       const plan = (stmt: { source: string }) =>
         (db.prepare(`EXPLAIN QUERY PLAN ${stmt.source}`).all(params) as { detail: string }[]).map((r) => r.detail);
       return { sessions: plan(searchSessionsStmt), prompts: plan(searchPromptsStmt) };
-    },
-    hookEventPlan() {
-      return (db.prepare(`EXPLAIN QUERY PLAN ${selectHookStats.source}`).all() as { detail: string }[]).map((r) => r.detail);
     },
     getGraph(sessionId) {
       const json = getGraphJson(sessionId);
