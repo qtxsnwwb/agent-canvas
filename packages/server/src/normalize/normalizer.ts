@@ -53,6 +53,8 @@ interface SessionState {
    * was set by a hook and is still corrected by a later tool_result (content plane wins), except `denied`.
    */
   terminalFromContent: Set<string>;
+  /** Tool nodes whose durationMs was supplied by a hook's duration_ms (not derived from start/end times). */
+  durationFromHook: Set<string>;
   /** record uuid -> id of the last node that record produced. */
   lastNodeByUuid: Map<string, string>;
   /** uuid of a record that produced no node -> its parentUuid. */
@@ -347,6 +349,7 @@ export class Normalizer {
       const derived = !terminal && effect.durationMs === null ? elapsedMs(node.timestamp, at) : null;
       const durationMs = effect.durationMs ?? derived;
       if (durationMs !== null) patch.durationMs = durationMs;
+      if (effect.durationMs !== null) state.durationFromHook.add(id);
     }
     const withOutput = !terminal && 'output' in effect;
     if (Object.keys(patch).length === 0) return;
@@ -527,6 +530,7 @@ export class Normalizer {
         nodes: new Map(),
         toolInputs: new Map(),
         terminalFromContent: new Set(),
+        durationFromHook: new Set(),
         lastNodeByUuid: new Map(),
         passthrough: new Map(),
         turnByAgent: new Map(),
@@ -781,7 +785,8 @@ export class Normalizer {
     // Only non-terminal nodes keep their input in memory (PermissionRequest matching).
     if (!existing || existing.status === null || !TERMINAL_STATUSES.includes(existing.status)) state.toolInputs.set(id, c.input);
     if (existing) {
-      // A hook created this node first; the transcript record now confirms it. status is left alone.
+      // A hook created this node first; the transcript record now confirms it. status is left alone, but the record
+      // carries the authoritative start time and the message usage.
       const base = this.baseNode(state, record, agentId, id, parentId);
       const placed = this.placeInBatch(state, agentId, { ...base, messageId: meta.messageId }, true);
       const pending = state.agentMetas.get(c.toolUseId);
@@ -790,7 +795,17 @@ export class Normalizer {
         parentId: placed.node.parentId,
         turnId: base.turnId,
         messageId: meta.messageId,
+        usage: meta.usage,
       };
+      const start = str(record.timestamp);
+      if (start !== null) {
+        patch.timestamp = start;
+        // A duration derived from the hook's start is re-derived from the authoritative one; a hook's duration_ms stays.
+        if (existing.endedAt !== null && existing.durationMs !== null && !state.durationFromHook.has(id)) {
+          const derived = elapsedMs(start, existing.endedAt);
+          if (derived !== null) patch.durationMs = derived;
+        }
+      }
       // An agent meta's description already owns the summary of a dispatch node.
       if (!pending) patch.summary = summary;
       state.nodes.set(id, { ...existing, ...patch });

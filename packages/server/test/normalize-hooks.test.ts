@@ -463,3 +463,60 @@ test('PostToolUseFailure 与 SubagentStop 也记 endedAt', () => {
   expect(graph.nodes['tool:tu1']).toMatchObject({ status: 'failed', endedAt: FAIL_AT });
   expect(graph.nodes['tool:tu2']).toMatchObject({ kind: 'subagent', status: 'succeeded', endedAt: STOP_AT });
 });
+
+const AT = (s: number) => new Date(Date.parse('2026-04-01T10:00:00.000Z') + s * 1000).toISOString();
+const useAt = (at: string) => assistantBlock('a1', 'u1', { type: 'tool_use', id: 'tu1', name: 'Bash', input: { command: 'ls' } }, { timestamp: at });
+const preAt = (at: string) => hook('PreToolUse', { tool_name: 'Bash', tool_input: { command: 'ls' }, tool_use_id: 'tu1' }, at);
+
+test('hook 先到再由 JSONL 确认：usage 取自消息，timestamp 改为 JSONL 的时间，id 不变', () => {
+  const prompt = userPrompt('u1', null, 'x', { timestamp: AT(0) });
+  const { graph } = run(n, [prompt, preAt(AT(10)), useAt(AT(5))]);
+  const transcriptOnly = run(new Normalizer(), [prompt, useAt(AT(5))]).graph.nodes['tool:tu1']!;
+  expect(Object.keys(graph.nodes)).toEqual(['u1', 'tool:tu1']);
+  expect(transcriptOnly.usage).not.toBeNull();
+  expect(graph.nodes['tool:tu1']).toMatchObject({ usage: transcriptOnly.usage, timestamp: AT(5), confirmed: true });
+});
+
+test('hook 先到且 PostToolUse 带 duration_ms，之后 JSONL 确认：耗时仍是 hook 的', () => {
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x', { timestamp: AT(0) }),
+    preAt(AT(10)),
+    hook('PostToolUse', { tool_use_id: 'tu1', tool_response: 'ok', duration_ms: 40 }, AT(20)),
+    useAt(AT(5)),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ timestamp: AT(5), endedAt: AT(20), durationMs: 40 });
+});
+
+test('hook 先到且耗时由 hook 起止推出，之后 JSONL 确认：耗时按 JSONL 起点重算', () => {
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x', { timestamp: AT(0) }),
+    preAt(AT(10)),
+    hook('PostToolUse', { tool_use_id: 'tu1', tool_response: 'ok' }, AT(20)),
+    useAt(AT(5)),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ timestamp: AT(5), endedAt: AT(20), durationMs: 15_000 });
+});
+
+test('PreToolUse、JSONL tool_use、tool_result：推出的耗时从 JSONL 起点算', () => {
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x', { timestamp: AT(0) }),
+    preAt(AT(10)),
+    useAt(AT(5)),
+    toolResult('u2', 'a1', 'tu1', 'ok', false, { timestamp: AT(30) }),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ timestamp: AT(5), endedAt: AT(30), durationMs: 25_000 });
+});
+
+test('hook 先到的工具节点：重放同一批原始事件得到相同节点', () => {
+  const events = [
+    userPrompt('u1', null, 'x', { timestamp: AT(0) }),
+    preAt(AT(10)),
+    hook('PostToolUse', { tool_use_id: 'tu1', tool_response: 'ok' }, AT(20)),
+    useAt(AT(5)),
+    toolResult('u2', 'a1', 'tu1', 'ok', false, { timestamp: AT(30) }),
+  ];
+  const first = run(n, events).graph;
+  const second = run(new Normalizer(), events).graph;
+  expect(second.nodes).toEqual(first.nodes);
+  expect(first.nodes['tool:tu1']).toMatchObject({ durationMs: 15_000 });
+});
