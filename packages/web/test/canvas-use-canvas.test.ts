@@ -1029,6 +1029,29 @@ test('setMode("replay") 把时刻设为范围末尾；快照带 replay 信息，
   model.dispose();
 });
 
+test('setReplayTime 立即发布的快照只换 replay：画布节点 / 边的输入（view、positions、框、layoutMode）保持同一对象', async () => {
+  const live = fakeLive(replaySample());
+  const layout = fakeLayout();
+  const model = createCanvasModel(live, layout.client);
+  layout.resolveAll();
+  await flush();
+  model.setMode('replay');
+  await vi.advanceTimersByTimeAsync(60);
+  layout.resolveAll();
+  await flush();
+  const before = model.getSnapshot();
+  model.setReplayTime(EPOCH + 3000);
+  const tick = model.getSnapshot();
+  expect(tick).not.toBe(before);
+  expect(tick.replay!.timeMs).toBe(EPOCH + 3000);
+  expect(tick.view).toBe(before.view);
+  expect(tick.positions).toBe(before.positions);
+  expect(tick.turnBoxes).toBe(before.turnBoxes);
+  expect(tick.containerBoxes).toBe(before.containerBoxes);
+  expect(tick.layoutMode).toBe(before.layoutMode);
+  model.dispose();
+});
+
 test('setReplayTime 之后，视图只含该时刻之前的节点；中途的工具为 running', async () => {
   const live = fakeLive(replaySample());
   const layout = fakeLayout();

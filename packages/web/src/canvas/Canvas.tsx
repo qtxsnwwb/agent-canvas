@@ -108,17 +108,27 @@ function wrapperClass(container: boolean, highlight: Highlight): string | undefi
 }
 
 /**
+ * The parts of the snapshot the React Flow nodes and edges are built from. The memos depend on these, not on the
+ * snapshot object: a replay tick publishes a new snapshot that only changes `replay.timeMs` (these keep their identity),
+ * and must not re-walk every node and edge.
+ */
+type FlowInputs = Pick<CanvasSnapshot, 'view' | 'positions' | 'turnBoxes' | 'containerBoxes' | 'layoutMode'>;
+
+/**
  * React Flow nodes for the snapshot; an unchanged node keeps its previous object so React Flow skips it. The highlight
  * state is part of the comparison, so a selection change only replaces the nodes whose state changed.
  */
-function useFlowNodes(snapshot: CanvasSnapshot, selectedId: string | null, chain: UpstreamChain): FlowNode[] {
+function useFlowNodes(
+  { view, positions, turnBoxes, containerBoxes, layoutMode }: FlowInputs,
+  selectedId: string | null,
+  chain: UpstreamChain,
+): FlowNode[] {
   const cache = useRef(new Map<string, FlowNode>());
   const last = useRef<FlowNode[] | null>(null);
   return useMemo(() => {
     const prev = cache.current;
     const next = new Map<string, FlowNode>();
     const out: FlowNode[] = [];
-    const { view, positions, turnBoxes, containerBoxes, layoutMode } = snapshot;
     const active = chainActive(view, chain);
     const highlightOf = (id: string): Highlight => (!active ? 'none' : chain.nodeIds.has(id) ? 'chain' : 'dim');
     const headerHighlight: Highlight = active ? 'dim' : 'none';
@@ -219,14 +229,14 @@ function useFlowNodes(snapshot: CanvasSnapshot, selectedId: string | null, chain
     }
     cache.current = next;
     return (last.current = sameElements(last.current, out));
-  }, [snapshot, selectedId, chain]);
+  }, [view, positions, turnBoxes, containerBoxes, layoutMode, selectedId, chain]);
 }
 
 /**
  * React Flow edges between drawn nodes. An edge out of a node with two or more outgoing edges is drawn in the fork
  * colour; an edge into a running or awaiting-permission node is animated.
  */
-function useFlowEdges(snapshot: CanvasSnapshot, chain: UpstreamChain): Edge[] {
+function useFlowEdges({ view, positions }: Pick<FlowInputs, 'view' | 'positions'>, chain: UpstreamChain): Edge[] {
   type Cached = { src: ViewEdge; animated: boolean; fork: boolean; zIndex: number; highlight: Highlight; edge: Edge };
   const cache = useRef(new Map<string, Cached>());
   const last = useRef<Edge[] | null>(null);
@@ -234,7 +244,6 @@ function useFlowEdges(snapshot: CanvasSnapshot, chain: UpstreamChain): Edge[] {
     const prev = cache.current;
     const next = new Map<string, Cached>();
     const out: Edge[] = [];
-    const { view, positions } = snapshot;
     const forks = forkSources(view.edges, (id) => view.nodes.get(id)?.type === 'earlier');
     const depths = groupDepths(view);
     const active = chainActive(view, chain);
@@ -268,7 +277,7 @@ function useFlowEdges(snapshot: CanvasSnapshot, chain: UpstreamChain): Edge[] {
     }
     cache.current = next;
     return (last.current = sameElements(last.current, out));
-  }, [snapshot, chain]);
+  }, [view, positions, chain]);
 }
 
 function miniMapColor(n: FlowNode): string {
