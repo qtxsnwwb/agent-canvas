@@ -139,6 +139,8 @@ export interface Store {
   getMeta(key: string): string | null;
   setMeta(key: string, value: string): void;
   deleteMeta(key: string): void;
+  /** True when raw_event holds at least one row of this session (served by the raw_event_session index). */
+  hasRawForSession(sessionId: string): boolean;
   /** True when raw_event holds at least one row. */
   hasRawEvents(): boolean;
   /** Random id generated when the database file was created; stable across restarts and rebuilds. */
@@ -295,6 +297,7 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   const upsertMeta = db.prepare(`INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`);
   const deleteMeta = db.prepare(`DELETE FROM meta WHERE key = ?`);
   const selectAnyRaw = db.prepare(`SELECT 1 FROM raw_event LIMIT 1`).pluck();
+  const selectAnyRawForSession = db.prepare(`SELECT 1 FROM raw_event WHERE session_id = ? LIMIT 1`).pluck();
   const upsertLaterMeta = db.prepare(
     `INSERT INTO meta (key, value) VALUES (?, ?)
      ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE excluded.value > meta.value`,
@@ -661,6 +664,7 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     },
     hookEventStats: () => selectHookStats.all() as Diagnostics['hookEvents'],
     hasRawEvents: () => selectAnyRaw.get() !== undefined,
+    hasRawForSession: (sessionId) => selectAnyRawForSession.get(sessionId) !== undefined,
     diagnostics() {
       return {
         unknownRecords: (selectUnknown.all() as { record_type: string; count: number; sample: string }[]).map((r) => ({

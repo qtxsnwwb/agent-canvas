@@ -185,7 +185,10 @@ export class Pipeline {
     };
     const needsQueue =
       sessionId !== null &&
-      (this.tails.has(sessionId) || (!this.normalizer.hasSession(sessionId) && this.store.getSession(sessionId) !== null));
+      (this.tails.has(sessionId) ||
+        (!this.normalizer.hasSession(sessionId) &&
+          (this.store.getSession(sessionId) !== null ||
+            (this.normalizer.needsPreSessionReplay(sessionId) && this.store.hasRawForSession(sessionId)))));
     if (!needsQueue) {
       try {
         this.applyHook(event);
@@ -549,7 +552,13 @@ export class Pipeline {
    */
   private async hydrate(sessionId: string): Promise<void> {
     const normalizer = this.normalizer;
-    if (normalizer.hasSession(sessionId) || this.store.getSession(sessionId) === null) return;
+    if (normalizer.hasSession(sessionId)) return;
+    if (this.store.getSession(sessionId) === null) {
+      // No session row yet, but committed raw events (a title record, an agent meta, a hook whose slice failed) may
+      // exist: restore what the Normalizer keeps before a session exists from them, as a rebuild would.
+      if (normalizer.needsPreSessionReplay(sessionId)) normalizer.restorePreSession(sessionId, this.rawPages(sessionId));
+      return;
+    }
     let after = 0;
     let done = false;
     try {
@@ -569,6 +578,17 @@ export class Pipeline {
     } catch (err) {
       normalizer.dropSession(sessionId); // never leave a half-replayed session behind
       throw err;
+    }
+  }
+
+  /** Every stored raw event of a session in ingest order, read page by page. */
+  private *rawPages(sessionId: string): Generator<StoredRawEvent> {
+    let after = 0;
+    for (;;) {
+      const page = this.store.rawForSessionAfter(sessionId, after, HYDRATE_PAGE_ROWS, HYDRATE_PAGE_BYTES);
+      if (page.length === 0) return;
+      yield* page;
+      after = page[page.length - 1]!.ingestId;
     }
   }
 

@@ -116,6 +116,8 @@ export class Normalizer {
    */
   private readonly titleSources = new Map<string, Partial<Record<TitleSource, string>>>();
   private readonly pendingAgentMetas = new Map<string, AgentMeta[]>();
+  /** Sessions without state whose pre-session memory (titles, pending agent metas) was restored by restorePreSession. */
+  private readonly preSessionRestored = new Set<string>();
 
   apply(event: RawEvent, projectId: string): NormalizeResult {
     try {
@@ -130,8 +132,54 @@ export class Normalizer {
   dropSession(sessionId: string): void {
     this.sessions.delete(sessionId);
     // Dropped state is rebuilt by replaying raw events in order, which restores every source's value (and discards
-    // values from an ingest that was rolled back).
+    // values from an ingest that was rolled back). A session that has no state yet is restored by restorePreSession.
     this.titleSources.delete(sessionId);
+    this.pendingAgentMetas.delete(sessionId);
+    this.preSessionRestored.delete(sessionId);
+  }
+
+  /** True when the session has no state and its pre-session memory has not been restored since it was last dropped. */
+  needsPreSessionReplay(sessionId: string): boolean {
+    return !this.sessions.has(sessionId) && !this.preSessionRestored.has(sessionId);
+  }
+
+  /**
+   * For a session that has committed raw events but no session yet (e.g. only a custom-title record): rebuilds what
+   * the Normalizer keeps before a session exists — title sources and pending agent metas — from those events, in
+   * ingest order, exactly as applying them would. Nothing else is derived and no changes are produced.
+   */
+  restorePreSession(sessionId: string, events: Iterable<RawEvent>): void {
+    this.dropSession(sessionId);
+    try {
+      for (const ev of events) this.replayPreSession(ev);
+    } catch (err) {
+      this.dropSession(sessionId);
+      throw err;
+    }
+    if (!this.sessions.has(sessionId)) this.preSessionRestored.add(sessionId);
+  }
+
+  private replayPreSession(event: RawEvent): void {
+    const ignored: Change[] = [];
+    if (event.source === 'meta') {
+      this.applyMeta(event);
+      return;
+    }
+    if (event.source === 'hook') {
+      const parsed = parseHook(event.eventName, event.payload);
+      if (parsed.ok) this.setTitle(parsed.hook.sessionId, 'hook', parsed.hook.title, ignored);
+      return;
+    }
+    if (event.agentId !== null) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(event.line);
+    } catch {
+      return;
+    }
+    if (!isObject(parsed) || (parsed.type !== 'custom-title' && parsed.type !== 'agent-name')) return;
+    const custom = parsed.type === 'custom-title';
+    this.setTitle(event.sessionId, custom ? 'custom' : 'agentName', str(parsed[custom ? 'customTitle' : 'agentName']), ignored);
   }
 
   hasSession(sessionId: string): boolean {

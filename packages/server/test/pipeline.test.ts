@@ -528,6 +528,50 @@ describe('pipeline', () => {
     expect(store.getSession('s1')!.title).toBe('T');
   });
 
+  test('失败片段之后：会话还没有行时已提交的自定义标题不丢', async () => {
+    await write('proj/s1.jsonl', []);
+    await fs.writeFile(abs('proj/s1.jsonl'), line({ type: 'custom-title', customTitle: 'My title', sessionId: 's1' }));
+    await pipeline.ingestFile(abs('proj/s1.jsonl'));
+    expect(store.getSession('s1')).toBeNull();
+    expect(store.rawForSession('s1')).toHaveLength(1);
+    await append('proj/s1.jsonl', [userPrompt('u1', null, 'prompt title')]);
+    const failing = failingOnce('applyChanges');
+    const p = new Pipeline(failing, config);
+    await p.ingestFile(abs('proj/s1.jsonl')).catch(() => undefined);
+    expect(store.getSession('s1')).toBeNull();
+    await p.ingestFile(abs('proj/s1.jsonl'));
+    expect(store.getSession('s1')!.title).toBe('My title');
+    p.rebuild();
+    expect(store.getSession('s1')!.title).toBe('My title');
+  });
+
+  test('失败片段之后：同一 Pipeline 里已提交的 agent 名称（会话还没有行）也不丢', async () => {
+    const failing = failingOnce('applyChanges');
+    failing.fail.on = false;
+    const p = new Pipeline(failing, config);
+    await write('proj/s1.jsonl', []);
+    await fs.writeFile(abs('proj/s1.jsonl'), line({ type: 'agent-name', agentName: 'Named', sessionId: 's1' }));
+    await p.ingestFile(abs('proj/s1.jsonl'));
+    await append('proj/s1.jsonl', [userPrompt('u1', null, 'prompt title')]);
+    failing.fail.on = true;
+    await p.ingestFile(abs('proj/s1.jsonl')).catch(() => undefined);
+    expect(store.getSession('s1')).toBeNull();
+    await p.ingestFile(abs('proj/s1.jsonl'));
+    expect(store.getSession('s1')!.title).toBe('Named');
+  });
+
+  test('失败片段自己带的标题被回滚后不出现', async () => {
+    await fs.mkdir(abs('proj/s1'), { recursive: true });
+    await fs.writeFile(abs('proj/s1/custom-title.json'), JSON.stringify({ customTitle: 'Rolled back' }));
+    const p = new Pipeline(failingOnce('setOffset'), config);
+    await expect(p.ingestFile(abs('proj/s1/custom-title.json'))).rejects.toThrow('simulated crash');
+    expect(store.rawForSession('s1')).toEqual([]);
+    await fs.rm(abs('proj/s1/custom-title.json'));
+    await write('proj/s1.jsonl', [userPrompt('u1', null, 'prompt title')]);
+    await p.ingestFile(abs('proj/s1.jsonl'));
+    expect(store.getSession('s1')!.title).toBe('prompt title');
+  });
+
   test('hook 导入是原子的：失败时派生数据不落库，原始事件只保留一份供重建', async () => {
     const p = new Pipeline(failingOnce('applyChanges'), config);
     expect(() => p.ingestHook('UserPromptSubmit', 'n1', JSON.stringify({ session_id: 'n1', hook_event_name: 'UserPromptSubmit' }))).not.toThrow();
