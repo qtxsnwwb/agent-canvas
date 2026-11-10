@@ -24,7 +24,7 @@ import { edgeZ, groupDepths, nodeZ } from './stacking';
 import type { CanvasSnapshot } from './useCanvas';
 import { forkSources, type CanvasView, type TurnSummary, type ViewEdge } from './view';
 import type { UpstreamChain } from './chain';
-import { isActivationKey } from './format';
+import { chainAriaLabel, isActivationKey } from './format';
 import {
   CanvasActions, graphNodeAriaLabel, highlightClass, isActive, nodeColor, nodeTypes, summaryAriaLabel, summaryColor,
   type FlowNode, type Highlight,
@@ -170,7 +170,7 @@ function useFlowNodes(snapshot: CanvasSnapshot, selectedId: string | null, chain
           ? old
           : {
             id: vn.id, type: 'graphNode', position, width, height, selected, zIndex,
-            ariaLabel: graphNodeAriaLabel(vn.node, container),
+            ariaLabel: chainAriaLabel(graphNodeAriaLabel(vn.node, container), highlight === 'chain'),
             // The wrapper of a container lets clicks on its body through to the pane; its head opts back in (see
             // canvas.css). Inline, because React Flow sets `pointer-events: all` inline on the wrapper and spreads
             // node.style after it.
@@ -181,10 +181,12 @@ function useFlowNodes(snapshot: CanvasSnapshot, selectedId: string | null, chain
           };
       } else if (vn.type === 'turn_summary') {
         n = old && old.type === 'turnSummary' && sameSummary(old.data.summary, vn.summary) && old.data.highlight === highlight
+          && old.zIndex === zIndex
           && samePos(old.position, position) && old.selected === selected && old.width === width && old.height === height
           ? old
           : {
-            id: vn.id, type: 'turnSummary', position, width, height, selected, ariaLabel: summaryAriaLabel(vn.summary),
+            id: vn.id, type: 'turnSummary', position, width, height, selected, zIndex,
+            ariaLabel: chainAriaLabel(summaryAriaLabel(vn.summary), highlight === 'chain'),
             className: wrapperClass(false, highlight),
             data: { summary: vn.summary, highlight },
             handles: handlesFor(width, height), draggable: false, connectable: false,
@@ -234,8 +236,8 @@ function useFlowEdges(snapshot: CanvasSnapshot, chain: UpstreamChain): Edge[] {
       const animated = target?.type === 'node' && isActive(target.node.status);
       const fork = forks.has(e.from);
       const highlight: Highlight = !active ? 'none' : chain.edgeIds.has(e.id) ? 'chain' : 'dim';
-      // Inside a container: above its background, below the nodes of the same group.
-      const zIndex = edgeZ(view, depths, e);
+      // Inside a container: above its background, below the nodes of the same group; chain edges above dimmed ones.
+      const zIndex = edgeZ(view, depths, e, highlight === 'chain');
       const old = prev.get(e.id);
       let edge: Edge;
       if (old && old.animated === animated && old.fork === fork && old.zIndex === zIndex && old.highlight === highlight

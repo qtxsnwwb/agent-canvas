@@ -16,3 +16,8 @@ export function nodeAriaLabel([kind, ...rest]: (string | null | undefined)[]): s
   const parts = rest.map((x) => x?.trim() ?? '').filter((x) => x !== '');
   return parts.length > 0 ? `${kind ?? ''}：${parts.join('，')}` : kind ?? '';
 }
+
+/** A node's accessible name, with "，在推理链上" appended when it is on the causal chain of the selection. */
+export function chainAriaLabel(label: string, onChain: boolean): string {
+  return onChain ? `${label}，在推理链上` : label;
+}

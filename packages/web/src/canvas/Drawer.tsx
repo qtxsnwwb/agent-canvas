@@ -46,7 +46,10 @@ function ReasoningList({ rows, truncated, onSelect, onExpand, pendingFocus }: {
   useEffect(() => {
     if (!pendingFocus.current) return;
     pendingFocus.current = false;
-    currentRef.current?.focus({ preventScroll: true });
+    const current = currentRef.current;
+    if (!current) return;
+    current.focus({ preventScroll: true });
+    current.scrollIntoView({ block: 'nearest' }); // the list may have scrolled the new current row out of view
   }, [rows, pendingFocus]);
   const content = (r: ReasoningRow) => (
     <>
@@ -74,7 +77,7 @@ function ReasoningList({ rows, truncated, onSelect, onExpand, pendingFocus }: {
             {rows.map((r) => (
               <li key={r.id}>
                 {r.current
-                  ? <div ref={currentRef} className="cc-reason cc-reason-current" aria-current="true" tabIndex={-1}>{content(r)}</div>
+                  ? <div ref={currentRef} className="cc-reason cc-reason-current" aria-current="step" tabIndex={-1}>{content(r)}</div>
                   : (
                     <button type="button" className="cc-reason" onClick={() => { pendingFocus.current = true; onSelect(r.id); }}>
                       {content(r)}
