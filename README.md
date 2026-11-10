@@ -36,7 +36,7 @@ claude-canvas listening on http://127.0.0.1:4317
 
 换端口：`pnpm start --port 4400`（或直接 `node packages/server/dist/cli.js start --port 4400`），打印的地址会随之变化。
 
-首次启动会导入 `~/.claude/projects` 下全部已有的 transcript；历史很多时需要一段时间，导入在后台进行，页面在此期间已可使用（`GET /api/diagnostics` 的 `importing` 为 `true`）。导入速度的量级约为每秒 1–2 MB transcript（在合成数据上测得），数据库大小约为 transcript 总量的 4 倍，请为数据目录预留空间。之后服务会持续监视 transcript 的变化。
+首次启动会导入 `~/.claude/projects` 下全部已有的 transcript；历史很多时需要一段时间，导入在后台进行，页面在此期间已可使用（`GET /api/diagnostics` 的 `importing` 为 `true`）。在一份真实数据上测得（340 MB、612 个文件）：导入约 2 分钟，导入完成后数据库约为 transcript 总量的 1.6 倍；导入期间 WAL 文件会临时增长到 transcript 总量的数倍，之后收缩到 64 MB 以内，请为数据目录预留空间。之后服务会持续监视 transcript 的变化。
 
 同一个数据目录只能运行一个服务：启动时会创建锁文件 `<数据目录>/claude-canvas.lock`（记录 pid 和启动时间）。若已有服务在运行，第二次 `start` 会打印 `claude-canvas is already running with this data directory (pid N); lock file: …` 并以退出码 1 退出。上一次进程异常退出留下的锁会被自动接管。
 
