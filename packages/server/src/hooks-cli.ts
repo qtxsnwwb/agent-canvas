@@ -40,6 +40,12 @@ interface Loaded {
   settings: unknown;
   exists: boolean;
   crlf: boolean;
+  /** The file started with a UTF-8 BOM (kept on write-back). */
+  bom: boolean;
+  /** Indentation unit to write with: the file's own (tab or N spaces), 2 spaces when it has no indented line. */
+  indent: string;
+  /** Why the file cannot be written back losslessly (checked only when a write is about to happen); null when it can. */
+  lossy: 'number' | 'duplicate' | null;
   /** The exact file text the plan is computed from; null when the file did not exist. */
   raw: string | null;
   mode: number | null;
@@ -74,6 +80,120 @@ function readRaw(file: string): string | null {
   }
 }
 
+const DEFAULT_INDENT = '  ';
+
+/** The first indented line decides: a leading tab means tabs, otherwise its run of leading spaces. */
+function detectIndent(text: string): string {
+  const m = /(?:^|\n)([ \t]+)\S/.exec(text);
+  if (m === null) return DEFAULT_INDENT;
+  const lead = m[1]!;
+  if (lead.startsWith('\t')) return '\t';
+  return /^ +/.exec(lead)![0];
+}
+
+/**
+ * A number token in canonical form (sign, significant digits without leading/trailing zeros, exponent), so tokens
+ * that denote the same decimal value compare equal ("1e3" and "1000", "2.50" and "2.5"; zero ignores its sign).
+ */
+function canonicalNumber(token: string): string | null {
+  const m = /^(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(token);
+  if (m === null) return null;
+  const frac = m[3] ?? '';
+  let digits = (m[2]! + frac).replace(/^0+/, '');
+  if (digits === '') return '0';
+  let exp = BigInt(m[4] ?? '0') - BigInt(frac.length);
+  const trimmed = digits.replace(/0+$/, '');
+  exp += BigInt(digits.length - trimmed.length);
+  digits = trimmed;
+  return `${m[1]}${digits}e${exp}`;
+}
+
+/** True when the number token does not survive JSON.parse -> JSON.stringify with its decimal value intact. */
+function numberIsLossy(token: string): boolean {
+  return canonicalNumber(token) !== canonicalNumber(JSON.stringify(JSON.parse(token)));
+}
+
+/**
+ * Scans JSON text that JSON.parse already accepted for what JSON.parse -> JSON.stringify would silently change: a
+ * number literal whose value a double cannot hold, or a key repeated within one object (parsing keeps only the last).
+ * Returns the first such problem in text order.
+ */
+function findLossy(text: string): 'number' | 'duplicate' | null {
+  let i = 0;
+  let found: 'number' | 'duplicate' | null = null;
+  const skipWs = (): void => {
+    while (i < text.length && (text[i] === ' ' || text[i] === '\t' || text[i] === '\n' || text[i] === '\r')) i++;
+  };
+  const readString = (): string => {
+    const start = i;
+    i++; // opening quote
+    while (text[i] !== '"') i += text[i] === '\\' ? 2 : 1;
+    i++; // closing quote
+    return JSON.parse(text.slice(start, i)) as string;
+  };
+  const NUMBER = /-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/y;
+  // Iterative walk (no recursion depth limit): a stack of open containers, each object with the keys seen so far.
+  const stack: (Set<string> | null)[] = [];
+  const key = (): void => {
+    skipWs();
+    const k = readString();
+    const keys = stack[stack.length - 1]!;
+    if (keys.has(k)) found ??= 'duplicate';
+    keys.add(k);
+    skipWs();
+    i++; // ':'
+  };
+  /** Consumes one value, or opens a container; true when it opened a non-empty one (its first value comes next). */
+  const value = (): boolean => {
+    skipWs();
+    const c = text[i];
+    if (c === '{' || c === '[') {
+      i++;
+      stack.push(c === '{' ? new Set() : null);
+      skipWs();
+      if (text[i] === (c === '{' ? '}' : ']')) {
+        i++;
+        stack.pop();
+        return false;
+      }
+      if (c === '{') key();
+      return true;
+    }
+    if (c === '"') {
+      readString();
+      return false;
+    }
+    if (c === '-' || (c !== undefined && c >= '0' && c <= '9')) {
+      NUMBER.lastIndex = i;
+      const token = NUMBER.exec(text)![0];
+      i += token.length;
+      if (found === null && numberIsLossy(token)) found = 'number';
+      return false;
+    }
+    i += c === 'f' ? 5 : 4; // true / false / null
+    return false;
+  };
+  let expectValue = true;
+  for (;;) {
+    if (expectValue) {
+      expectValue = value();
+      continue;
+    }
+    // After a value: move to the next member, or close the innermost container.
+    skipWs();
+    if (stack.length === 0) break;
+    if (text[i] === ',') {
+      i++;
+      if (stack[stack.length - 1] !== null) key();
+      expectValue = true;
+      continue;
+    }
+    i++; // '}' or ']'
+    stack.pop();
+  }
+  return found;
+}
+
 /** Throws a plain Error whose message is ready to print. */
 function loadSettings(file: string): Loaded {
   let raw: string | null;
@@ -82,22 +202,24 @@ function loadSettings(file: string): Loaded {
   } catch (err) {
     throw new Error(`无法读取 ${file}：${(err as Error).message}`);
   }
-  if (raw === null) return { settings: {}, exists: false, crlf: false, raw: null, mode: null };
+  if (raw === null) return { settings: {}, exists: false, crlf: false, bom: false, indent: DEFAULT_INDENT, lossy: null, raw: null, mode: null };
   let mode: number | null = null;
   try {
     mode = fs.statSync(file).mode & 0o777;
   } catch {
     // mode is only a nicety
   }
-  const text = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
+  const bom = raw.charCodeAt(0) === 0xfeff;
+  const text = bom ? raw.slice(1) : raw;
   const crlf = text.includes('\r\n');
-  if (text.trim() === '') return { settings: {}, exists: true, crlf, raw, mode };
+  const indent = detectIndent(text);
+  if (text.trim() === '') return { settings: {}, exists: true, crlf, bom, indent, lossy: null, raw, mode };
   try {
     const settings = JSON.parse(text) as unknown;
     if (typeof settings !== 'object' || settings === null || Array.isArray(settings)) {
       throw new SettingsShapeError('settings 必须是 JSON 对象（键 settings 的形状不对）');
     }
-    return { settings, exists: true, crlf, raw, mode };
+    return { settings, exists: true, crlf, bom, indent, lossy: findLossy(text), raw, mode };
   } catch (err) {
     if (err instanceof SettingsShapeError) throw err;
     throw new Error(`${file} 不是合法的 JSON：${(err as Error).message}`);
@@ -135,9 +257,11 @@ function makeBackup(file: string, d: Date): string {
   }
 }
 
-function writeAtomically(file: string, next: Record<string, unknown>, crlf: boolean, mode: number | null): void {
-  let text = `${JSON.stringify(next, null, 2)}\n`;
+function writeAtomically(file: string, next: Record<string, unknown>, loaded: Loaded): void {
+  const { crlf, bom, indent, mode } = loaded;
+  let text = `${JSON.stringify(next, null, indent)}\n`;
   if (crlf) text = text.replace(/\n/g, '\r\n');
+  if (bom) text = `﻿${text}`;
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.tmp-${process.pid}`;
   try {
@@ -191,6 +315,12 @@ async function run(mode: Mode, opts: HooksCliOptions, io: HooksCliIo): Promise<n
     return 0;
   }
 
+  // Writing back goes through JSON.parse -> JSON.stringify: refuse when that would silently change the file.
+  if (loaded.lossy !== null) {
+    io.err(`${loaded.lossy === 'number' ? '设置文件包含无法无损读写的数字' : '设置文件包含重复的键'}，未做任何改动：${file}`);
+    return 1;
+  }
+
   if (isSymlink(opts.settingsFile)) {
     io.out(`（${opts.settingsFile} 是符号链接，实际写入 ${file}）`);
   }
@@ -217,7 +347,7 @@ async function run(mode: Mode, opts: HooksCliOptions, io: HooksCliIo): Promise<n
       return 1;
     }
     const backup = loaded.exists ? makeBackup(file, io.now()) : null;
-    writeAtomically(file, next, loaded.crlf, loaded.mode);
+    writeAtomically(file, next, loaded);
     io.out(`已写入 ${file}`);
     if (backup !== null) io.out(`备份：${backup}`);
     io.out('新开的 Claude Code 会话才会使用这些 hooks');

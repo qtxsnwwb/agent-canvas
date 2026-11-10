@@ -154,15 +154,95 @@ test('空白文件视为 {}，并备份原文件', async () => {
   expect(listDir()).toContain(`settings.json.bak-claude-canvas-${STAMP}`);
 });
 
-test('带 BOM、CRLF 的文件：能读；写回为 CRLF、无 BOM 亦可但必须是合法 JSON', async () => {
+test('带 BOM、CRLF 的文件：写回保留 BOM 和 CRLF，且是合法 JSON', async () => {
   seed('﻿{\r\n  "theme": "dark"\r\n}\r\n');
   expect(await runHooksInstall(opts(), fakeIo())).toBe(0);
   const text = fs.readFileSync(file, 'utf8');
-  expect(text.charCodeAt(0)).not.toBe(0xfeff);
+  expect(text.charCodeAt(0)).toBe(0xfeff);
+  expect(text.charCodeAt(1)).toBe('{'.charCodeAt(0));
   expect(text).toContain('\r\n');
   expect(text.replace(/\r\n/g, '')).not.toContain('\n');
-  expect(JSON.parse(text).theme).toBe('dark');
-  expect(Object.keys(JSON.parse(text).hooks)).toEqual([...HOOK_EVENTS]);
+  const parsed = JSON.parse(text.slice(1));
+  expect(parsed.theme).toBe('dark');
+  expect(Object.keys(parsed.hooks)).toEqual([...HOOK_EVENTS]);
+});
+
+test('没有 BOM 的文件写回也没有 BOM', async () => {
+  seed('{\n  "a": 1\n}\n');
+  await runHooksInstall(opts(), fakeIo());
+  expect(fs.readFileSync(file, 'utf8').charCodeAt(0)).toBe('{'.charCodeAt(0));
+});
+
+const indentOf = (text: string): string => /\n([ \t]+)"/.exec(text)![1]!;
+
+test('写回沿用原文件的缩进：制表符', async () => {
+  seed('{\n\t"a": {\n\t\t"b": 1\n\t}\n}\n');
+  expect(await runHooksInstall(opts(), fakeIo())).toBe(0);
+  const text = fs.readFileSync(file, 'utf8');
+  expect(indentOf(text)).toBe('\t');
+  expect(text).toContain('\n\t\t"b": 1');
+  expect(text).not.toMatch(/\n +"/);
+});
+
+test('写回沿用原文件的缩进：4 个空格', async () => {
+  seed('{\n    "a": {\n        "b": 1\n    }\n}\n');
+  expect(await runHooksInstall(opts(), fakeIo())).toBe(0);
+  const text = fs.readFileSync(file, 'utf8');
+  expect(indentOf(text)).toBe('    ');
+  expect(text).toContain('\n        "b": 1');
+});
+
+test.each([['{"a":1}'], ['']])('单行或空文件 %j：写回用 2 个空格缩进', async (content) => {
+  seed(content);
+  expect(await runHooksInstall(opts(), fakeIo())).toBe(0);
+  expect(indentOf(fs.readFileSync(file, 'utf8'))).toBe('  ');
+});
+
+test.each([['9007199254740993'], ['12345678901234567890'], ['0.12345678901234567890123'], ['1e400']])(
+  '含有无法无损读写的数字 %s：拒绝写入，返回 1，文件未变',
+  async (num) => {
+    const content = `{\n  "big": ${num}\n}\n`;
+    seed(content);
+    const io = fakeIo();
+    expect(await runHooksInstall(opts(), io)).toBe(1);
+    expect(io.errs).toEqual([`设置文件包含无法无损读写的数字，未做任何改动：${file}`]);
+    expect(fs.readFileSync(file, 'utf8')).toBe(content);
+    expect(listDir()).toEqual(['settings.json']);
+  },
+);
+
+test('uninstall 遇到无法无损读写的数字同样拒绝写入', async () => {
+  await runHooksInstall(opts(), fakeIo());
+  const installed = fs.readFileSync(file, 'utf8');
+  const content = installed.replace('{', '{\n  "big": 9007199254740993,');
+  fs.writeFileSync(file, content);
+  const io = fakeIo();
+  expect(await runHooksUninstall(opts(), io)).toBe(1);
+  expect(io.errs).toEqual([`设置文件包含无法无损读写的数字，未做任何改动：${file}`]);
+  expect(fs.readFileSync(file, 'utf8')).toBe(content);
+});
+
+test('普通数字（2、1.5、1e3、-0.25、0、1E-7、100、2.50）不触发拒绝', async () => {
+  seed('{"n": [2, 1.5, 1e3, -0.25, 0, 1E-7, 100, 2.50, 9007199254740992]}');
+  expect(await runHooksInstall(opts(), fakeIo())).toBe(0);
+  expect(readJson().n).toEqual([2, 1.5, 1000, -0.25, 0, 1e-7, 100, 2.5, 9007199254740992]);
+});
+
+test.each([['{"a": 1, "a": 2}'], ['{"x": {"k": 1, "k": 1}}'], ['{"a": 1, "\\u0061": 2}'], ['{"l": [{"q": 1}, {"q": 2, "q": 3}]}']])(
+  '对象里有重复的键 %s：拒绝写入，返回 1，文件未变',
+  async (content) => {
+    seed(content);
+    const io = fakeIo();
+    expect(await runHooksInstall(opts(), io)).toBe(1);
+    expect(io.errs).toEqual([`设置文件包含重复的键，未做任何改动：${file}`]);
+    expect(fs.readFileSync(file, 'utf8')).toBe(content);
+    expect(listDir()).toEqual(['settings.json']);
+  },
+);
+
+test('不同对象里同名的键、字符串里像键的内容都不算重复', async () => {
+  seed('{"a": {"k": 1}, "b": {"k": 2}, "c": [{"k": 3}, {"k": 4}], "s": "\\"a\\": 1, \\"a\\": 2"}');
+  expect(await runHooksInstall(opts(), fakeIo())).toBe(0);
 });
 
 test('LF 文件写回仍是 LF', async () => {
