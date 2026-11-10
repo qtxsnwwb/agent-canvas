@@ -4,7 +4,7 @@ import path from 'node:path';
 import type { Change, SeqChange } from '@claude-canvas/shared';
 import type { Config } from './config.js';
 import { Normalizer } from './normalize/normalizer.js';
-import { classifyPath, type TranscriptFile } from './sources/transcript/paths.js';
+import { classifyPath, classifyRelPath, relPath, type TranscriptFile } from './sources/transcript/paths.js';
 import { readNewLines } from './sources/transcript/reader.js';
 import type { RawEvent, Store, StoredRawEvent } from './store/store.js';
 
@@ -117,9 +117,15 @@ export class Pipeline {
     return l.queued;
   }
 
-  ingestHook(eventName: string, sessionId: string | null, payload: string): void {
+  /**
+   * `transcriptPath` is the payload's `transcript_path`: when it classifies as a session or agent file under
+   * projectsDir, its project is stored with the raw event (so replay reproduces it) and used for a new session.
+   */
+  ingestHook(eventName: string, sessionId: string | null, payload: string, transcriptPath?: string | null): void {
     const receivedAt = new Date().toISOString();
-    const event: RawEvent = { source: 'hook', receivedAt, eventName, sessionId, payload };
+    const cls = typeof transcriptPath === 'string' && transcriptPath !== '' ? classifyPath(this.config.projectsDir, transcriptPath) : null;
+    const projectId = cls !== null && (cls.kind === 'session' || cls.kind === 'agent') ? cls.projectId : null;
+    const event: RawEvent = { source: 'hook', receivedAt, eventName, sessionId, payload, projectId };
     this.seed();
     if (this.lastHook === null || receivedAt > this.lastHook) this.lastHook = receivedAt;
     const needsQueue =
@@ -164,7 +170,7 @@ export class Pipeline {
       for (const file of files) {
         const kind = classifyPath(this.config.projectsDir, file)?.kind;
         if (kind === 'title' || kind === 'agent_meta') {
-          const known = sizes.get(file);
+          const known = sizes.get(this.rel(file));
           try {
             if (known !== undefined && (await fsp.stat(file)).size === known) continue;
           } catch {
@@ -182,7 +188,7 @@ export class Pipeline {
   async rescan(): Promise<void> {
     const sizes = this.sizeMap();
     for (const file of await this.listFiles()) {
-      const storedSize = sizes.get(file);
+      const storedSize = sizes.get(this.rel(file));
       if (storedSize !== undefined) {
         try {
           if ((await fsp.stat(file)).size === storedSize) continue;
@@ -206,8 +212,7 @@ export class Pipeline {
     this.normalizer = new Normalizer();
     const changes: Change[] = [];
     for (const id of this.store.allSessionIdsInRaw()) {
-      const projectBySession = new Map<string, string>();
-      for (const ev of this.store.rawForSession(id)) changes.push(...this.replayOne(ev, projectBySession));
+      for (const ev of this.store.rawForSession(id)) changes.push(...this.replayOne(ev));
     }
     this.commit(changes);
     // Sessions are re-hydrated on demand; leave nothing loaded-but-untracked.
@@ -244,6 +249,12 @@ export class Pipeline {
     return this.sizes!;
   }
 
+  /** Store key of a file: path relative to projectsDir with `/` separators. */
+  private rel(absPath: string): string {
+    return relPath(this.config.projectsDir, absPath) ?? absPath;
+  }
+
+  /** `file` is the relative store key. */
   private recordOffset(file: string, offset: number, size: number): void {
     this.store.setOffset(file, offset, size);
     this.sizeMap().set(file, size);
@@ -309,6 +320,7 @@ export class Pipeline {
     if (cls.kind === 'title' || cls.kind === 'agent_meta') return this.ingestMeta(absPath, cls);
 
     const agentId = cls.kind === 'agent' ? cls.agentId : null;
+    const file = this.rel(absPath);
     for (;;) {
       let size: number;
       try {
@@ -317,7 +329,7 @@ export class Pipeline {
         return; // file is gone: keep the stored offset, scanAll marks the session
       }
       if (cls.kind === 'session') this.clearDeleted(cls.sessionId);
-      const from = this.store.getOffset(absPath);
+      const from = this.store.getOffset(file);
       const res = await readNewLines(absPath, from, READ_BUDGET_BYTES);
       if (res.lines.length > 0) {
         await this.enqueue(cls.sessionId, () => {
@@ -326,7 +338,7 @@ export class Pipeline {
             const recordType = topLevelType(text);
             const event: RawEvent = {
               source: 'transcript',
-              file: absPath,
+              file,
               offset,
               line: text,
               recordType,
@@ -342,7 +354,7 @@ export class Pipeline {
         });
       }
       // Persist on any progress, including reads that only consumed blank lines.
-      if (res.newOffset !== from || res.truncated) this.recordOffset(absPath, res.newOffset, size);
+      if (res.newOffset !== from || res.truncated) this.recordOffset(file, res.newOffset, size);
       if (res.newOffset === from) return;
       await yieldToEventLoop();
     }
@@ -357,15 +369,16 @@ export class Pipeline {
     }
     const size = Buffer.byteLength(content);
     const agentId = cls.kind === 'agent_meta' ? cls.agentId : null;
+    const file = this.rel(absPath);
     await this.enqueue(cls.sessionId, () => {
       // Compare against what is stored (not an in-memory cache) so the check survives restarts;
       // a file that was never recorded cannot have a stored copy, so skip the lookup.
-      if (this.store.getOffset(absPath) > 0 && this.store.latestMeta(absPath) === content) return;
-      const event: RawEvent = { source: 'meta', file: absPath, sessionId: cls.sessionId, agentId, payload: content };
+      if (this.store.getOffset(file) > 0 && this.store.latestMeta(file) === content) return;
+      const event: RawEvent = { source: 'meta', file, sessionId: cls.sessionId, agentId, payload: content };
       this.store.insertRaw(event);
       this.commit(this.normalizer.apply(event, cls.projectId).changes);
       // Recorded so the rescan timer treats the file as known and only revisits it when its size changes.
-      this.recordOffset(absPath, size, size);
+      this.recordOffset(file, size, size);
     });
   }
 
@@ -374,8 +387,9 @@ export class Pipeline {
     if (sessionId !== null) this.lastTouch.set(sessionId, Date.now());
     this.store.insertRaw(event);
     this.persistedHooks.add(event);
-    const projectId = (sessionId !== null ? this.store.getSession(sessionId)?.projectId : undefined) ?? UNKNOWN_PROJECT;
-    const out = this.normalizer.apply(event, projectId);
+    // The Normalizer only uses projectId for a new session or to upgrade 'unknown', so the stored value alone
+    // (null -> 'unknown') gives the same result live and on replay.
+    const out = this.normalizer.apply(event, event.projectId ?? UNKNOWN_PROJECT);
     if (out.unknownRecordType !== undefined) this.store.bumpUnknown(out.unknownRecordType, event.payload);
     this.commit(out.changes);
   }
@@ -388,7 +402,6 @@ export class Pipeline {
   private async hydrate(sessionId: string): Promise<void> {
     const normalizer = this.normalizer;
     if (normalizer.hasSession(sessionId) || this.store.getSession(sessionId) === null) return;
-    const projectBySession = new Map<string, string>();
     let after = 0;
     let done = false;
     try {
@@ -396,7 +409,7 @@ export class Pipeline {
         const start = performance.now();
         while (!done && performance.now() - start < HYDRATE_SLICE_MS) {
           const page = this.store.rawForSessionAfter(sessionId, after, HYDRATE_PAGE_ROWS);
-          for (const ev of page) this.replayOne(ev, projectBySession);
+          for (const ev of page) this.replayOne(ev);
           if (page.length < HYDRATE_PAGE_ROWS) done = true;
           else after = page[page.length - 1]!.ingestId;
         }
@@ -411,14 +424,10 @@ export class Pipeline {
     }
   }
 
-  private replayOne(ev: StoredRawEvent, projectBySession: Map<string, string>): Change[] {
-    let projectId: string;
-    if (ev.source === 'hook') {
-      projectId = (ev.sessionId !== null ? projectBySession.get(ev.sessionId) : undefined) ?? UNKNOWN_PROJECT;
-    } else {
-      projectId = classifyPath(this.config.projectsDir, ev.file)?.projectId ?? UNKNOWN_PROJECT;
-      projectBySession.set(ev.sessionId, projectId);
-    }
+  /** Derives the project from what is stored (relative path or the hook's stored projectId), never from projectsDir. */
+  private replayOne(ev: StoredRawEvent): Change[] {
+    const projectId =
+      ev.source === 'hook' ? (ev.projectId ?? UNKNOWN_PROJECT) : (classifyRelPath(ev.file)?.projectId ?? UNKNOWN_PROJECT);
     return this.normalizer.apply(ev, projectId).changes;
   }
 
@@ -471,9 +480,9 @@ export class Pipeline {
     const firstPass = !this.flagsChecked;
     this.flagsChecked = true;
     for (const file of this.sizeMap().keys()) {
-      const cls = classifyPath(this.config.projectsDir, file);
+      const cls = classifyRelPath(file);
       if (cls?.kind !== 'session') continue;
-      if (fs.existsSync(file)) {
+      if (fs.existsSync(path.join(this.config.projectsDir, ...file.split('/')))) {
         if (firstPass || this.deleted.has(cls.sessionId)) {
           this.deleted.delete(cls.sessionId);
           const session = this.store.getSession(cls.sessionId);

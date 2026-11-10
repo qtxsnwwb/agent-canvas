@@ -14,9 +14,18 @@ import {
 } from '@claude-canvas/shared';
 import { DERIVED_TABLES, SCHEMA_SQL } from './schema.js';
 
+/** `file` of transcript and meta events is relative to projectsDir with `/` separators. */
 export type RawEvent =
   | { source: 'transcript'; file: string; offset: number; line: string; recordType: string; sessionId: string; agentId: string | null }
-  | { source: 'hook'; receivedAt: string; eventName: string; sessionId: string | null; payload: string }
+  | {
+      source: 'hook';
+      receivedAt: string;
+      eventName: string;
+      sessionId: string | null;
+      payload: string;
+      /** Project derived from the payload's transcript_path at ingest; replay uses this stored value. */
+      projectId?: string | null;
+    }
   | { source: 'meta'; file: string; sessionId: string; agentId: string | null; payload: string }; // custom-title.json, agent-*.meta.json contents
 export type StoredRawEvent = RawEvent & { ingestId: number };
 
@@ -61,6 +70,7 @@ interface RawRow {
   agent_id: string | null;
   event_name: string | null;
   received_at: string | null;
+  project_id: string | null;
   body: string;
 }
 
@@ -85,6 +95,7 @@ function toStoredRaw(r: RawRow): StoredRawEvent {
         eventName: r.event_name!,
         sessionId: r.session_id,
         payload: r.body,
+        projectId: r.project_id,
       };
     default:
       return {
@@ -126,8 +137,8 @@ export function openStore(dbPath: string): Store {
      )`,
   );
   const insertRawHook = db.prepare(
-    `INSERT INTO raw_event (source, event_name, received_at, session_id, body)
-     VALUES ('hook', @eventName, @receivedAt, @sessionId, @payload)`,
+    `INSERT INTO raw_event (source, event_name, received_at, session_id, project_id, body)
+     VALUES ('hook', @eventName, @receivedAt, @sessionId, @projectId, @payload)`,
   );
   const insertRawMeta = db.prepare(
     `INSERT INTO raw_event (source, file, session_id, agent_id, body)
@@ -246,7 +257,7 @@ export function openStore(dbPath: string): Store {
         const res = insertRawTranscript.run({ ...event, lineHash });
         return res.changes === 0 ? null : Number(res.lastInsertRowid);
       }
-      if (event.source === 'hook') return Number(insertRawHook.run(event).lastInsertRowid);
+      if (event.source === 'hook') return Number(insertRawHook.run({ ...event, projectId: event.projectId ?? null }).lastInsertRowid);
       return Number(insertRawMeta.run(event).lastInsertRowid);
     },
     getOffset(file) {

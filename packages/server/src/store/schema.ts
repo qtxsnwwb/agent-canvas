@@ -5,7 +5,8 @@ export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS raw_event (
   ingest_id   INTEGER PRIMARY KEY AUTOINCREMENT,
   source      TEXT NOT NULL,
-  file        TEXT,
+  file        TEXT,            -- relative to projectsDir, '/' separators
+  project_id  TEXT,            -- hooks: project derived from transcript_path at ingest (null when unknown)
   "offset"    INTEGER,
   line_hash   TEXT,
   record_type TEXT,
@@ -21,7 +22,7 @@ CREATE INDEX IF NOT EXISTS raw_event_session ON raw_event (session_id, ingest_id
 CREATE INDEX IF NOT EXISTS raw_event_meta ON raw_event (file, ingest_id) WHERE source = 'meta';
 
 CREATE TABLE IF NOT EXISTS file_offset (
-  file     TEXT PRIMARY KEY,
+  file     TEXT PRIMARY KEY,   -- relative to projectsDir, '/' separators
   "offset" INTEGER NOT NULL,
   size     INTEGER NOT NULL
 );

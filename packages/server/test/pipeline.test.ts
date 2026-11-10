@@ -177,7 +177,7 @@ describe('pipeline', () => {
     await pipeline.scanAll();
     expect(store.getSession('s1')!.sourceDeleted).toBe(true);
     expect(store.getGraph('s1')!.nodes).toHaveLength(1);
-    expect(store.getOffset(abs('proj/s1.jsonl'))).toBeGreaterThan(0);
+    expect(store.getOffset('proj/s1.jsonl')).toBeGreaterThan(0);
   });
 
   test('并发的 ingestFile 调用被串行化且不重复处理', async () => {
@@ -208,12 +208,12 @@ describe('pipeline', () => {
     await fs.appendFile(file, '\r\n\n\r\n');
     await pipeline.ingestFile(file);
     const size = (await fs.stat(file)).size;
-    expect(store.getOffset(file)).toBe(size);
-    expect(store.diagnostics().files).toContainEqual({ path: file, offset: size, size });
+    expect(store.getOffset('proj/s1.jsonl')).toBe(size);
+    expect(store.diagnostics().files).toContainEqual({ path: 'proj/s1.jsonl', offset: size, size });
     await fs.appendFile(file, '\n\n'); // blank-only growth
     await pipeline.ingestFile(file);
     const size2 = (await fs.stat(file)).size;
-    expect(store.diagnostics().files).toContainEqual({ path: file, offset: size2, size: size2 });
+    expect(store.diagnostics().files).toContainEqual({ path: 'proj/s1.jsonl', offset: size2, size: size2 });
   });
 
   test('sourceDeleted 是粘性的：之后的 hook 不会清除它', async () => {
@@ -343,5 +343,70 @@ describe('pipeline', () => {
     await new Pipeline(store, config).ingestFile(abs('proj/s1/custom-title.json'));
     expect(spy).not.toHaveBeenCalled();
     expect(store.getSession('s1')!.title).toBe('T2');
+  });
+
+  // ---- final fix wave, group 5: location-independent raw events, hook project ----
+
+  test('原始记录和偏移用相对 projectsDir 的 / 路径保存', async () => {
+    await write('proj/s1.jsonl', [userPrompt('u1', null, 'x'), assistantBlock('a1', 'u1', { type: 'tool_use', id: 'tu1', name: 'Agent', input: {} })]);
+    await write('proj/s1/subagents/agent-ag1.jsonl', [userPrompt('s1u', null, 'sub', { agentId: 'ag1' })]);
+    await fs.writeFile(abs('proj/s1/subagents/agent-ag1.meta.json'), JSON.stringify({ toolUseId: 'tu1', agentType: 'Explore', description: 'd' }));
+    await pipeline.scanAll();
+    const files = new Set(store.rawForSession('s1').map((e) => (e.source === 'hook' ? null : e.file)));
+    expect(files).toEqual(new Set(['proj/s1.jsonl', 'proj/s1/subagents/agent-ag1.jsonl', 'proj/s1/subagents/agent-ag1.meta.json']));
+    expect(store.diagnostics().files.map((f) => f.path).sort()).toEqual([
+      'proj/s1.jsonl',
+      'proj/s1/subagents/agent-ag1.jsonl',
+      'proj/s1/subagents/agent-ag1.meta.json',
+    ]);
+    expect(store.getOffset('proj/s1.jsonl')).toBeGreaterThan(0);
+  });
+
+  test('移动 projectsDir 后不重复导入，历史与重建都不丢', async () => {
+    await write('proj/s1.jsonl', [userPrompt('u1', null, 'x')]);
+    await pipeline.scanAll();
+    const rawBefore = store.rawForSession('s1').length;
+    const moved = path.join(tmp, 'moved');
+    await fs.rename(config.projectsDir, moved);
+    const cfg2 = { ...config, projectsDir: moved };
+    const p2 = new Pipeline(store, cfg2);
+    const added: string[] = [];
+    p2.onChanges((cs) => cs.forEach((c) => c.type === 'node_added' && added.push(c.node.id)));
+    await p2.scanAll();
+    expect(store.rawForSession('s1')).toHaveLength(rawBefore);
+    expect(added).toEqual([]);
+    expect(store.getSession('s1')!.sourceDeleted).toBe(false);
+    await fs.appendFile(path.join(moved, 'proj', 's1.jsonl'), linesOf([assistantBlock('a1', 'u1', { type: 'text', text: 'hi' })]));
+    await p2.ingestFile(path.join(moved, 'proj', 's1.jsonl'));
+    expect(added).toEqual(['a1']);
+    p2.rebuild();
+    expect(store.getSession('s1')!.projectId).toBe('proj');
+    expect(store.getGraph('s1')!.nodes.map((n) => n.id)).toEqual(['u1', 'a1']);
+  });
+
+  test.runIf(process.platform === 'win32')('projectsDir 大小写变化不会重复导入', async () => {
+    await write('proj/s1.jsonl', [userPrompt('u1', null, 'x')]);
+    await pipeline.scanAll();
+    const rawBefore = store.rawForSession('s1').length;
+    const p2 = new Pipeline(store, { ...config, projectsDir: config.projectsDir.toUpperCase() });
+    await p2.scanAll();
+    expect(store.rawForSession('s1')).toHaveLength(rawBefore);
+    expect(store.diagnostics().files.map((f) => f.path)).toEqual(['proj/s1.jsonl']);
+  });
+
+  test('未知会话的 hook 从 transcript_path 得出 projectId，并保存供重放', async () => {
+    const payload = (sid: string, tp: string) => JSON.stringify({ session_id: sid, hook_event_name: 'UserPromptSubmit', transcript_path: tp });
+    pipeline.ingestHook('UserPromptSubmit', 'h1', payload('h1', abs('proj/h1.jsonl')), abs('proj/h1.jsonl'));
+    pipeline.ingestHook('UserPromptSubmit', 'h2', payload('h2', '/elsewhere/x.jsonl'), '/elsewhere/x.jsonl');
+    pipeline.ingestHook('UserPromptSubmit', 'h3', payload('h3', abs('proj/h1/subagents/agent-z.jsonl')), abs('proj/h1/subagents/agent-z.jsonl'));
+    await pipeline.idle();
+    expect(store.getSession('h1')!.projectId).toBe('proj');
+    expect(store.getSession('h2')!.projectId).toBe('unknown');
+    expect(store.getSession('h3')!.projectId).toBe('proj');
+    expect(store.rawForSession('h1')[0]).toMatchObject({ source: 'hook', projectId: 'proj' });
+    expect(store.rawForSession('h2')[0]).toMatchObject({ source: 'hook', projectId: null });
+    pipeline.rebuild();
+    expect(store.getSession('h1')!.projectId).toBe('proj');
+    expect(store.getSession('h2')!.projectId).toBe('unknown');
   });
 });

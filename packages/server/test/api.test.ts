@@ -100,6 +100,11 @@ describe('http api', () => {
     expect((await get('/api/diagnostics')).json().lastHookAt).not.toBeNull();
   });
 
+  test('POST /hooks 把 transcript_path 交给管线以确定项目', async () => {
+    await post('/hooks', { hook_event_name: 'SessionStart', session_id: 's8', transcript_path: abs('proj/s8.jsonl') });
+    await vi.waitFor(() => expect(store.getSession('s8')?.projectId).toBe('proj'));
+  });
+
   test.each([
     ['非 JSON', 'not json', 'text/plain'],
     ['空请求体', '', 'application/json'],

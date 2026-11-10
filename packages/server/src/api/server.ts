@@ -190,7 +190,8 @@ export function buildServer(deps: { store: Store; pipeline: Pipeline; config: Co
           const obj = typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : {};
           const eventName = typeof obj.hook_event_name === 'string' ? obj.hook_event_name : 'unknown';
           const sessionId = typeof obj.session_id === 'string' ? obj.session_id : null;
-          pipeline.ingestHook(eventName, sessionId, text);
+          const transcriptPath = typeof obj.transcript_path === 'string' ? obj.transcript_path : null;
+          pipeline.ingestHook(eventName, sessionId, text, transcriptPath);
         } catch {
           // best effort: the hook has already been answered
         }

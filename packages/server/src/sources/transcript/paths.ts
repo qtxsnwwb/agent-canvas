@@ -9,10 +9,24 @@ export type TranscriptFile =
 const AGENT_JSONL = /^agent-(.+)\.jsonl$/;
 const AGENT_META = /^agent-(.+)\.meta\.json$/;
 
-/** Classify a file under the projects directory; both `/` and `\` separators are accepted. */
-export function classifyPath(projectsDir: string, absPath: string): TranscriptFile | null {
+/**
+ * Path of `absPath` relative to `projectsDir` with `/` separators (the key stored in raw_event and file_offset), or
+ * null when it is not under `projectsDir`. On Windows the comparison is case-insensitive (path.win32.relative).
+ */
+export function relPath(projectsDir: string, absPath: string): string | null {
   const rel = path.relative(projectsDir, absPath);
   if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) return null;
+  return rel.split(/[\\/]+/).filter((p) => p !== '').join('/');
+}
+
+/** Classify a file under the projects directory; both `/` and `\` separators are accepted. */
+export function classifyPath(projectsDir: string, absPath: string): TranscriptFile | null {
+  const rel = relPath(projectsDir, absPath);
+  return rel === null ? null : classifyRelPath(rel);
+}
+
+/** Classify a path relative to the projects directory (as stored in raw_event.file). */
+export function classifyRelPath(rel: string): TranscriptFile | null {
   const parts = rel.split(/[\\/]+/).filter((p) => p !== '');
   const [projectId, second, third, fourth] = parts;
 
