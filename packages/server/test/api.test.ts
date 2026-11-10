@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import WebSocket from 'ws';
 import type { FastifyInstance } from 'fastify';
 import type { SeqChange } from '@claude-canvas/shared';
-import { buildServer } from '../src/api/server.js';
+import { buildServer, isAllowedRequest } from '../src/api/server.js';
 import { loadConfig, type Config } from '../src/config.js';
 import { Pipeline } from '../src/pipeline.js';
 import { openStore, type RawEvent, type Store } from '../src/store/store.js';
@@ -42,7 +42,7 @@ describe('http api', () => {
     await pipeline.ingestFile(abs(rel));
   }
   async function connect(): Promise<WebSocket> {
-    const address = await app.listen({ port: 0, host: '127.0.0.1' });
+    const address = app.server.listening ? `http://127.0.0.1:${(app.server.address() as { port: number }).port}` : await app.listen({ port: 0, host: '127.0.0.1' });
     const ws = new WebSocket(address.replace('http', 'ws') + '/ws');
     sockets.push(ws);
     await new Promise<void>((resolve, reject) => {
@@ -221,6 +221,162 @@ describe('http api', () => {
     await app.close();
     await closed;
     expect(() => pipeline.ingestHook('Stop', 's1', '{}')).not.toThrow();
+  });
+
+  describe('origin and host validation', () => {
+    const evil = { origin: 'https://evil.example' };
+
+    test('isAllowedRequest 判定规则', () => {
+      const ok: Record<string, string>[] = [
+        {},
+        { origin: 'http://localhost:5173' },
+        { origin: 'http://127.0.0.1:4317' },
+        { origin: 'https://[::1]:4317' },
+        { origin: 'http://LOCALHOST' },
+        { host: '127.0.0.1:4317' },
+        { host: 'localhost:4317' },
+        { host: '[::1]:4317' },
+        { host: 'LocalHost' },
+      ];
+      const bad: Record<string, string>[] = [
+        { origin: 'https://evil.example' },
+        { origin: 'null' },
+        { origin: 'http://localhost.evil.example' },
+        { origin: 'ftp://localhost' },
+        { origin: 'not a url' },
+        { host: 'evil.example' },
+        { host: 'evil.example:4317' },
+        { host: '127.0.0.1.evil.example' },
+        { host: 'localhost:4317', origin: 'http://evil.example' },
+      ];
+      for (const h of ok) expect(isAllowedRequest(h), JSON.stringify(h)).toBe(true);
+      for (const h of bad) expect(isAllowedRequest(h), JSON.stringify(h)).toBe(false);
+    });
+
+    test('外来 Origin 的 REST 请求返回 403 且无 CORS 头', async () => {
+      const res = await app.inject({ method: 'GET', url: '/api/projects', headers: evil });
+      expect(res.statusCode).toBe(403);
+      expect(res.body).toBe('');
+      expect(res.headers['access-control-allow-origin']).toBeUndefined();
+      expect((await app.inject({ method: 'GET', url: '/api/projects', headers: { origin: 'null' } })).statusCode).toBe(403);
+    });
+
+    test('外来 Host 的请求返回 403', async () => {
+      const res = await app.inject({ method: 'GET', url: '/api/projects', headers: { host: 'evil.example' } });
+      expect(res.statusCode).toBe(403);
+    });
+
+    test('允许的 Origin 和 Host', async () => {
+      for (const headers of [
+        {},
+        { origin: 'http://localhost:5173' },
+        { origin: 'http://127.0.0.1:4317' },
+        { host: '127.0.0.1:4317' },
+        { host: 'localhost:4317' },
+        { host: '[::1]:4317' },
+      ]) {
+        expect((await app.inject({ method: 'GET', url: '/api/projects', headers })).statusCode).toBe(200);
+      }
+    });
+
+    test('外来 Origin 的 /hooks 返回空 200 且不入库', async () => {
+      const spy = vi.spyOn(pipeline, 'ingestHook');
+      const res = await app.inject({
+        method: 'POST',
+        url: '/hooks',
+        payload: JSON.stringify({ hook_event_name: 'UserPromptSubmit', session_id: 'forged' }),
+        headers: { 'content-type': 'text/plain', ...evil },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.body).toBe('');
+      await new Promise((r) => setTimeout(r, 50));
+      expect(spy).not.toHaveBeenCalled();
+      expect(store.getSession('forged')).toBeNull();
+    });
+
+    test('外来 Origin 的 WebSocket 升级被拒绝', async () => {
+      const address = await app.listen({ port: 0, host: '127.0.0.1' });
+      for (const origin of ['https://evil.example', 'null']) {
+        const ws = new WebSocket(address.replace('http', 'ws') + '/ws', { headers: { Origin: origin } });
+        sockets.push(ws);
+        const messages: string[] = [];
+        ws.on('message', (d) => messages.push(d.toString()));
+        const status = await new Promise<number>((resolve, reject) => {
+          ws.once('unexpected-response', (req, res) => {
+            res.resume();
+            req.destroy();
+            resolve(res.statusCode ?? 0);
+          });
+          ws.once('open', () => reject(new Error('connection was established')));
+          ws.once('error', () => undefined);
+        });
+        expect(status).toBe(403);
+        expect(messages).toEqual([]);
+      }
+    });
+  });
+
+  test('id 中含有 % 的节点按字面解析，不返回 500', async () => {
+    await writeSession('proj/s1.jsonl', [
+      userPrompt('u1', null, 'hello'),
+      assistantBlock('a1', 'u1', { type: 'tool_use', id: 'a%41', name: 'Read', input: {} }),
+      toolResult('r1', 'a1', 'a%41', 'pct body'),
+    ]);
+    await pipeline.ingestFile(abs('proj/s1.jsonl'));
+    expect((await get('/api/sessions/s1/nodes/tool%3Aa%2541')).json().output).toBe('pct body');
+    expect((await get('/api/sessions/s1/nodes/tool%3AaA')).statusCode).toBe(404);
+    expect((await get('/api/sessions/s1/nodes/%25')).statusCode).toBe(404);
+    expect((await get('/api/sessions/s1/nodes/%')).statusCode).toBeLessThan(500);
+  });
+
+  test('第二个会话订阅替换第一个', async () => {
+    await seed();
+    await writeSession('proj/s2.jsonl', [userPrompt('v1', null, 'other', { sessionId: 's2' })]);
+    await pipeline.ingestFile(abs('proj/s2.jsonl'));
+    const ws = await connect();
+    const got = collect(ws);
+    ws.send(JSON.stringify({ type: 'subscribe', scope: 'session', sessionId: 's1', sinceSeq: store.getGraph('s1')!.seq }));
+    ws.send(JSON.stringify({ type: 'subscribe', scope: 'session', sessionId: 's2', sinceSeq: store.getGraph('s2')!.seq }));
+    await new Promise((r) => setTimeout(r, 50));
+    await post('/hooks', { hook_event_name: 'UserPromptSubmit', session_id: 's1' });
+    await post('/hooks', { hook_event_name: 'UserPromptSubmit', session_id: 's2' });
+    await vi.waitFor(() => expect(got.changes().length).toBeGreaterThan(0));
+    await new Promise((r) => setTimeout(r, 100));
+    const ids = got.changes().map((c) => (c.type === 'session_upserted' ? c.session.id : null));
+    expect(ids).toContain('s2');
+    expect(ids).not.toContain('s1');
+  });
+
+  test('同时持有 sessions 和 session 订阅时每个变更只收到一次', async () => {
+    await seed();
+    const ws = await connect();
+    const got = collect(ws);
+    ws.send(JSON.stringify({ type: 'subscribe', scope: 'sessions' }));
+    ws.send(JSON.stringify({ type: 'subscribe', scope: 'session', sessionId: 's1', sinceSeq: store.getGraph('s1')!.seq }));
+    await new Promise((r) => setTimeout(r, 50));
+    await post('/hooks', { hook_event_name: 'UserPromptSubmit', session_id: 's1' });
+    await vi.waitFor(() => expect(got.changes().length).toBeGreaterThan(0));
+    await new Promise((r) => setTimeout(r, 100));
+    const seqs = got.changes().map((c) => c.seq);
+    expect(new Set(seqs).size).toBe(seqs.length);
+  });
+
+  test('一个连接发送失败不影响其他连接', async () => {
+    const a = await connect();
+    const b = await connect();
+    const gotB = collect(b);
+    a.send(JSON.stringify({ type: 'subscribe', scope: 'sessions' }));
+    b.send(JSON.stringify({ type: 'subscribe', scope: 'sessions' }));
+    await new Promise((r) => setTimeout(r, 50));
+    const spy = vi.spyOn(WebSocket.prototype, 'send').mockImplementationOnce(() => {
+      throw new Error('send failed');
+    });
+    try {
+      pipeline.ingestHook('UserPromptSubmit', 's5', JSON.stringify({ session_id: 's5', hook_event_name: 'UserPromptSubmit' }));
+      await vi.waitFor(() => expect(gotB.changes().length).toBeGreaterThan(0));
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   test('webDist 为目录时提供静态文件并回退到 index.html；为 null 时不注册', async () => {

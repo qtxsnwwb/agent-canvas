@@ -39,6 +39,37 @@ function stripDetail(c: SeqChange): SeqChange {
   return c;
 }
 
+const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
+
+function hostnameOf(urlLike: string): string | null {
+  try {
+    return new URL(urlLike).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The service has no auth; loopback binding alone does not stop browsers, so every request must carry a loopback Host
+ * and (when present) a loopback Origin. A missing Origin (Claude Code's hook client, curl) is allowed.
+ */
+export function isAllowedRequest(headers: { host?: string | undefined; origin?: string | undefined }): boolean {
+  if (headers.host !== undefined) {
+    const h = hostnameOf(`http://${headers.host}`);
+    if (h === null || !LOOPBACK_HOSTNAMES.has(h)) return false;
+  }
+  if (headers.origin !== undefined) {
+    try {
+      const u = new URL(headers.origin);
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+      if (!LOOPBACK_HOSTNAMES.has(u.hostname.toLowerCase())) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
 function parseClientMessage(raw: string): ClientMessage | null {
   let m: unknown;
   try {
@@ -66,12 +97,26 @@ export function buildServer(deps: { store: Store; pipeline: Pipeline; config: Co
   const app = Fastify();
   const connections = new Set<Connection>();
 
+  // Runs before body parsing and the WebSocket upgrade handler.
+  app.addHook('onRequest', async (req, reply) => {
+    if (isAllowedRequest(req.headers)) return;
+    // /hooks keeps its "always an empty 200" contract, but the payload is never ingested.
+    // A rejected WebSocket upgrade leaves a detached socket that nothing else closes; end it once the 403 is flushed.
+    if (req.headers.upgrade !== undefined) reply.raw.once('finish', () => req.raw.socket.end());
+    await reply.code(req.url.split('?')[0] === '/hooks' ? 200 : 403).send();
+    return reply;
+  });
+
   const unsubscribe = pipeline.onChanges((changes) => {
-    for (const conn of connections) {
-      const out = changes.filter(
-        (c) => (conn.sessionsScope && c.type === 'session_upserted') || (conn.sessionId !== null && sessionIdOf(c) === conn.sessionId),
-      );
-      if (out.length > 0) conn.send({ type: 'changes', changes: out.map(stripDetail) });
+    for (const conn of [...connections]) {
+      try {
+        const out = changes.filter(
+          (c) => (conn.sessionsScope && c.type === 'session_upserted') || (conn.sessionId !== null && sessionIdOf(c) === conn.sessionId),
+        );
+        if (out.length > 0) conn.send({ type: 'changes', changes: out.map(stripDetail) });
+      } catch {
+        connections.delete(conn); // a failing connection must not affect the others or the pipeline
+      }
     }
   });
   app.addHook('onClose', async () => {
@@ -100,21 +145,25 @@ export function buildServer(deps: { store: Store; pipeline: Pipeline; config: Co
           return;
         }
         conn.sessionId = msg.sessionId;
-        const backlog = store.changesSince(msg.sinceSeq, msg.sessionId);
-        if (backlog.length > 0) conn.send({ type: 'changes', changes: backlog.map(stripDetail) });
+        try {
+          const backlog = store.changesSince(msg.sinceSeq, msg.sessionId);
+          if (backlog.length > 0) conn.send({ type: 'changes', changes: backlog.map(stripDetail) });
+        } catch {
+          socket.terminate();
+        }
       });
     });
   });
 
   app.get('/api/projects', async () => store.listProjects());
-  app.get<{ Params: { id: string } }>('/api/projects/:id/sessions', async (req) => store.listSessions(decodeURIComponent(req.params.id)));
+  app.get<{ Params: { id: string } }>('/api/projects/:id/sessions', async (req) => store.listSessions(req.params.id));
   app.get<{ Params: { id: string } }>('/api/sessions/:id/graph', async (req, reply) => {
-    const graph = store.getGraph(decodeURIComponent(req.params.id));
+    const graph = store.getGraph(req.params.id);
     if (graph === null) return reply.code(404).send({ error: 'session not found' });
     return graph;
   });
   app.get<{ Params: { id: string; nodeId: string } }>('/api/sessions/:id/nodes/:nodeId', async (req, reply) => {
-    const detail = store.getNodeDetail(decodeURIComponent(req.params.id), decodeURIComponent(req.params.nodeId));
+    const detail = store.getNodeDetail(req.params.id, req.params.nodeId);
     if (detail === null) return reply.code(404).send({ error: 'node not found' });
     return detail;
   });
