@@ -9,6 +9,24 @@ import { startWatcher } from '../src/sources/transcript/watcher.js';
 import { openStore, type RawEvent, type Store } from '../src/store/store.js';
 import { assistantBlock, toolResult, userPrompt } from './fixtures.js';
 
+const reads = vi.hoisted(() => ({ active: 0, max: 0, failFor: null as string | null }));
+vi.mock('../src/sources/transcript/reader.js', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('../src/sources/transcript/reader.js')>();
+  return {
+    ...orig,
+    readNewLines: async (...args: Parameters<typeof orig.readNewLines>) => {
+      if (args[0] === reads.failFor) throw Object.assign(new Error('EPERM: simulated'), { code: 'EPERM' });
+      reads.active += 1;
+      reads.max = Math.max(reads.max, reads.active);
+      try {
+        return await orig.readNewLines(...args);
+      } finally {
+        reads.active -= 1;
+      }
+    },
+  };
+});
+
 const line = (obj: unknown): string => JSON.stringify(obj) + '\n';
 const linesOf = (events: RawEvent[]): string =>
   events.map((e) => (e.source === 'transcript' ? e.line : '') + '\n').join('');
@@ -36,6 +54,7 @@ describe('pipeline', () => {
     pipeline = new Pipeline(store, config);
   });
   afterEach(async () => {
+    reads.failFor = null;
     store.close();
     await fs.rm(tmp, { recursive: true, force: true, maxRetries: 5 });
   });
@@ -163,7 +182,9 @@ describe('pipeline', () => {
 
   test('并发的 ingestFile 调用被串行化且不重复处理', async () => {
     await write('proj/s1.jsonl', [userPrompt('u1', null, 'x'), assistantBlock('a1', 'u1', { type: 'text', text: 'hi' })]);
+    reads.max = 0;
     await Promise.all([1, 2, 3, 4].map(() => pipeline.ingestFile(abs('proj/s1.jsonl'))));
+    expect(reads.max).toBe(1); // never two reads of the same file in flight
     expect(store.getGraph('s1')!.nodes.map((n) => n.id)).toEqual(['u1', 'a1']);
     expect(store.rawForSession('s1')).toHaveLength(2);
   });
@@ -188,11 +209,136 @@ describe('pipeline', () => {
 
   test('即使没有文件系统事件，定时扫描也能发现追加', async () => {
     const w = startWatcher(pipeline, { ...config, rescanMs: 200 });
-    await w.ready;
+    try {
+      await w.ready;
+      await write('proj/s1.jsonl', [userPrompt('u1', null, 'x')]);
+      await vi.waitFor(() => expect(store.getSession('s1')).not.toBeNull(), { timeout: 5000 });
+      await append('proj/s1.jsonl', [assistantBlock('a1', 'u1', { type: 'text', text: 'hi' })]);
+      await vi.waitFor(() => expect(store.getGraph('s1')!.nodes).toHaveLength(2), { timeout: 5000 });
+    } finally {
+      await w.close();
+    }
+  });
+
+  test('只有空行的读取也会保存偏移，rescan 不再重复导入', async () => {
+    const file = abs('proj/s1.jsonl');
     await write('proj/s1.jsonl', [userPrompt('u1', null, 'x')]);
-    await vi.waitFor(() => expect(store.getSession('s1')).not.toBeNull(), { timeout: 5000 });
+    await fs.appendFile(file, '\r\n\n\r\n');
+    await pipeline.ingestFile(file);
+    const size = (await fs.stat(file)).size;
+    expect(store.getOffset(file)).toBe(size);
+    expect(store.diagnostics().files).toContainEqual({ path: file, offset: size, size });
+    await fs.appendFile(file, '\n\n'); // blank-only growth
+    await pipeline.ingestFile(file);
+    const size2 = (await fs.stat(file)).size;
+    expect(store.diagnostics().files).toContainEqual({ path: file, offset: size2, size: size2 });
+  });
+
+  test('sourceDeleted 是粘性的：之后的 hook 不会清除它', async () => {
+    await write('proj/s1.jsonl', [userPrompt('u1', null, 'x')]);
+    await pipeline.scanAll();
+    await fs.rm(abs('proj/s1.jsonl'));
+    await pipeline.scanAll();
+    pipeline.ingestHook('Stop', 's1', JSON.stringify({ session_id: 's1', hook_event_name: 'Stop' }));
+    await pipeline.idle();
+    expect(store.getSession('s1')!.sourceDeleted).toBe(true);
+    await write('proj/s1.jsonl', [userPrompt('u1', null, 'x')]);
+    await pipeline.ingestFile(abs('proj/s1.jsonl'));
+    expect(store.getSession('s1')!.sourceDeleted).toBe(false);
+  });
+
+  test('一个读不了的文件不会中断 scanAll / rescan', async () => {
+    await write('proj/aaa.jsonl', [userPrompt('b1', null, 'x')]);
+    reads.failFor = abs('proj/aaa.jsonl'); // simulates EPERM / EBUSY on one file
+    await write('proj/s1.jsonl', [userPrompt('u1', null, 'x')]);
+    await pipeline.scanAll();
+    expect(store.getSession('s1')).not.toBeNull();
+    expect(pipeline.ingestFailures().map((f) => f.file)).toEqual([abs('proj/aaa.jsonl')]);
     await append('proj/s1.jsonl', [assistantBlock('a1', 'u1', { type: 'text', text: 'hi' })]);
-    await vi.waitFor(() => expect(store.getGraph('s1')!.nodes).toHaveLength(2), { timeout: 5000 });
-    await w.close();
+    await pipeline.rescan();
+    expect(store.getGraph('s1')!.nodes).toHaveLength(2);
+  });
+
+  test('rescan 与 lastHookAt 不会反复调用 diagnostics', async () => {
+    await write('proj/s1.jsonl', [userPrompt('u1', null, 'x')]);
+    const p2 = new Pipeline(store, config);
+    const spy = vi.spyOn(store, 'diagnostics');
+    await p2.scanAll();
+    await p2.rescan();
+    await p2.rescan();
+    p2.lastHookAt();
+    p2.ingestHook('Stop', 's1', JSON.stringify({ session_id: 's1', hook_event_name: 'Stop' }));
+    expect(p2.lastHookAt()).not.toBeNull();
+    expect(spy.mock.calls.length).toBeLessThanOrEqual(1);
+  });
+
+  test('重启后 scanAll 不会为未变化的 meta 文件读取会话历史', async () => {
+    await write('proj/s1.jsonl', [userPrompt('u1', null, 'x')]);
+    await fs.mkdir(abs('proj/s1'), { recursive: true });
+    await fs.writeFile(abs('proj/s1/custom-title.json'), JSON.stringify({ customTitle: 'T' }));
+    await pipeline.scanAll();
+    const spy = vi.spyOn(store, 'rawForSession');
+    await new Pipeline(store, config).scanAll();
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  test('冷启动的 hook 水合不阻塞事件循环，且新事件排在水合之后', async () => {
+    const big = Array.from({ length: 20_000 }, (_, i) =>
+      assistantBlock(`a${i}`, i ? `a${i - 1}` : null, { type: 'text', text: 'x'.repeat(500) }),
+    );
+    await write('proj/s1.jsonl', big);
+    await pipeline.ingestFile(abs('proj/s1.jsonl'));
+    await append('proj/s1.jsonl', [assistantBlock('late', 'a19999', { type: 'text', text: 'late' })]);
+
+    const p2 = new Pipeline(store, config); // cold Normalizer
+    let maxGap = 0;
+    let last = performance.now();
+    const timer = setInterval(() => {
+      const now = performance.now();
+      maxGap = Math.max(maxGap, now - last);
+      last = now;
+    }, 5);
+    try {
+      p2.ingestHook(
+        'PreToolUse',
+        's1',
+        JSON.stringify({ session_id: 's1', hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: {}, tool_use_id: 'tuH' }),
+      );
+      const file = p2.ingestFile(abs('proj/s1.jsonl'));
+      await p2.idle();
+      await file;
+    } finally {
+      clearInterval(timer);
+    }
+    expect(maxGap).toBeLessThan(100);
+    const ids = store.getGraph('s1')!.nodes.map((n) => n.id);
+    expect(ids).toContain('tool:tuH');
+    expect(ids).toContain('late');
+    const raw = store.rawForSession('s1');
+    const hookAt = raw.findIndex((e) => e.source === 'hook');
+    const lateAt = raw.findIndex((e) => e.source === 'transcript' && e.line.includes('"late"'));
+    expect(hookAt).toBeGreaterThan(-1);
+    expect(lateAt).toBeGreaterThan(hookAt);
+  }, 60_000);
+
+  test('scanAll 后久未活动的会话不留在内存里，之后追加仍然正确', async () => {
+    await write('proj/s1.jsonl', [userPrompt('u1', null, 'x'), assistantBlock('a1', 'u1', { type: 'text', text: 'hi' })]);
+    await write('proj/s2.jsonl', [userPrompt('v1', null, 'y')]);
+    await pipeline.scanAll();
+    expect(pipeline.loadedSessionCount()).toBe(0);
+    await append('proj/s1.jsonl', [assistantBlock('a2', 'a1', { type: 'text', text: 'more' })]);
+    await pipeline.ingestFile(abs('proj/s1.jsonl'));
+    expect(store.getGraph('s1')!.nodes.map((n) => n.id)).toEqual(['u1', 'a1', 'a2']);
+    expect(store.getGraph('s2')!.nodes.map((n) => n.id)).toEqual(['v1']);
+  });
+
+  test('rescan 淘汰超过 evictAfterMs 未被触碰的会话', async () => {
+    const p = new Pipeline(store, { ...config, evictAfterMs: 50 });
+    await write('proj/s1.jsonl', [userPrompt('u1', null, 'x')]);
+    await p.ingestFile(abs('proj/s1.jsonl'));
+    expect(p.loadedSessionCount()).toBe(1);
+    await new Promise((r) => setTimeout(r, 120));
+    await p.rescan();
+    expect(p.loadedSessionCount()).toBe(0);
   });
 });
