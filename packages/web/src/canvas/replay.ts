@@ -127,6 +127,32 @@ export function turnIndexAt(marks: readonly { ms: number }[], timeMs: number): n
 }
 
 /**
+ * The turn mark a PageUp (`direction` -1) / PageDown (+1) on the slider jumps to: the latest mark strictly before
+ * `timeMs`, or the earliest strictly after it; null when there is none.
+ */
+export function adjacentMark(marks: readonly { ms: number }[], timeMs: number, direction: -1 | 1): number | null {
+  let best: number | null = null;
+  for (const { ms } of marks) {
+    if (direction < 0 ? ms < timeMs && (best === null || ms > best) : ms > timeMs && (best === null || ms < best)) best = ms;
+  }
+  return best;
+}
+
+const pad2 = (n: number): string => String(n).padStart(2, '0');
+const localDay = (d: Date): string => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+
+/**
+ * The timeline clock: the local time of day, or `MM-DD HH:mm:ss` when the replay range does not start and end on the
+ * same local calendar day (a time alone would be ambiguous). '' for an invalid time.
+ */
+export function formatClock(ms: number, range: ReplayRange | null): string {
+  const d = new Date(ms);
+  if (Number.isNaN(d.getTime())) return '';
+  if (range === null || localDay(new Date(range.startMs)) === localDay(new Date(range.endMs))) return d.toLocaleTimeString();
+  return `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+}
+
+/**
  * The extra row a node gets in the replay view: tool / subagent "耗时 3.4s · 输入 1.2k · 输出 340", text the two token
  * parts; missing parts are left out, "—" when none is left. null for the other kinds (no extra row).
  */

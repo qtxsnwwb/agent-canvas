@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { advance, formatTokens, turnIndexAt } from './replay';
+import { adjacentMark, advance, formatClock, formatTokens, turnIndexAt } from './replay';
 import type { CanvasSnapshot } from './useCanvas';
 
 /** Playback timer period; each tick advances the time by the real elapsed time × the speed (see advance). */
@@ -8,11 +8,6 @@ const SPEEDS = [1, 10, 60] as const;
 const DEFAULT_SPEED = 10;
 /** Slider step (ms). */
 const SLIDER_STEP = 1000;
-
-function formatClock(ms: number): string {
-  const d = new Date(ms);
-  return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString();
-}
 
 /**
  * The replay view's timeline bar: play / pause, speed, a slider over the replay range with a tick per turn above it,
@@ -49,7 +44,7 @@ export function Timeline({ replay, onSeek }: { replay: NonNullable<CanvasSnapsho
   const start = range?.startMs ?? 0;
   const end = range?.endMs ?? 0;
   const span = end - start;
-  const clock = formatClock(timeMs);
+  const clock = formatClock(timeMs, range);
   const togglePlay = (): void => {
     if (playing) {
       setPlaying(false);
@@ -73,14 +68,24 @@ export function Timeline({ replay, onSeek }: { replay: NonNullable<CanvasSnapsho
       </select>
       <div className="cc-tl-track">
         <div className="cc-tl-ticks">
+          {/* Not tab stops (a long session has hundreds): the slider's PageUp / PageDown jump between turns instead. */}
           {usable && marks.map((m, i) => (
-            <button key={`${m.turnId}:${i}`} type="button" className="cc-tl-tick" aria-label={`第 ${i + 1} 轮`}
-              title={`第 ${i + 1} 轮 · ${formatClock(m.ms)}`}
+            <button key={`${m.turnId}:${i}`} type="button" className="cc-tl-tick" tabIndex={-1} aria-label={`第 ${i + 1} 轮`}
+              title={`第 ${i + 1} 轮 · ${formatClock(m.ms, range)}`}
               style={{ left: `${((m.ms - start) / span) * 100}%` }} onClick={() => onSeek(m.ms)} />
           ))}
         </div>
         <input type="range" className="cc-tl-slider" min={start} max={end} step={SLIDER_STEP} value={timeMs}
-          disabled={!usable} aria-label="回放时刻" aria-valuetext={clock}
+          disabled={!usable} aria-label="回放时刻" aria-valuetext={clock} aria-keyshortcuts="PageUp PageDown"
+          title="PageUp / PageDown：跳到上一轮 / 下一轮"
+          onKeyDown={(e) => {
+            if (e.key !== 'PageUp' && e.key !== 'PageDown') return;
+            e.preventDefault(); // replaces the slider's own large step
+            const target = adjacentMark(marks, timeMs, e.key === 'PageUp' ? -1 : 1);
+            if (target === null) return;
+            setPlaying(false);
+            onSeek(target);
+          }}
           onChange={(e) => {
             setPlaying(false);
             const v = Number(e.currentTarget.value);

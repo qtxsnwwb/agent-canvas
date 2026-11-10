@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest';
 import type { Graph, GraphEdge, GraphNode, NodeKind, Usage } from '@claude-canvas/shared';
-import { advance, formatTokens, graphAt, replayOverlay, replayRange, turnIndexAt, turnMarks, usageTotal } from '../src/canvas/replay';
+import { adjacentMark, advance, formatClock, formatTokens, graphAt, replayOverlay, replayRange, turnIndexAt, turnMarks, usageTotal } from '../src/canvas/replay';
 
 const EPOCH = Date.parse('2026-01-01T00:00:00Z');
 const iso = (tMs: number) => new Date(EPOCH + tMs).toISOString();
@@ -164,4 +164,31 @@ test('replayOverlay：回复只显示 token 两项；其他类型没有叠加行
   expect(replayOverlay(node('a', 'text', 0, { usage, durationMs: 100 }))).toBe('输入 15k · 输出 999');
   expect(replayOverlay(node('a', 'text', 0))).toBe('—');
   for (const k of ['prompt', 'thinking', 'system', 'unknown'] as const) expect(replayOverlay(node('a', k, 0, { usage }))).toBeNull();
+});
+
+test('adjacentMark：PageUp 跳到上一个轮次标记、PageDown 跳到下一个；正好在标记上时跳到相邻的那个；没有则 null', () => {
+  const marks = [{ turnId: 't1', ms: 100 }, { turnId: 't2', ms: 500 }, { turnId: 't3', ms: 900 }];
+  expect(adjacentMark(marks, 600, -1)).toBe(500);
+  expect(adjacentMark(marks, 600, 1)).toBe(900);
+  expect(adjacentMark(marks, 500, -1)).toBe(100);
+  expect(adjacentMark(marks, 500, 1)).toBe(900);
+  expect(adjacentMark(marks, 100, -1)).toBeNull();
+  expect(adjacentMark(marks, 50, -1)).toBeNull();
+  expect(adjacentMark(marks, 50, 1)).toBe(100);
+  expect(adjacentMark(marks, 900, 1)).toBeNull();
+  expect(adjacentMark([], 0, 1)).toBeNull();
+  // Order of the marks does not matter.
+  expect(adjacentMark([...marks].reverse(), 600, -1)).toBe(500);
+  expect(adjacentMark([...marks].reverse(), 600, 1)).toBe(900);
+});
+
+test('formatClock：回放范围起止在同一本地日期时只显示时刻，跨日时显示 MM-DD HH:mm:ss', () => {
+  const at = (d: number, h: number, m: number, s: number) => new Date(2026, 10, d, h, m, s).getTime();
+  const sameDay = { startMs: at(10, 0, 0, 1), endMs: at(10, 23, 59, 59) };
+  expect(formatClock(at(10, 9, 5, 7), sameDay)).toBe(new Date(at(10, 9, 5, 7)).toLocaleTimeString());
+  const twoDays = { startMs: at(10, 23, 0, 0), endMs: at(11, 1, 0, 0) };
+  expect(formatClock(at(10, 23, 30, 5), twoDays)).toBe('11-10 23:30:05');
+  expect(formatClock(at(11, 0, 4, 9), twoDays)).toBe('11-11 00:04:09');
+  expect(formatClock(at(10, 9, 5, 7), null)).toBe(new Date(at(10, 9, 5, 7)).toLocaleTimeString());
+  expect(formatClock(Number.NaN, twoDays)).toBe('');
 });
