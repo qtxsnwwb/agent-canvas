@@ -9,12 +9,17 @@ export interface MessageMeta {
   endTurn: boolean;
 }
 
+/** One recognized content block of an assistant record; `index` is its position in `message.content`. */
+export type AssistantBlock =
+  | { kind: 'thinking'; index: number; text: string; durationMs: number | null }
+  | { kind: 'text'; index: number; text: string }
+  | { kind: 'tool_use'; index: number; toolUseId: string; name: string; input: unknown };
+
 /** What a record means for the graph, independent of any session state. */
 export type Classified =
   | { kind: 'prompt'; text: string }
-  | { kind: 'thinking'; text: string; durationMs: number | null; meta: MessageMeta }
-  | { kind: 'text'; text: string; meta: MessageMeta }
-  | { kind: 'tool_use'; toolUseId: string; name: string; input: unknown; meta: MessageMeta }
+  /** Recognized blocks in content order (at least one); unknown block types are skipped. */
+  | { kind: 'assistant'; blocks: AssistantBlock[]; meta: MessageMeta }
   | { kind: 'tool_results'; results: { toolUseId: string; content: unknown; isError: boolean }[] }
   | { kind: 'compact' }
   | { kind: 'interrupt'; text: string } // "[Request interrupted by user…]": a system node, ends the turn
@@ -36,29 +41,37 @@ function messageMeta(message: Record<string, unknown>): MessageMeta {
   };
 }
 
+function classifyBlock(record: TranscriptRecord, block: unknown, index: number): AssistantBlock | null {
+  if (!isObject(block)) return null;
+  switch (block.type) {
+    case 'thinking':
+      if (typeof block.thinking !== 'string') return null;
+      return {
+        kind: 'thinking',
+        index,
+        text: block.thinking,
+        durationMs: typeof record.thinkingDurationMs === 'number' ? record.thinkingDurationMs : null,
+      };
+    case 'text':
+      return typeof block.text === 'string' ? { kind: 'text', index, text: block.text } : null;
+    case 'tool_use':
+      if (typeof block.id !== 'string' || typeof block.name !== 'string') return null;
+      return { kind: 'tool_use', index, toolUseId: block.id, name: block.name, input: block.input ?? {} };
+    default:
+      return null;
+  }
+}
+
 function classifyAssistant(record: TranscriptRecord): Classified {
   const message = record.message;
   if (!isObject(message) || !Array.isArray(message.content)) return { kind: 'malformed' };
-  const block: unknown = message.content[0];
-  if (!isObject(block)) return { kind: 'malformed' };
-  const meta = messageMeta(message);
-  switch (block.type) {
-    case 'thinking':
-      if (typeof block.thinking !== 'string') return { kind: 'malformed' };
-      return {
-        kind: 'thinking',
-        text: block.thinking,
-        durationMs: typeof record.thinkingDurationMs === 'number' ? record.thinkingDurationMs : null,
-        meta,
-      };
-    case 'text':
-      return typeof block.text === 'string' ? { kind: 'text', text: block.text, meta } : { kind: 'malformed' };
-    case 'tool_use':
-      if (typeof block.id !== 'string' || typeof block.name !== 'string') return { kind: 'malformed' };
-      return { kind: 'tool_use', toolUseId: block.id, name: block.name, input: block.input ?? {}, meta };
-    default:
-      return { kind: 'malformed' };
-  }
+  const blocks: AssistantBlock[] = [];
+  (message.content as unknown[]).forEach((block, i) => {
+    const b = classifyBlock(record, block, i);
+    if (b !== null) blocks.push(b);
+  });
+  if (blocks.length === 0) return { kind: 'malformed' };
+  return { kind: 'assistant', blocks, meta: messageMeta(message) };
 }
 
 /** A user record whose text starts with this is an interrupt marker, not a prompt. */
@@ -141,6 +154,6 @@ export function impliedStatus(c: Classified, isSubagent: boolean): SessionStatus
   if (c.kind === 'prompt') return 'running';
   if (c.kind === 'interrupt') return 'idle';
   // Activity implies running: a turn need not begin with a recognizable prompt record.
-  if (c.kind === 'thinking' || c.kind === 'text' || c.kind === 'tool_use') return c.meta.endTurn ? 'idle' : 'running';
+  if (c.kind === 'assistant') return c.meta.endTurn ? 'idle' : 'running';
   return null;
 }

@@ -295,3 +295,76 @@ test('迟到的非 end_turn assistant 记录不覆盖较新的状态', () => {
   ]);
   expect(statusesOf(changes).at(-1)).toBe('idle');
 });
+
+// ---- final fix wave, group 3: every content block of an assistant record ----
+
+const multi = (uuid: string, parentUuid: string | null, blocks: object[], over: { stopReason?: string; messageId?: string; thinkingDurationMs?: number } = {}) => {
+  const ev = assistantBlock(uuid, parentUuid, blocks[0] ?? {}, over);
+  if (ev.source !== 'transcript') throw new Error('unreachable');
+  const record = JSON.parse(ev.line) as { message: { content: object[] } };
+  record.message.content = blocks;
+  return { ...ev, line: JSON.stringify(record) };
+};
+
+test('多个内容块按顺序各成节点并依次相连', () => {
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x'),
+    multi('a1', 'u1', [
+      { type: 'thinking', thinking: 'hmm' },
+      { type: 'text', text: '先看看' },
+      { type: 'tool_use', id: 'tu1', name: 'Read', input: { file_path: '/x' } },
+    ], { thinkingDurationMs: 300 }),
+    toolResult('u2', 'a1', 'tu1', 'body'),
+    assistantBlock('a2', 'u2', { type: 'text', text: 'ok' }),
+  ]);
+  expect(Object.keys(graph.nodes)).toEqual(['u1', 'a1', 'a1#1', 'tool:tu1', 'a2']);
+  expect(graph.nodes.a1).toMatchObject({ kind: 'thinking', parentId: 'u1', durationMs: 300 });
+  expect(graph.nodes['a1#1']).toMatchObject({ kind: 'text', parentId: 'a1', summary: '先看看' });
+  expect(graph.nodes['tool:tu1']).toMatchObject({ kind: 'tool', parentId: 'a1#1', status: 'succeeded' });
+  expect(graph.nodes.a2!.parentId).toBe('tool:tu1');
+  expect(Object.keys(graph.edges)).toEqual(['u1->a1', 'a1->a1#1', 'a1#1->tool:tu1', 'tool:tu1->a2']);
+});
+
+test('同一记录里的多个 tool_use 按批次规则分叉', () => {
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x'),
+    multi('a1', 'u1', [
+      { type: 'text', text: '查两个' },
+      { type: 'tool_use', id: 'tA', name: 'Read', input: {} },
+      { type: 'tool_use', id: 'tB', name: 'Read', input: {} },
+    ], { messageId: 'm1' }),
+    toolResult('u2', 'a1', 'tA', 'a'),
+    toolResult('u3', 'u2', 'tB', 'b'),
+    assistantBlock('a2', 'u3', { type: 'text', text: 'done' }, { messageId: 'm2' }),
+  ]);
+  expect(graph.nodes['tool:tA']!.parentId).toBe('a1');
+  expect(graph.nodes['tool:tB']!.parentId).toBe('a1');
+  expect(graph.edges['a1->tool:tB']!.kind).toBe('fork');
+  expect(graph.edges['a1->tool:tA:fork']!.kind).toBe('fork');
+  expect(graph.nodes.a2!.parentId).toBe('tool:tB');
+  expect(graph.edges['tool:tA->a2']).toBeDefined();
+});
+
+test('未知类型的内容块被跳过；块 id 用内容数组下标', () => {
+  const { graph, unknown } = run(n, [
+    userPrompt('u1', null, 'x'),
+    multi('a1', 'u1', [{ type: 'server_tool_use', id: 'z' }, { type: 'text', text: 'hi' }, { type: 'redacted_thinking' }, { type: 'text', text: 'there' }]),
+  ]);
+  expect(Object.keys(graph.nodes)).toEqual(['u1', 'a1#1', 'a1#3']);
+  expect(graph.nodes['a1#1']!.parentId).toBe('u1');
+  expect(graph.nodes['a1#3']!.parentId).toBe('a1#1');
+  expect(unknown).toEqual([]);
+});
+
+test('没有可识别内容块的 assistant 记录仍是 unknown 节点', () => {
+  const { graph } = run(n, [userPrompt('u1', null, 'x'), multi('a1', 'u1', [{ type: 'server_tool_use' }, { type: 'thinking' }])]);
+  expect(graph.nodes.a1).toMatchObject({ kind: 'unknown', parentId: 'u1' });
+});
+
+test('多块记录的 end_turn 把会话置为 idle', () => {
+  const { changes } = run(n, [
+    userPrompt('u1', null, 'x'),
+    multi('a1', 'u1', [{ type: 'thinking', thinking: '' }, { type: 'text', text: 'done' }], { stopReason: 'end_turn' }),
+  ]);
+  expect(statusesOf(changes).at(-1)).toBe('idle');
+});

@@ -11,7 +11,14 @@ import {
 import type { RawEvent } from '../store/store.js';
 import { parseHook, type HookDescription, type HookNodeEffect } from './hooks.js';
 import { summarize } from './summary.js';
-import { classifyRecord, impliedStatus, type Classified, type MessageMeta, type TranscriptRecord } from './transcript.js';
+import {
+  classifyRecord,
+  impliedStatus,
+  type AssistantBlock,
+  type Classified,
+  type MessageMeta,
+  type TranscriptRecord,
+} from './transcript.js';
 
 export interface NormalizeResult {
   changes: Change[];
@@ -361,24 +368,8 @@ export class Normalizer {
           detail: { text: classified.text },
         });
         break;
-      case 'thinking':
-        this.addNode(state, record, agentId, changes, {
-          kind: 'thinking',
-          title: 'Thinking',
-          summary: summarize(classified.text),
-          durationMs: classified.durationMs,
-          meta: classified.meta,
-          detail: { text: classified.text },
-        });
-        break;
-      case 'text':
-        this.addNode(state, record, agentId, changes, {
-          kind: 'text',
-          title: 'Text',
-          summary: summarize(classified.text),
-          meta: classified.meta,
-          detail: { text: classified.text },
-        });
+      case 'assistant':
+        this.applyAssistant(state, record, agentId, classified, changes);
         break;
       case 'interrupt':
         this.addNode(state, record, agentId, changes, {
@@ -398,11 +389,56 @@ export class Normalizer {
           detail: { raw: record },
         });
         break;
-      case 'tool_use':
-        this.applyToolUse(state, record, agentId, classified, changes);
-        break;
     }
     return { changes };
+  }
+
+  /**
+   * Every recognized block in content order. Block 0 keeps the record uuid as its id, block i >= 1 gets `<uuid>#<i>`;
+   * tool_use blocks are always `tool:<id>`. Block i hangs off block i-1 (batch rules still apply to tool_use).
+   */
+  private applyAssistant(
+    state: SessionState,
+    record: TranscriptRecord,
+    agentId: string | null,
+    c: Extract<Classified, { kind: 'assistant' }>,
+    changes: Change[],
+  ): void {
+    let prev: string | null = null;
+    let first = true;
+    for (const b of c.blocks) {
+      const parentId = first ? this.resolveParent(state, record) : prev;
+      first = false;
+      const id = b.index === 0 ? record.uuid : `${record.uuid}#${b.index}`;
+      switch (b.kind) {
+        case 'thinking':
+          prev = this.addNode(state, record, agentId, changes, {
+            id,
+            parentId,
+            kind: 'thinking',
+            title: 'Thinking',
+            summary: summarize(b.text),
+            durationMs: b.durationMs,
+            meta: c.meta,
+            detail: { text: b.text },
+          });
+          break;
+        case 'text':
+          prev = this.addNode(state, record, agentId, changes, {
+            id,
+            parentId,
+            kind: 'text',
+            title: 'Text',
+            summary: summarize(b.text),
+            meta: c.meta,
+            detail: { text: b.text },
+          });
+          break;
+        case 'tool_use':
+          prev = this.applyToolUse(state, record, agentId, b, c.meta, parentId, changes);
+          break;
+      }
+    }
   }
 
   private stateFor(sessionId: string, record: TranscriptRecord, projectId: string, changes: Change[]): SessionState {
@@ -505,13 +541,14 @@ export class Normalizer {
     record: TranscriptRecord,
     agentId: string | null,
     id: string,
+    parentId: string | null,
   ): GraphNode {
     return {
       id,
       sessionId: state.session.id,
       turnId: agentId === null ? (state.turnByAgent.get('') ?? null) : null,
       agentId,
-      parentId: this.resolveParent(state, record),
+      parentId,
       kind: 'unknown',
       status: null,
       timestamp: str(record.timestamp) ?? state.session.lastActivityAt,
@@ -540,10 +577,16 @@ export class Normalizer {
       durationMs?: number | null;
       meta?: MessageMeta;
       systemSubtype?: string;
+      /** Defaults to the record uuid. */
+      id?: string;
+      /** Defaults to the record's resolved parentUuid chain. */
+      parentId?: string | null;
     },
-  ): void {
+  ): string {
+    const id = spec.id ?? record.uuid;
+    const parentId = spec.parentId !== undefined ? spec.parentId : this.resolveParent(state, record);
     const node: GraphNode = {
-      ...this.baseNode(state, record, agentId, record.uuid),
+      ...this.baseNode(state, record, agentId, id, parentId),
       kind: spec.kind,
       title: spec.title,
       summary: spec.summary,
@@ -552,7 +595,7 @@ export class Normalizer {
       usage: spec.meta?.usage ?? null,
       systemSubtype: spec.systemSubtype ?? null,
     };
-    this.emitNode(state, record.uuid, node, spec.detail, agentId, false, changes);
+    return this.emitNode(state, record.uuid, node, spec.detail, agentId, false, changes);
   }
 
   private emitNode(
@@ -563,7 +606,7 @@ export class Normalizer {
     agentId: string | null,
     isTool: boolean,
     changes: Change[],
-  ): void {
+  ): string {
     const placed = this.placeInBatch(state, agentId, created, isTool);
     const node = placed.node;
     state.nodes.set(node.id, node);
@@ -571,6 +614,7 @@ export class Normalizer {
     changes.push({ type: 'node_added', node, detail });
     this.emitPlacementEdges(state, placed, true, changes);
     this.registerFirstNode(state, agentId, node.id, changes);
+    return node.id;
   }
 
   /**
@@ -636,13 +680,16 @@ export class Normalizer {
     });
   }
 
+  /** Returns the tool node id. */
   private applyToolUse(
     state: SessionState,
     record: TranscriptRecord,
     agentId: string | null,
-    c: Extract<Classified, { kind: 'tool_use' }>,
+    c: Extract<AssistantBlock, { kind: 'tool_use' }>,
+    meta: MessageMeta,
+    parentId: string | null,
     changes: Change[],
-  ): void {
+  ): string {
     const id = `tool:${c.toolUseId}`;
     const summary = summarize(c.input);
     state.toolInputs.set(id, c.input);
@@ -650,14 +697,14 @@ export class Normalizer {
     const existing = state.nodes.get(id);
     if (existing) {
       // A hook created this node first; the transcript record now confirms it. status is left alone.
-      const base = this.baseNode(state, record, agentId, id);
-      const placed = this.placeInBatch(state, agentId, { ...base, messageId: c.meta.messageId }, true);
+      const base = this.baseNode(state, record, agentId, id, parentId);
+      const placed = this.placeInBatch(state, agentId, { ...base, messageId: meta.messageId }, true);
       const pending = state.agentMetas.get(c.toolUseId);
       const patch: Partial<GraphNode> = {
         confirmed: true,
         parentId: placed.node.parentId,
         turnId: base.turnId,
-        messageId: c.meta.messageId,
+        messageId: meta.messageId,
       };
       // An agent meta's description already owns the summary of a dispatch node.
       if (!pending) patch.summary = summary;
@@ -667,22 +714,23 @@ export class Normalizer {
       this.emitPlacementEdges(state, placed, placed.node.parentId !== null && placed.node.parentId !== existing.parentId, changes);
       this.registerFirstNode(state, agentId, id, changes);
       if (pending && existing.agentId !== pending.agentId) this.applyAgentMeta(state, pending, changes);
-      return;
+      return id;
     }
     const node: GraphNode = {
-      ...this.baseNode(state, record, agentId, id),
+      ...this.baseNode(state, record, agentId, id, parentId),
       kind: c.name === 'Agent' || c.name === 'Task' ? 'subagent' : 'tool',
       status: 'running',
       title: c.name,
       summary,
       toolName: c.name,
       toolUseId: c.toolUseId,
-      messageId: c.meta.messageId,
-      usage: c.meta.usage,
+      messageId: meta.messageId,
+      usage: meta.usage,
     };
     this.emitNode(state, record.uuid, node, { input: c.input }, agentId, true, changes);
-    const meta = state.agentMetas.get(c.toolUseId);
-    if (meta) this.applyAgentMeta(state, meta, changes);
+    const agentMeta = state.agentMetas.get(c.toolUseId);
+    if (agentMeta) this.applyAgentMeta(state, agentMeta, changes);
+    return id;
   }
 
   private applyToolResults(
