@@ -87,6 +87,10 @@
 .cc-expand { flex: none; color: #2563eb; font-size: 11px; }
 .cc-failed { color: #dc2626; font-weight: 600; }
 
+/* Folded middle of a long turn. */
+.cc-earlier { background: #f1f5f9; border-style: dashed; border-left-style: solid; color: #475569; cursor: default; }
+.cc-earlier .cc-fold { height: 20px; }
+
 /* Turn header strip at the top of an expanded turn's box. */
 .cc-turn-header {
   box-sizing: border-box;

@@ -29,6 +29,7 @@ export interface CanvasProps {
   selectedId: string | null;
   onSelect(id: string | null): void;
   onToggleTurn(turnKey: string): void;
+  onShowFullTurn(turnKey: string): void;
 }
 
 const EDGE_COLOR = { sequence: '#94a3b8', fork: '#6366f1' } as const;
@@ -109,7 +110,7 @@ function useFlowNodes(snapshot: CanvasSnapshot, selectedId: string | null): Flow
             data: { node: vn.node, innerCount: vn.innerCount },
             handles: handlesFor(width, height), draggable: false, connectable: false,
           };
-      } else {
+      } else if (vn.type === 'turn_summary') {
         n = old && old.type === 'turnSummary' && sameSummary(old.data.summary, vn.summary)
           && samePos(old.position, position) && old.selected === selected && old.width === width && old.height === height
           ? old
@@ -117,6 +118,15 @@ function useFlowNodes(snapshot: CanvasSnapshot, selectedId: string | null): Flow
             id: vn.id, type: 'turnSummary', position, width, height, selected,
             data: { summary: vn.summary },
             handles: handlesFor(width, height), draggable: false, connectable: false,
+          };
+      } else {
+        n = old && old.type === 'earlier' && old.data.count === vn.count && old.data.toolCount === vn.toolCount
+          && old.data.failedCount === vn.failedCount && samePos(old.position, position) && old.width === width && old.height === height
+          ? old
+          : {
+            id: vn.id, type: 'earlier', position, width, height,
+            data: { turnKey: vn.turnKey, count: vn.count, toolCount: vn.toolCount, failedCount: vn.failedCount },
+            handles: handlesFor(width, height), selectable: false, focusable: false, draggable: false, connectable: false,
           };
       }
       next.set(vn.id, n);
@@ -170,6 +180,7 @@ function useFlowEdges(snapshot: CanvasSnapshot): Edge[] {
 function miniMapColor(n: FlowNode): string {
   if (n.type === 'graphNode') return nodeColor(n.data.node);
   if (n.type === 'turnSummary') return summaryColor(n.data.summary);
+  if (n.type === 'earlier') return '#cbd5e1';
   return 'transparent';
 }
 
@@ -228,7 +239,7 @@ function useFollow(snapshot: CanvasSnapshot) {
   };
 }
 
-function CanvasInner({ snapshot, selectedId, onSelect, onToggleTurn }: CanvasProps) {
+function CanvasInner({ snapshot, selectedId, onSelect, onToggleTurn, onShowFullTurn }: CanvasProps) {
   const nodes = useFlowNodes(snapshot, selectedId);
   const edges = useFlowEdges(snapshot);
   const follow = useFollow(snapshot);
@@ -236,7 +247,12 @@ function CanvasInner({ snapshot, selectedId, onSelect, onToggleTurn }: CanvasPro
   // Stable identity for the context value; the latest callback is read through the ref.
   const toggleRef = useRef(onToggleTurn);
   toggleRef.current = onToggleTurn;
-  const actions = useMemo(() => ({ toggleTurn: (key: string) => toggleRef.current(key) }), []);
+  const showFullRef = useRef(onShowFullTurn);
+  showFullRef.current = onShowFullTurn;
+  const actions = useMemo(() => ({
+    toggleTurn: (key: string) => toggleRef.current(key),
+    showFullTurn: (key: string) => showFullRef.current(key),
+  }), []);
 
   return (
     <CanvasActions.Provider value={actions}>

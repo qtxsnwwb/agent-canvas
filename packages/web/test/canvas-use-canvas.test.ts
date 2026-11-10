@@ -254,3 +254,34 @@ test('dispose 后不再通知订阅者，也不再请求布局', async () => {
   expect(layout.reqs).toHaveLength(1);
   expect(model.getSnapshot().positions).toEqual({});
 });
+
+test('showFullTurn 立即重建并显示长轮次的全部节点；把轮次折叠再展开后恢复为折叠更早节点', async () => {
+  const nodes = Array.from({ length: 61 }, (_, i) => node(`n${i}`, 't1', i));
+  const live = fakeLive(graph(nodes));
+  const layout = fakeLayout();
+  const model = createCanvasModel(live, layout.client);
+  layout.resolveAll();
+  await flush();
+  const turn = () => model.getSnapshot().view.turns[0]!;
+  expect(turn().foldedEarlier).toBe(21); // first node is not a prompt
+  expect(model.getSnapshot().view.nodes.has('earlier:t1')).toBe(true);
+
+  const before = layout.reqs.length;
+  model.showFullTurn('t1');
+  expect(turn().foldedEarlier).toBe(0); // no timer advanced
+  expect(turn().nodeIds).toHaveLength(61);
+  expect(model.getSnapshot().view.nodes.has('earlier:t1')).toBe(false);
+  await flush();
+  expect(layout.reqs.length).toBeGreaterThan(before);
+  layout.resolveAll();
+  await flush();
+
+  model.toggleTurn('t1'); // fold the whole turn
+  expect(turn().collapsed).toBe(true);
+  layout.resolveAll();
+  await flush();
+  model.toggleTurn('t1'); // and expand it again: back to the folded-earlier default
+  expect(turn().collapsed).toBe(false);
+  expect(turn().foldedEarlier).toBe(21);
+  model.dispose();
+});

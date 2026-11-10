@@ -17,6 +17,8 @@ export interface CanvasModel {
   subscribe(fn: () => void): () => void;
   /** Flips the turn's current expanded/collapsed state and records it as an override. */
   toggleTurn(turnKey: string): void;
+  /** Shows every node of a long expanded turn (instead of folding its middle into an `earlier` node). */
+  showFullTurn(turnKey: string): void;
   dispose(): void;
 }
 
@@ -50,6 +52,7 @@ function pick<T>(obj: Record<string, T>, keep: (key: string) => boolean): Record
  */
 export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscribe'>, layout: LayoutClient): CanvasModel {
   const overrides = new Map<string, boolean>();
+  const fullTurns = new Set<string>();
   const listeners = new Set<() => void>();
   let snapshot: CanvasSnapshot = EMPTY_SNAPSHOT;
   let disposed = false;
@@ -67,7 +70,7 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
   const rebuild = (): void => {
     if (disposed) return;
     const gen = ++generation;
-    const view = buildView(live.getGraph(), overrides);
+    const view = buildView(live.getGraph(), overrides, fullTurns);
     const inView = (id: string): boolean => view.nodes.has(id);
     const turnKeys = new Set(view.turns.map((t) => t.key));
     publish({
@@ -118,7 +121,14 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
       const turn = snapshot.view.turns.find((t) => t.key === turnKey);
       if (!turn) return;
       overrides.set(turnKey, turn.collapsed); // value = expanded: a collapsed turn becomes expanded and vice versa
+      if (!turn.collapsed) fullTurns.delete(turnKey); // folding resets "show all": re-expanding folds the middle again
       throttle.cancel(); // this rebuild also picks up any pending graph change
+      rebuild();
+    },
+    showFullTurn(turnKey) {
+      if (disposed || fullTurns.has(turnKey)) return;
+      fullTurns.add(turnKey);
+      throttle.cancel();
       rebuild();
     },
     dispose() {
@@ -131,7 +141,7 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
 }
 
 /** One model and one layout worker per live session; both are disposed when the page unmounts. */
-export function useCanvas(live: LiveSession): CanvasSnapshot & { toggleTurn(turnKey: string): void } {
+export function useCanvas(live: LiveSession): CanvasSnapshot & Pick<CanvasModel, 'toggleTurn' | 'showFullTurn'> {
   const [model, setModel] = useState<CanvasModel | null>(null);
   useEffect(() => {
     const client = createLayoutClient(createBrowserLayoutWorker);
@@ -148,6 +158,7 @@ export function useCanvas(live: LiveSession): CanvasSnapshot & { toggleTurn(turn
   const getSnapshot = useCallback(() => (model ? model.getSnapshot() : EMPTY_SNAPSHOT), [model]);
   const snapshot = useSyncExternalStore(subscribe, getSnapshot);
   const toggleTurn = useCallback((turnKey: string) => model?.toggleTurn(turnKey), [model]);
+  const showFullTurn = useCallback((turnKey: string) => model?.showFullTurn(turnKey), [model]);
   // Same object until the snapshot changes, so consumers can memoize on it.
-  return useMemo(() => ({ ...snapshot, toggleTurn }), [snapshot, toggleTurn]);
+  return useMemo(() => ({ ...snapshot, toggleTurn, showFullTurn }), [snapshot, toggleTurn, showFullTurn]);
 }

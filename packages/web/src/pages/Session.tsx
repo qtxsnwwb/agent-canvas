@@ -20,7 +20,7 @@ function SessionCanvas({ live }: { live: LiveSession }) {
     <>
       {canvas.layoutError !== null && <div className="canvas-error">布局失败：{canvas.layoutError}</div>}
       <div className="canvas-area">
-        <Canvas snapshot={canvas} selectedId={selected} onSelect={setSelectedId} onToggleTurn={canvas.toggleTurn} />
+        <Canvas snapshot={canvas} selectedId={selected} onSelect={setSelectedId} onToggleTurn={canvas.toggleTurn} onShowFullTurn={canvas.showFullTurn} />
         {selectedNode !== null && <Drawer sessionId={live.getSession().id} node={selectedNode} onClose={closeDrawer} />}
         {empty && <div className="canvas-empty muted">暂无节点</div>}
       </div>

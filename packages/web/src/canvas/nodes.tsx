@@ -48,10 +48,12 @@ export function isActive(status: NodeStatus | null): boolean {
 export type GraphFlowNode = Node<{ node: GraphNode; innerCount: number }, 'graphNode'>;
 export type SummaryFlowNode = Node<{ summary: TurnSummary }, 'turnSummary'>;
 export type HeaderFlowNode = Node<{ turnKey: string; startedAt: string; nodeCount: number }, 'turnHeader'>;
-export type FlowNode = GraphFlowNode | SummaryFlowNode | HeaderFlowNode;
+export type EarlierFlowNode = Node<{ turnKey: string; count: number; toolCount: number; failedCount: number }, 'earlier'>;
+export type FlowNode = GraphFlowNode | SummaryFlowNode | HeaderFlowNode | EarlierFlowNode;
 
+export interface CanvasActionsValue { toggleTurn(turnKey: string): void; showFullTurn(turnKey: string): void }
 /** Callbacks for controls inside nodes; a context keeps them out of node data (which must stay stable). */
-export const CanvasActions = createContext<{ toggleTurn(turnKey: string): void }>({ toggleTurn() {} });
+export const CanvasActions = createContext<CanvasActionsValue>({ toggleTurn() {}, showFullTurn() {} });
 
 function boxStyle(width: number | undefined, height: number | undefined, color: string): CSSProperties {
   return { width, height, ['--cc-color' as string]: color };
@@ -146,6 +148,26 @@ function TurnSummaryView({ data, width, height, selected }: NodeProps<SummaryFlo
   );
 }
 
+function EarlierView({ data, width, height }: NodeProps<EarlierFlowNode>) {
+  const { showFullTurn } = useContext(CanvasActions);
+  const onShowAll = (e: MouseEvent): void => {
+    e.stopPropagation(); // not a node click
+    showFullTurn(data.turnKey);
+  };
+  return (
+    <div className="cc-node cc-earlier" style={boxStyle(width, height, SUMMARY_COLOR)}>
+      <Handles />
+      <div className="cc-row">
+        <span className="cc-ellipsis cc-grow">
+          更早的 {data.count} 个节点 · {data.toolCount} 次工具调用
+          {data.failedCount > 0 && <span className="cc-failed"> · {data.failedCount} 个失败</span>}
+        </span>
+        <button type="button" className="cc-fold nodrag nopan" onClick={onShowAll}>展开全部</button>
+      </div>
+    </div>
+  );
+}
+
 function formatClock(iso: string): string {
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString();
@@ -173,4 +195,5 @@ export const nodeTypes = {
   graphNode: memo(GraphNodeView),
   turnSummary: memo(TurnSummaryView),
   turnHeader: memo(TurnHeaderView),
+  earlier: memo(EarlierView),
 } satisfies NodeTypes;
