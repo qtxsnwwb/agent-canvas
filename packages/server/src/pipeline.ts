@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { Change, SeqChange } from '@claude-canvas/shared';
 import type { Config } from './config.js';
 import { Normalizer } from './normalize/normalizer.js';
+import { NORMALIZER_VERSION } from './normalize/version.js';
 import { classifyPath, classifyRelPath, relPath, type TranscriptFile } from './sources/transcript/paths.js';
 import { readNewLines } from './sources/transcript/reader.js';
 import type { RawEvent, Store, StoredRawEvent } from './store/store.js';
@@ -15,6 +16,10 @@ const HYDRATE_SLICE_MS = 8;
 /** Rows read from the store per hydration page. */
 const HYDRATE_PAGE_ROWS = 200;
 const UNKNOWN_PROJECT = 'unknown';
+const REBUILD_PROGRESS_EVERY = 100;
+/** meta keys */
+export const REBUILD_FLAG = 'rebuild_in_progress';
+export const NORMALIZER_VERSION_KEY = 'normalizer_version';
 
 type Listener = (changes: SeqChange[]) => void;
 interface FileLock {
@@ -76,9 +81,7 @@ export class Pipeline {
 
   /** Number of sessions currently held in the Normalizer's memory. */
   loadedSessionCount(): number {
-    let n = 0;
-    for (const id of this.lastTouch.keys()) if (this.normalizer.hasSession(id)) n += 1;
-    return n;
+    return this.normalizer.sessionCount();
   }
 
   /** Files whose last ingest attempt failed (unreadable, locked, ...). */
@@ -209,18 +212,53 @@ export class Pipeline {
   }
 
   /** Re-derives everything from the raw log. */
-  rebuild(): void {
+  /**
+   * Re-derives everything from the raw log, one session at a time: each session's raw rows are replayed page by page
+   * through a fresh Normalizer and committed in that session's own transaction, then its state is released, so peak
+   * memory is bounded by the largest session. `rebuild_in_progress` (meta) is set before the derived tables are
+   * cleared and removed only after the last session and the normalizer version are written, so an interrupted
+   * rebuild is detected and redone. unknown_stat is cleared and recomputed. `progress(done, total)` is called every
+   * REBUILD_PROGRESS_EVERY sessions and after the last one.
+   */
+  rebuild(progress?: (done: number, total: number) => void): void {
     if (this.active.size > 0 || this.tails.size > 0) throw new Error('rebuild refused: ingest work is pending (await idle() first)');
+    this.store.setMeta(REBUILD_FLAG, '1');
     this.store.clearDerived();
     this.normalizer = new Normalizer();
-    const changes: Change[] = [];
-    for (const id of this.store.allSessionIdsInRaw()) {
-      for (const ev of this.store.rawForSession(id)) changes.push(...this.replayOne(ev));
-    }
-    this.commit(changes);
-    // Sessions are re-hydrated on demand; leave nothing loaded-but-untracked.
-    this.normalizer = new Normalizer();
     this.lastTouch.clear();
+    const ids = this.store.allSessionIdsInRaw();
+    try {
+      ids.forEach((id, i) => {
+        this.normalizer = new Normalizer();
+        const changes: Change[] = [];
+        const unknown: [string, string][] = [];
+        let after = 0;
+        for (;;) {
+          const page = this.store.rawForSessionAfter(id, after, HYDRATE_PAGE_ROWS);
+          if (page.length === 0) break;
+          for (const ev of page) {
+            const out = this.normalizer.apply(ev, this.projectOf(ev));
+            changes.push(...out.changes);
+            if (out.unknownRecordType !== undefined && ev.source !== 'meta') {
+              unknown.push([out.unknownRecordType, ev.source === 'transcript' ? ev.line : ev.payload]);
+            }
+          }
+          after = page[page.length - 1]!.ingestId;
+        }
+        this.atomically(null, () => {
+          for (const [type, sample] of unknown) this.store.bumpUnknown(type, sample);
+          return changes;
+        });
+        this.normalizer = new Normalizer(); // release this session before the next one
+        if ((i + 1) % REBUILD_PROGRESS_EVERY === 0 || i + 1 === ids.length) progress?.(i + 1, ids.length);
+      });
+    } finally {
+      // Sessions are re-hydrated on demand; leave nothing loaded-but-untracked.
+      this.normalizer = new Normalizer();
+      this.lastTouch.clear();
+    }
+    this.store.setMeta(NORMALIZER_VERSION_KEY, String(NORMALIZER_VERSION));
+    this.store.deleteMeta(REBUILD_FLAG);
     this.markDeletedSources();
   }
 
@@ -437,10 +475,12 @@ export class Pipeline {
   }
 
   /** Derives the project from what is stored (relative path or the hook's stored projectId), never from projectsDir. */
+  private projectOf(ev: StoredRawEvent): string {
+    return ev.source === 'hook' ? (ev.projectId ?? UNKNOWN_PROJECT) : (classifyRelPath(ev.file)?.projectId ?? UNKNOWN_PROJECT);
+  }
+
   private replayOne(ev: StoredRawEvent): Change[] {
-    const projectId =
-      ev.source === 'hook' ? (ev.projectId ?? UNKNOWN_PROJECT) : (classifyRelPath(ev.file)?.projectId ?? UNKNOWN_PROJECT);
-    return this.normalizer.apply(ev, projectId).changes;
+    return this.normalizer.apply(ev, this.projectOf(ev)).changes;
   }
 
   private drop(sessionId: string): void {

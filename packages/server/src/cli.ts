@@ -6,9 +6,11 @@ import { parseArgs } from 'node:util';
 import type { AddressInfo } from 'node:net';
 import { buildServer } from './api/server.js';
 import { loadConfig, type Config } from './config.js';
-import { Pipeline } from './pipeline.js';
+import { acquireLock } from './lock.js';
+import { NORMALIZER_VERSION } from './normalize/version.js';
+import { NORMALIZER_VERSION_KEY, Pipeline, REBUILD_FLAG } from './pipeline.js';
 import { startWatcher } from './sources/transcript/watcher.js';
-import { openStore } from './store/store.js';
+import { openStore, type Store } from './store/store.js';
 
 export interface Running {
   url: string;
@@ -32,31 +34,69 @@ function resolveConfig(overrides: Partial<Config>): Config {
   return config;
 }
 
-export async function start(overrides: Partial<Config> = {}): Promise<Running> {
+/**
+ * Why the derived tables must be rebuilt before serving, or null. A brand-new empty database just records the
+ * current normalizer version.
+ */
+export function rebuildReason(store: Store): string | null {
+  if (store.getMeta(REBUILD_FLAG) !== null) return 'interrupted rebuild';
+  const stored = store.getMeta(NORMALIZER_VERSION_KEY);
+  if (stored === null) {
+    if (store.hasRawEvents()) return 'no recorded normalizer version';
+    store.setMeta(NORMALIZER_VERSION_KEY, String(NORMALIZER_VERSION));
+    return null;
+  }
+  return stored === String(NORMALIZER_VERSION) ? null : `normalizer version ${stored} -> ${NORMALIZER_VERSION}`;
+}
+
+export interface StartOptions {
+  /** Receives stdout lines (the rebuild notice). */
+  log?: (line: string) => void;
+  /** Rebuild progress, when a rebuild runs before listening. */
+  progress?: (done: number, total: number) => void;
+}
+
+export async function start(overrides: Partial<Config> = {}, options: StartOptions = {}): Promise<Running> {
   const config = resolveConfig(overrides);
-  const store = openStore(config.dbPath);
-  const pipeline = new Pipeline(store, config);
-  const app = buildServer({ store, pipeline, config });
+  const lock = acquireLock(config.dataDir);
+  let store: Store | null = null;
+  let app: ReturnType<typeof buildServer> | null = null;
   let watcher: ReturnType<typeof startWatcher> | null = null;
+  let pipeline: Pipeline;
   try {
+    store = openStore(config.dbPath);
+    pipeline = new Pipeline(store, config);
+    const reason = rebuildReason(store);
+    if (reason !== null) {
+      options.log?.(`claude-canvas rebuilding derived data (reason: ${reason})`);
+      pipeline.rebuild(options.progress);
+    }
+    app = buildServer({ store, pipeline, config });
     await app.listen({ port: config.port, host: config.host });
     // The initial scan runs in the background; the server is already answering requests.
     watcher = startWatcher(pipeline, config);
   } catch (err) {
-    await app.close().catch(() => undefined);
-    store.close();
+    await app?.close().catch(() => undefined);
+    store?.close();
+    lock.release();
     throw err;
   }
   const url = `http://${config.host}:${(app.server.address() as AddressInfo).port}`;
   let closing: Promise<void> | null = null;
+  const openedStore = store;
+  const server = app;
   return {
     url,
     close() {
       closing ??= (async () => {
-        await watcher!.close();
-        await app.close();
-        await pipeline.idle();
-        store.close();
+        try {
+          await watcher!.close();
+          await server.close();
+          await pipeline.idle();
+          openedStore.close();
+        } finally {
+          lock.release();
+        }
       })();
       return closing;
     },
@@ -64,13 +104,18 @@ export async function start(overrides: Partial<Config> = {}): Promise<Running> {
 }
 
 /** Re-derives all graph data from the raw log with a fresh store and pipeline (no watcher, nothing pending). */
-export function rebuild(overrides: Partial<Config> = {}): void {
+export function rebuild(overrides: Partial<Config> = {}, options: { progress?: (done: number, total: number) => void } = {}): void {
   const config = resolveConfig(overrides);
-  const store = openStore(config.dbPath);
+  const lock = acquireLock(config.dataDir);
   try {
-    new Pipeline(store, config).rebuild();
+    const store = openStore(config.dbPath);
+    try {
+      new Pipeline(store, config).rebuild(options.progress);
+    } finally {
+      store.close();
+    }
   } finally {
-    store.close();
+    lock.release();
   }
 }
 
@@ -85,7 +130,10 @@ async function main(argv: string[]): Promise<number> {
         if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error(`invalid --port: ${values.port}`);
         overrides.port = port;
       }
-      const app = await start(overrides);
+      const app = await start(overrides, {
+        log: (line) => console.log(line),
+        progress: (done, total) => process.stderr.write(`rebuild: ${done}/${total} sessions\n`),
+      });
       console.log(`claude-canvas listening on ${app.url}`);
       process.once('SIGINT', () => {
         void app.close().then(
@@ -97,7 +145,7 @@ async function main(argv: string[]): Promise<number> {
     }
     if (command === 'rebuild') {
       parseArgs({ args: rest, options: {}, allowPositionals: false });
-      rebuild();
+      rebuild({}, { progress: (done, total) => process.stderr.write(`rebuild: ${done}/${total} sessions\n`) });
       console.log('claude-canvas rebuild complete');
       return 0;
     }

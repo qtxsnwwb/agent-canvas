@@ -1,5 +1,5 @@
-/** Tables holding data derived from raw events; cleared by Store.clearDerived(). */
-export const DERIVED_TABLES = ['session', 'node', 'node_detail', 'edge', 'change_log'] as const;
+/** Tables holding data derived from raw events; cleared by Store.clearDerived() (rebuild recomputes them). */
+export const DERIVED_TABLES = ['session', 'node', 'node_detail', 'edge', 'change_log', 'unknown_stat'] as const;
 
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS raw_event (

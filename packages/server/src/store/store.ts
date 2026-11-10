@@ -77,9 +77,14 @@ export interface Store {
   /** Payload of the most recent meta raw event for that file, or null. */
   latestMeta(file: string): string | null;
   allSessionIdsInRaw(): string[];
-  /** Clears derived tables and the change log; keeps raw_event and file_offset. */
+  /** Clears derived tables, the change log and unknown_stat; keeps raw_event, file_offset and meta. */
   clearDerived(): void;
   bumpUnknown(recordType: string, sample: string): void;
+  getMeta(key: string): string | null;
+  setMeta(key: string, value: string): void;
+  deleteMeta(key: string): void;
+  /** True when raw_event holds at least one row. */
+  hasRawEvents(): boolean;
   /** Random id generated when the database file was created; stable across restarts and rebuilds. */
   epoch(): string;
   /** Latest receivedAt of any stored hook event (kept in `meta`, no raw_event scan). */
@@ -222,6 +227,9 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   const selectMeta = db.prepare(`SELECT value FROM meta WHERE key = ?`).pluck();
   db.prepare(`INSERT OR IGNORE INTO meta (key, value) VALUES ('epoch', ?)`).run(randomUUID());
   const epoch = selectMeta.get('epoch') as string;
+  const upsertMeta = db.prepare(`INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`);
+  const deleteMeta = db.prepare(`DELETE FROM meta WHERE key = ?`);
+  const selectAnyRaw = db.prepare(`SELECT 1 FROM raw_event LIMIT 1`).pluck();
   const upsertLaterMeta = db.prepare(
     `INSERT INTO meta (key, value) VALUES (?, ?)
      ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE excluded.value > meta.value`,
@@ -468,6 +476,14 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     },
     lastHookAt,
     epoch: () => epoch,
+    getMeta: (key) => (selectMeta.get(key) as string | undefined) ?? null,
+    setMeta(key, value) {
+      upsertMeta.run(key, value);
+    },
+    deleteMeta(key) {
+      deleteMeta.run(key);
+    },
+    hasRawEvents: () => selectAnyRaw.get() !== undefined,
     diagnostics() {
       return {
         unknownRecords: (selectUnknown.all() as { record_type: string; count: number; sample: string }[]).map((r) => ({

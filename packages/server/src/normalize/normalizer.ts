@@ -109,6 +109,11 @@ export class Normalizer {
     return this.sessions.has(sessionId);
   }
 
+  /** Number of sessions held in memory. */
+  sessionCount(): number {
+    return this.sessions.size;
+  }
+
   /** Number of tool inputs held in memory for a session (introspection for tests). */
   toolInputCount(sessionId: string): number {
     return this.sessions.get(sessionId)?.toolInputs.size ?? 0;

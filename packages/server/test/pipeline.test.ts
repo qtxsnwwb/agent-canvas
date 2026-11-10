@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import type { GraphSnapshot, SeqChange } from '@claude-canvas/shared';
 import { loadConfig, type Config } from '../src/config.js';
+import { NORMALIZER_VERSION } from '../src/normalize/version.js';
 import { Pipeline } from '../src/pipeline.js';
 import { startWatcher } from '../src/sources/transcript/watcher.js';
 import { openStore, type RawEvent, type Store } from '../src/store/store.js';
@@ -503,5 +504,61 @@ describe('pipeline', () => {
     } finally {
       s.close();
     }
+  });
+
+  // ---- final fix wave, group 8: per-session paged rebuild ----
+
+  test('rebuild 逐个会话进行，内存里最多只有一个会话的状态', async () => {
+    for (let k = 0; k < 6; k++) {
+      await write(`proj/s${k}.jsonl`, [userPrompt(`u${k}`, null, 'x'), assistantBlock(`a${k}`, `u${k}`, { type: 'text', text: 'hi' })]);
+    }
+    await pipeline.scanAll();
+    const before = Array.from({ length: 6 }, (_, k) => store.getGraph(`s${k}`)!.nodes);
+    let maxLoaded = 0;
+    let commits = 0;
+    const real = store.applyChanges.bind(store);
+    const spy = vi.spyOn(store, 'applyChanges').mockImplementation((cs) => {
+      commits += 1;
+      maxLoaded = Math.max(maxLoaded, pipeline.loadedSessionCount());
+      return real(cs);
+    });
+    try {
+      pipeline.rebuild();
+    } finally {
+      spy.mockRestore();
+    }
+    expect(commits).toBeGreaterThanOrEqual(6);
+    expect(maxLoaded).toBe(1);
+    expect(pipeline.loadedSessionCount()).toBe(0);
+    expect(Array.from({ length: 6 }, (_, k) => store.getGraph(`s${k}`)!.nodes)).toEqual(before);
+  });
+
+  test('rebuild 清空并重新统计 unknown_stat', async () => {
+    await fs.mkdir(abs('proj'), { recursive: true });
+    await fs.writeFile(abs('proj/s1.jsonl'), line({ type: 'atis-latch', sessionId: 's1' }) + line({ type: 'atis-latch', n: 2 }) + '{broken\n');
+    await pipeline.ingestFile(abs('proj/s1.jsonl'));
+    const before = store.diagnostics().unknownRecords;
+    store.bumpUnknown('stale-type', 'x');
+    pipeline.rebuild();
+    expect(store.diagnostics().unknownRecords).toEqual(before);
+  });
+
+  test('rebuild 可重启：中途失败时留下标记，再次运行后完整', async () => {
+    for (let k = 0; k < 3; k++) await write(`proj/s${k}.jsonl`, [userPrompt(`u${k}`, null, 'x')]);
+    await pipeline.scanAll();
+    let calls = 0;
+    const real = store.applyChanges.bind(store);
+    const spy = vi.spyOn(store, 'applyChanges').mockImplementation((cs) => {
+      calls += 1;
+      if (calls === 2) throw new Error('killed');
+      return real(cs);
+    });
+    expect(() => pipeline.rebuild()).toThrow('killed');
+    spy.mockRestore();
+    expect(store.getMeta('rebuild_in_progress')).toBe('1');
+    pipeline.rebuild();
+    expect(store.getMeta('rebuild_in_progress')).toBeNull();
+    expect(store.getMeta('normalizer_version')).toBe(String(NORMALIZER_VERSION));
+    for (let k = 0; k < 3; k++) expect(store.getGraph(`s${k}`)!.nodes.map((n) => n.id)).toEqual([`u${k}`]);
   });
 });
