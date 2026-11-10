@@ -4,6 +4,7 @@ import type { GraphNode, NodeKind, NodeStatus } from '@claude-canvas/shared';
 import { NODE_STATUS_LABEL } from '../labels';
 import { formatDuration, nodeAriaLabel } from './format';
 import { THINKING_NOT_RECORDED } from './reasoning';
+import { replayOverlay } from './replay';
 import type { TurnSummary } from './view';
 
 export const KIND_LABEL: Record<NodeKind, string> = {
@@ -66,6 +67,8 @@ export type GraphNodeData = {
   node: GraphNode; innerCount: number; expandable: boolean; expanded: boolean; container: boolean;
   /** Causal view: a thinking node is drawn with two rows (see sizeOf). */
   causal: boolean;
+  /** Replay view: tool, subagent (collapsed) and text nodes get a duration / token row (see sizeOf, replayOverlay). */
+  replay: boolean;
   highlight: Highlight;
 };
 /**
@@ -163,6 +166,8 @@ function GraphNodeView({ data, width, height, selected }: NodeProps<GraphFlowNod
   }
 
   const showTitle = node.kind === 'tool' || node.kind === 'subagent';
+  // The replay row is drawn in the node's extra 16 px; a container's head keeps its 68 px and shows none.
+  const overlay = data.replay && !data.container ? replayOverlay(node) : null;
   const rows = (button: ReactNode) => (
     <>
       <div className="cc-row">
@@ -180,11 +185,17 @@ function GraphNodeView({ data, width, height, selected }: NodeProps<GraphFlowNod
       )}
     </>
   );
-  if (node.kind === 'subagent') return <SubagentView data={data} className={className} style={style} rows={rows} />;
+  const overlayRow = overlay !== null
+    ? <div className="cc-row cc-overlay"><span className="cc-ellipsis cc-grow">{overlay}</span></div>
+    : null;
+  if (node.kind === 'subagent') {
+    return <SubagentView data={data} className={className} style={style} rows={rows} overlayRow={overlayRow} />;
+  }
   return (
     <div className={className} style={style}>
       <Handles />
       {rows(null)}
+      {overlayRow}
     </div>
   );
 }
@@ -194,8 +205,8 @@ function GraphNodeView({ data, width, height, selected }: NodeProps<GraphFlowNod
  * inner nodes are separate React Flow nodes drawn above the body). The same element tree in both states, so the
  * expand / collapse button keeps the keyboard focus across the switch.
  */
-function SubagentView({ data, className, style, rows }: {
-  data: GraphNodeData; className: string; style: CSSProperties; rows(button: ReactNode): ReactNode;
+function SubagentView({ data, className, style, rows, overlayRow }: {
+  data: GraphNodeData; className: string; style: CSSProperties; rows(button: ReactNode): ReactNode; overlayRow: ReactNode;
 }) {
   const { toggleAgent } = useContext(CanvasActions);
   const { node, innerCount, expandable, expanded, container } = data;
@@ -222,6 +233,7 @@ function SubagentView({ data, className, style, rows }: {
         <div className="cc-row cc-inner">
           <span className="cc-ellipsis cc-grow">{innerCount > 0 ? `内部 ${innerCount} 个节点` : '暂无内部节点'}</span>
         </div>
+        {overlayRow}
       </div>
       {container && <div className="cc-container-body" />}
     </div>

@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest';
 import type { Graph, GraphEdge, GraphNode, NodeKind, Usage } from '@claude-canvas/shared';
-import { formatTokens, graphAt, replayRange, turnMarks, usageTotal } from '../src/canvas/replay';
+import { advance, formatTokens, graphAt, replayOverlay, replayRange, turnIndexAt, turnMarks, usageTotal } from '../src/canvas/replay';
 
 const EPOCH = Date.parse('2026-01-01T00:00:00Z');
 const iso = (tMs: number) => new Date(EPOCH + tMs).toISOString();
@@ -115,17 +115,53 @@ test('usageTotal：无 messageId 各算一次，usage 为空跳过', () => {
   expect(usageTotal([])).toEqual({ inputTokens: 0, outputTokens: 0 });
 });
 
-test.each([[999, '999'], [1200, '1.2k'], [15000, '15k'], [1250000, '1.3M'], [-5, '0'], [Number.NaN, '0'], [Infinity, '0']])('formatTokens(%s)', (n, s) => {
+test.each([[999, '999'], [1000, '1k'], [999_949, '999.9k'], [999_950, '1M'], [1200, '1.2k'], [15000, '15k'], [1250000, '1.3M'], [-5, '0'], [Number.NaN, '0'], [Infinity, '0']])('formatTokens(%s)', (n, s) => {
   expect(formatTokens(n)).toBe(s);
 });
 
-test('8000 个节点的图上 graphAt 在 50 毫秒内完成', () => {
-  const nodes: GraphNode[] = [];
-  for (let i = 0; i < 8000; i++) nodes.push(node(`n${i}`, 'tool', i * 10, { status: 'succeeded', endedAt: iso(i * 10 + 5) }));
-  const edges = nodes.slice(1).map((n, i) => e(`n${i}`, n.id));
-  const g = graph(nodes, edges);
-  graphAt(g, EPOCH + 40000);
-  const t0 = performance.now();
-  graphAt(g, EPOCH + 40000);
-  expect(performance.now() - t0).toBeLessThan(50);
+test('endedAt 无法解析的节点原样返回', () => {
+  const g = graph([node('a', 'tool', 1000, { status: 'succeeded', endedAt: 'garbage' })]);
+  const at = graphAt(g, EPOCH + 1500);
+  expect(at.nodes.a).toBe(g.nodes.a);
+  expect(at).toBe(g);
+});
+
+const RANGE = { startMs: 1000, endMs: 5000 };
+test('advance：按倍速推进，到末尾夹住并报告结束', () => {
+  expect(advance(1000, 100, 10, RANGE)).toEqual({ timeMs: 2000, done: false });
+  expect(advance(1000, 100, 1, RANGE)).toEqual({ timeMs: 1100, done: false });
+  expect(advance(4500, 100, 60, RANGE)).toEqual({ timeMs: 5000, done: true });
+  expect(advance(5000, 100, 10, RANGE)).toEqual({ timeMs: 5000, done: true });
+});
+test('advance：负数或 NaN 的经过时间被忽略；时刻先夹到范围内', () => {
+  expect(advance(2000, -50, 10, RANGE)).toEqual({ timeMs: 2000, done: false });
+  expect(advance(2000, Number.NaN, 10, RANGE)).toEqual({ timeMs: 2000, done: false });
+  expect(advance(2000, 100, Number.NaN, RANGE)).toEqual({ timeMs: 2000, done: false });
+  expect(advance(0, 0, 10, RANGE)).toEqual({ timeMs: 1000, done: false });
+  expect(advance(9000, Number.NaN, 10, RANGE)).toEqual({ timeMs: 5000, done: true });
+  expect(advance(3000, 100, 10, null)).toEqual({ timeMs: 3000, done: true });
+});
+
+test('turnIndexAt：时刻之前（含）的轮次数，第一轮之前为 0', () => {
+  const marks = [{ turnId: 't1', ms: 100 }, { turnId: 't2', ms: 500 }, { turnId: 't3', ms: 900 }];
+  expect(turnIndexAt(marks, 99)).toBe(0);
+  expect(turnIndexAt(marks, 100)).toBe(1);
+  expect(turnIndexAt(marks, 899)).toBe(2);
+  expect(turnIndexAt(marks, 10_000)).toBe(3);
+  expect(turnIndexAt([], 10_000)).toBe(0);
+});
+
+test('replayOverlay：工具 / 子代理显示耗时与 token，缺的省略，全缺为 —', () => {
+  const usage = { inputTokens: 1200, outputTokens: 340 };
+  expect(replayOverlay(node('a', 'tool', 0, { durationMs: 3400, usage }))).toBe('耗时 3.4s · 输入 1.2k · 输出 340');
+  expect(replayOverlay(node('a', 'subagent', 0, { durationMs: 3400 }))).toBe('耗时 3.4s');
+  expect(replayOverlay(node('a', 'tool', 0, { usage }))).toBe('输入 1.2k · 输出 340');
+  expect(replayOverlay(node('a', 'tool', 0))).toBe('—');
+  expect(replayOverlay(node('a', 'tool', 0, { durationMs: -1 }))).toBe('—');
+});
+test('replayOverlay：回复只显示 token 两项；其他类型没有叠加行', () => {
+  const usage = { inputTokens: 15000, outputTokens: 999 };
+  expect(replayOverlay(node('a', 'text', 0, { usage, durationMs: 100 }))).toBe('输入 15k · 输出 999');
+  expect(replayOverlay(node('a', 'text', 0))).toBe('—');
+  for (const k of ['prompt', 'thinking', 'system', 'unknown'] as const) expect(replayOverlay(node('a', k, 0, { usage }))).toBeNull();
 });

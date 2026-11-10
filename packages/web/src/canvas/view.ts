@@ -9,8 +9,10 @@ export const TURN_FOLD_THRESHOLD = 60;
 /**
  * 'live': everything, subagents expandable. 'topology': no thinking / text nodes, every subagent collapsed.
  * 'causal': the same nodes, groups and edges as 'live'; only the node sizes differ (see sizeOf).
+ * 'replay': the node set rules of 'live', applied to the graph as it was at the replay time (the model feeds buildView
+ * graphAt(live graph, time)); tool, subagent and text nodes get an overlay row (see sizeOf).
  */
-export type ViewMode = 'live' | 'topology' | 'causal';
+export type ViewMode = 'live' | 'topology' | 'causal' | 'replay';
 
 /** Layout group of the inner nodes of an expanded agent. */
 export function agentGroupKey(agentId: string): string {

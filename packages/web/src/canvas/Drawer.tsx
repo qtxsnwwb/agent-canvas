@@ -143,6 +143,8 @@ export interface DrawerProps {
   /** upstreamChain(view, node.id) in the causal view (EMPTY_CHAIN otherwise). */
   chain: UpstreamChain;
   view: CanvasView;
+  /** Replay view: the header says the content is the node's current state, not the replayed one. */
+  replay?: boolean;
   /** Selects another node (a row of the "推理链" list). */
   onSelect(id: string): void;
   /** Expands the folds that cut the chain short (chain.cutAt; see expandCut). */
@@ -150,7 +152,7 @@ export interface DrawerProps {
   onClose(): void;
 }
 
-export function Drawer({ sessionId, node, chain, view, onSelect, onExpandCut, onClose }: DrawerProps) {
+export function Drawer({ sessionId, node, chain, view, replay = false, onSelect, onExpandCut, onClose }: DrawerProps) {
   const closeRef = useRef<HTMLButtonElement>(null);
   // Focus the close button on open; give focus back to whatever had it when the drawer closes.
   useEffect(() => {
@@ -186,6 +188,7 @@ export function Drawer({ sessionId, node, chain, view, onSelect, onExpandCut, on
           {node.usage !== null && <span>输入 {node.usage.inputTokens} · 输出 {node.usage.outputTokens}</span>}
           {!node.confirmed && <span className="cc-tag">未确认</span>}
         </div>
+        {replay && <div className="cc-drawer-note">内容为当前状态，不随时间轴回退</div>}
       </div>
       <DrawerBody
         key={node.id}

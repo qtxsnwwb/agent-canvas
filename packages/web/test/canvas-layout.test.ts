@@ -200,6 +200,26 @@ test('因果视角下思考节点用大尺寸，其余尺寸不变', () => {
   expect(groupInput(causal, 't1', ['th', 'tl'], new Map()).nodes[0]).toMatchObject({ width: 280, height: 56 });
 });
 
+test('复盘视角下 tool、subagent、text 各高 16 px，其余不变', () => {
+  const kinds: NodeKind[] = ['prompt', 'text', 'thinking', 'tool', 'subagent', 'system', 'unknown'];
+  const nodes = kinds.map((k, i) => node(`n${k}`, k, 't1', i));
+  const g: Graph = { ...emptyGraph(), nodes: Object.fromEntries(nodes.map((x) => [x.id, x])), edges: {} };
+  const v = buildView(g, new Map());
+  for (const k of kinds) {
+    const vn = v.nodes.get(`n${k}`)!;
+    const live = sizeOf(vn, 'live');
+    const extra = k === 'tool' || k === 'subagent' || k === 'text' ? 16 : 0;
+    expect(sizeOf(vn, 'replay')).toEqual({ width: live.width, height: live.height + extra });
+  }
+  expect(sizeOf(v.nodes.get('ntool')!, 'replay')).toEqual({ width: 240, height: 68 });
+  expect(sizeOf(v.nodes.get('nsubagent')!, 'replay')).toEqual({ width: 260, height: 84 });
+  expect(sizeOf(v.nodes.get('ntext')!, 'replay')).toEqual({ width: 280, height: 72 });
+  const summary = buildView(g, new Map([['t1', false]])).nodes.get('turn:t1')!;
+  expect(sizeOf(summary, 'replay')).toEqual(sizeOf(summary, 'live'));
+  const replay = buildView(g, new Map(), undefined, { mode: 'replay' });
+  expect(groupInput(replay, 't1', ['ntool'], new Map()).nodes[0]).toMatchObject({ width: 240, height: 68 });
+});
+
 test('placeAgentGroups：容器被撑到最小宽度时，较窄的内部布局水平居中', () => {
   const base = { positions: { s1: { x: 100, y: 200 } } };
   const narrow = { group: g('agent:a1', 's1', 1, ['i1']), layout: { key: 'agent:a1', width: 100, height: 40, anchorX: 50, positions: { i1: { x: 0, y: 0 } } } };

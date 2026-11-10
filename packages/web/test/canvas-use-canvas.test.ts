@@ -982,3 +982,229 @@ test('关闭自动折叠：代理内部从 61 长到 70，隐藏集合不变，�
   expect(group().foldedIds).toHaveLength(70 - 1 - 40);
   model.dispose();
 });
+
+// ---- 复盘视角 ----
+
+const at = (tMs: number) => new Date(EPOCH + tMs).toISOString();
+/** t1: p1 (0) → a 工具 (1000 开始，5000 结束) → b 回复 (6000) */
+function replaySample(): Graph {
+  return withEdges(
+    [
+      prompt('p1', 't1', 0),
+      { ...node('a', 't1', 1000), kind: 'tool', status: 'succeeded', durationMs: 4000, endedAt: at(5000) },
+      node('b', 't1', 6000),
+    ],
+    [['p1', 'a'], ['a', 'b']],
+  );
+}
+const nodeOf = (model: ReturnType<typeof createCanvasModel>, id: string) => {
+  const vn = model.getSnapshot().view.nodes.get(id);
+  return vn?.type === 'node' ? vn.node : undefined;
+};
+
+test('setMode("replay") 把时刻设为范围末尾；快照带 replay 信息，其他视角为 null', async () => {
+  const live = fakeLive(replaySample());
+  const layout = fakeLayout();
+  const model = createCanvasModel(live, layout.client);
+  expect(model.getSnapshot().replay).toBeNull();
+  model.setMode('replay');
+  expect(model.getMode()).toBe('replay');
+  const s = model.getSnapshot(); // no timer advanced
+  expect(s.view.mode).toBe('replay');
+  expect(s.replay).toEqual({
+    range: { startMs: EPOCH, endMs: EPOCH + 6000 },
+    timeMs: EPOCH + 6000,
+    marks: [{ turnId: 't1', ms: EPOCH }],
+    totals: { nodeCount: 3, usage: { inputTokens: 0, outputTokens: 0 } },
+  });
+  expect([...s.view.nodes.keys()].sort()).toEqual(['a', 'b', 'p1']);
+  expect(model.getReplay()).toEqual(s.replay);
+  model.setMode('causal');
+  expect(model.getSnapshot().replay).toBeNull();
+  model.setMode('replay'); // re-entering starts at the end again
+  model.setReplayTime(EPOCH + 3000);
+  model.setMode('live');
+  model.setMode('replay');
+  expect(model.getSnapshot().replay!.timeMs).toBe(EPOCH + 6000);
+  model.dispose();
+});
+
+test('setReplayTime 之后，视图只含该时刻之前的节点；中途的工具为 running', async () => {
+  const live = fakeLive(replaySample());
+  const layout = fakeLayout();
+  const model = createCanvasModel(live, layout.client);
+  layout.resolveAll();
+  await flush();
+  model.setMode('replay');
+  model.setReplayTime(EPOCH + 3000);
+  expect(model.getSnapshot().replay!.timeMs).toBe(EPOCH + 3000); // the time is published at once
+  await vi.advanceTimersByTimeAsync(60); // the view follows through the throttled rebuild
+  const s = model.getSnapshot();
+  expect([...s.view.nodes.keys()].sort()).toEqual(['a', 'p1']);
+  expect(nodeOf(model, 'a')).toMatchObject({ status: 'running', durationMs: null, endedAt: null });
+  expect(s.view.latestNodeId).toBe('a');
+  expect(s.replay!.totals.nodeCount).toBe(2);
+  expect(live.getGraph().nodes.a!.status).toBe('succeeded'); // the live graph is untouched
+  model.setReplayTime(EPOCH + 5000);
+  await vi.advanceTimersByTimeAsync(60);
+  expect(nodeOf(model, 'a')).toMatchObject({ status: 'succeeded', durationMs: 4000 });
+  // Clamped to the range; NaN is ignored.
+  model.setReplayTime(EPOCH - 1e9);
+  expect(model.getSnapshot().replay!.timeMs).toBe(EPOCH);
+  model.setReplayTime(Number.NaN);
+  expect(model.getSnapshot().replay!.timeMs).toBe(EPOCH);
+  model.setReplayTime(EPOCH + 1e9);
+  expect(model.getSnapshot().replay!.timeMs).toBe(EPOCH + 6000);
+  model.dispose();
+});
+
+test('复盘中实时图新增节点：视图不变、范围末尾延长、时刻不动', async () => {
+  const g = replaySample();
+  const live = fakeLive(g);
+  const layout = fakeLayout();
+  const model = createCanvasModel(live, layout.client);
+  model.setMode('replay');
+  layout.resolveAll();
+  await flush();
+  layout.resolveAll();
+  await flush();
+  const before = model.getSnapshot();
+  const requests = layout.reqs.length;
+  // An immutable update, as the live session makes it: unchanged nodes and edges keep their objects.
+  live.set({
+    nodes: { ...g.nodes, z: node('z', 't1', 9000) },
+    edges: { ...g.edges, 'b->z': { id: 'b->z', sessionId: 's1', from: 'b', to: 'z', kind: 'sequence' } },
+  });
+  await vi.advanceTimersByTimeAsync(60);
+  const s = model.getSnapshot();
+  expect(s.view).toBe(before.view);
+  expect(s.positions).toBe(before.positions);
+  expect(s.replay!.timeMs).toBe(EPOCH + 6000);
+  expect(s.replay!.range).toEqual({ startMs: EPOCH, endMs: EPOCH + 9000 });
+  expect(layout.reqs.length).toBe(requests); // nothing to lay out
+  model.dispose();
+});
+
+test('切回 live 后视图立即包含复盘期间新增的节点', async () => {
+  const g = replaySample();
+  const live = fakeLive(g);
+  const layout = fakeLayout();
+  const model = createCanvasModel(live, layout.client);
+  model.setMode('replay');
+  live.set({ nodes: { ...g.nodes, z: node('z', 't1', 9000) }, edges: g.edges });
+  await vi.advanceTimersByTimeAsync(60);
+  expect(model.getSnapshot().view.nodes.has('z')).toBe(false);
+  model.setMode('live');
+  const s = model.getSnapshot(); // no timer advanced
+  expect(s.view.nodes.has('z')).toBe(true);
+  expect(nodeOf(model, 'a')!.status).toBe('succeeded');
+  expect(s.replay).toBeNull();
+  model.dispose();
+});
+
+test('totals 按 messageId 去重并包含子代理内部节点', async () => {
+  const u = (inputTokens: number, outputTokens: number) => ({ inputTokens, outputTokens });
+  const live = fakeLive(withEdges(
+    [
+      prompt('p1', 't1', 0),
+      { ...node('x1', 't1', 1), messageId: 'm1', usage: u(100, 10) },
+      { ...node('x2', 't1', 2), kind: 'tool', messageId: 'm1', usage: u(100, 10) },
+      sub('s1', 't1', null, 3, 'a1'),
+      { ...inner('i1', 'a1', 4), messageId: 'm2', usage: u(50, 5) },
+      { ...inner('i2', 'a1', 10), messageId: 'm3', usage: u(7, 1) },
+    ],
+    [['p1', 'x1'], ['x1', 'x2'], ['x2', 's1'], ['s1', 'i1', 'spawn'], ['i1', 'i2']],
+  ));
+  const layout = fakeLayout();
+  const model = createCanvasModel(live, layout.client);
+  model.setMode('replay'); // the agent is collapsed: its inner nodes still count
+  expect(model.getSnapshot().view.nodes.has('i1')).toBe(false);
+  expect(model.getSnapshot().replay!.totals).toEqual({ nodeCount: 6, usage: u(157, 16) });
+  model.setReplayTime(EPOCH + 5);
+  await vi.advanceTimersByTimeAsync(60);
+  expect(model.getSnapshot().replay!.totals).toEqual({ nodeCount: 5, usage: u(150, 15) });
+  model.dispose();
+});
+
+test('非 replay 视角下 setReplayTime 不起作用', async () => {
+  const live = fakeLive(replaySample());
+  const layout = fakeLayout();
+  const model = createCanvasModel(live, layout.client);
+  layout.resolveAll();
+  await flush();
+  const before = model.getSnapshot();
+  const fn = vi.fn();
+  model.subscribe(fn);
+  model.setReplayTime(EPOCH + 3000);
+  await vi.advanceTimersByTimeAsync(200);
+  expect(fn).not.toHaveBeenCalled();
+  expect(model.getSnapshot()).toBe(before);
+  model.setMode('replay');
+  expect(model.getSnapshot().replay!.timeMs).toBe(EPOCH + 6000);
+  model.dispose();
+});
+
+test('复盘中拖动滑块：一轮布局进行中连续 setReplayTime，结束后只再跑 1 轮，用最后的时刻', async () => {
+  const live = fakeLive(graph(Array.from({ length: 20 }, (_, i) => node(`n${i}`, 't1', i * 1000))));
+  const layout = fakeLayout();
+  const model = createCanvasModel(live, layout.client);
+  layout.resolveAll();
+  await flush();
+  model.setMode('replay');
+  const start = layout.reqs.length;
+  expect(layout.pending()).toHaveLength(1);
+  for (let k = 19; k >= 5; k--) {
+    model.setReplayTime(EPOCH + k * 1000);
+    await vi.advanceTimersByTimeAsync(16);
+  }
+  await vi.advanceTimersByTimeAsync(60);
+  expect(layout.reqs.length).toBe(start); // still the one round
+  expect(model.getSnapshot().view.nodes.size).toBe(6);
+  layout.resolveAll();
+  await flush();
+  expect(layout.reqs.length).toBe(start + 1);
+  expect(layout.reqs[start]!.input.nodes.map((n) => n.id)).toEqual(['n0', 'n1', 'n2', 'n3', 'n4', 'n5']);
+  layout.resolveAll();
+  await vi.advanceTimersByTimeAsync(200);
+  expect(layout.reqs.length).toBe(start + 1);
+  model.dispose();
+});
+
+test('复盘中移动时刻但回放图没有变化：不重建视图、不请求布局，只更新时刻', async () => {
+  const live = fakeLive(replaySample());
+  const layout = fakeLayout();
+  const model = createCanvasModel(live, layout.client);
+  model.setMode('replay');
+  model.setReplayTime(EPOCH + 2000); // a is running
+  await vi.advanceTimersByTimeAsync(60);
+  for (let k = 0; k < 3; k++) { layout.resolveAll(); await flush(); }
+  const before = model.getSnapshot();
+  const requests = layout.reqs.length;
+  model.setReplayTime(EPOCH + 3000); // a is still running, nothing else started
+  await vi.advanceTimersByTimeAsync(60);
+  const s = model.getSnapshot();
+  expect(s.view).toBe(before.view);
+  expect(s.replay!.timeMs).toBe(EPOCH + 3000);
+  expect(s.replay!.totals).toBe(before.replay!.totals);
+  expect(s.replay!.marks).toBe(before.replay!.marks);
+  expect(layout.reqs.length).toBe(requests);
+  model.dispose();
+});
+
+test('复盘视角下的布局请求使用复盘尺寸；新尺寸的布局到达后 layoutMode 才切换', async () => {
+  const live = fakeLive(replaySample());
+  const layout = fakeLayout();
+  const model = createCanvasModel(live, layout.client);
+  layout.resolveAll();
+  await flush();
+  model.setMode('replay');
+  const req = layout.pending()[0]!;
+  expect(req.input.nodes).toEqual([
+    { id: 'p1', width: 280, height: 64 }, { id: 'a', width: 240, height: 68 }, { id: 'b', width: 280, height: 72 },
+  ]);
+  expect(model.getSnapshot().layoutMode).toBe('live');
+  layout.resolveAll();
+  await flush();
+  expect(model.getSnapshot().layoutMode).toBe('replay');
+  model.dispose();
+});

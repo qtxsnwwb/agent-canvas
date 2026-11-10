@@ -1,4 +1,5 @@
 import type { Graph, GraphEdge, GraphNode, Usage } from '@claude-canvas/shared';
+import { formatDuration } from './format';
 
 export interface ReplayRange { startMs: number; endMs: number }
 
@@ -96,4 +97,47 @@ export function formatTokens(n: number): string {
   if (n < 1000) return String(Math.round(n));
   if (n < 1_000_000 && Number(trim(n / 1000)) < 1000) return `${trim(n / 1000)}k`;
   return `${trim(n / 1_000_000)}M`;
+}
+
+/** `ms` clamped to the range (unchanged without a range). */
+export function clampToRange(ms: number, range: ReplayRange | null): number {
+  return range === null ? ms : Math.min(range.endMs, Math.max(range.startMs, ms));
+}
+
+/**
+ * One playback step: the time (clamped to the range) advanced by `elapsedMs × speed`, clamped again; `done` once it has
+ * reached the range end. A negative or non-finite elapsed time or speed does not move the time. No range: done.
+ */
+export function advance(timeMs: number, elapsedMs: number, speed: number, range: ReplayRange | null): { timeMs: number; done: boolean } {
+  if (range === null) return { timeMs, done: true };
+  const step = Number.isFinite(elapsedMs) && elapsedMs > 0 && Number.isFinite(speed) && speed > 0 ? elapsedMs * speed : 0;
+  const base = Number.isFinite(timeMs) ? timeMs : range.startMs;
+  const next = clampToRange(base + step, range);
+  return { timeMs: next, done: next >= range.endMs };
+}
+
+/** "第 N 轮": how many turn marks are at or before `timeMs` (0 before the first). */
+export function turnIndexAt(marks: readonly { ms: number }[], timeMs: number): number {
+  let n = 0;
+  for (const m of marks) {
+    if (m.ms <= timeMs) n++;
+    else break;
+  }
+  return n;
+}
+
+/**
+ * The extra row a node gets in the replay view: tool / subagent "耗时 3.4s · 输入 1.2k · 输出 340", text the two token
+ * parts; missing parts are left out, "—" when none is left. null for the other kinds (no extra row).
+ */
+export function replayOverlay(node: Pick<GraphNode, 'kind' | 'durationMs' | 'usage'>): string | null {
+  const timed = node.kind === 'tool' || node.kind === 'subagent';
+  if (!timed && node.kind !== 'text') return null;
+  const parts: string[] = [];
+  if (timed && node.durationMs !== null) {
+    const d = formatDuration(node.durationMs);
+    if (d !== '') parts.push(`耗时 ${d}`);
+  }
+  if (node.usage) parts.push(`输入 ${formatTokens(node.usage.inputTokens)}`, `输出 ${formatTokens(node.usage.outputTokens)}`);
+  return parts.length > 0 ? parts.join(' · ') : '—';
 }

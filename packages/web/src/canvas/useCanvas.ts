@@ -1,10 +1,23 @@
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
+import type { Graph, Usage } from '@claude-canvas/shared';
 import type { LiveSession } from '../client';
 import { createThrottle } from '../throttle';
 import { groupInput, placeAgentGroups, stackTurns, turnInput, type Box, type TurnLayout } from './layout';
 import { createBrowserLayoutWorker, createLayoutClient, type LayoutClient } from './layoutClient';
+import { clampToRange, graphAt, replayRange, turnMarks, usageTotal, type ReplayRange } from './replay';
 import { containerSize } from './sizes';
 import { agentGroupKey, buildView, type AgentGroup, type CanvasView, type ViewMode } from './view';
+
+/**
+ * The replay view's timeline state. `range` and `marks` (main-thread prompts) come from the whole live graph; `totals`
+ * count every node of the replayed graph (agents' inner nodes included), usage deduplicated by messageId.
+ */
+export interface ReplayInfo {
+  range: ReplayRange | null;
+  timeMs: number;
+  marks: { turnId: string; ms: number }[];
+  totals: { nodeCount: number; usage: Usage };
+}
 
 export interface CanvasSnapshot {
   view: CanvasView;
@@ -22,6 +35,8 @@ export interface CanvasSnapshot {
    */
   layoutMode: ViewMode;
   layoutError: string | null;
+  /** The replay timeline (see CanvasModel.getReplay); null outside the replay view. */
+  replay: ReplayInfo | null;
 }
 export interface CanvasModel {
   getSnapshot(): CanvasSnapshot;
@@ -48,9 +63,19 @@ export interface CanvasModel {
    * (topology mode ignores it).
    */
   toggleAgent(agentId: string): void;
-  /** Switches between the live, topology and causal views; rebuilds at once. Default 'live'. */
+  /**
+   * Switches between the live, topology, causal and replay views; rebuilds at once. Default 'live'. Entering replay
+   * puts the replay time at the end of the range.
+   */
   setMode(mode: ViewMode): void;
   getMode(): ViewMode;
+  /**
+   * Replay view only (ignored otherwise): moves the replay time (clamped to the range; NaN ignored). The new time is
+   * published at once; the view follows through the throttled rebuild, like a live update.
+   */
+  setReplayTime(ms: number): void;
+  /** The replay timeline as of the last rebuild (in any view: range null and no marks when the view is not replay). */
+  getReplay(): ReplayInfo;
   dispose(): void;
 }
 
@@ -69,7 +94,42 @@ const EMPTY_SNAPSHOT: CanvasSnapshot = {
   containerBoxes: {},
   layoutMode: 'live',
   layoutError: null,
+  replay: null,
 };
+const NO_REPLAY: ReplayInfo = { range: null, timeMs: 0, marks: [], totals: { nodeCount: 0, usage: { inputTokens: 0, outputTokens: 0 } } };
+
+/**
+ * Whether two replayed graphs show the same thing: the same node ids, each the same object or both a "running" copy
+ * made by graphAt of the same live node, and the same edge objects. `aSrc` / `bSrc` are the graphs they were made from.
+ */
+function sameReplayed(a: Graph, aSrc: Graph, b: Graph, bSrc: Graph): boolean {
+  if (a === b) return true;
+  let count = 0;
+  for (const id in a.nodes) {
+    count++;
+    const x = a.nodes[id]!;
+    const y = b.nodes[id];
+    if (y === undefined) return false;
+    if (x === y) continue;
+    const src = aSrc.nodes[id];
+    if (x === src || y === bSrc.nodes[id] || src !== bSrc.nodes[id]) return false;
+  }
+  if (count !== Object.keys(b.nodes).length) return false;
+  if (a.edges === b.edges) return true;
+  count = 0;
+  for (const id in a.edges) {
+    count++;
+    if (a.edges[id] !== b.edges[id]) return false;
+  }
+  return count === Object.keys(b.edges).length;
+}
+
+const sameRange = (a: ReplayRange | null, b: ReplayRange | null): boolean =>
+  a === b || (a !== null && b !== null && a.startMs === b.startMs && a.endMs === b.endMs);
+const sameMarks = (a: ReplayInfo['marks'], b: ReplayInfo['marks']): boolean =>
+  a.length === b.length && a.every((m, i) => m.turnId === b[i]!.turnId && m.ms === b[i]!.ms);
+const sameTotals = (a: ReplayInfo['totals'], b: ReplayInfo['totals']): boolean =>
+  a.nodeCount === b.nodeCount && a.usage.inputTokens === b.usage.inputTokens && a.usage.outputTokens === b.usage.outputTokens;
 
 /** Keeps only the entries whose key passes `keep`; returns `obj` itself when nothing is dropped. */
 function pick<T>(obj: Record<string, T>, keep: (key: string) => boolean): Record<string, T> {
@@ -112,6 +172,12 @@ function sameRecord<T>(a: Record<string, T>, b: Record<string, T>, same: (x: T, 
  * stacked and the groups placed inside their containers. With no agent expanded a round is just the turns. A round
  * that finds the model dirty between two stages stops there and publishes nothing (unless the round before it stopped
  * that way too); the queued rebuild then starts the next round.
+ *
+ * A throttled rebuild whose graph is unchanged (and with nothing else the view depends on changed) keeps the view and
+ * starts no round. In the replay view the graph fed to buildView is graphAt(live graph, replay time): a replay time
+ * change goes through the same throttled path (the time itself is published at once), and a replayed graph equivalent
+ * to the one the view was built from counts as unchanged; live updates still extend the range and marks, but do not
+ * move the time.
  */
 export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscribe'>, layout: LayoutClient): CanvasModel {
   /** Turn key -> expanded, set by the user. */
@@ -135,6 +201,18 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
   let lastAbandoned = false;
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
   let retryDelay = RETRY_FIRST_MS;
+  /** Replay view: the replay time; null for "the end of the range" (set on entering replay, kept until there is one). */
+  let replayTime: number | null = null;
+  /** The last computed replay state (NO_REPLAY outside the replay view). */
+  let replayInfo: ReplayInfo = NO_REPLAY;
+  /**
+   * The graph the current view was built from, and the live graph it was made from. A rebuild whose graph is the same
+   * (or an equivalent replayed graph, see sameReplayed) keeps the view, unless `viewStale` says something else the view
+   * depends on changed (a fold, an agent, the mode, the selection, a queued round or a retry).
+   */
+  let builtGraph: Graph | null = null;
+  let builtSource: Graph | null = null;
+  let viewStale = true;
   const cancelRetry = (): void => {
     if (retryTimer !== null) clearTimeout(retryTimer);
     retryTimer = null;
@@ -206,9 +284,10 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
       if (disposed) return;
       if (dirty) {
         dirty = false;
+        viewStale = true; // the view published meanwhile still needs its round
         rebuild();
       } else if (failed) {
-        retryTimer = setTimeout(() => { retryTimer = null; rebuild(); }, retryDelay);
+        retryTimer = setTimeout(() => { retryTimer = null; viewStale = true; rebuild(); }, retryDelay);
         retryDelay = Math.min(retryDelay * 2, RETRY_MAX_MS);
       }
     };
@@ -234,7 +313,7 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
         const layoutMode = view.mode;
         const unchanged = positions === snapshot.positions && turnBoxes === snapshot.turnBoxes
           && containerBoxes === snapshot.containerBoxes && snapshot.layoutMode === layoutMode && snapshot.layoutError === null;
-        if (!unchanged) publish({ view: current, positions, turnBoxes, containerBoxes, layoutMode, layoutError: null });
+        if (!unchanged) publish({ ...snapshot, view: current, positions, turnBoxes, containerBoxes, layoutMode, layoutError: null });
         retryDelay = RETRY_FIRST_MS;
         settle(false);
       },
@@ -248,10 +327,47 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
     );
   };
 
+  /**
+   * Replay view: the replay state for `source` (the live graph) and `graph` (graphAt of it at `timeMs`). Reuses the
+   * previous state, or its range / marks / totals objects, where the values are unchanged.
+   */
+  const nextReplay = (source: Graph, graph: Graph, range: ReplayRange | null, timeMs: number): ReplayInfo => {
+    const prev = replayInfo;
+    const r = sameRange(range, prev.range) ? prev.range : range;
+    const m = turnMarks(source);
+    const marks = sameMarks(m, prev.marks) ? prev.marks : m;
+    const t = { nodeCount: Object.keys(graph.nodes).length, usage: usageTotal(Object.values(graph.nodes)) };
+    const totals = sameTotals(t, prev.totals) ? prev.totals : t;
+    return r === prev.range && marks === prev.marks && totals === prev.totals && timeMs === prev.timeMs
+      ? prev
+      : { range: r, timeMs, marks, totals };
+  };
+
   function rebuild(): void {
     if (disposed) return;
+    const source = live.getGraph();
+    let graph = source;
+    let replay: ReplayInfo | null = null;
+    if (mode === 'replay') {
+      const range = replayRange(source);
+      const timeMs = replayTime === null ? range?.endMs ?? 0 : clampToRange(replayTime, range);
+      if (range !== null) replayTime = timeMs; // the time does not move with later live updates
+      graph = graphAt(source, timeMs);
+      if (builtGraph !== null && builtSource !== null && sameReplayed(graph, source, builtGraph, builtSource)) graph = builtGraph;
+      replay = replayInfo = nextReplay(source, graph, range, timeMs);
+    } else {
+      replayInfo = NO_REPLAY;
+    }
+    if (!viewStale && graph === builtGraph) {
+      // Nothing the view depends on changed (an unrelated notification, a replay time with the same replayed graph).
+      if (replay !== snapshot.replay) publish({ ...snapshot, replay });
+      return;
+    }
+    viewStale = false;
+    builtGraph = graph;
+    builtSource = source;
     cancelRetry(); // this rebuild is the retry
-    const view = buildView(live.getGraph(), effectiveOverrides(), fullTurns, { frozenHidden: frozen, keepVisible, expandedAgents, mode });
+    const view = buildView(graph, effectiveOverrides(), fullTurns, { frozenHidden: frozen, keepVisible, expandedAgents, mode });
     // A collapsed turn forgets "show all" and its frozen fold, however it got collapsed: re-expanding it folds the
     // middle by the length rule again.
     for (const t of view.turns) {
@@ -268,12 +384,19 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
       positions: pick(snapshot.positions, inView),
       turnBoxes: pick(snapshot.turnBoxes, (k) => turnKeys.has(k)),
       containerBoxes: pick(snapshot.containerBoxes, (id) => isExpandedContainer(view, id)),
+      replay,
     });
     if (roundRunning) dirty = true;
     else startRound(view);
   }
 
   const throttle = createThrottle(rebuild, REBUILD_MS);
+  /** A UI action changed what the view depends on: rebuild at once (also picks up any pending graph change). */
+  const rebuildNow = (): void => {
+    viewStale = true;
+    throttle.cancel();
+    rebuild();
+  };
   const unsubscribe = live.subscribe(() => throttle.trigger());
   rebuild();
 
@@ -293,14 +416,12 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
         fullTurns.delete(turnKey);
         frozen.delete(turnKey);
       }
-      throttle.cancel(); // this rebuild also picks up any pending graph change
-      rebuild();
+      rebuildNow();
     },
     showFullTurn(turnKey) {
       if (disposed || fullTurns.has(turnKey)) return;
       fullTurns.add(turnKey);
-      throttle.cancel();
-      rebuild();
+      rebuildNow();
     },
     setAutoFold(enabled) {
       if (disposed || enabled === autoFold) return;
@@ -311,11 +432,12 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
       }
       implicit.clear();
       frozen.clear();
-      throttle.cancel();
-      rebuild();
+      rebuildNow();
     },
     setKeepVisible(id) {
+      if (id === keepVisible) return;
       keepVisible = id; // takes effect with the next rebuild: a selected node is already visible
+      viewStale = true; // ... even when that rebuild brings no graph change
     },
     toggleAgent(agentId) {
       if (disposed) return;
@@ -326,16 +448,26 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
       } else {
         expandedAgents.add(agentId);
       }
-      throttle.cancel();
-      rebuild();
+      rebuildNow();
     },
     setMode(next) {
       if (disposed || next === mode) return;
       mode = next;
-      throttle.cancel();
-      rebuild();
+      if (next === 'replay') replayTime = null; // start at the end of the range
+      rebuildNow();
     },
     getMode: () => mode,
+    setReplayTime(ms) {
+      if (disposed || mode !== 'replay' || !Number.isFinite(ms) || replayInfo.range === null) return;
+      const timeMs = clampToRange(ms, replayInfo.range);
+      if (timeMs === replayInfo.timeMs) return;
+      replayTime = timeMs;
+      // The slider moves at once; the replayed view (and the totals) follow with the throttled rebuild.
+      replayInfo = { ...replayInfo, timeMs };
+      publish({ ...snapshot, replay: replayInfo });
+      throttle.trigger();
+    },
+    getReplay: () => replayInfo,
     dispose() {
       disposed = true;
       cancelRetry();
@@ -348,7 +480,7 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
 
 /** One model and one layout worker per live session; both are disposed when the page unmounts. */
 export type UseCanvasResult = CanvasSnapshot
-  & Pick<CanvasModel, 'toggleTurn' | 'showFullTurn' | 'setAutoFold' | 'setKeepVisible' | 'toggleAgent' | 'setMode'>
+  & Pick<CanvasModel, 'toggleTurn' | 'showFullTurn' | 'setAutoFold' | 'setKeepVisible' | 'toggleAgent' | 'setMode' | 'setReplayTime'>
   & { /** False until the model exists (the snapshot is then an empty placeholder). */ ready: boolean };
 
 export function useCanvas(live: LiveSession): UseCanvasResult {
@@ -373,10 +505,11 @@ export function useCanvas(live: LiveSession): UseCanvasResult {
   const setKeepVisible = useCallback((id: string | null) => model?.setKeepVisible(id), [model]);
   const toggleAgent = useCallback((agentId: string) => model?.toggleAgent(agentId), [model]);
   const setMode = useCallback((mode: ViewMode) => model?.setMode(mode), [model]);
+  const setReplayTime = useCallback((ms: number) => model?.setReplayTime(ms), [model]);
   // Same object until the snapshot changes, so consumers can memoize on it.
   const ready = model !== null;
   return useMemo(
-    () => ({ ...snapshot, toggleTurn, showFullTurn, setAutoFold, setKeepVisible, toggleAgent, setMode, ready }),
-    [snapshot, toggleTurn, showFullTurn, setAutoFold, setKeepVisible, toggleAgent, setMode, ready],
+    () => ({ ...snapshot, toggleTurn, showFullTurn, setAutoFold, setKeepVisible, toggleAgent, setMode, setReplayTime, ready }),
+    [snapshot, toggleTurn, showFullTurn, setAutoFold, setKeepVisible, toggleAgent, setMode, setReplayTime, ready],
   );
 }

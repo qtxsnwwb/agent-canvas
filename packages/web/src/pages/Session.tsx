@@ -4,6 +4,7 @@ import { openLiveSession, type LiveSession } from '../client';
 import { Canvas } from '../canvas/Canvas';
 import { EMPTY_CHAIN, expandCut, upstreamChain } from '../canvas/chain';
 import { Drawer } from '../canvas/Drawer';
+import { Timeline } from '../canvas/Timeline';
 import { useCanvas } from '../canvas/useCanvas';
 import type { ViewMode } from '../canvas/view';
 import { sessionStatusView } from '../labels';
@@ -18,9 +19,10 @@ const VIEW_MODES: { mode: ViewMode; label: string }[] = [
   { mode: 'live', label: '实时' },
   { mode: 'topology', label: '拓扑' },
   { mode: 'causal', label: '因果' },
+  { mode: 'replay', label: '复盘' },
 ];
 
-/** Segmented live / topology / causal switch; the mode itself lives in the canvas model. */
+/** Segmented live / topology / causal / replay switch; the mode itself lives in the canvas model. */
 /** Disabled until the model exists (before that a click would be dropped). */
 function ViewSwitch({ mode, disabled, onChange }: { mode: ViewMode; disabled: boolean; onChange(mode: ViewMode): void }) {
   return (
@@ -53,7 +55,11 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
   useEffect(() => { setKeepVisible(selected); }, [selected, setKeepVisible]);
   // Only graph nodes open the drawer; a vanished node (or a turn summary) leaves selectedNode null and closes it.
   const selectedView = selected !== null ? canvas.view.nodes.get(selected) : undefined;
-  const selectedNode = selectedView?.type === 'node' ? selectedView.node : null;
+  // The replay view draws nodes as they were at the replay time; the drawer shows the node's current content.
+  const replaying = canvas.view.mode === 'replay';
+  const selectedNode = selectedView?.type === 'node'
+    ? (replaying ? live.getGraph().nodes[selectedView.id] : undefined) ?? selectedView.node
+    : null;
   const closeDrawer = useCallback(() => setSelectedId(null), []);
   // Causal view: the selection's upstream chain, once per (view, selection); highlighted on the canvas and listed in
   // the drawer. EMPTY_CHAIN in the other views and without a selected graph node.
@@ -76,7 +82,7 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
     <>
       {toolbar !== null && createPortal(<ViewSwitch mode={canvas.view.mode} disabled={!canvas.ready} onChange={canvas.setMode} />, toolbar)}
       {canvas.layoutError !== null && <div className="canvas-error">布局失败，正在自动重试：{canvas.layoutError}</div>}
-      <div className={`canvas-area${selectedNode !== null ? ' cc-drawer-open' : ''}`}>
+      <div className={`canvas-area${selectedNode !== null ? ' cc-drawer-open' : ''}${canvas.replay !== null ? ' cc-replay' : ''}`}>
         <Canvas
           snapshot={canvas}
           selectedId={selected}
@@ -93,11 +99,13 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
             node={selectedNode}
             chain={chain}
             view={view}
+            replay={replaying}
             onSelect={setSelectedId}
             onExpandCut={expandChainCut}
             onClose={closeDrawer}
           />
         )}
+        {canvas.replay !== null && <Timeline replay={canvas.replay} onSeek={canvas.setReplayTime} />}
         {empty && <div className="canvas-empty muted">暂无节点</div>}
         {laying && <div className="canvas-empty muted">布局中…</div>}
       </div>

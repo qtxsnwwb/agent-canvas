@@ -26,11 +26,19 @@ export function containerSize(inner: { width: number; height: number }): { width
   };
 }
 
-/** Fixed node size (width x height) by kind; layout depends only on this, never on measured DOM. */
+/** Replay view: tool, subagent and text nodes get one more 16 px row (duration / token overlay, see replayOverlay). */
+export const REPLAY_OVERLAY_HEIGHT = 16;
+
+/**
+ * Fixed node size (width x height) by kind; layout depends only on this, never on measured DOM. A collapsed subagent
+ * in the replay view is 84 px tall; an expanded container keeps its CONTAINER_HEADER head in every view.
+ */
 export function sizeOf(v: ViewNode, mode: ViewMode = 'live'): { width: number; height: number } {
   if (mode === 'causal' && v.type === 'node' && v.node.kind === 'thinking') return { width: 280, height: 56 };
   const s = v.type === 'turn_summary' ? SIZES.turn_summary
     : v.type === 'earlier' ? SIZES.earlier
       : (SIZES as Record<string, { width: number; height: number }>)[v.node.kind] ?? SIZES.unknown;
-  return { width: s.width, height: s.height };
+  const overlay = mode === 'replay' && v.type === 'node'
+    && (v.node.kind === 'tool' || v.node.kind === 'subagent' || v.node.kind === 'text');
+  return { width: s.width, height: overlay ? s.height + REPLAY_OVERLAY_HEIGHT : s.height };
 }

@@ -145,9 +145,10 @@ function useFlowNodes(snapshot: CanvasSnapshot, selectedId: string | null, chain
     const depths = groupDepths(view);
     // Agents can be expanded and collapsed in every view except topology (which shows every subagent collapsed).
     const canExpand = view.mode !== 'topology';
-    // Sizes (and the two-row causal thinking node) follow the mode the positions were laid out for, so a mode switch
-    // never draws new sizes on old positions; both switch together when the new mode's round lands.
+    // Sizes (and the two-row causal thinking node, the replay overlay row) follow the mode the positions were laid out
+    // for, so a mode switch never draws new sizes on old positions; both switch together when the new mode's round lands.
     const causal = layoutMode === 'causal';
+    const replay = layoutMode === 'replay';
     for (const vn of view.nodes.values()) {
       const position = positions[vn.id];
       if (!position) continue;
@@ -164,7 +165,8 @@ function useFlowNodes(snapshot: CanvasSnapshot, selectedId: string | null, chain
         const expandable = canExpand && vn.expandable;
         const d = old?.type === 'graphNode' ? old.data : undefined;
         n = old && d && d.node === vn.node && d.innerCount === vn.innerCount && d.expanded === vn.expanded
-          && d.expandable === expandable && d.container === container && d.causal === causal && d.highlight === highlight
+          && d.expandable === expandable && d.container === container && d.causal === causal && d.replay === replay
+          && d.highlight === highlight
           && old.zIndex === zIndex
           && samePos(old.position, position) && old.selected === selected && old.width === width && old.height === height
           ? old
@@ -176,7 +178,7 @@ function useFlowNodes(snapshot: CanvasSnapshot, selectedId: string | null, chain
             // node.style after it.
             className: wrapperClass(container, highlight),
             style: container ? CONTAINER_STYLE : undefined,
-            data: { node: vn.node, innerCount: vn.innerCount, expanded: vn.expanded, expandable, container, causal, highlight },
+            data: { node: vn.node, innerCount: vn.innerCount, expanded: vn.expanded, expandable, container, causal, replay, highlight },
             handles: container ? makeHandles(width, height) : handlesFor(width, height), draggable: false, connectable: false,
           };
       } else if (vn.type === 'turn_summary') {
@@ -376,7 +378,7 @@ function CanvasInner({ snapshot, selectedId, chain, onSelect, onToggleTurn, onSh
   const { following } = follow;
   useEffect(() => { onFollowingChange?.(following); }, [following, onFollowingChange]);
 
-  // A view switch (live / topology / causal) resumes following, as "回到最新" does, unless a node is selected (the
+  // A view switch (live / topology / causal / replay) resumes following, as "回到最新" does, unless a node is selected (the
   // reader is looking at it).
   const mode = snapshot.view.mode;
   const lastMode = useRef(mode);
