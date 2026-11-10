@@ -43,6 +43,8 @@ export interface CanvasModel {
   subscribe(fn: () => void): () => void;
   /** Flips the turn's current expanded/collapsed state and records it as an override. */
   toggleTurn(turnKey: string): void;
+  /** Expands the turn if it is collapsed (recorded as an override); no-op when it is expanded or unknown. */
+  expandTurn(turnKey: string): void;
   /**
    * Shows every node of a long expanded turn (instead of folding its middle into an `earlier` node); also takes an agent
    * group key (agentGroupKey) for a long expanded agent.
@@ -79,6 +81,8 @@ export interface CanvasModel {
   dispose(): void;
 }
 
+/** Every agent group key starts with this (agentGroupKey); turn keys never do. */
+const AGENT_KEY_PREFIX = agentGroupKey('');
 /** Minimum interval between two rebuilds triggered by live updates. */
 const REBUILD_MS = 50;
 /** After a failed round with nothing queued, the model retries after this delay, doubling up to RETRY_MAX_MS. */
@@ -375,6 +379,11 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
       fullTurns.delete(t.key);
       frozen.delete(t.key);
     }
+    // Likewise an agent group that left the view (its turn collapsed, its container folded into `earlier`, topology).
+    const groupKeys = new Set(view.agentGroups.map((g) => g.key));
+    const leftView = (key: string): boolean => key.startsWith(AGENT_KEY_PREFIX) && !groupKeys.has(key);
+    for (const key of [...fullTurns]) if (leftView(key)) fullTurns.delete(key);
+    for (const key of [...frozen.keys()]) if (leftView(key)) frozen.delete(key);
     if (!autoFold) freeze(view); // turns that appeared (or were expanded) since the last rebuild
     const inView = (id: string): boolean => view.nodes.has(id);
     const turnKeys = new Set(view.turns.map((t) => t.key));
@@ -416,6 +425,13 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
         fullTurns.delete(turnKey);
         frozen.delete(turnKey);
       }
+      rebuildNow();
+    },
+    expandTurn(turnKey) {
+      if (disposed) return;
+      const turn = snapshot.view.turns.find((t) => t.key === turnKey);
+      if (!turn || !turn.collapsed) return;
+      overrides.set(turnKey, true);
       rebuildNow();
     },
     showFullTurn(turnKey) {
@@ -480,7 +496,7 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
 
 /** One model and one layout worker per live session; both are disposed when the page unmounts. */
 export type UseCanvasResult = CanvasSnapshot
-  & Pick<CanvasModel, 'toggleTurn' | 'showFullTurn' | 'setAutoFold' | 'setKeepVisible' | 'toggleAgent' | 'setMode' | 'setReplayTime'>
+  & Pick<CanvasModel, 'toggleTurn' | 'expandTurn' | 'showFullTurn' | 'setAutoFold' | 'setKeepVisible' | 'toggleAgent' | 'setMode' | 'setReplayTime'>
   & { /** False until the model exists (the snapshot is then an empty placeholder). */ ready: boolean };
 
 export function useCanvas(live: LiveSession): UseCanvasResult {
@@ -500,6 +516,7 @@ export function useCanvas(live: LiveSession): UseCanvasResult {
   const getSnapshot = useCallback(() => (model ? model.getSnapshot() : EMPTY_SNAPSHOT), [model]);
   const snapshot = useSyncExternalStore(subscribe, getSnapshot);
   const toggleTurn = useCallback((turnKey: string) => model?.toggleTurn(turnKey), [model]);
+  const expandTurn = useCallback((turnKey: string) => model?.expandTurn(turnKey), [model]);
   const showFullTurn = useCallback((turnKey: string) => model?.showFullTurn(turnKey), [model]);
   const setAutoFold = useCallback((enabled: boolean) => model?.setAutoFold(enabled), [model]);
   const setKeepVisible = useCallback((id: string | null) => model?.setKeepVisible(id), [model]);
@@ -509,7 +526,7 @@ export function useCanvas(live: LiveSession): UseCanvasResult {
   // Same object until the snapshot changes, so consumers can memoize on it.
   const ready = model !== null;
   return useMemo(
-    () => ({ ...snapshot, toggleTurn, showFullTurn, setAutoFold, setKeepVisible, toggleAgent, setMode, setReplayTime, ready }),
-    [snapshot, toggleTurn, showFullTurn, setAutoFold, setKeepVisible, toggleAgent, setMode, setReplayTime, ready],
+    () => ({ ...snapshot, toggleTurn, expandTurn, showFullTurn, setAutoFold, setKeepVisible, toggleAgent, setMode, setReplayTime, ready }),
+    [snapshot, toggleTurn, expandTurn, showFullTurn, setAutoFold, setKeepVisible, toggleAgent, setMode, setReplayTime, ready],
   );
 }

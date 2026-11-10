@@ -90,7 +90,10 @@ export function highlightClass(h: Highlight): string {
 }
 export type FlowNode = GraphFlowNode | SummaryFlowNode | HeaderFlowNode | EarlierFlowNode;
 
-/** `fromKeyboard`: the action came from the keyboard, so focus should land on the turn's header once it exists. */
+/**
+ * `fromKeyboard`: the action came from the keyboard, so focus should land on the turn's header (for an agent group key:
+ * its container's 收起 button) once it exists.
+ */
 export interface CanvasActionsValue {
   toggleTurn(turnKey: string, fromKeyboard?: boolean): void;
   /** Takes a turn key or an agent group key (the fold inside a long agent). */
@@ -273,8 +276,8 @@ function EarlierView({ data, width, height }: NodeProps<EarlierFlowNode>) {
   const { showFullTurn } = useContext(CanvasActions);
   const onShowAll = (e: MouseEvent): void => {
     e.stopPropagation(); // not a node click
-    // A keyboard click moves focus to the turn's header afterwards; an agent group has no header of its own.
-    showFullTurn(data.groupKey, e.detail === 0 && data.groupKey === data.turnKey);
+    // A keyboard click moves focus afterwards: to the turn's header, or to an agent container's 收起 button.
+    showFullTurn(data.groupKey, e.detail === 0);
   };
   return (
     <div className="cc-node cc-earlier" style={boxStyle(width, height, SUMMARY_COLOR)}>

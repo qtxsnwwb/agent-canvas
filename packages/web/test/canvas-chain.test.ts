@@ -200,3 +200,25 @@ test('expandCut：earlier 对应 showFullTurn(groupKey)，摘要节点对应展�
   expect(expandCut(v2, upstreamChain(v2, 'x9').cutAt)).toEqual({ fullTurns: [], turns: ['t1'] });
   expect(expandCut(v2, ['gone', 'x9'])).toEqual({ fullTurns: [], turns: [] });
 });
+
+test('子代理以自己的任务提示开头：内部提示不结束链，从容器继续到主线提示', () => {
+  const g = graph(
+    [p('p1', 't1', 0), text('tx1', 't1', 1), sub('s1', 't1', 2, 'a1'), inner('ip', 'a1', 3, 'prompt'), inner('ith', 'a1', 4, 'thinking'), inner('i2', 'a1', 5)],
+    [e('p1', 'tx1'), e('tx1', 's1'), e('s1', 'ip', 'spawn'), e('ip', 'ith'), e('ith', 'i2')],
+  );
+  const c = upstreamChain(buildV(g, opts({ mode: 'causal', expandedAgents: new Set(['a1']) })), 'i2');
+  expect([...c.nodeIds].sort()).toEqual(['i2', 'ip', 'ith', 'p1', 's1', 'tx1']);
+  expect(c.reasoning).toEqual(['tx1', 'ith']);
+  expect(c.truncated).toBe(false);
+});
+
+test('两层嵌套的子代理各自以任务提示开头：链一直走到主线提示', () => {
+  const g = graph(
+    [p('p1', 't1', 0), text('tx1', 't1', 1), sub('s1', 't1', 2, 'a1'), inner('ip', 'a1', 3, 'prompt'),
+      node('s2', 'subagent', null, 'a1', 4, { childAgentId: 'a2' }), inner('jp', 'a2', 5, 'prompt'), inner('jth', 'a2', 6, 'thinking'), inner('j2', 'a2', 7)],
+    [e('p1', 'tx1'), e('tx1', 's1'), e('s1', 'ip', 'spawn'), e('ip', 's2'), e('s2', 'jp', 'spawn'), e('jp', 'jth'), e('jth', 'j2')],
+  );
+  const c = upstreamChain(buildV(g, opts({ mode: 'causal', expandedAgents: new Set(['a1', 'a2']) })), 'j2');
+  expect([...c.nodeIds].sort()).toEqual(['ip', 'j2', 'jp', 'jth', 'p1', 's1', 's2', 'tx1']);
+  expect(c.reasoning).toEqual(['tx1', 'jth']);
+});

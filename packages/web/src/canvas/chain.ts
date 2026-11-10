@@ -40,10 +40,10 @@ function indexOf(view: CanvasView): Index {
 }
 
 /**
- * Walks the view's edges backwards (breadth first, each node once) from `nodeId`. A prompt, a turn summary and an
- * `earlier` node end the walk (the last two mark the chain `truncated` and are listed in `cutAt`). A node that starts
- * an agent group (no incoming edge from its own group) continues from the group's container node. Returns EMPTY_CHAIN
- * for null or an id not in the view.
+ * Walks the view's edges backwards (breadth first, each node once) from `nodeId`. A main-thread prompt (one in a turn,
+ * not in an agent group), a turn summary and an `earlier` node end the walk (the last two mark the chain `truncated`
+ * and are listed in `cutAt`). A node that starts an agent group (no incoming edge from its own group, e.g. the agent's
+ * task prompt) continues from the group's container node. Returns EMPTY_CHAIN for null or an id not in the view.
  */
 export function upstreamChain(view: CanvasView, nodeId: string | null): UpstreamChain {
   if (nodeId === null || !view.nodes.has(nodeId)) return EMPTY_CHAIN;
@@ -67,7 +67,8 @@ export function upstreamChain(view: CanvasView, nodeId: string | null): Upstream
       if (id !== nodeId) cutAt.push(id);
       continue;
     }
-    if (vn.node.kind === 'prompt') continue;
+    // Only a main-thread prompt ends the walk; an agent's own task prompt is an ordinary node of its group.
+    if (vn.node.kind === 'prompt' && !containerOf.has(vn.groupKey)) continue;
     const ins = incoming.get(id) ?? [];
     let fromOwnGroup = false;
     for (const e of ins) {

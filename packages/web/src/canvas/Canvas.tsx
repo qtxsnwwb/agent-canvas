@@ -20,7 +20,7 @@ import './canvas.css';
 import { TURN_HEADER } from './layout';
 import { followTarget, resumeZoom, viewportMoved } from './follow';
 import { sizeOf } from './sizes';
-import { edgeZ, groupDepths, nodeZ } from './stacking';
+import { edgeZ, groupDepths, HEADER_Z, nodeZ } from './stacking';
 import type { CanvasSnapshot } from './useCanvas';
 import { forkSources, type CanvasView, type TurnSummary, type ViewEdge } from './view';
 import type { UpstreamChain } from './chain';
@@ -45,6 +45,11 @@ export interface CanvasProps {
   onToggleAgent(agentId: string): void;
   /** Called with the follow state whenever it changes (and on mount). */
   onFollowingChange?(following: boolean): void;
+  /**
+   * Changing this number stops following, as a canvas button does (for layout changes made outside the canvas, e.g.
+   * the drawer's 展开). The caller turns auto-fold off itself before making the change.
+   */
+  stopFollowingSignal?: number;
 }
 
 const EDGE_COLOR = { sequence: '#94a3b8', fork: '#6366f1' } as const;
@@ -133,7 +138,8 @@ function useFlowNodes(snapshot: CanvasSnapshot, selectedId: string | null, chain
         && old.data.highlight === headerHighlight
         ? old
         : {
-          id, type: 'turnHeader', position, width, height: HEADER_HEIGHT, className: wrapperClass(false, headerHighlight),
+          id, type: 'turnHeader', position, width, height: HEADER_HEIGHT, zIndex: HEADER_Z,
+          className: wrapperClass(false, headerHighlight),
           data: { turnKey: turn.key, startedAt: turn.summary.startedAt, nodeCount: turn.summary.nodeCount, highlight: headerHighlight },
           // Declared (empty) handles: otherwise React Flow force-renders an unmeasured node even when off screen.
           handles: NO_HANDLES, selectable: false, focusable: false, draggable: false, connectable: false,
@@ -352,16 +358,16 @@ const HEADER_FOCUS_WAIT_MS = 3_000;
 const HEADER_FOCUS_POLL_MS = 50;
 
 /**
- * After a keyboard expand the focused element (a summary node or its button) goes away; move focus to the turn
- * header's "折叠" button once React Flow has rendered it, so focus does not fall back to the page body. Best effort.
+ * After a keyboard expand the focused element (a summary node, an `earlier` node or its button) goes away; move focus
+ * to the button matching `selector` (a turn header's "折叠", an agent container's "收起") once React Flow has rendered
+ * it, so focus does not fall back to the page body. Best effort.
  */
-function useHeaderFocus(): (turnKey: string) => void {
+function useDeferredFocus(): (selector: string) => void {
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(timer.current), []);
-  return useCallback((turnKey: string) => {
+  return useCallback((selector: string) => {
     clearTimeout(timer.current);
     const until = Date.now() + HEADER_FOCUS_WAIT_MS;
-    const selector = `.react-flow__node[data-id="${CSS.escape(HEADER_PREFIX + turnKey)}"] .cc-fold`;
     const attempt = (): void => {
       const button = document.querySelector<HTMLButtonElement>(selector);
       if (button) button.focus({ preventScroll: true });
@@ -371,7 +377,9 @@ function useHeaderFocus(): (turnKey: string) => void {
   }, []);
 }
 
-function CanvasInner({ snapshot, selectedId, chain, onSelect, onToggleTurn, onShowFullTurn, onToggleAgent, onFollowingChange }: CanvasProps) {
+function CanvasInner({
+  snapshot, selectedId, chain, onSelect, onToggleTurn, onShowFullTurn, onToggleAgent, onFollowingChange, stopFollowingSignal,
+}: CanvasProps) {
   const nodes = useFlowNodes(snapshot, selectedId, chain);
   const edges = useFlowEdges(snapshot, chain);
   const follow = useFollow(snapshot);
@@ -402,7 +410,16 @@ function CanvasInner({ snapshot, selectedId, chain, onSelect, onToggleTurn, onSh
   toggleAgentRef.current = onToggleAgent;
   const followChangeRef = useRef(onFollowingChange);
   followChangeRef.current = onFollowingChange;
-  const focusHeader = useHeaderFocus();
+  const focusLater = useDeferredFocus();
+  const viewRef = useRef(snapshot.view);
+  viewRef.current = snapshot.view;
+  /** The button to focus after a keyboard expand of `key`: an agent container's 收起, otherwise the turn header's 折叠. */
+  const focusAfter = useCallback((key: string) => {
+    const group = viewRef.current.agentGroups.find((g) => g.key === key);
+    focusLater(group !== undefined
+      ? `.react-flow__node[data-id="${CSS.escape(group.containerId)}"] .cc-expand`
+      : `.react-flow__node[data-id="${CSS.escape(HEADER_PREFIX + key)}"] .cc-fold`);
+  }, [focusLater]);
   const stopFollowing = follow.stop;
   // A UI layout change stops following; auto-fold is switched off right away (not only through the follow effect
   // after the next render), so the rebuild this action triggers already keeps everything expanded in place.
@@ -413,7 +430,7 @@ function CanvasInner({ snapshot, selectedId, chain, onSelect, onToggleTurn, onSh
     };
     const before = (key: string, fromKeyboard?: boolean): void => {
       stop();
-      if (fromKeyboard) focusHeader(key);
+      if (fromKeyboard) focusAfter(key);
     };
     return {
       stopFollowing: stop,
@@ -422,20 +439,25 @@ function CanvasInner({ snapshot, selectedId, chain, onSelect, onToggleTurn, onSh
       // The subagent node (and its button, which keeps the focus) stays in place, so no focus handling is needed.
       toggleAgent: (agentId: string) => { stop(); toggleAgentRef.current(agentId); },
     };
-  }, [stopFollowing, focusHeader]);
+  }, [stopFollowing, focusAfter]);
 
-  // A selection in the causal view stops following (and so auto-fold): its upstream chain must not be folded away
-  // under the reader by later updates.
-  const causalSelection = mode === 'causal' && selectedId !== null;
+  // Every selection in the causal view stops following (and so auto-fold), also after "回到最新": its upstream chain
+  // must not be folded away under the reader by later updates.
   useEffect(() => {
-    if (causalSelection) actions.stopFollowing();
-  }, [causalSelection, actions]);
+    if (mode === 'causal' && selectedId !== null) actions.stopFollowing();
+  }, [mode, selectedId, actions]);
+
+  // A layout change made outside the canvas (the drawer's 展开) stops following like a canvas button.
+  const lastSignal = useRef(stopFollowingSignal);
+  useEffect(() => {
+    if (lastSignal.current === stopFollowingSignal) return;
+    lastSignal.current = stopFollowingSignal;
+    stopFollowing();
+  }, [stopFollowingSignal, stopFollowing]);
 
   // Enter / Space on a focused node. React Flow's own key handler on the node wrapper only updates its internal
   // selection and never calls onNodeClick; the wrapper (not our node component) holds the focus, so the key is
   // handled here as it bubbles out of the wrapper. Stopping it keeps Space from also arming React Flow's pan key.
-  const viewRef = useRef(snapshot.view);
-  viewRef.current = snapshot.view;
   const onSelectRef = useRef(onSelect);
   onSelectRef.current = onSelect;
   const onKeyDown = useCallback((e: KeyboardEvent<HTMLDivElement>) => {

@@ -66,13 +66,21 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
   const view = canvas.view;
   const chainStart = view.mode === 'causal' && selectedNode !== null ? selectedNode.id : null;
   const chain = useMemo(() => (chainStart !== null ? upstreamChain(view, chainStart) : EMPTY_CHAIN), [view, chainStart]);
-  // The drawer's "展开" under a chain cut short by a fold: show the `earlier` folds in full, expand the collapsed turns.
-  const { showFullTurn, toggleTurn } = canvas;
+  // The drawer's "展开" under a chain cut short by a fold: show the `earlier` folds in full, expand the collapsed turns
+  // (in full too, so one click reveals the upstream instead of running into the long-turn fold). Like a canvas button
+  // it stops following; auto-fold goes off first, so the rebuilds below already keep everything in place.
+  const { showFullTurn, expandTurn, setAutoFold } = canvas;
+  const [stopFollowingSignal, setStopFollowingSignal] = useState(0);
   const expandChainCut = useCallback(() => {
     const { fullTurns, turns } = expandCut(view, chain.cutAt);
+    setAutoFold(false);
+    setStopFollowingSignal((n) => n + 1);
     for (const key of fullTurns) showFullTurn(key);
-    for (const key of turns) toggleTurn(key);
-  }, [view, chain, showFullTurn, toggleTurn]);
+    for (const key of turns) {
+      expandTurn(key);
+      showFullTurn(key);
+    }
+  }, [view, chain, showFullTurn, expandTurn, setAutoFold]);
   // "暂无节点" only when the live graph really has no nodes; "布局中…" while the model is starting or the view has
   // nodes none of which is placed yet.
   const empty = !hasKeys(live.getGraph().nodes);
@@ -92,6 +100,7 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
           onShowFullTurn={canvas.showFullTurn}
           onToggleAgent={canvas.toggleAgent}
           onFollowingChange={canvas.setAutoFold}
+          stopFollowingSignal={stopFollowingSignal}
         />
         {selectedNode !== null && (
           <Drawer

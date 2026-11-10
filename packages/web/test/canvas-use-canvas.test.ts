@@ -1208,3 +1208,54 @@ test('复盘视角下的布局请求使用复盘尺寸；新尺寸的布局到�
   expect(model.getSnapshot().layoutMode).toBe('replay');
   model.dispose();
 });
+
+test('代理分组离开视图后忘掉“展开全部”：轮次折叠或切到拓扑再回来，按长度规则重新折叠', async () => {
+  const live = fakeLive(longAgent(61));
+  const layout = deterministicLayout();
+  const model = createCanvasModel(live, layout.client);
+  model.toggleAgent('a1');
+  const group = () => model.getSnapshot().view.agentGroups[0];
+  model.showFullTurn('agent:a1');
+  expect(group()!.foldedIds).toEqual([]);
+  model.toggleTurn('t1'); // collapse the container's turn: the group leaves the view
+  expect(group()).toBeUndefined();
+  model.toggleTurn('t1');
+  expect(group()!.foldedIds).toHaveLength(20);
+  model.showFullTurn('agent:a1');
+  model.setMode('topology');
+  model.setMode('live');
+  expect(group()!.foldedIds).toHaveLength(20);
+  model.dispose();
+});
+
+test('代理分组离开视图后忘掉冻结的折叠：回到视图时按当时的长度规则重新冻结', async () => {
+  const live = fakeLive(longAgent(61));
+  const layout = deterministicLayout();
+  const model = createCanvasModel(live, layout.client);
+  model.toggleAgent('a1');
+  model.setAutoFold(false);
+  const group = () => model.getSnapshot().view.agentGroups[0];
+  expect(group()!.foldedIds).toHaveLength(20);
+  model.setMode('topology'); // the group leaves the view
+  live.set(longAgent(70));
+  await vi.advanceTimersByTimeAsync(60);
+  model.setMode('live');
+  expect(group()!.foldedIds).toHaveLength(70 - 1 - 40);
+  model.dispose();
+});
+
+test('expandTurn 只展开：折叠的轮次被展开，已展开的轮次不变（重复调用无副作用）', async () => {
+  const turns = graph([node('a', 't1', 0), node('b', 't2', 10), node('c', 't3', 20), node('d', 't4', 30)]);
+  const live = fakeLive(turns);
+  const layout = fakeLayout();
+  const model = createCanvasModel(live, layout.client);
+  const collapsed = () => model.getSnapshot().view.turns.map((t) => t.collapsed);
+  expect(collapsed()).toEqual([true, false, false, false]);
+  model.expandTurn('t1');
+  expect(collapsed()).toEqual([false, false, false, false]);
+  model.expandTurn('t1');
+  model.expandTurn('t4');
+  expect(collapsed()).toEqual([false, false, false, false]);
+  model.expandTurn('nope');
+  model.dispose();
+});

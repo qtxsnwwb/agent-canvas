@@ -1,7 +1,7 @@
 import { expect, test } from 'vitest';
 import type { Graph, GraphEdge, GraphNode, NodeKind } from '@claude-canvas/shared';
 import { buildView } from '../src/canvas/view';
-import { edgeZ, groupDepths, nodeZ, Z_PER_DEPTH } from '../src/canvas/stacking';
+import { edgeZ, groupDepths, HEADER_Z, nodeZ, Z_PER_DEPTH } from '../src/canvas/stacking';
 
 const EPOCH = Date.parse('2026-01-01T00:00:00Z');
 function node(id: string, kind: NodeKind, turnId: string | null, agentId: string | null, tMs: number, childAgentId: string | null = null): GraphNode {
@@ -32,8 +32,16 @@ function zOf(expanded: string[]) {
   return { view, z, ez };
 }
 
-/** Each depth is one layer of Z_PER_DEPTH values: edges, then edges on the chain, then nodes. */
-const layer = (depth: number) => ({ edge: depth * Z_PER_DEPTH, chain: depth * Z_PER_DEPTH + 1, node: depth * Z_PER_DEPTH + 2 });
+/** Each depth is one layer of Z_PER_DEPTH values: (turn headers,) edges, edges on the chain, nodes. */
+const layer = (depth: number) => ({
+  edge: depth * Z_PER_DEPTH + 1, chain: depth * Z_PER_DEPTH + 2, node: depth * Z_PER_DEPTH + 3,
+});
+
+test('轮次标题栏在第 0 层最底下：低于普通边', () => {
+  const { ez } = zOf([]);
+  expect(HEADER_Z).toBeLessThan(ez('p1->s1'));
+  expect(HEADER_Z).toBe(0);
+});
 
 test('没有展开的子代理时所有节点和边都在第 0 层', () => {
   const { view, z, ez } = zOf([]);
