@@ -1,5 +1,5 @@
 import { afterEach, expect, test, vi } from 'vitest';
-import type { SearchHit } from '@claude-canvas/shared';
+import { SEARCH_MAX_CHARS, type SearchHit } from '@claude-canvas/shared';
 import { createSearcher, highlightParts } from '../src/search';
 import { baseSession } from './helpers';
 
@@ -16,6 +16,25 @@ test('highlightParts：不区分大小写、多处命中、中文、q 含正则�
   expect(highlightParts('abc', '')).toEqual([{ text: 'abc', match: false }]);
   expect(highlightParts('abc', 'zz')).toEqual([{ text: 'abc', match: false }]);
   expect(highlightParts('a(b', '(b')).toEqual([{ text: 'a', match: false }, { text: '(b', match: true }]);
+});
+
+test('highlightParts 与服务端规则一致：只对 ASCII 字母不区分大小写，É 与 é 互不高亮', () => {
+  expect(highlightParts('Élan élan', 'é')).toEqual([{ text: 'Élan ', match: false }, { text: 'é', match: true }, { text: 'lan', match: false }]);
+  expect(highlightParts('Élan élan', 'É')).toEqual([{ text: 'É', match: true }, { text: 'lan élan', match: false }]);
+  expect(highlightParts('STRASSE', 'straße')).toEqual([{ text: 'STRASSE', match: false }]);
+  expect(highlightParts('İstanbul', 'i̇')).toEqual([{ text: 'İstanbul', match: false }]);
+});
+
+test('highlightParts：超过 SEARCH_MAX_CHARS 的查询只用前 200 个码点', () => {
+  const emoji = '\u{1F600}';
+  const head = 'a'.repeat(199) + emoji; // 200 code points
+  const snippet = `x${head}y`;
+  expect(SEARCH_MAX_CHARS).toBe(200);
+  expect(highlightParts(snippet, `${head}ZZZ`)).toEqual([
+    { text: 'x', match: false },
+    { text: head, match: true },
+    { text: 'y', match: false },
+  ]);
 });
 
 test('createSearcher：防抖内只发最后一次', async () => {
