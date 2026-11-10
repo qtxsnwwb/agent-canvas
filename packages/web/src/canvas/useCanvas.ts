@@ -19,6 +19,11 @@ export interface CanvasModel {
   toggleTurn(turnKey: string): void;
   /** Shows every node of a long expanded turn (instead of folding its middle into an `earlier` node). */
   showFullTurn(turnKey: string): void;
+  /**
+   * Default true. While false, turns expanded by the default "last 3" rule stay expanded when newer turns arrive (so
+   * content does not move under a reader); turning it back on drops those and applies the default rule again.
+   */
+  setAutoFold(enabled: boolean): void;
   dispose(): void;
 }
 
@@ -45,32 +50,96 @@ function pick<T>(obj: Record<string, T>, keep: (key: string) => boolean): Record
   return dropped ? out : obj;
 }
 
+const samePoint = (a: { x: number; y: number }, b: { x: number; y: number } | undefined): boolean =>
+  b !== undefined && a.x === b.x && a.y === b.y;
+const sameBox = (a: Box, b: Box | undefined): boolean =>
+  b !== undefined && a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
+/** Same keys, and every value equal by `same`. */
+function sameRecord<T>(a: Record<string, T>, b: Record<string, T>, same: (x: T, y: T | undefined) => boolean): boolean {
+  if (a === b) return true;
+  const keys = Object.keys(a);
+  if (keys.length !== Object.keys(b).length) return false;
+  return keys.every((k) => same(a[k]!, b[k]));
+}
+
 /**
- * Not React-bound. After each live notification (throttled to 50 ms) the view is rebuilt and every turn is laid out;
- * the new positions are swapped in at once when all turns have returned. Until then nodes keep their old positions,
- * and nodes that have none are left out of `positions`.
+ * Not React-bound. After each live notification (throttled to 50 ms) the view is rebuilt and published at once; then
+ * every turn is laid out and the new positions are swapped in at once when all turns have returned. Until then nodes
+ * keep their old positions, and nodes that have none are left out of `positions`. At most one layout round runs at a
+ * time: a rebuild during a round publishes its view and marks the model dirty, and one more round runs (against the
+ * then-current graph) when the running one settles.
  */
 export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscribe'>, layout: LayoutClient): CanvasModel {
+  /** Turn key -> expanded, set by the user. */
   const overrides = new Map<string, boolean>();
+  /** Turn key -> expanded, recorded while auto-fold is off for turns the default rule had expanded. */
+  const implicit = new Map<string, boolean>();
   const fullTurns = new Set<string>();
   const listeners = new Set<() => void>();
   let snapshot: CanvasSnapshot = EMPTY_SNAPSHOT;
   let disposed = false;
-  let generation = 0;
-  /** Newest generation whose layout was applied; older results arriving later are dropped. */
-  let appliedGeneration = 0;
-  /** Newest generation whose layout failed; a success only clears the error when it is newer. */
-  let failedGeneration = 0;
+  let autoFold = true;
+  let roundRunning = false;
+  let dirty = false;
 
   const publish = (next: CanvasSnapshot): void => {
     snapshot = next;
     for (const fn of [...listeners]) fn();
   };
 
-  const rebuild = (): void => {
+  /** Keeps every turn the current view shows expanded by the default rule expanded from now on (until auto-fold returns). */
+  const pinDefaultExpanded = (): void => {
+    for (const t of snapshot.view.turns) {
+      if (!t.collapsed && !overrides.has(t.key)) implicit.set(t.key, true);
+    }
+  };
+
+  const effectiveOverrides = (): ReadonlyMap<string, boolean> => {
+    if (implicit.size === 0) return overrides;
+    const merged = new Map(implicit);
+    for (const [k, v] of overrides) merged.set(k, v);
+    return merged;
+  };
+
+  const startRound = (view: CanvasView): void => {
+    roundRunning = true;
+    const settle = (): void => {
+      roundRunning = false;
+      if (dirty && !disposed) {
+        dirty = false;
+        rebuild();
+      }
+    };
+    Promise.all(view.turns.map((t) => layout.layout(turnInput(view, t)))).then(
+      (layouts) => {
+        if (disposed) return;
+        const stacked = stackTurns(layouts);
+        // The view may have moved on since this request: keep only what is still shown.
+        const current = snapshot.view;
+        let positions: Positions = {};
+        for (const [id, p] of Object.entries(stacked.positions)) if (current.nodes.has(id)) positions[id] = p;
+        for (const [id, p] of Object.entries(snapshot.positions)) if (!(id in positions)) positions[id] = p;
+        const currentTurns = new Set(current.turns.map((t) => t.key));
+        let turnBoxes = pick(stacked.turnBoxes, (k) => currentTurns.has(k));
+        if (sameRecord(positions, snapshot.positions, samePoint)) positions = snapshot.positions;
+        if (sameRecord(turnBoxes, snapshot.turnBoxes, sameBox)) turnBoxes = snapshot.turnBoxes;
+        const unchanged = positions === snapshot.positions && turnBoxes === snapshot.turnBoxes && snapshot.layoutError === null;
+        if (!unchanged) publish({ view: current, positions, turnBoxes, layoutError: null });
+        settle();
+      },
+      (err: unknown) => {
+        if (disposed) return;
+        const layoutError = err instanceof Error ? err.message : String(err);
+        if (layoutError !== snapshot.layoutError) publish({ ...snapshot, layoutError });
+        settle();
+      },
+    );
+  };
+
+  function rebuild(): void {
     if (disposed) return;
-    const gen = ++generation;
-    const view = buildView(live.getGraph(), overrides, fullTurns);
+    if (!autoFold) pinDefaultExpanded();
+    const view = buildView(live.getGraph(), effectiveOverrides(), fullTurns);
     const inView = (id: string): boolean => view.nodes.has(id);
     const turnKeys = new Set(view.turns.map((t) => t.key));
     publish({
@@ -79,32 +148,9 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
       positions: pick(snapshot.positions, inView),
       turnBoxes: pick(snapshot.turnBoxes, (k) => turnKeys.has(k)),
     });
-
-    Promise.all(view.turns.map((t) => layout.layout(turnInput(view, t)))).then(
-      (layouts) => {
-        if (disposed || gen < appliedGeneration) return;
-        appliedGeneration = gen;
-        const stacked = stackTurns(layouts);
-        // The view may have moved on since this request: keep only what is still shown.
-        const current = snapshot.view;
-        const positions: Positions = {};
-        for (const [id, p] of Object.entries(stacked.positions)) if (current.nodes.has(id)) positions[id] = p;
-        for (const [id, p] of Object.entries(snapshot.positions)) if (!(id in positions)) positions[id] = p;
-        const currentTurns = new Set(current.turns.map((t) => t.key));
-        publish({
-          view: current,
-          positions,
-          turnBoxes: pick(stacked.turnBoxes, (k) => currentTurns.has(k)),
-          layoutError: gen > failedGeneration ? null : snapshot.layoutError,
-        });
-      },
-      (err: unknown) => {
-        if (disposed || gen < appliedGeneration) return;
-        failedGeneration = Math.max(failedGeneration, gen);
-        publish({ ...snapshot, layoutError: err instanceof Error ? err.message : String(err) });
-      },
-    );
-  };
+    if (roundRunning) dirty = true;
+    else startRound(view);
+  }
 
   const throttle = createThrottle(rebuild, REBUILD_MS);
   const unsubscribe = live.subscribe(() => throttle.trigger());
@@ -131,6 +177,17 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
       throttle.cancel();
       rebuild();
     },
+    setAutoFold(enabled) {
+      if (disposed || enabled === autoFold) return;
+      autoFold = enabled;
+      if (!enabled) {
+        pinDefaultExpanded();
+        return; // nothing on screen changes
+      }
+      implicit.clear();
+      throttle.cancel();
+      rebuild();
+    },
     dispose() {
       disposed = true;
       throttle.cancel();
@@ -141,7 +198,7 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
 }
 
 /** One model and one layout worker per live session; both are disposed when the page unmounts. */
-export function useCanvas(live: LiveSession): CanvasSnapshot & Pick<CanvasModel, 'toggleTurn' | 'showFullTurn'> {
+export function useCanvas(live: LiveSession): CanvasSnapshot & Pick<CanvasModel, 'toggleTurn' | 'showFullTurn' | 'setAutoFold'> {
   const [model, setModel] = useState<CanvasModel | null>(null);
   useEffect(() => {
     const client = createLayoutClient(createBrowserLayoutWorker);
@@ -159,6 +216,7 @@ export function useCanvas(live: LiveSession): CanvasSnapshot & Pick<CanvasModel,
   const snapshot = useSyncExternalStore(subscribe, getSnapshot);
   const toggleTurn = useCallback((turnKey: string) => model?.toggleTurn(turnKey), [model]);
   const showFullTurn = useCallback((turnKey: string) => model?.showFullTurn(turnKey), [model]);
+  const setAutoFold = useCallback((enabled: boolean) => model?.setAutoFold(enabled), [model]);
   // Same object until the snapshot changes, so consumers can memoize on it.
-  return useMemo(() => ({ ...snapshot, toggleTurn, showFullTurn }), [snapshot, toggleTurn, showFullTurn]);
+  return useMemo(() => ({ ...snapshot, toggleTurn, showFullTurn, setAutoFold }), [snapshot, toggleTurn, showFullTurn, setAutoFold]);
 }

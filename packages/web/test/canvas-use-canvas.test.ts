@@ -128,29 +128,104 @@ test('追加节点：新位置到达前旧节点位置不变，新节点暂不�
   model.dispose();
 });
 
-test('旧的布局结果晚于新的到达时被丢弃', async () => {
+test('同一时刻最多一轮布局：进行中收到 10 次通知，结束后只再跑 1 轮，且用最新的图', async () => {
   const live = fakeLive(graph([node('a', 't1', 0)]));
   const layout = fakeLayout();
   const model = createCanvasModel(live, layout.client);
-  const first = layout.reqs[0]!;
-  live.set(graph([node('a', 't1', 0), node('b', 't1', 1)]));
-  await vi.advanceTimersByTimeAsync(50);
-  const second = layout.reqs[1]!;
-  expect(second).toBeDefined();
+  expect(layout.reqs).toHaveLength(1);
+  const ids = ['a'];
+  for (let i = 1; i <= 10; i++) {
+    ids.push(`n${i}`);
+    live.set(graph(ids.map((id, k) => node(id, 't1', k))));
+    await vi.advanceTimersByTimeAsync(60);
+    expect(model.getSnapshot().view.nodes.has(`n${i}`)).toBe(true); // the view still updates at once
+  }
+  expect(layout.reqs).toHaveLength(1);
 
-  layout.resolve(second);
+  layout.resolve(layout.reqs[0]!);
   await flush();
-  const fromSecond = model.getSnapshot();
-  expect(Object.keys(fromSecond.positions).sort()).toEqual(['a', 'b']);
-  expect(fromSecond.positions.a!.x).toBe(1000 - 150); // request #1's column, centred (turn width 300)
+  expect(layout.reqs).toHaveLength(2);
+  expect(layout.reqs[1]!.input.nodes.map((n) => n.id)).toEqual(ids);
+  layout.resolve(layout.reqs[1]!);
+  await vi.advanceTimersByTimeAsync(200);
+  expect(layout.reqs).toHaveLength(2);
+  expect(Object.keys(model.getSnapshot().positions).sort()).toEqual([...ids].sort());
+  model.dispose();
+});
 
+test('失败的一轮结束后同样触发排队的重建', async () => {
+  const live = fakeLive(graph([node('a', 't1', 0)]));
+  const layout = fakeLayout();
+  const model = createCanvasModel(live, layout.client);
+  live.set(graph([node('a', 't1', 0), node('b', 't1', 1)]));
+  await vi.advanceTimersByTimeAsync(60);
+  expect(layout.reqs).toHaveLength(1);
+  layout.reject(layout.reqs[0]!, 'boom');
+  await flush();
+  expect(layout.reqs).toHaveLength(2);
+  expect(layout.reqs[1]!.input.nodes.map((n) => n.id)).toEqual(['a', 'b']);
+  model.dispose();
+});
+
+test('布局进行中，已放置节点的状态变化立即出现在快照里', async () => {
+  const live = fakeLive(graph([node('a', 't1', 0)]));
+  const layout = fakeLayout();
+  const model = createCanvasModel(live, layout.client);
+  layout.resolveAll();
+  await flush();
+  live.set(graph([node('a', 't1', 0), node('b', 't1', 1)]));
+  await vi.advanceTimersByTimeAsync(60);
+  expect(layout.pending()).toHaveLength(1);
+  const placed = model.getSnapshot().positions.a;
+  live.set(graph([{ ...node('a', 't1', 0), status: 'failed' }, node('b', 't1', 1)]));
+  await vi.advanceTimersByTimeAsync(60);
+  const s = model.getSnapshot();
+  const a = s.view.nodes.get('a');
+  expect(a?.type === 'node' && a.node.status).toBe('failed');
+  expect(s.positions.a).toEqual(placed);
+  expect(layout.pending()).toHaveLength(1); // still the same round
+  model.dispose();
+});
+
+test('什么都没变的通知最多发布一次快照', async () => {
+  const g = graph([node('a', 't1', 0), node('b', 't1', 1)]);
+  const live = fakeLive(g);
+  // Deterministic layout: same input, same positions.
+  const client: LayoutClient = {
+    layout: async (input) => ({
+      key: input.key, width: 300, height: input.nodes.length * 100, anchorX: 150,
+      positions: Object.fromEntries(input.nodes.map((n, i) => [n.id, { x: 0, y: i * 100 }])),
+    }),
+    dispose() {},
+  };
+  const model = createCanvasModel(live, client);
+  await flush();
+  expect(Object.keys(model.getSnapshot().positions)).toHaveLength(2);
   const fn = vi.fn();
   model.subscribe(fn);
-  layout.resolve(first);
-  await flush();
-  expect(model.getSnapshot()).toBe(fromSecond);
-  expect(model.getSnapshot().positions.a!.x).toBe(1000 - 150);
-  expect(fn).not.toHaveBeenCalled();
+  live.set(g);
+  await vi.advanceTimersByTimeAsync(200);
+  expect(fn.mock.calls.length).toBeLessThanOrEqual(1);
+  model.dispose();
+});
+
+test('关闭自动折叠：新轮次到来时之前展开的轮次保持展开；重新打开后只展开最后 3 个，显式覆盖保留', async () => {
+  const turns = (n: number) => graph(Array.from({ length: n }, (_, i) => node(`x${i + 1}`, `t${i + 1}`, i * 10)));
+  const live = fakeLive(turns(4));
+  const layout = fakeLayout();
+  const model = createCanvasModel(live, layout.client);
+  const collapsed = () => model.getSnapshot().view.turns.map((t) => t.collapsed);
+  expect(collapsed()).toEqual([true, false, false, false]);
+  model.toggleTurn('t1'); // explicit: expanded
+  expect(collapsed()).toEqual([false, false, false, false]);
+
+  model.setAutoFold(false);
+  live.set(turns(6));
+  await vi.advanceTimersByTimeAsync(60);
+  expect(collapsed()).toEqual([false, false, false, false, false, false]);
+
+  model.setAutoFold(true);
+  expect(collapsed()).toEqual([false, true, true, false, false, false]);
   model.dispose();
 });
 

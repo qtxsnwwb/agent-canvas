@@ -9,15 +9,24 @@ export interface WorkerLike {
 export interface LayoutClient { layout(input: TurnLayoutInput): Promise<TurnLayout>; dispose(): void }
 
 const CACHE_LIMIT = 300;
+/** A request with no reply after this long counts as a hung worker. */
+export const LAYOUT_TIMEOUT_MS = 20_000;
+/** After this many worker failures in a row (no successful reply in between), wait before starting a new worker. */
+export const MAX_CONSECUTIVE_FAILURES = 3;
+export const WORKER_RETRY_MS = 2_000;
 
 /** Same-origin module worker emitted by Vite as its own file (CSP forbids blob:/inline workers). */
 export function createBrowserLayoutWorker(): WorkerLike {
   return new Worker(new URL('./layout.worker.ts', import.meta.url), { type: 'module' }) as unknown as WorkerLike;
 }
 
-interface Pending { cacheKey: string; resolve(l: TurnLayout): void; reject(e: Error): void }
+interface Pending { cacheKey: string; timer: ReturnType<typeof setTimeout>; resolve(l: TurnLayout): void; reject(e: Error): void }
 
-/** Results cached by key+signature (LRU, max 300); concurrent equal requests share one computation. */
+/**
+ * Results cached by key+signature (LRU, max 300); concurrent equal requests share one computation. A worker that
+ * errors, cannot be posted to or does not answer within 20 s is dropped and every pending request rejects; after 3
+ * such failures in a row the client waits 2 s before starting a new worker, rejecting requests meanwhile.
+ */
 export function createLayoutClient(createWorker: () => WorkerLike): LayoutClient {
   const cache = new Map<string, TurnLayout>();
   const inflight = new Map<string, Promise<TurnLayout>>();
@@ -25,12 +34,17 @@ export function createLayoutClient(createWorker: () => WorkerLike): LayoutClient
   let worker: WorkerLike | null = null;
   let nextId = 1;
   let disposed = false;
+  let failures = 0;
+  let coolingDown: ReturnType<typeof setTimeout> | null = null;
 
   function failAll(err: Error): void {
     const all = [...pending.values()];
     pending.clear();
     inflight.clear();
-    for (const p of all) p.reject(err);
+    for (const p of all) {
+      clearTimeout(p.timer);
+      p.reject(err);
+    }
   }
   function dropWorker(err: Error): void {
     const w = worker;
@@ -38,9 +52,17 @@ export function createLayoutClient(createWorker: () => WorkerLike): LayoutClient
     if (w) {
       w.onmessage = null;
       w.onerror = null;
-      w.terminate();
+      try { w.terminate(); } catch { /* already gone */ }
     }
     failAll(err);
+  }
+  /** Drops the worker after a failure and starts the cool-down once failures pile up. */
+  function workerFailed(err: Error): void {
+    dropWorker(err);
+    failures++;
+    if (failures >= MAX_CONSECUTIVE_FAILURES && coolingDown === null && !disposed) {
+      coolingDown = setTimeout(() => { coolingDown = null; }, WORKER_RETRY_MS);
+    }
   }
   function ensureWorker(): WorkerLike {
     if (worker) return worker;
@@ -49,6 +71,8 @@ export function createLayoutClient(createWorker: () => WorkerLike): LayoutClient
       const data = ev.data as { id: number; layout?: TurnLayout; error?: string };
       const p = pending.get(data.id);
       if (!p) return;
+      failures = 0; // the worker is alive and answering
+      clearTimeout(p.timer);
       pending.delete(data.id);
       inflight.delete(p.cacheKey);
       if (data.error !== undefined || !data.layout) {
@@ -61,7 +85,7 @@ export function createLayoutClient(createWorker: () => WorkerLike): LayoutClient
     };
     w.onerror = (ev) => {
       const msg = (ev as { message?: string } | null)?.message;
-      dropWorker(new Error(`layout worker failed${msg ? `: ${msg}` : ''}`));
+      workerFailed(new Error(`layout worker failed${msg ? `: ${msg}` : ''}`));
     };
     worker = w;
     return w;
@@ -79,22 +103,36 @@ export function createLayoutClient(createWorker: () => WorkerLike): LayoutClient
       }
       const running = inflight.get(cacheKey);
       if (running) return running;
+      if (worker === null && coolingDown !== null) {
+        return Promise.reject(new Error(
+          `layout worker failed ${failures} times in a row; a new one starts in ${WORKER_RETRY_MS / 1000} s`,
+        ));
+      }
+      let failedSync = false;
       const promise = new Promise<TurnLayout>((resolve, reject) => {
         const id = nextId++;
-        pending.set(id, { cacheKey, resolve, reject });
+        const timer = setTimeout(
+          () => workerFailed(new Error(`layout worker timed out after ${LAYOUT_TIMEOUT_MS / 1000} s`)),
+          LAYOUT_TIMEOUT_MS,
+        );
+        pending.set(id, { cacheKey, timer, resolve, reject });
         try {
           ensureWorker().postMessage({ id, input });
         } catch (err) {
-          pending.delete(id);
-          reject(err instanceof Error ? err : new Error(String(err)));
+          failedSync = true;
+          // This request is still pending, so dropping the worker rejects it along with everything else on it.
+          workerFailed(err instanceof Error ? err : new Error(String(err)));
         }
       });
+      if (failedSync) return promise; // already rejected: never shared through `inflight`
       inflight.set(cacheKey, promise);
       promise.catch(() => { if (inflight.get(cacheKey) === promise) inflight.delete(cacheKey); });
       return promise;
     },
     dispose() {
       disposed = true;
+      if (coolingDown !== null) clearTimeout(coolingDown);
+      coolingDown = null;
       dropWorker(new Error('layout client disposed'));
     },
   };

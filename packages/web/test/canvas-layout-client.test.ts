@@ -1,4 +1,4 @@
-import { expect, test } from 'vitest';
+import { expect, test, vi } from 'vitest';
 import { createLayoutClient, type WorkerLike } from '../src/canvas/layoutClient';
 import type { TurnLayout, TurnLayoutInput } from '../src/canvas/layout';
 
@@ -76,4 +76,97 @@ test('dispose 后终止 Worker，未完成的请求 reject', async () => {
   c.dispose();
   await rejected;
   expect(w.terminated).toBe(true);
+});
+
+class ThrowingWorker extends FakeWorker {
+  override postMessage(): void { throw new Error('cannot post'); }
+}
+
+test('postMessage 同步抛错：丢弃 Worker 并 reject，inflight 里不留被拒绝的 promise', async () => {
+  const workers: FakeWorker[] = [];
+  const c = createLayoutClient(() => {
+    const w = workers.length === 0 ? new ThrowingWorker() : new FakeWorker();
+    workers.push(w);
+    return w;
+  });
+  const p1 = c.layout(input('t'));
+  // Same request again, synchronously after the failure: must not share the rejected promise.
+  const p2 = c.layout(input('t'));
+  await expect(p1).rejects.toThrow('cannot post');
+  expect(workers[0]!.terminated).toBe(true);
+  expect(workers).toHaveLength(2);
+  workers[1]!.reply(0, result('t'));
+  expect(await p2).toEqual(result('t'));
+});
+
+test('单个请求 20 秒超时：所有挂起请求 reject，Worker 被丢弃', async () => {
+  vi.useFakeTimers();
+  try {
+    const workers: FakeWorker[] = [];
+    const c = createLayoutClient(() => { const w = new FakeWorker(); workers.push(w); return w; });
+    const pa = c.layout(input('A'));
+    const pb = c.layout(input('B'));
+    const ra = expect(pa).rejects.toThrow(/timed out/);
+    const rb = expect(pb).rejects.toThrow(/timed out/);
+    await vi.advanceTimersByTimeAsync(19_999);
+    expect(workers[0]!.terminated).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await ra;
+    await rb;
+    expect(workers[0]!.terminated).toBe(true);
+    const p = c.layout(input('A'));
+    expect(workers).toHaveLength(2);
+    workers[1]!.reply(0, result('A'));
+    expect(await p).toEqual(result('A'));
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test('连续 3 次 Worker 失败后等待 2 秒才新建 Worker；期间的请求立即 reject', async () => {
+  vi.useFakeTimers();
+  try {
+    const workers: FakeWorker[] = [];
+    const c = createLayoutClient(() => { const w = new FakeWorker(); workers.push(w); return w; });
+    for (let i = 0; i < 3; i++) {
+      const p = c.layout(input('t'));
+      const rejected = expect(p).rejects.toBeDefined();
+      workers[i]!.onerror?.({ message: 'boom' });
+      await rejected;
+    }
+    expect(workers).toHaveLength(3);
+    await expect(c.layout(input('t'))).rejects.toThrow(/2 s/);
+    expect(workers).toHaveLength(3);
+    await vi.advanceTimersByTimeAsync(1_999);
+    await expect(c.layout(input('t'))).rejects.toThrow(/2 s/);
+    await vi.advanceTimersByTimeAsync(1);
+    const p = c.layout(input('t'));
+    expect(workers).toHaveLength(4);
+    workers[3]!.reply(0, result('t'));
+    expect(await p).toEqual(result('t'));
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test('一次成功的应答清零连续失败计数', async () => {
+  const workers: FakeWorker[] = [];
+  const c = createLayoutClient(() => { const w = new FakeWorker(); workers.push(w); return w; });
+  const fail = async (key: string) => {
+    const p = c.layout(input(key));
+    const rejected = expect(p).rejects.toBeDefined();
+    workers[workers.length - 1]!.onerror?.({ message: 'boom' });
+    await rejected;
+  };
+  await fail('f1');
+  await fail('f2');
+  const ok = c.layout(input('ok'));
+  workers[2]!.reply(0, result('ok'));
+  await ok;
+  await fail('f3');
+  await fail('f4');
+  const p = c.layout(input('next')); // only 2 failures since the success: a new worker right away
+  expect(workers).toHaveLength(5);
+  workers[4]!.reply(0, result('next'));
+  await p;
 });

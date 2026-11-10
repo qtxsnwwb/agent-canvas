@@ -30,6 +30,8 @@ export interface CanvasProps {
   onSelect(id: string | null): void;
   onToggleTurn(turnKey: string): void;
   onShowFullTurn(turnKey: string): void;
+  /** Called with the follow state whenever it changes (and on mount). */
+  onFollowingChange?(following: boolean): void;
 }
 
 const EDGE_COLOR = { sequence: '#94a3b8', fork: '#6366f1' } as const;
@@ -45,6 +47,13 @@ function sameSummary(a: TurnSummary, b: TurnSummary): boolean {
   return a.turnKey === b.turnKey && a.promptSummary === b.promptSummary && a.nodeCount === b.nodeCount
     && a.toolCount === b.toolCount && a.failedCount === b.failedCount && a.running === b.running
     && a.startedAt === b.startedAt && a.durationMs === b.durationMs;
+}
+
+/** `next` when any element differs from `prev`, otherwise `prev` itself (so React Flow sees no change). */
+function sameElements<T>(prev: T[] | null, next: T[]): T[] {
+  if (prev === null || prev.length !== next.length) return next;
+  for (let i = 0; i < next.length; i++) if (prev[i] !== next[i]) return next;
+  return prev;
 }
 
 const NO_HANDLES: NodeHandle[] = [];
@@ -66,17 +75,19 @@ function handlesFor(width: number, height: number): NodeHandle[] {
 /** React Flow nodes for the snapshot; an unchanged node keeps its previous object so React Flow skips it. */
 function useFlowNodes(snapshot: CanvasSnapshot, selectedId: string | null): FlowNode[] {
   const cache = useRef(new Map<string, FlowNode>());
+  const last = useRef<FlowNode[] | null>(null);
   return useMemo(() => {
     const prev = cache.current;
     const next = new Map<string, FlowNode>();
     const out: FlowNode[] = [];
     const { view, positions, turnBoxes } = snapshot;
 
-    // Headers first so they render beneath the nodes.
+    // Headers first so they render beneath the nodes. A turn whose nodes have no position yet (an expand in flight)
+    // gets no header: its box is still the old layout's.
     for (const turn of view.turns) {
       if (turn.collapsed) continue;
       const box = turnBoxes[turn.key];
-      if (!box) continue;
+      if (!box || !turn.nodeIds.some((id) => positions[id] !== undefined)) continue;
       const id = HEADER_PREFIX + turn.key;
       const position = { x: box.x, y: box.y };
       const width = Math.max(box.width, HEADER_MIN_WIDTH);
@@ -133,7 +144,7 @@ function useFlowNodes(snapshot: CanvasSnapshot, selectedId: string | null): Flow
       out.push(n);
     }
     cache.current = next;
-    return out;
+    return (last.current = sameElements(last.current, out));
   }, [snapshot, selectedId]);
 }
 
@@ -144,6 +155,7 @@ function useFlowNodes(snapshot: CanvasSnapshot, selectedId: string | null): Flow
 function useFlowEdges(snapshot: CanvasSnapshot): Edge[] {
   type Cached = { src: ViewEdge; animated: boolean; fork: boolean; edge: Edge };
   const cache = useRef(new Map<string, Cached>());
+  const last = useRef<Edge[] | null>(null);
   return useMemo(() => {
     const prev = cache.current;
     const next = new Map<string, Cached>();
@@ -173,7 +185,7 @@ function useFlowEdges(snapshot: CanvasSnapshot): Edge[] {
       out.push(edge);
     }
     cache.current = next;
-    return out;
+    return (last.current = sameElements(last.current, out));
   }, [snapshot]);
 }
 
@@ -239,10 +251,12 @@ function useFollow(snapshot: CanvasSnapshot) {
   };
 }
 
-function CanvasInner({ snapshot, selectedId, onSelect, onToggleTurn, onShowFullTurn }: CanvasProps) {
+function CanvasInner({ snapshot, selectedId, onSelect, onToggleTurn, onShowFullTurn, onFollowingChange }: CanvasProps) {
   const nodes = useFlowNodes(snapshot, selectedId);
   const edges = useFlowEdges(snapshot);
   const follow = useFollow(snapshot);
+  const { following } = follow;
+  useEffect(() => { onFollowingChange?.(following); }, [following, onFollowingChange]);
 
   // Stable identity for the context value; the latest callback is read through the ref.
   const toggleRef = useRef(onToggleTurn);
