@@ -147,3 +147,61 @@ test('summarize 压缩空白并截断', () => {
   expect(summarize(undefined)).toBe('');
   expect(summarize('z'.repeat(300))).toBe('z'.repeat(199) + '…');
 });
+
+test('终态节点的 tool_result 仍补上 output，但不发状态变更', () => {
+  const { changes } = run(n, [
+    userPrompt('u1', null, 'x'),
+    assistantBlock('a1', 'u1', { type: 'tool_use', id: 'tu1', name: 'Read', input: {} }),
+    toolResult('u2', 'a1', 'tu1', 'first'),
+    toolResult('u3', 'u2', 'tu1', 'second'),
+  ]);
+  const updates = changes.filter(
+    (c): c is Extract<Change, { type: 'node_updated' }> => c.type === 'node_updated',
+  );
+  expect(updates).toHaveLength(2);
+  expect('status' in updates[1].patch).toBe(false);
+  expect(updates[1].detail).toEqual({ output: 'second' });
+});
+
+test('未知类型但带 uuid 的记录不打断父链', () => {
+  const { graph, unknown } = run(n, [
+    userPrompt('u1', null, 'x'),
+    rawLine('progress', { uuid: 'x1', parentUuid: 'u1' }),
+    assistantBlock('a1', 'x1', { type: 'text', text: 'hi' }),
+  ]);
+  expect(graph.nodes.a1.parentId).toBe('u1');
+  expect(graph.edges['u1->a1']).toBeDefined();
+  expect(unknown).toEqual(['progress']);
+});
+
+test('数组内容的 user 记录（text/image）是 prompt', () => {
+  const content = [{ type: 'text', text: '看这张图' }, { type: 'image', source: {} }];
+  const { graph, changes } = run(n, [
+    rawLine('user', { uuid: 'u1', parentUuid: null, message: { role: 'user', content } }),
+  ]);
+  expect(graph.nodes.u1).toMatchObject({ kind: 'prompt', summary: '看这张图 [image]' });
+  const statuses = changes.flatMap((c) => (c.type === 'session_upserted' ? [c.session.status] : []));
+  expect(statuses.at(-1)).toBe('running');
+  const meta = run(new Normalizer(), [
+    rawLine('user', { uuid: 'u1', parentUuid: null, isMeta: true, message: { role: 'user', content } }),
+  ]);
+  expect(meta.graph.nodes).toEqual({});
+});
+
+test('确认已有 tool 节点时不重复发边', () => {
+  const { changes } = run(n, [
+    userPrompt('u1', null, 'x'),
+    assistantBlock('a1', 'u1', { type: 'tool_use', id: 'tu1', name: 'Read', input: {} }),
+    assistantBlock('a2', 'u1', { type: 'tool_use', id: 'tu1', name: 'Read', input: {} }),
+  ]);
+  const edges = changes.filter((c) => c.type === 'edge_added' && c.edge.id === 'u1->tool:tu1');
+  expect(edges).toHaveLength(1);
+});
+
+test('lastActivityAt 不会倒退', () => {
+  const r1 = n.apply(userPrompt('u1', null, 'x', { timestamp: '2026-02-01T00:00:10.000Z' }), 'p1');
+  const r2 = n.apply(rawLine('attachment', { uuid: 'at1', parentUuid: 'u1', timestamp: '2026-02-01T00:00:05.000Z' }), 'p1');
+  const last = r1.changes.filter((c) => c.type === 'session_upserted').at(-1);
+  expect(last).toMatchObject({ session: { lastActivityAt: '2026-02-01T00:00:10.000Z' } });
+  expect(r2.changes).toEqual([]);
+});

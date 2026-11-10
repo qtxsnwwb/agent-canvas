@@ -72,7 +72,16 @@ function classifyUser(record: TranscriptRecord): Classified {
       results.push({ toolUseId: block.tool_use_id, content: block.content, isError: block.is_error === true });
     }
   }
-  return results.length > 0 ? { kind: 'tool_results', results } : { kind: 'silent' };
+  if (results.length > 0) return { kind: 'tool_results', results };
+  if (record.isMeta === true) return { kind: 'silent' };
+  // Array prompts (pasted images, multi-part text): text blocks joined, images as a literal marker.
+  const parts: string[] = [];
+  for (const block of content as unknown[]) {
+    if (!isObject(block)) continue;
+    if (block.type === 'text' && typeof block.text === 'string') parts.push(block.text);
+    else if (block.type === 'image') parts.push('[image]');
+  }
+  return parts.length > 0 ? { kind: 'prompt', text: parts.join('\n') } : { kind: 'silent' };
 }
 
 export function classifyRecord(record: TranscriptRecord): Classified {

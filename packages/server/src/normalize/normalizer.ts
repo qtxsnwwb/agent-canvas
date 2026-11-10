@@ -64,7 +64,12 @@ export class Normalizer {
     if (!isObject(parsed)) return { changes: [], unknownRecordType: 'invalid-json' };
     const type = parsed.type;
     if (typeof type !== 'string') return { changes: [], unknownRecordType: 'missing-type' };
-    if (!KNOWN_TYPES.has(type)) return { changes: [], unknownRecordType: type };
+    if (!KNOWN_TYPES.has(type)) {
+      // Keep the parent chain intact across records we do not understand (only once the session exists).
+      const unknownUuid = str(parsed.uuid);
+      if (unknownUuid !== null) this.sessions.get(event.sessionId)?.passthrough.set(unknownUuid, str(parsed.parentUuid));
+      return { changes: [], unknownRecordType: type };
+    }
     const uuid = str(parsed.uuid);
     if (uuid === null) return type === 'attachment' ? { changes: [] } : { changes: [], unknownRecordType: `${type}:malformed` };
     const record = { ...parsed, type, uuid } as TranscriptRecord;
@@ -180,7 +185,7 @@ export class Normalizer {
     const gitBranch = str(record.gitBranch);
     const next: Session = {
       ...s,
-      lastActivityAt: ts ?? s.lastActivityAt,
+      lastActivityAt: ts !== null && ts > s.lastActivityAt ? ts : s.lastActivityAt,
       cwd: cwd ?? s.cwd,
       gitBranch: gitBranch ?? s.gitBranch,
       projectId: s.projectId === 'unknown' && projectId !== 'unknown' ? projectId : s.projectId,
@@ -317,7 +322,7 @@ export class Normalizer {
       const updated = { ...existing, ...patch };
       state.nodes.set(id, updated);
       changes.push({ type: 'node_updated', sessionId: state.session.id, id, patch, detail: { input: c.input } });
-      this.emitSequenceEdge(state, updated, changes);
+      if (base.parentId !== null && base.parentId !== existing.parentId) this.emitSequenceEdge(state, updated, changes);
       return;
     }
     const node: GraphNode = {
@@ -342,7 +347,12 @@ export class Normalizer {
     for (const r of c.results) {
       const id = `tool:${r.toolUseId}`;
       const node = state.nodes.get(id);
-      if (!node || (node.status !== null && TERMINAL_STATUSES.includes(node.status))) continue;
+      if (!node) continue;
+      if (node.status !== null && TERMINAL_STATUSES.includes(node.status)) {
+        // Already terminal (e.g. a hook got there first): keep status, still record the output.
+        changes.push({ type: 'node_updated', sessionId: state.session.id, id, patch: {}, detail: { output: r.content } });
+        continue;
+      }
       const patch: Partial<GraphNode> = { status: r.isError ? 'failed' : 'succeeded' };
       state.nodes.set(id, { ...node, ...patch });
       changes.push({ type: 'node_updated', sessionId: state.session.id, id, patch, detail: { output: r.content } });
