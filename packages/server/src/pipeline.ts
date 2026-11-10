@@ -9,7 +9,7 @@ import { readNewLines } from './sources/transcript/reader.js';
 import type { RawEvent, Store, StoredRawEvent } from './store/store.js';
 
 /** Per-read byte budget; keeps each synchronous slice of work short so the event loop stays responsive. */
-const READ_BUDGET_BYTES = 256 * 1024;
+const READ_BUDGET_BYTES = 64 * 1024;
 const UNKNOWN_PROJECT = 'unknown';
 
 type Listener = (changes: SeqChange[]) => void;
