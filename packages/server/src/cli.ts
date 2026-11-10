@@ -2,10 +2,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import readline from 'node:readline';
 import { parseArgs } from 'node:util';
 import type { AddressInfo } from 'node:net';
 import { buildServer } from './api/server.js';
 import { loadConfig, type Config } from './config.js';
+import { defaultSettingsFile, runHooksInstall, runHooksUninstall, type HooksCliIo } from './hooks-cli.js';
 import { acquireLock } from './lock.js';
 import { NORMALIZER_VERSION } from './normalize/version.js';
 import { NORMALIZER_VERSION_KEY, Pipeline, REBUILD_FLAG } from './pipeline.js';
@@ -22,6 +24,10 @@ export interface Running {
 const USAGE = `Usage:
   claude-canvas start [--port <n>]   Watch transcripts and serve the canvas
   claude-canvas rebuild              Re-derive the graph from the stored raw log
+  claude-canvas hooks install [--port <n>] [--yes] [--settings <file>]
+                                     Add the claude-canvas hooks to Claude Code's settings.json
+  claude-canvas hooks uninstall [--port <n>] [--yes] [--settings <file>]
+                                     Remove them again
 `;
 
 /** packages/web/dist next to this package (works from both src/ and dist/); null while it is not built. */
@@ -123,8 +129,54 @@ export function rebuild(overrides: Partial<Config> = {}, options: { progress?: (
   }
 }
 
-async function main(argv: string[]): Promise<number> {
+function terminalIo(): HooksCliIo {
+  return {
+    out: (line) => console.log(line),
+    err: (line) => console.error(line),
+    confirm: (question) =>
+      new Promise<boolean>((resolve) => {
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+        rl.question(question, (answer) => {
+          rl.close();
+          resolve(/^(y|yes)$/i.test(answer.trim()));
+        });
+      }),
+    isInteractive: Boolean(process.stdin.isTTY && process.stdout.isTTY),
+    now: () => new Date(),
+  };
+}
+
+async function hooksCommand(args: string[], env: NodeJS.ProcessEnv, io: HooksCliIo): Promise<number> {
+  const [sub, ...rest] = args;
+  if (sub !== 'install' && sub !== 'uninstall') {
+    io.err(USAGE.trimEnd());
+    return 1;
+  }
+  try {
+    const { values } = parseArgs({
+      args: rest,
+      options: { port: { type: 'string' }, yes: { type: 'boolean' }, settings: { type: 'string' } },
+      allowPositionals: false,
+    });
+    const port = values.port === undefined ? loadConfig(env).port : Number(values.port);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`invalid --port: ${values.port}`);
+    const opts = { settingsFile: values.settings ?? defaultSettingsFile(env), port, yes: values.yes === true };
+    return await (sub === 'install' ? runHooksInstall(opts, io) : runHooksUninstall(opts, io));
+  } catch (err) {
+    io.err(err instanceof Error ? err.message : String(err));
+    return 1;
+  }
+}
+
+export interface MainDeps {
+  /** IO for the hooks commands; tests inject a fake so no TTY is needed. */
+  hooksIo?: HooksCliIo;
+  env?: NodeJS.ProcessEnv;
+}
+
+export async function main(argv: string[], deps: MainDeps = {}): Promise<number> {
   const [command, ...rest] = argv;
+  if (command === 'hooks') return hooksCommand(rest, deps.env ?? process.env, deps.hooksIo ?? terminalIo());
   try {
     if (command === 'start') {
       const { values } = parseArgs({ args: rest, options: { port: { type: 'string' } }, allowPositionals: false });
