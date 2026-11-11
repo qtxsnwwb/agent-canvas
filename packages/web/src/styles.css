@@ -1,0 +1,35 @@
+body { margin: 0; font: 14px/1.5 system-ui, sans-serif; color: #1c1c1e; background: #fafafa; }
+a { color: #1a56c4; text-decoration: none; }
+header { padding: 8px 16px; background: #1c1c1e; }
+header a { color: #fff; font-weight: 600; }
+h2 { font-size: 15px; margin: 0 0 8px; }
+ul { list-style: none; margin: 0; padding: 0; }
+pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
+.muted { color: #6b6b70; font-size: 12px; }
+.error { color: #b3261e; padding: 8px 16px; }
+.tag { background: #eee; border-radius: 3px; padding: 0 4px; font-size: 12px; margin: 0 4px; }
+.status { font-size: 12px; font-weight: 600; }
+.status-running { color: #1a56c4; }
+.status-awaiting_permission, .status-awaiting_input { color: #b25e00; }
+.status-succeeded { color: #1e7a34; }
+.status-failed, .status-denied { color: #b3261e; }
+.status-stale { color: #777; }
+
+.home { display: flex; gap: 16px; padding: 16px; align-items: flex-start; }
+.projects { width: 320px; flex: none; }
+.sessions { flex: 1; min-width: 0; }
+.home li a { display: block; padding: 6px 8px; border-radius: 4px; color: inherit; overflow-wrap: anywhere; }
+.home li a:hover, .home li.selected a { background: #e8eefc; }
+
+.session-page { padding: 16px; }
+.session-head { margin-bottom: 12px; }
+.node { border-bottom: 1px solid #e4e4e7; }
+.node-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; padding: 4px 0; cursor: pointer; }
+.node-row:hover { background: #f0f0f3; }
+.subagent-node { margin-left: 24px; }
+.time { color: #6b6b70; font-variant-numeric: tabular-nums; }
+.kind { font-family: ui-monospace, monospace; font-size: 12px; }
+.title { font-weight: 600; }
+.summary { overflow-wrap: anywhere; min-width: 0; }
+.detail { margin: 4px 0 8px; padding: 8px; background: #fff; border: 1px solid #e4e4e7; border-radius: 4px; }
+.detail pre { max-height: 400px; overflow: auto; font: 12px/1.4 ui-monospace, monospace; }
