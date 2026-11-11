@@ -544,6 +544,13 @@ export function createCanvasModel(
       const members = currentRuns.get(runId);
       if (disposed || members === undefined) return;
       for (const id of members) expandedCalls.add(id);
+      // Its id may come back for a run forming later next to these calls (an id anchored on a failed call): that one is
+      // new, not one that was on screen when the freeze started.
+      if (frozenRuns !== null && frozenRuns.has(runId)) {
+        const rest = new Set(frozenRuns);
+        rest.delete(runId);
+        frozenRuns = rest;
+      }
       rebuildNow();
     },
     setReplayTime(ms) {

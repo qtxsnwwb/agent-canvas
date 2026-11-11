@@ -42,10 +42,22 @@ const KNOWN_TYPES = new Set(['user', 'assistant', 'system', 'attachment']);
 /** The tool an agent's thread calls last when it hands its result back (desktop app; seen in real transcripts, 2026-11-11). */
 const HANDBACK_TOOL = 'SubagentHandback';
 
-/** The earlier time; failed if either is. */
+/** A real end replaces a weak one; between two of the same strength: the earlier time, failed if either is. */
 function mergeEnd(a: AgentEnd, b: AgentEnd): AgentEnd {
-  return { at: a.at <= b.at ? a.at : b.at, status: a.status === 'failed' || b.status === 'failed' ? 'failed' : 'succeeded' };
+  if (a.weak === true && b.weak !== true) return b;
+  if (b.weak === true && a.weak !== true) return a;
+  return {
+    at: a.at <= b.at ? a.at : b.at,
+    status: a.status === 'failed' || b.status === 'failed' ? 'failed' : 'succeeded',
+    ...(a.weak === true ? { weak: true } : {}),
+  };
 }
+
+/** `<status>` values of a task notification that mean the task is over, and how (anything else is not an end). */
+const NOTIFIED_END: Readonly<Record<string, 'succeeded' | 'failed'>> = {
+  completed: 'succeeded', failed: 'failed', killed: 'failed', stopped: 'failed', cancelled: 'failed', canceled: 'failed',
+  error: 'failed', timeout: 'failed',
+};
 
 /** In-memory state for one session; later tasks extend this with batch/subagent bookkeeping. */
 interface SessionState {
@@ -93,7 +105,11 @@ interface SessionState {
   firstPromptSeen: boolean;
 }
 
-interface AgentEnd { at: string; status: 'succeeded' | 'failed' }
+/**
+ * `weak`: only inferred (the session ended with the agent still open), not reported for the agent itself. A real
+ * signal, whenever it arrives, replaces a weak end entirely.
+ */
+interface AgentEnd { at: string; status: 'succeeded' | 'failed'; weak?: boolean }
 
 interface Placement {
   node: GraphNode;
@@ -351,7 +367,8 @@ export class Normalizer {
     if (status !== null && at > state.statusAt) state.statusAt = at;
     this.updateSession(state, { type: 'hook', uuid: '', timestamp: at }, projectId, status, false, changes);
     // A background agent still open when the session ends was cut off with it.
-    if (status === 'ended') for (const id of [...state.asyncDispatch]) this.endDispatch(state, id, { at, status: 'failed' }, changes);
+    // Weak: the hook can be processed before the agent's own end signal, which then stands instead.
+    if (status === 'ended') for (const id of [...state.asyncDispatch]) this.endDispatch(state, id, { at, status: 'failed', weak: true }, changes);
     this.setTitle(hook.sessionId, 'hook', hook.title, changes);
     if (hook.node) this.applyHookNode(state, hook, hook.node, at, changes);
     return { changes };
@@ -467,11 +484,13 @@ export class Normalizer {
     const merged = mergeEnd(prev, end);
     state.agentEnded.set(id, merged);
     const patch: Partial<GraphNode> = {};
-    if (merged.at < prev.at && node.endedAt === prev.at) {
+    // The node's end is ours to move only if this mechanism set it (not a tool_result or a denial).
+    const ours = node.endedAt === prev.at && !state.terminalFromContent.has(id) && node.status !== 'denied';
+    if (ours && merged.at !== prev.at && (merged.at < prev.at || prev.weak === true)) {
       patch.endedAt = merged.at;
       if (!state.durationFromHook.has(id)) patch.durationMs = elapsedMs(node.timestamp, merged.at);
     }
-    if (merged.status === 'failed' && node.status === 'succeeded' && !state.terminalFromContent.has(id)) patch.status = 'failed';
+    if (ours && node.status !== merged.status && (merged.status === 'failed' || prev.weak === true)) patch.status = merged.status;
     if (Object.keys(patch).length === 0) return;
     state.nodes.set(id, { ...node, ...patch });
     changes.push({ type: 'node_updated', sessionId: state.session.id, id, patch });
@@ -484,17 +503,20 @@ export class Normalizer {
    */
   private applyQueueOperation(sessionId: string, record: Record<string, unknown>, changes: Change[]): void {
     const content = str(record.content);
-    if (record.operation !== 'enqueue' || content === null || !content.includes('<task-notification>')) return;
+    // The notification is the whole queued item (a queued user prompt that merely quotes one is not a notification).
+    if (record.operation !== 'enqueue' || content === null || !content.trimStart().startsWith('<task-notification>')) return;
     const toolUseId = /<tool-use-id>([^<]+)<\/tool-use-id>/.exec(content)?.[1]?.trim();
-    const status = /<status>([^<]+)<\/status>/.exec(content)?.[1]?.trim();
+    const reported = /<status>([^<]+)<\/status>/.exec(content)?.[1]?.trim().toLowerCase();
     const state = this.sessions.get(sessionId);
+    const status = reported !== undefined ? NOTIFIED_END[reported] : undefined;
     if (!state || toolUseId === undefined || status === undefined) return;
-    const end: AgentEnd = { at: str(record.timestamp) ?? state.session.lastActivityAt, status: status === 'completed' ? 'succeeded' : 'failed' };
+    const end: AgentEnd = { at: str(record.timestamp) ?? state.session.lastActivityAt, status };
     const id = `tool:${toolUseId}`;
     if (state.asyncDispatch.has(id) || state.agentEnded.has(id)) this.endDispatch(state, id, end, changes);
-    else {
+    else if (state.nodes.get(id)?.kind === 'subagent') {
+      // Its launch is not known to be a background one yet; kept only for an agent dispatch (not a background shell task).
       const prev = state.notified.get(toolUseId);
-      state.notified.set(toolUseId, prev === undefined ? end : mergeEnd(prev, end)); // the launch is not known to be a background one yet
+      state.notified.set(toolUseId, prev === undefined ? end : mergeEnd(prev, end));
     }
   }
 
@@ -551,6 +573,9 @@ export class Normalizer {
     }
     if (type === 'queue-operation') {
       const changes: Change[] = [];
+      // Like any record that produces no node, it must not break the parent chain (should it carry a uuid).
+      const queueUuid = str(parsed.uuid);
+      if (queueUuid !== null) this.sessions.get(event.sessionId)?.passthrough.set(queueUuid, str(parsed.parentUuid));
       this.applyQueueOperation(event.sessionId, parsed, changes);
       return { changes };
     }
@@ -1038,6 +1063,10 @@ export class Normalizer {
     if (notified !== undefined) {
       state.notified.delete(toolUseId);
       this.endDispatch(state, id, notified, changes);
+    }
+    // Launched (as far as we read it) after the session had already ended: nothing will end it later.
+    if (state.session.status === 'ended' && state.asyncDispatch.has(id)) {
+      this.endDispatch(state, id, { at: state.statusAt, status: 'failed', weak: true }, changes);
     }
   }
 

@@ -1398,3 +1398,26 @@ test('在复盘里停止跟随，切回逐步视图后仍然会合并', () => {
   expect(shownIds(model)).toEqual(['p', 'run:a', 'x']);
   model.dispose();
 });
+
+test('停止跟随时展开过的合并节点：它的编号不会让之后形成的新合并节点绕过冻结', async () => {
+  const failed = readCall('a', 1, { status: 'failed', parentId: 'p' });
+  const first = [readCall('b', 2, { parentId: 'p' }), readCall('c', 3, { parentId: 'p' }), readCall('d', 4, { parentId: 'p' })];
+  const later = [readCall('f', 5, { parentId: 'p' }), readCall('g', 6, { parentId: 'p' }), readCall('h', 7, { parentId: 'p' })];
+  const build = (calls: GraphNode[]): Graph => {
+    const all = [node('p', 't1', 0), failed, ...calls];
+    return {
+      nodes: Object.fromEntries(all.map((x) => [x.id, x])),
+      edges: Object.fromEntries(all.slice(1).map((x) => [`p->${x.id}`, { id: `p->${x.id}`, sessionId: 's1', from: 'p', to: x.id, kind: 'fork' as const }])),
+    };
+  };
+  const live = fakeLive(build(first));
+  const model = createCanvasModel(live, fakeLayout().client);
+  expect(shownIds(model)).toEqual(['a', 'p', 'run:a']); // anchored on the failed first call
+  model.setAutoFold(false);
+  model.expandRun('run:a');
+  expect(shownIds(model)).toEqual(['a', 'b', 'c', 'd', 'p']);
+  live.set(build([...first, ...later]));
+  await vi.advanceTimersByTimeAsync(60);
+  expect(shownIds(model)).toEqual(['a', 'b', 'c', 'd', 'f', 'g', 'h', 'p']); // no new run under the reader
+  model.dispose();
+});

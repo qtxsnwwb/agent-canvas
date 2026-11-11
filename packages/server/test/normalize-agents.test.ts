@@ -412,3 +412,41 @@ test('前台子代理：线程里的 end_turn 不提前结算派发节点，结�
     patch: { status: 'failed', endedAt: '2026-01-01T00:20:10.000Z' },
   });
 });
+
+test('后台派出：会话结束只是弱信号，随后到达的真实结束信号会取代它（任意先后）', () => {
+  const end = () => hook('SessionEnd', {}, '2026-01-01T05:00:00.000Z');
+  const done = () => notification('tu1', 'completed', '2026-01-01T04:00:00.000Z');
+  const a = run(n, [...launch(), end(), done()]).graph.nodes['tool:tu1']!;
+  const b = run(new Normalizer(), [...launch(), done(), end()]).graph.nodes['tool:tu1']!;
+  for (const node of [a, b]) {
+    expect(node).toMatchObject({ status: 'succeeded', endedAt: '2026-01-01T04:00:00.000Z' });
+    expect(node.durationMs).toBe(Date.parse(node.endedAt!) - Date.parse(node.timestamp));
+  }
+  // A real signal later than the session end also replaces it.
+  const late = run(new Normalizer(), [...launch(), end(), hook('SubagentStop', { agent_id: 'ag1' }, '2026-01-01T05:00:01.000Z')]).graph.nodes['tool:tu1']!;
+  expect(late).toMatchObject({ status: 'succeeded', endedAt: '2026-01-01T05:00:01.000Z' });
+});
+
+test('后台派出：会话已结束后才读到派出记录，派发节点不会一直停在运行中', () => {
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x'),
+    assistantBlock('a1', 'u1', { type: 'tool_use', id: 'tu1', name: 'Agent', input: {} }),
+    hook('SessionEnd', {}, '2026-01-01T05:00:00.000Z'),
+    toolResult('u2', 'a1', 'tu1', 'launched', undefined, ASYNC),
+  ]);
+  expect(graph.nodes['tool:tu1']!.status).toBe('failed');
+});
+
+test('任务通知：只有表示结束的状态才结算；引用通知文本的排队提示、非子代理的任务都不算', () => {
+  const running = run(n, [...launch(), notification('tu1', 'running', '2026-01-01T03:00:00.000Z')]);
+  expect(running.graph.nodes['tool:tu1']!.status).toBe('running');
+  const upper = run(new Normalizer(), [...launch(), notification('tu1', 'COMPLETED', '2026-01-01T03:00:00.000Z')]);
+  expect(upper.graph.nodes['tool:tu1']!.status).toBe('succeeded');
+  const killed = run(new Normalizer(), [...launch(), notification('tu1', 'killed', '2026-01-01T03:00:00.000Z')]);
+  expect(killed.graph.nodes['tool:tu1']!.status).toBe('failed');
+  const quoted = run(new Normalizer(), [
+    ...launch(),
+    rawLine('queue-operation', { operation: 'enqueue', content: '看这个 <task-notification><tool-use-id>tu1</tool-use-id><status>failed</status></task-notification>' }),
+  ]);
+  expect(quoted.graph.nodes['tool:tu1']!.status).toBe('running');
+});

@@ -248,10 +248,10 @@ export function createCompactor(): Compactor {
         return JSON.stringify([n.toolName, n.agentId, n.turnId, [...roots].sort()]);
       };
       /** Calls of a tool that cannot be merged (in flight, failed, the selection, ...): they still anchor their group's id. */
-      // Not the selection or the calls of an expanded run: a run forming next to those is a new run with its own id
-      // (reusing the expanded run's id would let it pass as a run that was already on screen).
+      // Not the calls of an expanded run: a run forming next to those is a new run with its own id. The selection does
+      // anchor (a run's id must not change because one of its neighbours is selected or deselected).
       const others = kept.filter((n) => n.kind === 'tool' && n.toolName !== null && !parent.has(n.id)
-        && n.id !== keep && !(exclude !== undefined && exclude.has(n.id)));
+        && !(exclude !== undefined && exclude.has(n.id)));
       const mergeSiblings = (): boolean => {
         let changed = false;
         // `kept` is in time order, so the first node seen with a key is the group's earliest.

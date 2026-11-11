@@ -279,3 +279,13 @@ test('a thought reaching a node through two later thoughts side by side is count
   );
   expect(compactGraph(g).thinkingMs.get('x')).toBe(3300);
 });
+
+test('selecting a call next to a run does not change the run\'s id', () => {
+  const g = graph(
+    [node('p', 'prompt', 0), read('a', 1, { status: 'failed', parentId: 'p' }), read('b', 1, { parentId: 'p' }),
+      read('c', 1, { parentId: 'p' }), read('d', 1, { parentId: 'p' })],
+    [e('p', 'a', 'fork'), e('p', 'b', 'fork'), e('p', 'c', 'fork'), e('p', 'd', 'fork')],
+  );
+  expect([...compactGraph(g).runs.keys()]).toEqual([runIdOf('a')]);
+  expect([...compactGraph(g, { keep: 'a' }).runs.keys()]).toEqual([runIdOf('a')]);
+});
