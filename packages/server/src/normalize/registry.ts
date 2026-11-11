@@ -1,15 +1,16 @@
 import { ORIGINS, type Origin } from '@claude-canvas/shared';
 import type { RawEvent } from '../store/store.js';
+import { CodexNormalizer } from './codex.js';
 import { Normalizer } from './normalizer.js';
 import type { AgentNormalizer, NormalizeResult } from './types.js';
 
 /** How to make a fresh normalizer for each origin; null = that origin has none (its raw events are stored only). */
 export type NormalizerFactories = Readonly<Record<Origin, (() => AgentNormalizer) | null>>;
 
-/** The normalizer of each origin. Codex has none yet: its raw events are kept and derived by a later rebuild. */
+/** The normalizer of each origin. */
 export const NORMALIZER_FACTORIES: NormalizerFactories = {
   claude: () => new Normalizer(),
-  codex: null,
+  codex: () => new CodexNormalizer(),
 };
 
 const originOf = (event: RawEvent): Origin => event.origin ?? 'claude';

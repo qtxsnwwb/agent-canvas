@@ -130,7 +130,7 @@ test('rebuild 报告进度', async () => {
   expect(progress.at(-1)).toEqual([1, 1]);
 });
 
-test('CLAUDE_CANVAS_CODEX_DIR 指向存在的目录时 start 读取 Codex 会话文件（还没有归一器：只存原始事件）', async () => {
+test('CLAUDE_CANVAS_CODEX_DIR 指向存在的目录时 start 读取 Codex 会话文件并推导出 codex 会话', async () => {
   const codexDir = path.join(tmp, 'codex', 'sessions');
   const rel = rolloutRel('019a0000-0000-7000-8000-00000000000a');
   await fs.mkdir(path.join(codexDir, ...rel.split('/').slice(0, -1)), { recursive: true });
@@ -151,9 +151,9 @@ test('CLAUDE_CANVAS_CODEX_DIR 指向存在的目录时 start 读取 Codex 会话
   const s = openStore(dbPath());
   try {
     expect(s.rawForSession('019a0000-0000-7000-8000-00000000000a').map((e) => e.origin)).toEqual(['codex', 'codex']);
-    expect(s.getSession('019a0000-0000-7000-8000-00000000000a')).toBeNull();
+    expect(s.getSession('019a0000-0000-7000-8000-00000000000a')).toMatchObject({ origin: 'codex', status: 'running' });
   } finally {
     s.close();
   }
-  rebuild({ projectsDir, dataDir }); // the Codex source is constructed for rebuild too; nothing to derive yet
+  rebuild({ projectsDir, dataDir }); // the Codex source is constructed for rebuild too
 });

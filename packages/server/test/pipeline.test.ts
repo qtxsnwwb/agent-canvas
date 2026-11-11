@@ -1004,7 +1004,7 @@ describe('pipeline', () => {
   });
 });
 
-// ---- Codex file source (no Codex normalizer yet: raw events are stored, nothing is derived) ----
+// ---- Codex file source (raw events; derived by the Codex normalizer since it exists) ----
 
 describe('pipeline 与 Codex 文件源', () => {
   const ROOT = '019a0000-0000-7000-8000-00000000000a';
@@ -1080,7 +1080,7 @@ describe('pipeline 与 Codex 文件源', () => {
     expect(fileSources({ ...config, codexSessionsDir: path.join(tmp, 'a-file') }).map((s) => s.origin)).toEqual(['claude']);
   });
 
-  test('原始事件带 codex 来源、会话、线程和项目；没有归一器时不推导、不留脏标记；偏移前进，重复导入无变化', async () => {
+  test('原始事件带 codex 来源、会话、线程和项目；推导出 codex 会话、不留脏标记；偏移前进，重复导入无变化', async () => {
     // The subagent's file sorts (and is read) before its root thread's file.
     await cwrite(rolloutRel(SUB, '2026/11/10'), subLines());
     await cwrite(rolloutRel(ROOT), rootLines());
@@ -1097,8 +1097,8 @@ describe('pipeline 与 Codex 文件源', () => {
       ['transcript', rootKey, null, PROJECT, 'codex'],
     ]);
     expect(store.rawForSession(SUB)).toEqual([]);
-    expect(store.getSession(ROOT)).toBeNull();
-    expect(store.listProjects(Date.now())).toEqual([]);
+    expect(store.getSession(ROOT)).toMatchObject({ origin: 'codex', projectId: PROJECT, status: 'idle' });
+    expect(store.listProjects(Date.now()).map((x) => [x.id, x.origins])).toEqual([[PROJECT, ['codex']]]);
     expect(store.dirtySessionIds()).toEqual([]);
     expect(p.ingestFailures()).toEqual([]);
     expect(store.getOffset(rootKey)).toBe((await fs.stat(cabs(rolloutRel(ROOT)))).size);
@@ -1114,11 +1114,11 @@ describe('pipeline 与 Codex 文件源', () => {
     await fs.appendFile(cabs(rolloutRel(ROOT)), rollout(taskStarted('t3')));
     await p.ingestFile(cabs(rolloutRel(ROOT)));
     expect(store.rawForSession(ROOT)).toHaveLength(count + 1);
-    expect(store.getSession(ROOT)).toBeNull();
+    expect(store.getSession(ROOT)!.status).toBe('running');
 
     p.rebuild();
     expect(store.rawForSession(ROOT)).toHaveLength(count + 1);
-    expect(store.getSession(ROOT)).toBeNull();
+    expect(store.getSession(ROOT)!.status).toBe('running');
     expect(store.dirtySessionIds()).toEqual([]);
   });
 
@@ -1204,7 +1204,7 @@ describe('pipeline 与 Codex 文件源', () => {
     expect(store.rawForSession(ROOT).find((e) => e.source === 'meta')).toMatchObject({ projectId: PROJECT });
     expect(store.rawForSession(SUB)).toEqual([]);
     expect(store.rawForSession(OTHER)).toEqual([]);
-    expect(store.getSession(ROOT)).toBeNull();
+    expect(store.getSession(ROOT)!.title).toBe('first');
     expect(store.getOffset('codex:../session_index.jsonl')).toBe((await fs.stat(indexFile())).size);
 
     // Nothing new: no new rows (same pipeline, rescan, and a restart).
@@ -1228,7 +1228,7 @@ describe('pipeline 与 Codex 文件源', () => {
     expect(metas(ROOT)).toHaveLength(2);
     p.rebuild();
     expect(metas(ROOT)).toHaveLength(2);
-    expect(store.getSession(ROOT)).toBeNull();
+    expect(store.getSession(ROOT)!.title).toBe('renamed');
   });
 
   test('源文件消失（归档或删除）：重启后仍从存档的原始事件知道它属于哪个会话；不报错，数据保留', async () => {
