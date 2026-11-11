@@ -6,9 +6,8 @@ import {
   type NodeDetail,
   type Session,
 } from '@claude-canvas/shared';
-import { isDeepStrictEqual } from 'node:util';
 import type { RawEvent } from '../store/store.js';
-import { SPAWN_TOOL_NAMES, parseCodexHook, type CodexHookEffect } from './codex-hooks.js';
+import { parseCodexHook, type CodexHook } from './codex-hooks.js';
 import { summarize } from './summary.js';
 import type { AgentNormalizer, NormalizeResult } from './types.js';
 
@@ -127,6 +126,35 @@ interface ThreadState {
   reasoningMs: Map<string, number>;
   /** Reasoning item id -> its thinking node id. */
   reasoningNodes: Map<string, string>;
+  /** Tool and dispatch node ids of the thread's calls, in placement order. */
+  callOrder: string[];
+  /** Per turn id: its calls still waiting for an output record, and how many got one. */
+  turnCalls: Map<string, { open: Set<string>; settled: number }>;
+  /** Time of the thread's last record with a valid timestamp (the fallback for one without). */
+  lastTs: string | null;
+}
+
+/** What the hooks have said about one turn (keyed by the payload's turn_id; '' = a hook without one). */
+interface HookTurnMark {
+  /** UserPromptSubmit, or a tool / permission hook: the turn is active. */
+  started: boolean;
+  /** Stop / Interrupt: the turn is over (sticky: a late tool hook of the same turn does not reopen it). */
+  stopped: boolean;
+  /** PermissionRequest, not yet followed by another hook of the turn. */
+  permission: boolean;
+}
+
+/**
+ * The hook marks of one session, in the order the hooks were received. Kept outside SessionState (like titles) so a
+ * hook received before its session exists (a Stop, a SessionEnd) still counts once the session appears.
+ */
+interface HookMarks {
+  turns: Map<string, HookTurnMark>;
+  /** The latest session-level mark is a SessionEnd (a SessionStart / UserPromptSubmit after it resumes). */
+  ended: boolean;
+  /** Earliest and latest receive time of the session's hooks. */
+  firstAt: string | null;
+  lastAt: string | null;
 }
 
 interface Spawn {
@@ -140,8 +168,14 @@ interface Spawn {
 
 interface SessionState {
   session: Session;
-  /** Time of the root-thread record that last set the status (an older one must not overwrite it). */
-  statusAt: string;
+  /** A transcript record of the session has been applied: from then on hooks never set its project or cwd. */
+  transcriptSeen: boolean;
+  /** startedAt / lastActivityAt come from a valid time (false only while every record so far had an unusable one). */
+  timed: boolean;
+  /** Turn id -> the thread the transcript puts it in (the root thread wins over a subagent thread) and that turn. */
+  turnThread: Map<string, { threadId: string; turn: Turn }>;
+  /** Nodes shown as awaiting_permission by a pending permission request -> the status the transcript gave them. */
+  awaiting: Map<string, GraphNode['status']>;
   nodes: Map<string, GraphNode>;
   /** Tool node id -> its input, while the call is open. */
   toolInputs: Map<string, unknown>;
@@ -157,15 +191,6 @@ interface SessionState {
   /** child threads whose spawn edge was emitted. */
   spawned: Set<string>;
   firstPromptSeen: boolean;
-  /** Hook placeholders (PreToolUse before the call record) not yet confirmed by a call, in the order they were made. */
-  placeholders: { nodeId: string; threadId: string; toolName: string }[];
-  /** Tool nodes whose terminal status came from a PostToolUse hook: the call's output record still decides. */
-  hookSettled: Set<string>;
-  /**
-   * A call record and a hook have met under the same id (hook tool_use_id = call_id): from then on the name fallback
-   * that pairs calls with placeholders of other ids is off, so a lost hook cannot make a call take another's placeholder.
-   */
-  idsMatch: boolean;
 }
 
 type Transcript = Extract<RawEvent, { source: 'transcript' }>;
@@ -245,15 +270,7 @@ function itemName(type: string, item: Obj): string {
 
 const entryFailed = (e: FoldEntry): boolean => e.status === 'failed' || (e.exitCode !== null && e.exitCode !== 0);
 
-/**
- * A hook's tool name names the same tool as a node's / call's: equal, the last part of a namespaced name
- * (`docs.search` ~ `search`), or both are the subagent spawn call.
- */
-function sameTool(hookName: string, toolName: string | null): boolean {
-  if (toolName === null) return false;
-  if (hookName === toolName || toolName.endsWith(`.${hookName}`)) return true;
-  return SPAWN_TOOL_NAMES.has(hookName) && SPAWN_TOOL_NAMES.has(toolName);
-}
+const isTerminal = (s: GraphNode['status']): boolean => s !== null && TERMINAL_STATUSES.includes(s);
 
 /** Text parts of a content list: `pick` maps one part to its text (null = skipped). */
 function joinParts(content: unknown, pick: (part: Obj) => string | null, sep: string): string {
@@ -282,8 +299,10 @@ export class CodexNormalizer implements AgentNormalizer {
    * an eviction) rebuilds the same values.
    */
   private readonly titleSources = new Map<string, Partial<Record<TitleSource, string>>>();
-  /** Sessions without state whose pre-session memory (titles) was restored by restorePreSession. */
+  /** Sessions without state whose pre-session memory (titles, hook marks) was restored by restorePreSession. */
   private readonly preSessionRestored = new Set<string>();
+  /** Hook marks per session (see HookMarks); like titles, they may exist before the session does. */
+  private readonly hookMarks = new Map<string, HookMarks>();
 
   apply(event: RawEvent, projectId: string): NormalizeResult {
     // Every state mutation pushes its change right away, so on a failure the changes made so far are still returned:
@@ -292,6 +311,8 @@ export class CodexNormalizer implements AgentNormalizer {
     try {
       if (event.source === 'transcript') {
         const unknown = this.applyTranscript(event, projectId, changes);
+        const state = this.sessions.get(event.sessionId);
+        if (state) this.refresh(state, changes);
         return unknown === undefined ? { changes } : { changes, unknownRecordType: unknown };
       }
       if (event.source === 'meta') {
@@ -308,6 +329,7 @@ export class CodexNormalizer implements AgentNormalizer {
   dropSession(sessionId: string): void {
     this.sessions.delete(sessionId);
     this.titleSources.delete(sessionId);
+    this.hookMarks.delete(sessionId);
     this.preSessionRestored.delete(sessionId);
   }
 
@@ -315,11 +337,20 @@ export class CodexNormalizer implements AgentNormalizer {
     return !this.sessions.has(sessionId) && !this.preSessionRestored.has(sessionId);
   }
 
-  /** Before a session exists the only thing kept is its titles (index meta events): restored from them, in order. */
+  /**
+   * Before a session exists the only things kept are its titles (index meta events) and its hook marks (hooks that do
+   * not create a session): restored from them, in order.
+   */
   restorePreSession(sessionId: string, events: Iterable<RawEvent>): void {
     this.dropSession(sessionId);
     try {
-      for (const ev of events) if (ev.source === 'meta' && ev.sessionId === sessionId) this.applyMeta(ev, []);
+      for (const ev of events) {
+        if (ev.source === 'meta' && ev.sessionId === sessionId) this.applyMeta(ev, []);
+        else if (ev.source === 'hook') {
+          const parsed = parseCodexHook(ev.eventName, ev.payload);
+          if (parsed.ok && parsed.hook.sessionId === sessionId) this.recordHook(parsed.hook, ev.receivedAt);
+        }
+      }
     } catch (err) {
       this.dropSession(sessionId);
       throw err;
@@ -370,7 +401,7 @@ export class CodexNormalizer implements AgentNormalizer {
 
   // ---- session ----
 
-  private stateFor(sessionId: string, ts: string, projectId: string, changes: Change[]): SessionState {
+  private stateFor(sessionId: string, ts: string, projectId: string, changes: Change[], timed = true): SessionState {
     let state = this.sessions.get(sessionId);
     if (!state) {
       const session: Session = {
@@ -387,7 +418,10 @@ export class CodexNormalizer implements AgentNormalizer {
       };
       state = {
         session,
-        statusAt: EPOCH,
+        transcriptSeen: false,
+        timed,
+        turnThread: new Map(),
+        awaiting: new Map(),
         nodes: new Map(),
         toolInputs: new Map(),
         folded: new Map(),
@@ -397,13 +431,15 @@ export class CodexNormalizer implements AgentNormalizer {
         dispatchOf: new Map(),
         spawned: new Set(),
         firstPromptSeen: false,
-        placeholders: [],
-        hookSettled: new Set(),
-        idsMatch: false,
       };
       this.sessions.set(sessionId, state);
       this.preSessionRestored.delete(sessionId);
       changes.push({ type: 'session_upserted', session });
+      // Hooks received before the session existed still count for its times.
+      const marks = this.hookMarks.get(sessionId);
+      if (marks?.firstAt != null && marks.lastAt !== null) {
+        this.commitSession(state, this.withTime(state, marks.lastAt, this.withTime(state, marks.firstAt)), changes);
+      }
     }
     return state;
   }
@@ -435,6 +471,9 @@ export class CodexNormalizer implements AgentNormalizer {
         batch: null,
         reasoningMs: new Map(),
         reasoningNodes: new Map(),
+        callOrder: [],
+        turnCalls: new Map(),
+        lastTs: null,
       };
       state.threads.set(id, thread);
     }
@@ -446,27 +485,121 @@ export class CodexNormalizer implements AgentNormalizer {
    * the earliest (so the order threads' files are read in does not matter); the root thread's project wins over a
    * subagent thread's (which may have been classified from its own worktree before the root was seen).
    */
-  private touchSession(state: SessionState, ts: string, projectId: string, isRoot: boolean, changes: Change[]): void {
-    const s = state.session;
-    let nextProject = s.projectId;
-    if (projectId !== 'unknown' && (isRoot || s.projectId === 'unknown')) nextProject = projectId;
-    this.commitSession(
-      state,
-      {
-        ...s,
-        lastActivityAt: ts > s.lastActivityAt ? ts : s.lastActivityAt,
-        startedAt: ts < s.startedAt ? ts : s.startedAt,
-        projectId: nextProject,
-      },
-      changes,
-    );
+  private touchSession(state: SessionState, ts: string | null, projectId: string, isRoot: boolean, changes: Change[]): void {
+    const next = ts === null ? { ...state.session } : this.withTime(state, ts);
+    if (projectId !== 'unknown' && (isRoot || next.projectId === 'unknown')) next.projectId = projectId;
+    this.commitSession(state, next, changes);
   }
 
-  /** Session status from the root thread's turns; a record older than the last status observation does not overwrite it. */
-  private setStatus(state: SessionState, status: Session['status'], ts: string, changes: Change[]): void {
-    if (ts < state.statusAt) return;
-    state.statusAt = ts;
-    this.commitSession(state, { ...state.session, status }, changes);
+  /** The latest time is the activity time, the earliest the start (min / max: the order of arrival does not matter). */
+  private withTime(state: SessionState, ts: string, s: Session = state.session): Session {
+    if (!state.timed) {
+      state.timed = true;
+      return { ...s, lastActivityAt: ts, startedAt: ts };
+    }
+    return { ...s, lastActivityAt: ts > s.lastActivityAt ? ts : s.lastActivityAt, startedAt: ts < s.startedAt ? ts : s.startedAt };
+  }
+
+  /** Recomputes everything derived from transcript state + hook marks together: the session status and the overlay. */
+  private refresh(state: SessionState, changes: Change[]): void {
+    const view = this.statusView(state);
+    if (view.status !== state.session.status) this.commitSession(state, { ...state.session, status: view.status }, changes);
+    this.applyAwaiting(state, view.permissionTargets, changes);
+  }
+
+  /**
+   * The session status as a function of state (never of arrival times or order):
+   *  - a turn belongs to the root thread or a subagent thread when the transcript says so, else it is unknown yet;
+   *    turns of a subagent thread never affect the session status;
+   *  - a turn is finished when the transcript ended it (task_complete / turn_aborted), a Stop / Interrupt hook named
+   *    it, or (root thread) a later root turn has started;
+   *  - ended: the latest session-level hook mark is a SessionEnd;
+   *  - awaiting_permission: a root or unknown turn has a pending permission request and is not finished;
+   *  - running: the root thread's latest turn is open in the transcript and no Stop / Interrupt hook stopped it, or a
+   *    hook started a root or unknown turn that is not finished;
+   *  - idle otherwise.
+   * A permission request is pending until a later hook of its turn, the end of its turn, or the transcript shows every
+   * call of that turn settled (at least one). Also returns, per pending request, the node it marks.
+   */
+  private statusView(state: SessionState): { status: Session['status']; permissionTargets: Set<string> } {
+    const marks = this.hookMarks.get(state.session.id);
+    const rootId = state.session.id;
+    const root = state.threads.get(rootId);
+    const rootLatest = root?.turns[root.turns.length - 1];
+    const ownerOf = (turnId: string): string | undefined => state.turnThread.get(turnId)?.threadId;
+    const finished = (turnId: string, mark: HookTurnMark | undefined): boolean => {
+      if (mark?.stopped) return true;
+      const known = state.turnThread.get(turnId);
+      if (known === undefined) return false;
+      if (known.turn.endedAt !== null) return true;
+      return known.threadId === rootId && rootLatest !== undefined && rootLatest.id !== turnId;
+    };
+    const settledInTranscript = (turnId: string): boolean => {
+      const tc = state.threads.get(ownerOf(turnId) ?? rootId)?.turnCalls.get(turnId);
+      return tc !== undefined && tc.settled > 0 && tc.open.size === 0;
+    };
+    const relevant = (turnId: string): boolean => {
+      const owner = ownerOf(turnId);
+      return owner === undefined || owner === rootId;
+    };
+
+    const permissionTargets = new Set<string>();
+    let awaiting = false;
+    let hookRunning = false;
+    for (const [turnId, mark] of marks?.turns ?? []) {
+      if (finished(turnId, mark)) continue;
+      if (mark.started && relevant(turnId)) hookRunning = true;
+      if (!mark.permission || settledInTranscript(turnId)) continue;
+      if (relevant(turnId)) awaiting = true;
+      const target = this.permissionTarget(state, turnId);
+      if (target !== undefined) permissionTargets.add(target);
+    }
+    let status: Session['status'];
+    if (marks?.ended) status = 'ended';
+    else if (awaiting) status = 'awaiting_permission';
+    else if ((rootLatest !== undefined && rootLatest.endedAt === null && !marks?.turns.get(rootLatest.id)?.stopped) || hookRunning) status = 'running';
+    else status = 'idle';
+    return { status, permissionTargets };
+  }
+
+  /**
+   * The node a pending permission request of a turn marks: the latest call node of the turn's thread (the root thread
+   * while the turn is unknown) whose transcript status is not terminal; when the turn is known, only its own calls.
+   */
+  private permissionTarget(state: SessionState, turnId: string): string | undefined {
+    const owner = state.turnThread.get(turnId)?.threadId;
+    const thread = state.threads.get(owner ?? state.session.id);
+    if (!thread) return undefined;
+    for (let i = thread.callOrder.length - 1; i >= 0; i--) {
+      const id = thread.callOrder[i]!;
+      const node = state.nodes.get(id);
+      if (!node || isTerminal(this.baseStatus(state, node))) continue;
+      if (owner !== undefined && node.turnId !== turnId) continue;
+      return id;
+    }
+    return undefined;
+  }
+
+  /** A node's status as the transcript set it (under a possible awaiting_permission overlay). */
+  private baseStatus(state: SessionState, node: GraphNode): GraphNode['status'] {
+    return state.awaiting.has(node.id) ? (state.awaiting.get(node.id) ?? null) : node.status;
+  }
+
+  /** Shows awaiting_permission on exactly `targets`; a node that leaves the set gets its transcript status back. */
+  private applyAwaiting(state: SessionState, targets: Set<string>, changes: Change[]): void {
+    for (const [id, base] of [...state.awaiting]) {
+      if (targets.has(id)) continue;
+      state.awaiting.delete(id);
+      const node = state.nodes.get(id);
+      if (node && node.status !== base) this.writeNode(state, id, { status: base }, changes);
+    }
+    for (const id of targets) {
+      if (state.awaiting.has(id)) continue;
+      const node = state.nodes.get(id);
+      if (!node) continue;
+      state.awaiting.set(id, node.status);
+      this.writeNode(state, id, { status: 'awaiting_permission' }, changes);
+    }
   }
 
   private commitSession(state: SessionState, next: Session, changes: Change[]): void {
@@ -501,9 +634,20 @@ export class CodexNormalizer implements AgentNormalizer {
     const kind = classify(type, payload);
     if (kind.kind === 'unknown') return kind.type;
 
+    // A record time that does not parse is not a time: the thread's (else the session's) previous valid time is used
+    // for the record, and it never becomes the session's start or activity time.
+    const rawTs = str(parsed.timestamp);
+    const validTs = rawTs !== null && msOf(rawTs) !== null ? rawTs : null;
     const existing = this.sessions.get(event.sessionId);
-    const ts = str(parsed.timestamp) ?? existing?.session.lastActivityAt ?? EPOCH;
-    const state = this.stateFor(event.sessionId, ts, projectId, changes);
+    const ts = validTs ?? existing?.threads.get(event.agentId ?? event.sessionId)?.lastTs ?? (existing?.timed ? existing.session.lastActivityAt : null) ?? EPOCH;
+    const state = this.stateFor(event.sessionId, ts, projectId, changes, validTs !== null);
+    if (!state.transcriptSeen) {
+      // A session a hook created takes its project and cwd from the transcript from its first record on (as if the
+      // hooks had never come): the record's project, and no cwd until the root thread's session_meta.
+      state.transcriptSeen = true;
+      const nextProject = projectId !== 'unknown' ? projectId : state.session.projectId;
+      this.commitSession(state, { ...state.session, projectId: nextProject, cwd: null }, changes);
+    }
     const thread = this.threadFor(state, event, ts);
     const isRoot = event.agentId === null;
 
@@ -513,7 +657,8 @@ export class CodexNormalizer implements AgentNormalizer {
     // A second session_meta in the file is the parent's (copied with its history).
     if (type === 'session_meta' && str(payload.id) !== null && str(payload.id) !== thread.id) return undefined;
 
-    this.touchSession(state, ts, projectId, isRoot, changes);
+    if (validTs !== null) thread.lastTs = validTs;
+    this.touchSession(state, validTs, projectId, isRoot, changes);
     if (kind.kind === 'ignored') {
       if (type === 'token_usage_record' || type === 'response_item') thread.group += 1; // ends a response's run of calls
       return undefined;
@@ -558,12 +703,13 @@ export class CodexNormalizer implements AgentNormalizer {
       case 'task_started': {
         thread.group += 1;
         const id = str(payload.turn_id) ?? `turn@${ctx.event.offset}`;
-        thread.turns.push({ id, endedAt: null, failed: false });
+        const turn: Turn = { id, endedAt: null, failed: false };
+        thread.turns.push(turn);
+        this.placeTurn(ctx.state, turn, thread);
         thread.currentTurn = id;
         thread.turnHasUserMessage = false;
         thread.turnHasOutput = false;
         thread.pendingTask = null;
-        if (ctx.isRoot) this.setStatus(ctx.state, 'running', ctx.ts, ctx.changes);
         this.threadTurnsChanged(ctx);
         break;
       }
@@ -599,6 +745,7 @@ export class CodexNormalizer implements AgentNormalizer {
       // The end of a turn whose start this file does not have.
       turn = { id: id ?? `turn@${ctx.event.offset}`, endedAt: null, failed: false };
       thread.turns.push(turn);
+      this.placeTurn(ctx.state, turn, thread);
     }
     turn.endedAt = ctx.ts;
     turn.failed = failed;
@@ -607,14 +754,21 @@ export class CodexNormalizer implements AgentNormalizer {
     for (const w of thread.callWindows) if (w.endMs === null && endMs !== null) w.endMs = endMs;
     thread.openCalls = [];
     thread.pendingTask = null;
-    // Only the end of the thread's latest turn makes the session idle (a stale end does not).
-    if (ctx.isRoot && thread.turns[thread.turns.length - 1] === turn) this.setStatus(ctx.state, 'idle', ctx.ts, ctx.changes);
     this.threadTurnsChanged(ctx);
   }
 
+  /** Records which thread a turn is in (the root thread wins over a subagent thread naming the same turn id). */
+  private placeTurn(state: SessionState, turn: Turn, thread: ThreadState): void {
+    const known = state.turnThread.get(turn.id);
+    // The thread's latest turn of that id; a subagent thread never takes a turn id over from the root thread.
+    if (known === undefined || known.threadId === thread.id || thread.agentId === null) state.turnThread.set(turn.id, { threadId: thread.id, turn });
+  }
+
+  /** A turn of the thread started or ended: dispatches following it (its own, and those spawned in it) re-derive. */
   private threadTurnsChanged(ctx: Ctx): void {
     const dispatch = ctx.state.dispatchOf.get(ctx.thread.id);
     if (dispatch !== undefined) this.applyDispatchStatus(ctx.state, dispatch, ctx.changes);
+    for (const [id, spawn] of ctx.state.spawns) if (spawn.threadId === ctx.thread.id) this.applyDispatchStatus(ctx.state, id, ctx.changes);
   }
 
   private applyItem(ctx: Ctx, item: Obj): void {
@@ -682,9 +836,9 @@ export class CodexNormalizer implements AgentNormalizer {
       this.patch(ctx.state, target, patch, ctx.changes, { raw: { items: list } });
       return;
     }
-    // No call it ran in: the item is a finished tool step of its own.
+    // No call it ran in: the item is a finished tool step of its own (own id prefix: item ids can equal call ids).
     this.addNode(ctx, {
-      id: itemId !== null ? `tool:${itemId}` : null,
+      id: itemId !== null ? `item:${itemId}` : null,
       kind: 'tool',
       title: itype,
       summary: summarize(entry.name),
@@ -794,7 +948,6 @@ export class CodexNormalizer implements AgentNormalizer {
     const input = ptype === 'custom_tool_call' ? (payload.input ?? null) : parseArguments(payload.arguments);
     const isSpawn = ptype === 'function_call' && name === 'spawn_agent' && (namespace === null || namespace === 'collaboration');
     const taskName = isSpawn ? str(obj(input).task_name) : null;
-    const placeholder = this.placeholderFor(state, thread, callId, toolName, name);
     const id = this.addNode(
       ctx,
       {
@@ -808,11 +961,17 @@ export class CodexNormalizer implements AgentNormalizer {
         detail: { input },
       },
       true,
-      placeholder ?? undefined,
     );
     if (id === null) return;
     thread.callNodes.set(callId, id);
     thread.openCalls.push(id);
+    thread.callOrder.push(id);
+    const turnId = state.nodes.get(id)?.turnId ?? null;
+    if (turnId !== null) {
+      const tc = thread.turnCalls.get(turnId) ?? { open: new Set<string>(), settled: 0 };
+      tc.open.add(id);
+      thread.turnCalls.set(turnId, tc);
+    }
     const startMs = msOf(ctx.ts);
     if (startMs !== null) thread.callWindows.push({ nodeId: id, startMs, endMs: null });
     state.toolInputs.set(id, input);
@@ -832,15 +991,14 @@ export class CodexNormalizer implements AgentNormalizer {
     const endMs = msOf(ctx.ts);
     for (const w of thread.callWindows) if (w.nodeId === id && endMs !== null) w.endMs = endMs;
     state.toolInputs.delete(id);
+    const tc = node.turnId === null ? undefined : thread.turnCalls.get(node.turnId);
+    if (tc?.open.delete(id)) tc.settled += 1;
     const detail = { output: payload.output ?? null };
-    // A dispatch node follows its agent's thread, not the immediate answer to the spawn call. A status a PostToolUse
-    // hook set is not final: the output record decides (transcript wins).
-    const terminal = node.status !== null && TERMINAL_STATUSES.includes(node.status);
-    if (node.kind === 'subagent' || (terminal && !state.hookSettled.has(id))) {
+    // A dispatch node follows its agent's thread, not the immediate answer to the spawn call.
+    if (node.kind === 'subagent' || isTerminal(this.baseStatus(state, node))) {
       this.patch(state, id, {}, ctx.changes, detail);
       return;
     }
-    state.hookSettled.delete(id);
     const failed = (state.folded.get(id) ?? []).some(entryFailed);
     const patch: Partial<GraphNode> = { status: failed ? 'failed' : 'succeeded', endedAt: ctx.ts };
     const durationMs = elapsedMs(node.timestamp, ctx.ts);
@@ -848,7 +1006,7 @@ export class CodexNormalizer implements AgentNormalizer {
     this.patch(state, id, patch, ctx.changes, detail);
   }
 
-  // ---- hooks (an overlay: the transcript's records decide whenever they say something) ----
+  // ---- hooks (marks only: they never create, confirm or settle a node) ----
 
   /** Pushes the hook's changes; returns the unknown-record label, if any. */
   private applyHook(event: Extract<RawEvent, { source: 'hook' }>, projectId: string, changes: Change[]): string | undefined {
@@ -856,153 +1014,68 @@ export class CodexNormalizer implements AgentNormalizer {
     if (!parsed.ok) return parsed.unknownRecordType;
     const hook = parsed.hook;
     const at = event.receivedAt;
+    this.recordHook(hook, at);
     let state = this.sessions.get(hook.sessionId);
     if (!state) {
       // A live session whose file is not read yet shows up at once; an end / stop for a session never seen does not
-      // conjure an empty one.
+      // conjure an empty one (its mark is kept and counts once the session appears).
       if (!hook.createsSession) return undefined;
       state = this.stateFor(hook.sessionId, at, projectId, changes);
     }
-    const isRoot = hook.agentId === null;
-    this.touchSession(state, at, projectId, isRoot, changes);
-    // The root thread's own session_meta sets the cwd; until it is read, the hook's.
-    if (isRoot && hook.cwd !== null && state.session.cwd === null) this.commitSession(state, { ...state.session, cwd: hook.cwd }, changes);
-    // An ended session only comes back on SessionStart / UserPromptSubmit (or a new turn in the transcript).
-    const status = state.session.status === 'ended' && !hook.resumes ? null : hook.status;
-    if (status !== null) this.setStatus(state, status, at, changes);
-    const effect = hook.node;
-    if (effect === null) return undefined;
-    switch (effect.kind) {
-      case 'pre_tool':
-        this.hookPreTool(state, hook.agentId, effect, at, changes);
-        break;
-      case 'permission_request':
-        this.hookPermission(state, hook.agentId, effect, changes);
-        break;
-      case 'post_tool':
-        this.hookPostTool(state, effect, at, changes);
-        break;
+    const next = this.withTime(state, at);
+    // Until the first transcript record, the session's project and cwd come from the hooks; never after that.
+    if (!state.transcriptSeen) {
+      const isRoot = hook.agentId === null;
+      if (projectId !== 'unknown' && (isRoot || next.projectId === 'unknown')) next.projectId = projectId;
+      if (isRoot && next.cwd === null) next.cwd = hook.cwd;
     }
+    this.commitSession(state, next, changes);
+    this.refresh(state, changes);
     return undefined;
   }
 
   /**
-   * PreToolUse: a running, unconfirmed tool node `tool:<tool_use_id>` in the hook's thread, shown before the call
-   * record is read; the call record confirms it (applyCall). When the record came first, only an earlier start.
+   * The marks a hook leaves, in receive order (see HookMarks / statusView). Session-level: SessionEnd ends,
+   * SessionStart / UserPromptSubmit resume (a subagent's never). Per turn (turn_id, '' when the payload has none):
+   * UserPromptSubmit and the tool / permission hooks start it, Stop / Interrupt stop it (without a turn_id: every turn
+   * marked so far), PermissionRequest makes a request pending, and any other hook of the turn clears that.
    */
-  private hookPreTool(
-    state: SessionState,
-    agentId: string | null,
-    effect: Extract<CodexHookEffect, { kind: 'pre_tool' }>,
-    at: string,
-    changes: Change[],
-  ): void {
-    const id = `tool:${effect.toolUseId}`;
-    const existing = state.nodes.get(id);
-    if (existing) {
-      if (existing.confirmed) state.idsMatch = true;
-      this.earlierStart(state, existing, at, changes);
+  private recordHook(hook: CodexHook, at: string): void {
+    let marks = this.hookMarks.get(hook.sessionId);
+    if (!marks) {
+      marks = { turns: new Map(), ended: false, firstAt: null, lastAt: null };
+      this.hookMarks.set(hook.sessionId, marks);
+    }
+    if (marks.firstAt === null || at < marks.firstAt) marks.firstAt = at;
+    if (marks.lastAt === null || at > marks.lastAt) marks.lastAt = at;
+    const e = hook.eventName;
+    if (hook.agentId === null) {
+      if (e === 'SessionEnd') marks.ended = true;
+      if (e === 'SessionStart' || e === 'UserPromptSubmit') marks.ended = false;
+    }
+    const turnScoped = e === 'UserPromptSubmit' || e === 'PreToolUse' || e === 'PostToolUse' || e === 'PermissionRequest' || e === 'Stop' || e === 'Interrupt';
+    if (!turnScoped) {
+      // Another hook naming a turn still ends that turn's pending permission request.
+      const mark = hook.turnId === null ? undefined : marks.turns.get(hook.turnId);
+      if (mark) mark.permission = false;
       return;
     }
-    const node: GraphNode = {
-      id,
-      sessionId: state.session.id,
-      turnId: effect.turnId,
-      agentId,
-      childAgentId: null,
-      parentId: null,
-      kind: SPAWN_TOOL_NAMES.has(effect.toolName) ? 'subagent' : 'tool',
-      status: 'running',
-      timestamp: at,
-      confirmed: false,
-      title: effect.toolName,
-      summary: summarize(effect.input),
-      toolName: effect.toolName,
-      toolUseId: effect.toolUseId,
-      messageId: null,
-      durationMs: null,
-      endedAt: null,
-      usage: null,
-      systemSubtype: null,
-    };
-    state.nodes.set(id, node);
-    state.toolInputs.set(id, effect.input);
-    state.placeholders.push({ nodeId: id, threadId: agentId ?? state.session.id, toolName: effect.toolName });
-    changes.push({ type: 'node_added', node, detail: { input: effect.input } });
-  }
-
-  /** Moves a node's start back to `at` when that is earlier (a duration derived from the start moves with it). */
-  private earlierStart(state: SessionState, node: GraphNode, at: string, changes: Change[]): void {
-    const next = msOf(at);
-    const current = msOf(node.timestamp);
-    if (next === null || (current !== null && next >= current)) return;
-    const patch: Partial<GraphNode> = { timestamp: at };
-    if (node.endedAt !== null && node.durationMs !== null) {
-      const d = elapsedMs(at, node.endedAt);
-      if (d !== null) patch.durationMs = d;
+    const key = hook.turnId ?? '';
+    let mark = marks.turns.get(key);
+    if (!mark) {
+      mark = { started: false, stopped: false, permission: false };
+      marks.turns.set(key, mark);
     }
-    this.patch(state, node.id, patch, changes);
-  }
-
-  /**
-   * PermissionRequest: the running tool node it names (`tool_use_id`), else the newest running node of that tool in
-   * the hook's thread, one with the same input first (the approach of the Claude normalizer).
-   */
-  private hookPermission(
-    state: SessionState,
-    agentId: string | null,
-    effect: Extract<CodexHookEffect, { kind: 'permission_request' }>,
-    changes: Change[],
-  ): void {
-    let target: GraphNode | undefined;
-    if (effect.toolUseId !== null) target = state.nodes.get(`tool:${effect.toolUseId}`);
-    else {
-      let newest: GraphNode | undefined;
-      let sameInput: GraphNode | undefined;
-      for (const node of state.nodes.values()) {
-        if (node.kind !== 'tool' || node.status !== 'running' || node.agentId !== agentId || !sameTool(effect.toolName, node.toolName)) continue;
-        if (newest === undefined || node.timestamp >= newest.timestamp) newest = node;
-        if (isDeepStrictEqual(state.toolInputs.get(node.id), effect.input) && (sameInput === undefined || node.timestamp >= sameInput.timestamp)) sameInput = node;
+    if (e === 'Stop' || e === 'Interrupt') {
+      const stopped = hook.turnId === null ? [...marks.turns.values()] : [mark];
+      for (const m of stopped) {
+        m.stopped = true;
+        m.permission = false;
       }
-      target = sameInput ?? newest;
+      return;
     }
-    if (target === undefined || target.kind !== 'tool' || target.status !== 'running') return;
-    this.patch(state, target.id, { status: 'awaiting_permission' }, changes);
-  }
-
-  /**
-   * PostToolUse: settles the node unless it is already settled (by its output record: the transcript wins; or by an
-   * earlier hook). A dispatch node is never settled here: its status follows the child thread.
-   */
-  private hookPostTool(state: SessionState, effect: Extract<CodexHookEffect, { kind: 'post_tool' }>, at: string, changes: Change[]): void {
-    const id = `tool:${effect.toolUseId}`;
-    const node = state.nodes.get(id);
-    if (!node || node.kind === 'subagent' || (effect.toolName !== null && SPAWN_TOOL_NAMES.has(effect.toolName))) return;
-    if (node.status !== null && TERMINAL_STATUSES.includes(node.status)) return;
-    const failed = effect.failed || (state.folded.get(id) ?? []).some(entryFailed);
-    const patch: Partial<GraphNode> = { status: failed ? 'failed' : 'succeeded', endedAt: at };
-    const durationMs = elapsedMs(node.timestamp, at);
-    if (durationMs !== null) patch.durationMs = durationMs;
-    state.hookSettled.add(id);
-    state.toolInputs.delete(id);
-    this.patch(state, id, patch, changes, { output: effect.output });
-  }
-
-  /**
-   * The unconfirmed placeholder a call record confirms: the one with the call's id; else, while no call and hook have
-   * met under the same id in this session, the oldest placeholder of the same thread and tool (the documentation does
-   * not promise tool_use_id = call_id). Null = none (a new node is made).
-   */
-  private placeholderFor(state: SessionState, thread: ThreadState, callId: string, toolName: string, name: string): GraphNode | null {
-    const exact = state.nodes.get(`tool:${callId}`);
-    if (exact !== undefined) {
-      if (exact.confirmed) return null; // a repeated record (addNode reports it)
-      state.idsMatch = true;
-      return exact;
-    }
-    if (state.idsMatch) return null;
-    const p = state.placeholders.find((x) => x.threadId === thread.id && (sameTool(x.toolName, toolName) || sameTool(x.toolName, name)));
-    return p === undefined ? null : (state.nodes.get(p.nodeId) ?? null);
+    mark.started = true;
+    mark.permission = e === 'PermissionRequest';
   }
 
   // ---- nodes ----
@@ -1051,11 +1124,10 @@ export class CodexNormalizer implements AgentNormalizer {
       systemSubtype?: string;
     },
     isCall = false,
-    confirm?: GraphNode,
   ): string | null {
     const { state, thread, changes } = ctx;
-    const id = confirm?.id ?? spec.id ?? `${spec.kind}:${thread.id}@${ctx.event.offset}`;
-    if (confirm === undefined && state.nodes.has(id)) {
+    const id = spec.id ?? `${spec.kind}:${thread.id}@${ctx.event.offset}`;
+    if (state.nodes.has(id)) {
       // The id is taken (by this or another thread): a repeated record. Nothing is placed; diagnostics show it.
       ctx.unknown = 'duplicate-node-id';
       return null;
@@ -1101,30 +1173,8 @@ export class CodexNormalizer implements AgentNormalizer {
       systemSubtype: spec.systemSubtype ?? null,
     };
     const sid = state.session.id;
-    if (confirm === undefined) {
-      state.nodes.set(id, placed);
-      changes.push({ type: 'node_added', node: placed, detail: spec.detail });
-    } else {
-      // A PreToolUse placeholder becomes this call's node: same id, placed and described by the record; it keeps the
-      // earlier start and what the hooks made of its status so far (the output record settles it).
-      const startMs = msOf(placed.timestamp);
-      const hookMs = msOf(confirm.timestamp);
-      const timestamp = hookMs !== null && (startMs === null || hookMs < startMs) ? confirm.timestamp : placed.timestamp;
-      const node: GraphNode = {
-        ...placed,
-        timestamp,
-        status: confirm.status,
-        endedAt: confirm.endedAt,
-        durationMs: confirm.endedAt !== null ? (elapsedMs(timestamp, confirm.endedAt) ?? confirm.durationMs) : confirm.durationMs,
-      };
-      state.nodes.set(id, node);
-      state.placeholders = state.placeholders.filter((p) => p.nodeId !== id);
-      const patch: Partial<GraphNode> = {};
-      for (const key of Object.keys(node) as (keyof GraphNode)[]) {
-        if (node[key] !== confirm[key]) (patch as Record<string, unknown>)[key] = node[key];
-      }
-      changes.push({ type: 'node_updated', sessionId: sid, id, patch, detail: spec.detail });
-    }
+    state.nodes.set(id, placed);
+    changes.push({ type: 'node_added', node: placed, detail: spec.detail });
     if (parentId !== null) changes.push({ type: 'edge_added', edge: { id: `${parentId}->${id}`, sessionId: sid, from: parentId, to: id, kind: edgeKind } });
     if (forkFirst !== null && parentId !== null) {
       changes.push({ type: 'edge_added', edge: { id: `${parentId}->${forkFirst}:fork`, sessionId: sid, from: parentId, to: forkFirst, kind: 'fork' } });
@@ -1139,7 +1189,25 @@ export class CodexNormalizer implements AgentNormalizer {
     return id;
   }
 
+  /**
+   * A change the transcript makes to a node. Under an awaiting_permission overlay a non-terminal status is only
+   * remembered (the node keeps showing awaiting_permission); a terminal one ends the overlay and is shown.
+   */
   private patch(state: SessionState, id: string, patch: Partial<GraphNode>, changes: Change[], detail?: Partial<NodeDetail>): void {
+    let out = patch;
+    if (state.awaiting.has(id) && 'status' in patch) {
+      const next = patch.status ?? null;
+      if (isTerminal(next)) state.awaiting.delete(id);
+      else {
+        state.awaiting.set(id, next);
+        out = { ...patch };
+        delete out.status;
+      }
+    }
+    this.writeNode(state, id, out, changes, detail);
+  }
+
+  private writeNode(state: SessionState, id: string, patch: Partial<GraphNode>, changes: Change[], detail?: Partial<NodeDetail>): void {
     const node = state.nodes.get(id);
     if (!node) return;
     if (Object.keys(patch).length === 0 && detail === undefined) return;
@@ -1214,18 +1282,34 @@ export class CodexNormalizer implements AgentNormalizer {
 
   /**
    * A dispatch node's status follows its agent's thread: a turn open (or nothing read yet) → running; otherwise the
-   * last turn's end decides (failed when it ended with an error or was aborted) and gives the end time.
+   * last turn's end decides (failed when it ended with an error or was aborted) and gives the end time. While no child
+   * thread is known, it follows the turn the spawn call was made in: running while that turn is open, failed (ended at
+   * the turn's end) once it has ended — a child thread that turns up later takes over.
    */
   private applyDispatchStatus(state: SessionState, dispatch: string, changes: Change[]): void {
     const node = state.nodes.get(dispatch);
     if (!node || node.kind !== 'subagent') return;
-    const thread = node.childAgentId === null ? undefined : state.threads.get(node.childAgentId);
-    const last = thread?.turns[thread.turns.length - 1];
+    const running = { status: 'running', endedAt: null, durationMs: null } as const;
     let next: Pick<GraphNode, 'status' | 'endedAt' | 'durationMs'>;
-    if (last === undefined || last.endedAt === null) next = { status: 'running', endedAt: null, durationMs: null };
-    else next = { status: last.failed ? 'failed' : 'succeeded', endedAt: last.endedAt, durationMs: elapsedMs(node.timestamp, last.endedAt) };
+    if (node.childAgentId === null) {
+      const spawnThread = state.threads.get(state.spawns.get(dispatch)?.threadId ?? '');
+      const turns = spawnThread?.turns ?? [];
+      let turn: Turn | undefined;
+      for (let i = turns.length - 1; i >= 0 && node.turnId !== null; i--) {
+        if (turns[i]!.id === node.turnId) {
+          turn = turns[i];
+          break;
+        }
+      }
+      next = turn?.endedAt != null ? { status: 'failed', endedAt: turn.endedAt, durationMs: elapsedMs(node.timestamp, turn.endedAt) } : running;
+    } else {
+      const thread = state.threads.get(node.childAgentId);
+      const last = thread?.turns[thread.turns.length - 1];
+      if (last === undefined || last.endedAt === null) next = running;
+      else next = { status: last.failed ? 'failed' : 'succeeded', endedAt: last.endedAt, durationMs: elapsedMs(node.timestamp, last.endedAt) };
+    }
     const patch: Partial<GraphNode> = {};
-    if (node.status !== next.status) patch.status = next.status;
+    if (this.baseStatus(state, node) !== next.status) patch.status = next.status;
     if (node.endedAt !== next.endedAt) patch.endedAt = next.endedAt;
     if (node.durationMs !== next.durationMs) patch.durationMs = next.durationMs;
     if (Object.keys(patch).length === 0) return;

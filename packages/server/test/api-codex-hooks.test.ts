@@ -71,7 +71,7 @@ test('Codex hook 先于会话文件：会话立即出现（codex、项目由 cwd
   await settle();
   const early = store.getGraph('root1')!;
   expect(early.session).toMatchObject({ origin: 'codex', projectId: project, cwd, status: 'running' });
-  expect(early.nodes.map((x) => [x.id, x.confirmed, x.status])).toEqual([['tool:c1', false, 'running']]);
+  expect(early.nodes).toEqual([]); // hooks never make nodes: the transcript does
   expect((store.listProjects(Date.now()) as { id: string; origins: string[] }[]).find((p) => p.id === project)?.origins).toEqual(['codex']);
 
   const root = new CodexThread({ id: 'root1', cwd });
@@ -80,7 +80,9 @@ test('Codex hook 先于会话文件：会话立即出现（codex、项目由 cwd
   await fs.mkdir(path.dirname(file), { recursive: true });
   await fs.writeFile(file, root.lines.map((l) => `${l}\n`).join(''));
   await pipeline.scanAll();
-  // (The fixture's records are dated before these hooks were received, so the turn's end does not override them.)
+  await settle();
+  // The fixture's records are dated before these hooks were received: the transcript's turn end still decides.
+  expect(store.getGraph('root1')!.session.status).toBe('idle');
   await post('/hooks?origin=codex', { hook_event_name: 'Stop', session_id: 'root1', cwd, turn_id: 't1', last_assistant_message: 'done' });
   await settle();
   const g = store.getGraph('root1')!;
@@ -93,6 +95,40 @@ test('Codex hook 先于会话文件：会话立即出现（codex、项目由 cwd
   const before = strip(g);
   pipeline.rebuild();
   expect(strip(store.getGraph('root1')!)).toEqual(before);
+});
+
+test('不建会话的 hook（Stop）先于会话文件：会话出现后它照样生效；重建结果相同', async () => {
+  await post('/hooks?origin=codex', { hook_event_name: 'Stop', session_id: 'root4', cwd, turn_id: 't1' });
+  await settle();
+  expect(store.getSession('root4')).toBeNull();
+  const root = new CodexThread({ id: 'root4', cwd });
+  for (const ev of [root.meta(), root.started('t1'), root.user('u1', 'go')]) void ev;
+  const file = path.join(config.codexSessionsDir!, ...rolloutRel('root4').split('/'));
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, root.lines.map((l) => `${l}\n`).join(''));
+  await pipeline.scanAll();
+  await settle();
+  // The transcript's turn is open, but the Stop hook received before the file was read stopped it.
+  expect(store.getSession('root4')).toMatchObject({ origin: 'codex', status: 'idle' });
+  const before = store.getGraph('root4')!;
+  pipeline.rebuild();
+  expect(store.getGraph('root4')!.session).toEqual(before.session);
+});
+
+test('hook 不改由会话文件定下的项目和 cwd', async () => {
+  const root = new CodexThread({ id: 'root5', cwd });
+  for (const ev of [root.meta(), root.started('t1')]) void ev;
+  const file = path.join(config.codexSessionsDir!, ...rolloutRel('root5').split('/'));
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, root.lines.map((l) => `${l}\n`).join(''));
+  await pipeline.scanAll();
+  await settle();
+  const other = path.join(tmp, 'elsewhere');
+  await post('/hooks?origin=codex', { hook_event_name: 'UserPromptSubmit', session_id: 'root5', cwd: other, turn_id: 't1', prompt: 'x' });
+  await settle();
+  expect(store.getSession('root5')).toMatchObject({ projectId: project, cwd });
+  // The stored hook carries the session's known project too (replay gives the same).
+  expect(store.rawForSession('root5').flatMap((e) => (e.source === 'hook' ? [e.projectId] : []))).toEqual([project]);
 });
 
 test('子代理的 hook：项目沿用会话已知的项目（不按子代理的工作目录另起项目）', async () => {

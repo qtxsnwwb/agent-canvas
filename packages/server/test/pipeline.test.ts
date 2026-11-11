@@ -1192,6 +1192,16 @@ describe('pipeline 与 Codex 文件源', () => {
     }
   });
 
+  test('会话索引含 BOM 和非法 UTF-8 字节：记下的大小是文件的字节数（不会每次复查都重读）', async () => {
+    await cwrite(rolloutRel(ROOT), rootLines());
+    const bytes = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(`${indexLine(ROOT, 'first')}\n`), Buffer.from([0xff, 0xfe, 0x0a])]);
+    await fs.writeFile(indexFile(), bytes);
+    const p = newPipeline();
+    await p.scanAll();
+    await p.idle();
+    expect(store.getOffset('codex:../session_index.jsonl')).toBe(bytes.length);
+  });
+
   test('会话索引：每个已知根线程一条 meta 原始事件；只在该行变化时再写；之后才出现的根线程也会补上', async () => {
     await cwrite(rolloutRel(ROOT), rootLines());
     await cwrite(rolloutRel(SUB), subLines());

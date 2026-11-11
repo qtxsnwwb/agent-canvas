@@ -1,10 +1,16 @@
 import { beforeEach, describe, expect, test } from 'vitest';
-import { applyChanges, emptyGraph, type Change, type GraphNode } from '@claude-canvas/shared';
+import { applyChanges, emptyGraph, type Change, type GraphNode, type Session } from '@claude-canvas/shared';
 import { CodexNormalizer } from '../src/normalize/codex.js';
 import { parseCodexHook } from '../src/normalize/codex-hooks.js';
 import { NORMALIZER_VERSION } from '../src/normalize/version.js';
 import type { RawEvent } from '../src/store/store.js';
 import { CodexThread, interleave, nextTime, run, type RunResult } from './codex-fixtures.js';
+
+/*
+ * Codex hooks v1 never create, confirm or settle nodes: the transcript alone makes the graph. Hooks contribute the
+ * session status (a function of state: transcript turns + per-turn hook marks) and `awaiting_permission` on the latest
+ * open call of the turn's thread while a permission request is pending.
+ */
 
 let n: CodexNormalizer;
 beforeEach(() => {
@@ -23,28 +29,30 @@ function hook(eventName: string, body: Record<string, unknown> = {}, opts: { ses
     payload: JSON.stringify({
       session_id: session,
       transcript_path: `/home/u/.codex/sessions/2026/11/11/rollout-x-${session}.jsonl`,
-      cwd: '/work/app',
+      cwd: '/hook/cwd',
       hook_event_name: eventName,
       model: 'gpt-x',
       ...body,
     }),
-    projectId: opts.projectId ?? 'p1',
+    projectId: opts.projectId ?? 'p-hook',
   };
 }
-const pre = (id: string, cmd = 'ls', extra: Record<string, unknown> = {}) =>
-  hook('PreToolUse', { turn_id: 't1', tool_name: 'exec', tool_use_id: id, tool_input: { cmd }, ...extra });
-const post = (id: string, response: unknown = { exit_code: 0, output: 'ok' }, extra: Record<string, unknown> = {}) =>
-  hook('PostToolUse', { turn_id: 't1', tool_name: 'exec', tool_use_id: id, tool_input: {}, tool_response: response, ...extra });
-const permission = (extra: Record<string, unknown> = {}) =>
-  hook('PermissionRequest', { turn_id: 't1', tool_name: 'exec', tool_input: { cmd: 'rm -rf build' }, ...extra });
+const pre = (id: string, turn = 't1', extra: Record<string, unknown> = {}) =>
+  hook('PreToolUse', { turn_id: turn, tool_name: 'Bash', tool_use_id: id, tool_input: { command: 'ls' }, ...extra });
+const post = (id: string, turn = 't1', extra: Record<string, unknown> = {}) =>
+  hook('PostToolUse', { turn_id: turn, tool_name: 'Bash', tool_use_id: id, tool_input: {}, tool_response: { exit_code: 0 }, ...extra });
+const permission = (turn = 't1', extra: Record<string, unknown> = {}) =>
+  hook('PermissionRequest', { turn_id: turn, tool_name: 'Bash', tool_input: { command: 'rm -rf build' }, ...extra });
+const prompt = (turn: string) => hook('UserPromptSubmit', { turn_id: turn, prompt: 'x' });
+const stop = (turn: string) => hook('Stop', { turn_id: turn, last_assistant_message: 'done' });
 
-/** `run` with each hook's own projectId (the fixture's run gives hooks 'unknown'). */
-function apply(events: RawEvent[]): RunResult {
+/** Applies events with each event's own projectId (hooks: the stored hook project). */
+function apply(events: RawEvent[], normalizer: CodexNormalizer = n): RunResult {
   const changes: Change[] = [];
   const unknown: string[] = [];
-  const sessions = new Map();
+  const sessions = new Map<string, Session>();
   for (const ev of events) {
-    const r = n.apply(ev, ev.source === 'hook' ? (ev.projectId ?? 'unknown') : ev.source === 'transcript' ? (ev.projectId ?? 'unknown') : 'p1');
+    const r = normalizer.apply(ev, ev.source === 'meta' ? 'p1' : (ev.projectId ?? 'unknown'));
     if (r.unknownRecordType !== undefined) unknown.push(r.unknownRecordType);
     changes.push(...r.changes);
     for (const c of r.changes) if (c.type === 'session_upserted') sessions.set(c.session.id, c.session);
@@ -56,326 +64,343 @@ const node = (r: RunResult, id: string): GraphNode => {
   if (!x) throw new Error(`no node ${id}; have ${Object.keys(r.graph.nodes).join(', ')}`);
   return x;
 };
-const status = (r: RunResult) => r.sessions.get('root1')?.status;
+/** Session status after applying everything so far to `n` (incrementally, across apply calls). */
+let lastSession: Session | undefined;
+function step(events: RawEvent[]): RunResult {
+  const r = apply(events);
+  if (r.sessions.has('root1')) lastSession = r.sessions.get('root1');
+  return r;
+}
+const statusNow = () => lastSession?.status;
+beforeEach(() => {
+  lastSession = undefined;
+});
+const nodeChanges = (r: RunResult) => r.changes.filter((c) => c.type !== 'session_upserted');
 
 test('NORMALIZER_VERSION 已升级', () => {
-  expect(NORMALIZER_VERSION).toBe(17);
+  expect(NORMALIZER_VERSION).toBe(18);
 });
 
 describe('parseCodexHook', () => {
   test('已知事件、未知事件、坏载荷', () => {
-    expect(parseCodexHook('Stop', JSON.stringify({ session_id: 's', cwd: '/w' }))).toMatchObject({ ok: true, hook: { sessionId: 's', cwd: '/w', status: 'idle', node: null } });
+    expect(parseCodexHook('Stop', JSON.stringify({ session_id: 's', cwd: '/w', turn_id: 't9' }))).toMatchObject({
+      ok: true,
+      hook: { eventName: 'Stop', sessionId: 's', cwd: '/w', turnId: 't9', agentId: null, createsSession: false },
+    });
+    expect(parseCodexHook('PreToolUse', JSON.stringify({ session_id: 's', agent_id: 'a1' }))).toMatchObject({ ok: true, hook: { agentId: 'a1', turnId: null, createsSession: true } });
     expect(parseCodexHook('Frobnicate', JSON.stringify({ session_id: 's' }))).toEqual({ ok: false, unknownRecordType: 'hook:Frobnicate' });
     expect(parseCodexHook('Stop', 'nope')).toEqual({ ok: false, unknownRecordType: 'hook:invalid' });
     expect(parseCodexHook('Stop', '{}')).toEqual({ ok: false, unknownRecordType: 'hook:invalid' });
   });
 
-  test('事件 → 会话状态', () => {
-    const st = (e: string, body: object = {}) => {
-      const p = parseCodexHook(e, JSON.stringify({ session_id: 's', tool_name: 'exec', tool_use_id: 'c', ...body }));
-      return p.ok ? p.hook.status : 'x';
+  test('会建会话的事件仍是这五个', () => {
+    const creates = (e: string) => {
+      const p = parseCodexHook(e, JSON.stringify({ session_id: 's' }));
+      return p.ok && p.hook.createsSession;
     };
-    expect(st('SessionStart')).toBe('idle');
-    expect(st('UserPromptSubmit')).toBe('running');
-    expect(st('PreToolUse')).toBe('running');
-    expect(st('PermissionRequest')).toBe('awaiting_permission');
-    expect(st('PostToolUse')).toBe('running');
-    expect(st('Stop')).toBe('idle');
-    expect(st('Interrupt')).toBe('idle');
-    expect(st('SessionEnd')).toBe('ended');
-    for (const e of ['SubagentStart', 'SubagentStop', 'PostCompact', 'PreCompact']) expect(st(e)).toBeNull();
-    // A subagent's hooks only move the session for its tool and permission events.
-    expect(st('Stop', { agent_id: 'a' })).toBeNull();
-    expect(st('PermissionRequest', { agent_id: 'a' })).toBe('awaiting_permission');
-  });
-
-  test('PostToolUse：明确报告错误或非零退出码才算失败', () => {
-    const failed = (response: unknown) => {
-      const p = parseCodexHook('PostToolUse', JSON.stringify({ session_id: 's', tool_name: 'exec', tool_use_id: 'c', tool_response: response }));
-      return p.ok && p.hook.node?.kind === 'post_tool' ? p.hook.node.failed : 'x';
-    };
-    expect(failed({ exit_code: 0, output: 'ok' })).toBe(false);
-    expect(failed('Error: just text that mentions errors')).toBe(false);
-    expect(failed(undefined)).toBe(false);
-    expect(failed({ exit_code: 2 })).toBe(true);
-    expect(failed({ exitCode: 1 })).toBe(true);
-    expect(failed({ success: false })).toBe(true);
-    expect(failed({ is_error: true })).toBe(true);
-    expect(failed({ error: 'boom' })).toBe(true);
-    expect(failed({ error: null, exit_code: 0 })).toBe(false);
+    expect(['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'PostToolUse'].every(creates)).toBe(true);
+    expect(['Stop', 'SessionEnd', 'Interrupt', 'SubagentStart', 'SubagentStop', 'PostCompact'].some(creates)).toBe(false);
   });
 });
 
-describe('PreToolUse 占位与确认', () => {
-  test('hook 先到：立即有一个未确认、执行中的工具节点；转录的调用到达后确认同一节点，保留更早的开始时间', () => {
-    const root = new CodexThread({ id: 'root1' });
-    const r1 = apply([root.meta(), root.started('t1'), root.user('u1', 'go')]);
-    const h = pre('c1');
-    const r2 = apply([h]);
-    const added = r2.changes.find((c) => c.type === 'node_added');
-    expect(added).toMatchObject({
-      node: { id: 'tool:c1', confirmed: false, status: 'running', toolName: 'exec', toolUseId: 'c1', agentId: null, parentId: null, turnId: 't1', kind: 'tool' },
-      detail: { input: { cmd: 'ls' } },
-    });
-    expect(added?.type === 'node_added' && added.node.timestamp).toBe(h.source === 'hook' ? h.receivedAt : '');
-    expect(r2.changes.filter((c) => c.type === 'edge_added')).toEqual([]);
-    const r3 = apply([root.exec('c1', 'ls -la')]);
-    expect(r3.unknown).toEqual([]);
-    expect(r3.changes.filter((c) => c.type === 'node_added')).toEqual([]);
-    const all = applyChanges(applyChanges(r1.graph, r2.changes), r3.changes);
-    expect(all.nodes['tool:c1']).toMatchObject({ confirmed: true, status: 'running', parentId: 'prompt:u1', title: 'exec', summary: 'ls -la', turnId: 't1', timestamp: h.source === 'hook' ? h.receivedAt : '' });
-    expect(Object.keys(all.edges)).toContain('prompt:u1->tool:c1');
-  });
-
-  test('转录先到：PreToolUse 不建新节点', () => {
-    const root = new CodexThread({ id: 'root1' });
-    apply([root.meta(), root.started('t1'), root.user('u1', 'go'), root.exec('c1', 'ls')]);
-    const r = apply([pre('c1')]);
-    expect(r.changes.filter((c) => c.type === 'node_added')).toEqual([]);
-  });
-
-  test('子代理的 hook：节点在子代理线程里（agentId = agent_id）', () => {
-    const r = apply([pre('c9', 'ls', { agent_id: 'sub1', agent_type: 'worker' })]);
-    expect(node(r, 'tool:c9')).toMatchObject({ agentId: 'sub1', confirmed: false });
-  });
-
-  test('只有 hook：节点保持未确认，PostToolUse 结算', () => {
-    const r = apply([pre('c1'), post('c1', { exit_code: 3 })]);
-    expect(node(r, 'tool:c1')).toMatchObject({ confirmed: false, status: 'failed' });
-    expect(node(r, 'tool:c1').endedAt).not.toBeNull();
-    expect(n.toolInputCount('root1')).toBe(0);
-  });
-
-  test('tool_use_id 和 call_id 对不上：调用确认同一线程、同名、最早的未确认占位；结果确定', () => {
-    const root = new CodexThread({ id: 'root1' });
-    const events = [
-      root.meta(), root.started('t1'), root.user('u1', 'go'),
-      pre('hookA', 'a'), pre('hookB', 'b'),
-      hook('PreToolUse', { tool_name: 'other', tool_use_id: 'hookO', tool_input: {} }),
-      pre('hookS', 's', { agent_id: 'sub1' }),
-      root.exec('callA', 'a'), root.output('callA'),
-      root.exec('callB', 'b'),
-    ];
-    const r = apply(events);
+describe('hooks 不建、不确认、不结算节点', () => {
+  test('转录之前的工具 hook：没有节点，只有会话', () => {
+    const r = apply([pre('c1'), permission(), post('c1')]);
     expect(r.unknown).toEqual([]);
-    expect(node(r, 'tool:hookA')).toMatchObject({ confirmed: true, status: 'succeeded', parentId: 'prompt:u1', toolUseId: 'callA' });
-    expect(node(r, 'tool:hookB')).toMatchObject({ confirmed: true, status: 'running', parentId: 'tool:hookA', toolUseId: 'callB' });
-    expect(r.graph.nodes['tool:callA']).toBeUndefined();
-    expect(r.graph.nodes['tool:callB']).toBeUndefined();
-    expect(node(r, 'tool:hookO').confirmed).toBe(false);
-    expect(node(r, 'tool:hookS').confirmed).toBe(false);
-    const again = new CodexNormalizer();
-    expect(run(again, events).graph).toEqual(r.graph);
+    expect(nodeChanges(r)).toEqual([]);
+    expect(r.sessions.get('root1')).toMatchObject({ origin: 'codex', projectId: 'p-hook', cwd: '/hook/cwd' });
   });
 
-  test('已用相同 id 确认过一次：不再按名字回退匹配（避免配错）', () => {
+  test('PreToolUse 先到：调用节点的 id、开始时间、父节点都来自转录', () => {
     const root = new CodexThread({ id: 'root1' });
-    const r = apply([root.meta(), root.started('t1'), root.user('u1', 'go'), pre('c1'), root.exec('c1', 'ls'), pre('c3'), root.exec('c2', 'x')]);
-    expect(node(r, 'tool:c1').confirmed).toBe(true);
-    expect(node(r, 'tool:c2').confirmed).toBe(true);
-    expect(node(r, 'tool:c3').confirmed).toBe(false);
+    const call = root.exec('c1', 'ls');
+    const r = apply([root.meta(), root.started('t1'), root.user('u1', 'go'), pre('c1'), call]);
+    expect(node(r, 'tool:c1')).toMatchObject({ confirmed: true, status: 'running', parentId: 'prompt:u1', timestamp: JSON.parse((call as { line: string }).line).timestamp });
   });
 
-  test('已被确认过的 id 再来一次调用：仍是重复记录', () => {
+  test('PostToolUse 不结算：节点等转录的输出', () => {
     const root = new CodexThread({ id: 'root1' });
-    const r = apply([root.meta(), root.started('t1'), pre('c1'), root.exec('c1', 'ls'), root.exec('c1', 'ls')]);
-    expect(r.unknown).toEqual(['duplicate-node-id']);
+    apply([root.meta(), root.started('t1'), root.exec('c1', 'ls')]);
+    const r = apply([post('c1', 't1', { tool_response: { exit_code: 3 } })]);
+    expect(nodeChanges(r)).toEqual([]);
+  });
+
+  test('id 对不上的 hook 也不产生任何节点（不再按名字配对）', () => {
+    const root = new CodexThread({ id: 'root1' });
+    const r = apply([
+      root.meta(), root.started('t1'), root.user('u1', 'go'),
+      root.exec('call_1', 'x'), pre('exec-aaa'), post('exec-aaa'), pre('exec-bbb'),
+      root.output('call_1'), root.complete(), stop('t1'),
+    ]);
+    expect(Object.keys(r.graph.nodes).sort()).toEqual(['prompt:u1', 'tool:call_1']);
+    expect(node(r, 'tool:call_1').status).toBe('succeeded');
   });
 });
 
-describe('PermissionRequest / PostToolUse', () => {
-  test('PermissionRequest：按 tool_use_id 标记等待确认；会话等待确认', () => {
-    const root = new CodexThread({ id: 'root1' });
-    const r = apply([root.meta(), root.started('t1'), root.exec('c1', 'ls'), permission({ tool_use_id: 'c1' })]);
-    expect(node(r, 'tool:c1').status).toBe('awaiting_permission');
-    expect(status(r)).toBe('awaiting_permission');
-  });
-
-  test('PermissionRequest 没有 tool_use_id：同线程同名、执行中的最新节点（同样输入优先）', () => {
-    const root = new CodexThread({ id: 'root1' });
-    const r = apply([
-      root.meta(), root.started('t1'),
-      root.exec('c1', 'rm -rf build'), root.exec('c2', 'ls'), root.exec('c3', 'pwd'),
-      permission({ tool_input: 'rm -rf build' }),
-    ]);
-    expect(node(r, 'tool:c1').status).toBe('awaiting_permission');
-    expect(node(r, 'tool:c3').status).toBe('running');
-    const r2 = apply([permission({ tool_input: { other: true } })]);
-    expect(applyChanges(r.graph, r2.changes).nodes['tool:c3']!.status).toBe('awaiting_permission');
-  });
-
-  test('PostToolUse 结算；之后转录的输出纠正状态和结束时间（转录为准）', () => {
-    const root = new CodexThread({ id: 'root1' });
-    const base = [root.meta(), root.started('t1'), pre('c1'), root.exec('c1', 'ls')];
-    const r = apply([...base, post('c1')]);
-    expect(node(r, 'tool:c1').status).toBe('succeeded');
-    const fail = root.command('cmd1', 'ls', { exitCode: 1 });
-    const out = root.output('c1');
-    const r2 = apply([fail, out]);
-    const g = applyChanges(r.graph, r2.changes);
-    expect(g.nodes['tool:c1']).toMatchObject({ status: 'failed', endedAt: JSON.parse((out as any).line).timestamp });
-  });
-
-  test('转录先结算：之后的 PostToolUse 不改', () => {
-    const root = new CodexThread({ id: 'root1' });
-    const r = apply([root.meta(), root.started('t1'), root.exec('c1', 'ls'), root.command('cmd1', 'ls', { exitCode: 1 }), root.output('c1')]);
-    const before = node(r, 'tool:c1');
-    const r2 = apply([post('c1')]);
-    expect(r2.changes.filter((c) => c.type !== 'session_upserted')).toEqual([]);
-    expect(before.status).toBe('failed');
-  });
-
-  test('派发子代理的节点不被 PostToolUse 结算', () => {
-    const root = new CodexThread({ id: 'root1' });
-    const r = apply([
-      root.meta(), root.started('t1'),
-      hook('PreToolUse', { tool_name: 'spawn_agent', tool_use_id: 'sp1', tool_input: { task_name: 'helper' } }),
-      root.spawn('sp1', 'helper'),
-      hook('PostToolUse', { tool_name: 'spawn_agent', tool_use_id: 'sp1', tool_response: { agent_id: 'x' } }),
-    ]);
-    expect(node(r, 'tool:sp1')).toMatchObject({ kind: 'subagent', status: 'running', confirmed: true });
-    const r2 = apply([hook('PostToolUse', { tool_name: 'Agent', tool_use_id: 'sp2', tool_response: {} }), hook('PreToolUse', { tool_name: 'Agent', tool_use_id: 'sp2', tool_input: {} })]);
-    expect(node(r2, 'tool:sp2')).toMatchObject({ kind: 'subagent', status: 'running' });
-    expect(apply([hook('PostToolUse', { tool_name: 'Agent', tool_use_id: 'sp2', tool_response: {} })]).changes.filter((c) => c.type !== 'session_upserted')).toEqual([]);
-  });
-});
-
-describe('会话状态与会话创建', () => {
+describe('会话状态：状态的函数', () => {
   test('UserPromptSubmit → 运行中；Stop → 空闲；SessionEnd → 已结束；之后只有 SessionStart / UserPromptSubmit 能恢复', () => {
     const root = new CodexThread({ id: 'root1' });
-    let r = apply([root.meta(), hook('UserPromptSubmit', { prompt: 'x' })]);
-    expect(status(r)).toBe('running');
-    r = apply([hook('Stop', { last_assistant_message: 'done' })]);
-    expect(status(r)).toBe('idle');
-    r = apply([hook('SessionEnd', { reason: 'exit' })]);
-    expect(status(r)).toBe('ended');
-    r = apply([hook('PreToolUse', { tool_name: 'exec', tool_use_id: 'zz', tool_input: {} })]);
-    expect(r.sessions.get('root1')?.status ?? 'ended').toBe('ended');
-    r = apply([hook('SessionStart', { source: 'resume' })]);
-    expect(status(r)).toBe('idle');
+    step([root.meta(), prompt('t1')]);
+    expect(statusNow()).toBe('running');
+    step([stop('t1')]);
+    expect(statusNow()).toBe('idle');
+    step([hook('SessionEnd', { reason: 'exit' })]);
+    expect(statusNow()).toBe('ended');
+    step([pre('zz', 't2')]);
+    expect(statusNow()).toBe('ended');
+    step([hook('SessionStart', { source: 'resume' })]);
+    expect(statusNow()).toBe('running'); // t2 was started by its PreToolUse and nothing finished it
+    step([stop('t2')]);
+    expect(statusNow()).toBe('idle');
   });
 
-  test('Interrupt → 空闲，不产生节点', () => {
+  test('转录：主线程有未结束的轮次 → 运行中；结束 → 空闲；hook 收到的时间晚于记录时间也不影响', () => {
     const root = new CodexThread({ id: 'root1' });
-    apply([root.meta(), root.started('t1')]);
-    const r = apply([hook('Interrupt', {})]);
-    expect(status(r)).toBe('idle');
-    expect(r.changes.filter((c) => c.type !== 'session_upserted')).toEqual([]);
+    step([root.meta(), root.started('t1'), prompt('t1')]);
+    expect(statusNow()).toBe('running');
+    step([root.complete()]); // its record time is earlier than the hook's receive time
+    expect(statusNow()).toBe('idle');
   });
 
-  test('hook 的状态不覆盖转录里更新的状态', () => {
+  test('Stop 在 task_complete 之前或之后到都是空闲；Stop 早于该轮最后一个 PostToolUse 到达也是空闲', () => {
     const root = new CodexThread({ id: 'root1' });
-    const stale = hook('Stop', {}, { at: '2026-11-11T02:00:00.000Z' });
-    const r = apply([root.meta(), root.started('t1'), stale]);
-    expect(status(r) ?? 'running').toBe('running');
+    step([root.meta(), root.started('t1'), prompt('t1'), pre('c1'), stop('t1')]);
+    expect(statusNow()).toBe('idle'); // the transcript's turn is still open, but Stop stopped it
+    step([post('c1')]); // a late forwarder of the same turn
+    expect(statusNow()).toBe('idle');
+    step([root.complete()]);
+    expect(statusNow()).toBe('idle');
   });
 
-  test('SubagentStart / SubagentStop / PostCompact：不改节点，不算未识别', () => {
+  test('Interrupt 结束该轮次', () => {
     const root = new CodexThread({ id: 'root1' });
-    apply([root.meta(), root.started('t1')]);
-    const r = apply([hook('SubagentStart', { agent_id: 'a1', agent_type: 'w' }), hook('SubagentStop', { agent_id: 'a1', agent_type: 'w' }), hook('PostCompact', {})]);
+    step([root.meta(), root.started('t1')]);
+    expect(statusNow()).toBe('running');
+    step([hook('Interrupt', { turn_id: 't1' })]);
+    expect(statusNow()).toBe('idle');
+  });
+
+  test('子代理线程的 hook 在主轮次结束后到达：转录知道它属于子线程，不把会话改回运行中', () => {
+    const root = new CodexThread({ id: 'root1' });
+    const sub = new CodexThread({ id: 'sub1', sessionId: 'root1', parent: 'root1', nickname: 'H', agentPath: '/root/h' });
+    step([root.meta(), root.started('t1'), sub.meta(), sub.started('st1'), root.complete(), stop('t1')]);
+    expect(statusNow()).toBe('idle');
+    step([pre('k1', 'st1', { agent_id: 'sub1' }), post('k1', 'st1', { agent_id: 'sub1' }), permission('st1', { agent_id: 'sub1' })]);
+    expect(statusNow()).toBe('idle');
+  });
+
+  test('还不知道属于哪个线程的轮次：hook 开始它就算运行中，直到转录说它属于子线程', () => {
+    const root = new CodexThread({ id: 'root1' });
+    const sub = new CodexThread({ id: 'sub1', sessionId: 'root1', parent: 'root1', nickname: 'H', agentPath: '/root/h' });
+    step([root.meta(), root.started('t1'), root.complete(), pre('k1', 'st1', { agent_id: 'sub1' })]);
+    expect(statusNow()).toBe('running');
+    step([sub.meta(), sub.started('st1')]);
+    expect(statusNow()).toBe('idle');
+  });
+
+  test('主线程里已被更新的轮次取代的旧轮次，不再算进行中', () => {
+    const root = new CodexThread({ id: 'root1' });
+    step([root.meta(), prompt('t1'), root.started('t1'), root.started('t2'), root.complete()]);
+    expect(statusNow()).toBe('idle');
+  });
+
+  test('权限请求：等待确认；同一轮次之后的任何 hook 清除；轮次结束也清除', () => {
+    const root = new CodexThread({ id: 'root1' });
+    step([root.meta(), root.started('t1'), root.exec('c1', 'rm'), permission()]);
+    expect(statusNow()).toBe('awaiting_permission');
+    step([post('c1')]);
+    expect(statusNow()).toBe('running');
+    step([permission()]);
+    expect(statusNow()).toBe('awaiting_permission');
+    step([root.output('c1'), root.complete()]);
+    expect(statusNow()).toBe('idle');
+  });
+
+  test('权限请求：转录里该轮次的调用都已结束（且至少结束了一个）时清除；还没读到调用时保持', () => {
+    const root = new CodexThread({ id: 'root1' });
+    step([root.meta(), root.started('t1'), permission()]);
+    expect(statusNow()).toBe('awaiting_permission');
+    step([root.exec('c1', 'rm')]);
+    expect(statusNow()).toBe('awaiting_permission');
+    step([root.output('c1')]);
+    expect(statusNow()).toBe('running');
+  });
+
+  test('没见过的会话：Stop 等不建会话，但它的标记在会话出现后照样生效', () => {
+    const root = new CodexThread({ id: 'root1' });
+    const r = apply([stop('t1'), hook('SessionEnd', {}, { session: 'other' })]);
     expect(r.unknown).toEqual([]);
-    expect(r.changes.filter((c) => c.type !== 'session_upserted')).toEqual([]);
+    expect(n.hasSession('root1')).toBe(false);
+    expect(n.hasSession('other')).toBe(false);
+    step([root.meta(), root.started('t1')]);
+    expect(statusNow()).toBe('idle');
   });
 
-  test('未知事件名计为未识别，不建会话', () => {
-    const r = apply([hook('Frobnicate', {}, { session: 'fresh' })]);
-    expect(r.unknown).toEqual(['hook:Frobnicate']);
-    expect(n.hasSession('fresh')).toBe(false);
-  });
-
-  test('没见过的会话：SessionStart 建出 Codex 会话（cwd、项目来自 hook）；会话文件之后到达时合在一起', () => {
-    const r = apply([hook('SessionStart', { source: 'startup' }, { session: 'root1', projectId: 'p-work' })]);
-    expect(r.sessions.get('root1')).toMatchObject({ origin: 'codex', cwd: '/work/app', projectId: 'p-work', status: 'idle' });
-    const root = new CodexThread({ id: 'root1', cwd: '/work/app2', projectId: 'p-work' });
-    const r2 = apply([root.meta(), root.started('t1')]);
-    expect(r2.sessions.get('root1')).toMatchObject({ cwd: '/work/app2', projectId: 'p-work', status: 'running' });
-  });
-
-  test('没见过的会话：Stop / SessionEnd / Interrupt / Subagent* 不凭空建会话', () => {
-    for (const e of ['Stop', 'SessionEnd', 'Interrupt', 'SubagentStop', 'PostCompact']) {
-      const r = apply([hook(e, {}, { session: `s-${e}` })]);
-      expect(r.unknown).toEqual([]);
-      expect(n.hasSession(`s-${e}`)).toBe(false);
-    }
-  });
-
-  test('畸形 hook：未识别标签，无变化，不抛', () => {
-    for (const payload of ['nope', '[]', '{"session_id":5}', 'null']) {
-      const r = n.apply({ source: 'hook', origin: 'codex', receivedAt: nextTime(), eventName: 'PreToolUse', sessionId: null, payload }, 'p1');
-      expect(r).toEqual({ changes: [], unknownRecordType: 'hook:invalid' });
-    }
-    const r = apply([hook('PreToolUse', { tool_name: 7, tool_use_id: {}, tool_input: null })]);
-    expect(r.unknown).toEqual([]);
-    expect(r.changes.filter((c) => c.type !== 'session_upserted')).toEqual([]);
+  test('子代理的 SessionEnd / SessionStart 不改会话级标记', () => {
+    const root = new CodexThread({ id: 'root1' });
+    step([root.meta(), hook('SessionEnd', { agent_id: 'sub1' })]);
+    expect(statusNow()).toBe('idle');
   });
 });
 
-describe('与转录的等价性', () => {
-  /** A session with two turns, a failing command, a permission prompt, and a subagent (spawn + child thread). */
-  function scenario() {
+describe('会话的项目和 cwd', () => {
+  test('hook 建的会话先用 hook 的；第一条转录记录到了以后 hook 不再改', () => {
+    let r = step([hook('SessionStart', { source: 'startup' }, { projectId: 'p-hook' })]);
+    expect(r.sessions.get('root1')).toMatchObject({ origin: 'codex', projectId: 'p-hook', cwd: '/hook/cwd' });
+    const root = new CodexThread({ id: 'root1', cwd: '/work/app', projectId: 'p-file' });
+    r = step([root.meta(), root.started('t1')]);
+    expect(lastSession).toMatchObject({ projectId: 'p-file', cwd: '/work/app' });
+    step([prompt('t1'), hook('PreToolUse', { turn_id: 't1', cwd: '/elsewhere' }, { projectId: 'p-other' })]);
+    expect(lastSession).toMatchObject({ projectId: 'p-file', cwd: '/work/app' });
+  });
+
+  test('先到的是子线程的记录：项目取那条记录的，cwd 等主线程的 session_meta', () => {
+    const sub = new CodexThread({ id: 'sub1', sessionId: 'root1', parent: 'root1', projectId: 'p-sub' });
+    step([prompt('t1'), sub.meta()]);
+    expect(lastSession).toMatchObject({ projectId: 'p-sub', cwd: null });
+  });
+});
+
+describe('节点上的等待确认', () => {
+  test('该轮次所在线程里最新的未结束调用显示等待确认；清除后回到执行中；已结束的保持结束', () => {
     const root = new CodexThread({ id: 'root1' });
-    const sub = new CodexThread({ id: 'sub1', sessionId: 'root1', parent: 'root1', nickname: 'Helper', agentPath: '/root/helper' });
-    // Hooks are received before the records describing the same step are read (their times are earlier).
-    const t = (h: string) => ({ turn_id: h });
-    const hooks = [
-      hook('SessionStart', { source: 'startup' }),
-      hook('UserPromptSubmit', { prompt: 'build it', ...t('t1') }),
-      pre('c1'), post('c1'),
-      pre('c2', 'make'), post('c2', { exit_code: 2 }),
-      hook('PreToolUse', { tool_name: 'spawn_agent', tool_use_id: 'sp1', tool_input: { task_name: 'helper' }, ...t('t1') }),
-      hook('PostToolUse', { tool_name: 'spawn_agent', tool_use_id: 'sp1', tool_response: 'started', ...t('t1') }),
-      hook('SubagentStart', { agent_id: 'sub1', agent_type: 'worker' }),
-      hook('PreToolUse', { tool_name: 'exec', tool_use_id: 'k1', tool_input: { cmd: 'pwd' }, agent_id: 'sub1', turn_id: 'st1' }),
-      hook('PostToolUse', { tool_name: 'exec', tool_use_id: 'k1', tool_response: { exit_code: 0 }, agent_id: 'sub1', turn_id: 'st1' }),
-      hook('SubagentStop', { agent_id: 'sub1', agent_type: 'worker' }),
-      hook('Stop', { last_assistant_message: 'done' }),
-      hook('UserPromptSubmit', { prompt: 'again', ...t('t2') }),
-      pre('c3', 'rm x', t('t2')), permission({ tool_use_id: 'c3', ...t('t2') }), post('c3', { exit_code: 0 }, t('t2')),
-      hook('Stop', {}),
-    ];
+    let r = step([root.meta(), root.started('t1'), root.exec('c1', 'a'), root.exec('c2', 'b'), permission()]);
+    const g1 = r.graph;
+    expect(g1.nodes['tool:c2']!.status).toBe('awaiting_permission');
+    expect(g1.nodes['tool:c1']!.status).toBe('running');
+    r = step([pre('x')]);
+    const g2 = applyChanges(g1, r.changes);
+    expect(g2.nodes['tool:c2']!.status).toBe('running');
+    r = step([permission()]);
+    const g3 = applyChanges(g2, r.changes);
+    expect(g3.nodes['tool:c2']!.status).toBe('awaiting_permission');
+    r = step([root.output('c2')]);
+    const g4 = applyChanges(g3, r.changes);
+    expect(g4.nodes['tool:c2']!.status).toBe('succeeded');
+    expect(g4.nodes['tool:c1']!.status).toBe('awaiting_permission'); // still pending: c1 is the latest open call now
+  });
+
+  test('子线程轮次的权限请求标记子线程的节点，不改会话状态', () => {
+    const root = new CodexThread({ id: 'root1' });
+    const sub = new CodexThread({ id: 'sub1', sessionId: 'root1', parent: 'root1' });
+    const r = step([root.meta(), root.started('t1'), root.exec('c1', 'a'), sub.meta(), sub.started('st1'), sub.exec('k1', 'b'), permission('st1', { agent_id: 'sub1' })]);
+    expect(node(r, 'tool:k1').status).toBe('awaiting_permission');
+    expect(node(r, 'tool:c1').status).toBe('running');
+    expect(statusNow()).toBe('running');
+  });
+
+  test('不知道属于哪个线程的轮次：主线程里最新的未结束调用', () => {
+    const root = new CodexThread({ id: 'root1' });
+    const r = step([root.meta(), root.started('t1'), root.exec('c1', 'a'), permission('t-unknown')]);
+    expect(node(r, 'tool:c1').status).toBe('awaiting_permission');
+  });
+});
+
+describe('派发节点的子线程未知（B5）', () => {
+  test('派发所在轮次进行中 → 执行中；轮次结束 → 失败（结束时间 = 轮次结束）；之后子线程出现 → 跟着子线程', () => {
+    const root = new CodexThread({ id: 'root1' });
+    const sub = new CodexThread({ id: 'sub1', sessionId: 'root1', parent: 'root1', nickname: 'H', agentPath: '/root/helper' });
+    const head = [root.meta(), root.started('t1'), root.spawn('sp1', 'helper'), root.output('sp1', 'failed to start', 'function')];
+    const end = root.complete();
+    const subEvs = [sub.meta(), sub.started('st1')];
+    const open = step(head);
+    expect(node(open, 'tool:sp1')).toMatchObject({ status: 'running', endedAt: null, childAgentId: null });
+    const endTime = JSON.parse((end as { line: string }).line).timestamp as string;
+    const ended = run(new CodexNormalizer(), [...head, end]);
+    expect(node(ended, 'tool:sp1')).toMatchObject({ status: 'failed', endedAt: endTime, childAgentId: null });
+    // Both arrival orders: the child thread known before / after the turn end.
+    const childFirst = run(new CodexNormalizer(), [...head, ...subEvs, end]);
+    const childLast = run(new CodexNormalizer(), [...head, end, ...subEvs]);
+    expect(node(childFirst, 'tool:sp1')).toMatchObject({ status: 'running', endedAt: null, childAgentId: 'sub1' });
+    expect(childLast.graph).toEqual(childFirst.graph);
+  });
+});
+
+describe('与转录的等价性、与到达顺序无关', () => {
+  /**
+   * A root turn with a permission prompt and a subagent whose tool hooks arrive after the root turn ended; a second
+   * root turn; SessionEnd then a resumed third turn. Hooks keep their own order, records theirs.
+   */
+  function scenario() {
+    const root = new CodexThread({ id: 'root1', projectId: 'p-file' });
+    const sub = new CodexThread({ id: 'sub1', sessionId: 'root1', parent: 'root1', nickname: 'Helper', agentPath: '/root/helper', projectId: 'p-file' });
     const transcriptRoot = [
       root.meta(), root.started('t1'), root.user('u1', 'build it'),
       ...root.reasoning('rs1'),
       root.exec('c1', 'ls'), root.command('cmd1', 'ls'), root.output('c1'), root.usage(),
-      root.exec('c2', 'make'), root.command('cmd2', 'make', { exitCode: 2 }), root.output('c2'), root.usage(),
+      root.exec('c2', 'rm build'), root.command('cmd2', 'rm build', { exitCode: 2 }), root.output('c2'), root.usage(),
       root.spawn('sp1', 'helper'), root.activity('sp1', 'sub1', '/root/helper'), root.output('sp1', 'started', 'function'), root.usage(),
       ...root.assistant('m1', 'done'), root.complete(),
-      root.started('t2'), root.user('u2', 'again'), root.exec('c3', 'rm x'), root.output('c3'), root.usage(), root.complete(),
+      root.started('t2'), root.user('u2', 'again'), root.exec('c3', 'make'), root.output('c3'), root.usage(), root.complete(),
+      root.started('t3'), root.user('u3', 'resumed'), ...root.assistant('m3', 'ok'), root.complete(),
     ];
     const transcriptSub = [
       sub.meta(), sub.started('st1'), sub.context('user', 'do the sub task', 'task1'),
       sub.exec('k1', 'pwd'), sub.output('k1'), sub.usage(), ...sub.assistant('sm1', 'sub done'), sub.complete(),
     ];
+    const hooks = [
+      hook('SessionStart', { source: 'startup' }),
+      prompt('t1'),
+      pre('c1'), post('c1'),
+      pre('c2'), permission(), post('c2'),
+      hook('PreToolUse', { turn_id: 't1', tool_name: 'spawn_agent', tool_use_id: 'sp1', tool_input: { task_name: 'helper' } }),
+      hook('PostToolUse', { turn_id: 't1', tool_name: 'spawn_agent', tool_use_id: 'sp1', tool_response: 'started' }),
+      hook('SubagentStart', { agent_id: 'sub1', agent_type: 'worker' }),
+      stop('t1'),
+      pre('k1', 'st1', { agent_id: 'sub1' }), permission('st1', { agent_id: 'sub1' }), post('k1', 'st1', { agent_id: 'sub1' }),
+      hook('SubagentStop', { agent_id: 'sub1', agent_type: 'worker' }),
+      prompt('t2'), pre('c3', 't2'), post('c3', 't2'), stop('t2'),
+      hook('SessionEnd', { reason: 'exit' }),
+      hook('SessionStart', { source: 'resume' }), prompt('t3'), stop('t3'),
+    ];
     return { transcriptRoot, transcriptSub, hooks };
   }
-  const strip = (nodes: Record<string, GraphNode>) =>
-    Object.fromEntries(Object.entries(nodes).map(([id, x]) => [id, { ...x, timestamp: '', durationMs: null }]));
+  const isTranscript = (e: RawEvent) => e.source === 'transcript';
 
-  test('有 hooks（任意穿插）与没有 hooks：节点集合、字段（开始时间和耗时除外）和边都相同；同一顺序重放结果相同', () => {
+  test('任意穿插：节点集合（id、类型、父节点、边、时间、终态）与没有 hooks 时完全相同；同一顺序重放相同', () => {
     const { transcriptRoot, transcriptSub, hooks } = scenario();
-    const plain = run(new CodexNormalizer(), interleave([transcriptRoot, transcriptSub], 7));
-    expect(plain.unknown).toEqual([]);
     for (let seed = 1; seed <= 40; seed++) {
       const order = interleave([transcriptRoot, transcriptSub, hooks], seed);
-      const withHooks = run(new CodexNormalizer(), order);
+      const plain = apply(order.filter(isTranscript), new CodexNormalizer());
+      expect(plain.unknown).toEqual([]);
+      const withHooks = apply(order, new CodexNormalizer());
       expect(withHooks.unknown).toEqual([]);
-      expect(strip(withHooks.graph.nodes)).toEqual(strip(plain.graph.nodes));
-      expect(withHooks.graph.edges).toEqual(plain.graph.edges);
-      for (const x of Object.values(withHooks.graph.nodes)) expect(x.confirmed).toBe(true);
-      // Replaying the same stored order gives exactly the same graph.
-      expect(run(new CodexNormalizer(), order).graph).toEqual(withHooks.graph);
+      expect(withHooks.graph).toEqual(plain.graph);
+      expect(withHooks.sessions.get('root1')!.status).toBe('idle');
+      expect(apply(order, new CodexNormalizer()).graph).toEqual(withHooks.graph);
     }
   });
 
-  test('hook 比转录早到：开始时间取更早的那个', () => {
+  test('每一步：会话和图只取决于已读的转录前缀和已收的 hook 前缀，与两者如何穿插无关（定种子）', () => {
     const { transcriptRoot, transcriptSub, hooks } = scenario();
-    const hooksFirst = run(new CodexNormalizer(), [...hooks, ...transcriptRoot, ...transcriptSub]);
-    const plain = run(new CodexNormalizer(), [...transcriptRoot, ...transcriptSub]);
-    for (const id of ['tool:c1', 'tool:c2', 'tool:c3', 'tool:k1']) {
-      expect(hooksFirst.graph.nodes[id]!.timestamp < plain.graph.nodes[id]!.timestamp).toBe(true);
-      expect(hooksFirst.graph.nodes[id]!.status).toBe(plain.graph.nodes[id]!.status);
+    const seen = new Set<string>();
+    for (let seed = 1; seed <= 12; seed++) {
+      const order = interleave([transcriptRoot, transcriptSub, hooks], seed * 977);
+      const live = new CodexNormalizer();
+      let graph = emptyGraph();
+      let session: Session | undefined;
+      const ts: RawEvent[] = [];
+      const hs: RawEvent[] = [];
+      for (const ev of order) {
+        (isTranscript(ev) ? ts : hs).push(ev);
+        const r = apply([ev], live);
+        graph = applyChanges(graph, r.changes);
+        session = r.sessions.get('root1') ?? session;
+        const tFirst = apply([...ts, ...hs], new CodexNormalizer());
+        const hFirst = apply([...hs, ...ts], new CodexNormalizer());
+        const at = { seed, t: ts.length, h: hs.length };
+        expect({ at, session: tFirst.sessions.get('root1') }).toEqual({ at, session });
+        expect({ at, session: hFirst.sessions.get('root1') }).toEqual({ at, session });
+        expect({ at, graph: tFirst.graph }).toEqual({ at, graph });
+        expect({ at, graph: hFirst.graph }).toEqual({ at, graph });
+        if (session) seen.add(session.status);
+      }
+      // A rebuild (the same stored order replayed) ends in the same place.
+      const rebuilt = apply(order, new CodexNormalizer());
+      expect(rebuilt.graph).toEqual(graph);
+      expect(rebuilt.sessions.get('root1')).toEqual(session);
     }
-    expect(hooksFirst.graph.nodes['tool:c2']!.status).toBe('failed');
+    // The run went through every status the hooks can cause.
+    expect([...seen].sort()).toEqual(['awaiting_permission', 'ended', 'idle', 'running']);
   });
 });

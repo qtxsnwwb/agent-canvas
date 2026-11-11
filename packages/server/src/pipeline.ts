@@ -479,8 +479,8 @@ export class Pipeline {
   /**
    * Project of a Codex hook, decided once on arrival and stored with the raw event (replay uses the stored value): the
    * payload's cwd encoded the way the Codex file source does it (reusing a project id that differs only in letter
-   * case). A subagent's hook (its cwd may be a worktree) keeps the session's known project, and a hook without a cwd
-   * falls back to its transcript_path or the session's known project.
+   * case), for a session the store does not have yet; a known session keeps its project (a hook never moves it, a
+   * subagent's worktree cwd included). A hook without a cwd falls back to its transcript_path.
    */
   private codexHookProject(sessionId: string | null, transcriptPath: string | null, from: { cwd: string | null; agentId: string | null }): string | null {
     const source = this.sourceFor('codex');
@@ -489,7 +489,8 @@ export class Pipeline {
       const stored = this.store.getSession(sessionId)?.projectId ?? null;
       if (stored !== null && stored !== UNKNOWN_PROJECT) known = stored;
     }
-    if (from.agentId !== null && known !== null) return known;
+    // A session the store already has keeps its project: a hook never moves it (not for its own cwd either).
+    if (known !== null) return known;
     if (source?.projectOfHook) {
       const p = source.projectOfHook(sessionId, from.cwd, from.agentId);
       if (p !== null) return p;
@@ -721,13 +722,15 @@ export class Pipeline {
   private async ingestIndex(absPath: string, source: FileSource, file: string): Promise<void> {
     if (source.indexEntries === undefined) return;
     const version = source.indexVersion?.() ?? 0;
-    let content: string;
+    let bytes: Buffer;
     try {
-      content = await fsp.readFile(absPath, 'utf8');
+      bytes = await fsp.readFile(absPath);
     } catch {
       return;
     }
-    const size = Buffer.byteLength(content);
+    // The size read in bytes (not the decoded text's: a BOM or invalid UTF-8 would never match the file's size).
+    const size = bytes.length;
+    const content = bytes.toString('utf8');
     for (const entry of source.indexEntries(file, content)) {
       if (this.store.latestMeta(entry.key) === entry.payload) continue;
       await this.enqueue(entry.sessionId, () => {
@@ -758,8 +761,8 @@ export class Pipeline {
       sessionId,
       () => {
         this.store.insertRaw(event);
-        // The Normalizer only uses projectId for a new session or to upgrade 'unknown', so the stored value alone
-        // (null -> 'unknown') gives the same result live and on replay.
+        // The stored projectId alone (null -> 'unknown') gives the same result live and on replay. (Claude: used only
+        // for a new session or to upgrade 'unknown'; Codex: only until the session's first transcript record.)
         const out = this.normalizer.apply(event, event.projectId ?? UNKNOWN_PROJECT);
         if (out.unknownRecordType !== undefined) this.store.bumpUnknown(out.unknownRecordType, event.payload);
         return out.changes;

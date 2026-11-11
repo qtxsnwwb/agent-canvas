@@ -145,8 +145,8 @@ describe('一轮对话', () => {
   test('没有进行中的调用时到达的条目自成一个已结束的工具节点', () => {
     const root = new CodexThread({ id: 'root1' });
     const r = run(n, [root.meta(), root.started('t1'), root.user('u1', 'hi'), root.command('e9', 'sleep 1', { exitCode: 0, durationMs: 1000 })]);
-    expect(node(r, 'tool:e9')).toMatchObject({ kind: 'tool', status: 'succeeded', toolName: 'CommandExecution', summary: 'sleep 1', durationMs: 1000, parentId: 'prompt:u1' });
-    expect(node(r, 'tool:e9').endedAt).not.toBeNull();
+    expect(node(r, 'item:e9')).toMatchObject({ kind: 'tool', status: 'succeeded', toolName: 'CommandExecution', summary: 'sleep 1', durationMs: 1000, parentId: 'prompt:u1' });
+    expect(node(r, 'item:e9').endedAt).not.toBeNull();
   });
 
   test('namespace 拼进工具名；function_call 的参数解析成对象', () => {
@@ -570,11 +570,11 @@ describe('折叠按条目开始的时间归到调用', () => {
     const head = [root.meta(), root.started('t1'), root.user('u1', 'x'), root.exec('c1', 'a')];
     const out = root.output('c1');
     const r = run(n, [...head, out, root.command('e9', 'sleep 1', { startedAtMs: ms(out) + 500 })]);
-    expect(node(r, 'tool:e9')).toMatchObject({ status: 'succeeded', parentId: 'tool:c1', timestamp: new Date(ms(out) + 500).toISOString() });
+    expect(node(r, 'item:e9')).toMatchObject({ status: 'succeeded', parentId: 'tool:c1', timestamp: new Date(ms(out) + 500).toISOString() });
     const r2 = run(n, [root.exec('c2', 'b'), root.exec('c3', 'c'), root.command('e10', 'pwd', { startedAtMs: null })]);
     expect(node(r2, 'tool:c3').summary).toBe('pwd');
     const r3 = run(n, [root.output('c2'), root.output('c3'), root.command('e11', 'id', { startedAtMs: null })]);
-    expect(node(r3, 'tool:e11').kind).toBe('tool');
+    expect(node(r3, 'item:e11').kind).toBe('tool');
   });
 
   test('摘要取第一条命令：调用里 MCP 条目在命令之前时也一样', () => {
@@ -591,8 +591,43 @@ describe('折叠按条目开始的时间归到调用', () => {
       const res = n.apply(ev, 'p1');
       expect(res.unknownRecordType).toBeUndefined();
       const added = res.changes.find((c): c is Extract<Change, { type: 'node_added' }> => c.type === 'node_added');
-      expect(added?.node).toMatchObject({ id: `tool:${id}`, timestamp: timeOf(ev) });
+      expect(added?.node).toMatchObject({ id: `item:${id}`, timestamp: timeOf(ev) });
     }
+  });
+
+  test('自成节点的条目 id 和调用 id 相同也不冲突（条目用自己的前缀）', () => {
+    const root = new CodexThread({ id: 'root1' });
+    const call = root.exec('c1', 'a');
+    const out = root.output('c1');
+    // The item started after its call's window closed (clock skew): it becomes its own node, under its own prefix.
+    const late = root.command('c1', 'make', { status: 'failed', exitCode: 2, startedAtMs: ms(out) + 500 });
+    const r = run(n, [root.meta(), root.started('t1'), call, out, late]);
+    expect(r.unknown).toEqual([]);
+    expect(node(r, 'tool:c1')).toMatchObject({ status: 'succeeded' });
+    expect(node(r, 'item:c1')).toMatchObject({ kind: 'tool', status: 'failed', parentId: 'tool:c1' });
+  });
+
+  test('解析不了的记录时间：不当作会话活动时间，也不进节点时间；退回此前的有效时间', () => {
+    const root = new CodexThread({ id: 'root1' });
+    const meta = root.meta();
+    const started = root.started('t1');
+    const r = run(n, [meta, started, root.record('event_msg', { type: 'task_complete', turn_id: 't1' }, { timestamp: 'zzz' })]);
+    const session = r.sessions.get('root1')!;
+    expect(session.lastActivityAt).toBe(timeOf(started));
+    expect(session.status).toBe('idle');
+    const r2 = run(n, [root.user('u9', 'hi'), root.record('response_item', { type: 'message', id: 'mz', role: 'assistant', content: [{ type: 'output_text', text: 'x' }] }, { timestamp: 'not a time' })]);
+    const prev = r2.graph.nodes['prompt:u9']!.timestamp;
+    expect(r2.graph.nodes['text:mz']!.timestamp).toBe(prev);
+    expect(Number.isNaN(Date.parse(r2.sessions.get('root1')!.lastActivityAt))).toBe(false);
+  });
+
+  test('会话的第一条记录时间就解析不了：之后第一条有效时间同时成为开始和最近活动时间', () => {
+    const root = new CodexThread({ id: 'root1' });
+    const meta = root.meta() as Extract<RawEvent, { source: 'transcript' }>;
+    const bad = root.line(JSON.stringify({ ...JSON.parse(meta.line), timestamp: 'bad' }), 'session_meta');
+    const later = root.started('t1');
+    const r = run(n, [bad, later]);
+    expect(r.sessions.get('root1')).toMatchObject({ startedAt: timeOf(later), lastActivityAt: timeOf(later) });
   });
 });
 
