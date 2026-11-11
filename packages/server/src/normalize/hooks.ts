@@ -48,7 +48,7 @@ function nodeEffect(eventName: string, p: Record<string, unknown>, agentId: stri
       return toolUseId !== null ? { kind: 'settle', toolUseId, status: 'denied', durationMs: null } : null;
     case 'PostToolUse':
       // A background Agent launch returns at once; the dispatch is settled when the agent ends (see the normalizer).
-      if (asyncLaunch(p.tool_response) !== null) return null;
+      if ((toolName === 'Agent' || toolName === 'Task') && asyncLaunch(p.tool_response) !== null) return null;
       return toolUseId !== null
         ? { kind: 'settle', toolUseId, status: 'succeeded', durationMs: num(p.duration_ms), output: p.tool_response }
         : null;

@@ -2,7 +2,7 @@ import { beforeEach, expect, test } from 'vitest';
 import { applyChange, emptyGraph, type Change, type Graph } from '@claude-canvas/shared';
 import { Normalizer } from '../src/normalize/normalizer.js';
 import type { RawEvent } from '../src/store/store.js';
-import { agentMeta, assistantBlock, customTitle, hook, run, toolResult, userPrompt } from './fixtures.js';
+import { agentMeta, assistantBlock, customTitle, hook, rawLine, run, toolResult, userPrompt } from './fixtures.js';
 
 let n: Normalizer;
 beforeEach(() => {
@@ -264,14 +264,13 @@ const launch = () => [
 test('后台派出的子代理：派出动作返回后派发节点仍在运行，子代理 end_turn 时才结算', () => {
   const started = run(n, launch());
   expect(started.graph.nodes['tool:tu1']).toMatchObject({ kind: 'subagent', status: 'running', endedAt: null, durationMs: null });
-  const { graph } = run(n, [
+  const working = run(n, [
     userPrompt('s1', null, 'sub prompt', { agentId: 'ag1' }),
     assistantBlock('s2', 's1', { type: 'text', text: 'working' }, { agentId: 'ag1' }),
   ]);
-  let g = started.graph;
-  for (const [id, node] of Object.entries(graph.nodes)) g = { ...g, nodes: { ...g.nodes, [id]: node } };
-  expect(n.apply(assistantBlock('s3', 's2', { type: 'text', text: 'done' }, { agentId: 'ag1', stopReason: 'end_turn', timestamp: '2026-01-01T01:00:00.000Z' }), 'p1')
-    .changes.find((c) => c.type === 'node_updated' && c.id === 'tool:tu1')).toMatchObject({
+  expect(working.changes.some((c) => c.type === 'node_updated' && c.id === 'tool:tu1' && 'status' in c.patch)).toBe(false);
+  const end = n.apply(assistantBlock('s3', 's2', { type: 'text', text: 'done' }, { agentId: 'ag1', stopReason: 'end_turn', timestamp: '2026-01-01T01:00:00.000Z' }), 'p1');
+  expect(end.changes.find((c) => c.type === 'node_updated' && c.id === 'tool:tu1')).toMatchObject({
     patch: { status: 'succeeded', endedAt: '2026-01-01T01:00:00.000Z' },
   });
 });
@@ -300,7 +299,7 @@ test('后台派出：PostToolUse hook 不结算派发节点，SubagentStop hook 
     patch: { status: 'succeeded', endedAt: '2026-01-01T02:00:00.000Z' },
   });
   // A later end_turn of the same agent is not a second end.
-  const again = n.apply(assistantBlock('s9', null, { type: 'text', text: 'bye' }, { agentId: 'ag1', stopReason: 'end_turn' }), 'p1');
+  const again = n.apply(assistantBlock('s9', null, { type: 'text', text: 'bye' }, { agentId: 'ag1', stopReason: 'end_turn', timestamp: '2026-01-01T03:00:00.000Z' }), 'p1');
   expect(again.changes.some((c) => c.type === 'node_updated' && c.id === 'tool:tu1')).toBe(false);
 });
 
@@ -344,4 +343,72 @@ test('前台子代理不受影响：派出动作的结果到达即结算', () =>
     toolResult('u2', 'a1', 't1', 'started', undefined, { toolUseResult: { isAsync: true } }),
   ]);
   expect(g2.nodes['tool:t1']!.status).toBe('succeeded');
+});
+
+const notification = (toolUseId: string, status: string, timestamp: string) => rawLine('queue-operation', {
+  operation: 'enqueue', timestamp,
+  content: `<task-notification>\n<task-id>x</task-id>\n<tool-use-id>${toolUseId}</tool-use-id>\n<status>${status}</status>\n</task-notification>`,
+});
+
+test('后台派出：没有任何线程内结束信号时，任务通知结算派发节点，并带上成功或失败', () => {
+  const ok = run(n, [...launch(), notification('tu1', 'completed', '2026-01-01T03:00:00.000Z')]);
+  expect(ok.unknown).toEqual([]);
+  expect(ok.graph.nodes['tool:tu1']).toMatchObject({ status: 'succeeded', endedAt: '2026-01-01T03:00:00.000Z' });
+  const failed = run(new Normalizer(), [...launch(), notification('tu1', 'failed', '2026-01-01T03:00:00.000Z')]);
+  expect(failed.graph.nodes['tool:tu1']!.status).toBe('failed');
+});
+
+test('后台派出：线程先以 end_turn 结束、通知随后报告失败，状态改为失败，结束时间仍是较早的那个', () => {
+  const { graph } = run(n, [
+    ...launch(),
+    assistantBlock('s1', null, { type: 'text', text: 'done' }, { agentId: 'ag1', stopReason: 'end_turn', timestamp: '2026-01-01T00:20:00.000Z' }),
+    notification('tu1', 'failed', '2026-01-01T00:21:00.000Z'),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ status: 'failed', endedAt: '2026-01-01T00:20:00.000Z' });
+});
+
+test('后台派出：end_turn 与 SubagentStop 谁先到，结束时间都一样（取较早的）', () => {
+  const endTurn = () => assistantBlock('s1', null, { type: 'text', text: 'done' }, { agentId: 'ag1', stopReason: 'end_turn', timestamp: '2026-01-01T00:20:00.000Z' });
+  const stop = () => hook('SubagentStop', { agent_id: 'ag1' }, '2026-01-01T00:20:05.000Z');
+  const a = run(n, [...launch(), endTurn(), stop()]).graph.nodes['tool:tu1']!;
+  const b = run(new Normalizer(), [...launch(), stop(), endTurn()]).graph.nodes['tool:tu1']!;
+  expect(a.endedAt).toBe('2026-01-01T00:20:00.000Z');
+  expect(b.endedAt).toBe('2026-01-01T00:20:00.000Z');
+  for (const node of [a, b]) expect(node.durationMs).toBe(Date.parse(node.endedAt!) - Date.parse(node.timestamp));
+  expect([a.status, b.status]).toEqual(['succeeded', 'succeeded']);
+});
+
+test('后台派出：子代理线程里的中断记录把派发节点结算为失败', () => {
+  const { graph } = run(n, [
+    ...launch(),
+    userPrompt('s1', null, '[Request interrupted by user]', { agentId: 'ag1' }),
+  ]);
+  expect(graph.nodes['tool:tu1']!.status).toBe('failed');
+});
+
+test('后台派出：会话结束时还没结束的派发节点结算为失败', () => {
+  const { graph } = run(n, [...launch(), hook('SessionEnd', {}, '2026-01-01T05:00:00.000Z')]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ status: 'failed', endedAt: '2026-01-01T05:00:00.000Z' });
+});
+
+test('后台派出：晚到的、不带后台标记的 PostToolUse 不结算派发节点', () => {
+  const { graph } = run(n, [
+    ...launch(),
+    hook('PostToolUse', { tool_use_id: 'tu1', tool_name: 'Agent', duration_ms: 12, tool_response: 'ok' }),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ status: 'running', endedAt: null });
+});
+
+test('前台子代理：线程里的 end_turn 不提前结算派发节点，结果到达时才结算', () => {
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x'),
+    assistantBlock('a1', 'u1', { type: 'tool_use', id: 'tu1', name: 'Agent', input: {} }),
+    agentMeta('ag1', { toolUseId: 'tu1', agentType: 'Explore', description: 'd' }),
+    assistantBlock('s1', null, { type: 'text', text: 'done' }, { agentId: 'ag1', stopReason: 'end_turn', timestamp: '2026-01-01T00:20:00.000Z' }),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ status: 'running', endedAt: null });
+  const done = n.apply(toolResult('u2', 'a1', 'tu1', 'boom', true, { timestamp: '2026-01-01T00:20:10.000Z' }), 'p1');
+  expect(done.changes.find((c) => c.type === 'node_updated' && c.id === 'tool:tu1')).toMatchObject({
+    patch: { status: 'failed', endedAt: '2026-01-01T00:20:10.000Z' },
+  });
 });

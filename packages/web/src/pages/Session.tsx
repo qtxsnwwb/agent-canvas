@@ -125,11 +125,15 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
       ? canvas.view.turns.find((t) => t.key === scope.turnKey)?.summary.promptSummary || '（无提示）'
       : scopeView?.type === 'node' ? [scopeView.node.title, scopeView.node.summary].filter(Boolean).join(' · ') : '';
   const closePanel = useCallback(() => {
+    pinned.current = null;
     setPanelClosed(true);
     setSelectedId(null);
     setDetail(null);
   }, []);
-  const openAgent = useCallback((dispatchNodeId: string) => setSelectedId(dispatchNodeId), []);
+  const openAgent = useCallback((dispatchNodeId: string) => {
+    pinned.current = null; // the reader's own choice
+    setSelectedId(dispatchNodeId);
+  }, []);
   // Opening a step while the panel follows the latest turn pins the panel to that turn: a new turn must not take the
   // list away from under the open drawer.
   const openStep = useCallback((id: string) => {
@@ -160,6 +164,7 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
       if (turnKey !== null) target = key = `turn:${turnKey}`;
     }
     if (target !== null && key !== null && cur.view.nodes.has(target)) {
+      if (target !== cur.selected) pinned.current = null; // moved to another turn or agent by the reader
       setSelectedId(target);
       setDetail({ id, scope: key });
     } else {

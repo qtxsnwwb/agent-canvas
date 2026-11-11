@@ -248,7 +248,10 @@ export function createCompactor(): Compactor {
         return JSON.stringify([n.toolName, n.agentId, n.turnId, [...roots].sort()]);
       };
       /** Calls of a tool that cannot be merged (in flight, failed, the selection, ...): they still anchor their group's id. */
-      const others = kept.filter((n) => n.kind === 'tool' && n.toolName !== null && !parent.has(n.id));
+      // Not the selection or the calls of an expanded run: a run forming next to those is a new run with its own id
+      // (reusing the expanded run's id would let it pass as a run that was already on screen).
+      const others = kept.filter((n) => n.kind === 'tool' && n.toolName !== null && !parent.has(n.id)
+        && n.id !== keep && !(exclude !== undefined && exclude.has(n.id)));
       const mergeSiblings = (): boolean => {
         let changed = false;
         // `kept` is in time order, so the first node seen with a key is the group's earliest.
@@ -340,7 +343,7 @@ export function createCompactor(): Compactor {
       const old = cache.get(id);
       const entry = old && old.members.length === members.length && old.members.every((m, i) => m === members[i])
         ? old
-        : { members, node: runNode(members) };
+        : { members, node: { ...runNode(members), id } }; // the id may be anchored on an earlier call that is not a member
       nextCache.set(id, entry);
       runNodes.push(entry.node);
       runs.set(id, members.map((m) => m.id));

@@ -213,7 +213,24 @@ test('a run keeps its id when its earliest call is still in flight and joins lat
   expect(early.graph.nodes.a).toBeDefined(); // still drawn on its own
   expect(compactor(build('succeeded')).runs.get(runIdOf('a'))).toEqual(['a', 'b', 'c', 'd']);
   // A call that failed stays out for good; the id is the same.
-  expect(compactor(build('failed')).runs.get(runIdOf('a'))).toEqual(['b', 'c', 'd']);
+  const failed = compactor(build('failed'));
+  expect(failed.runs.get(runIdOf('a'))).toEqual(['b', 'c', 'd']);
+  // The run node carries the anchored id, and every edge ends on a node of the reduced graph.
+  expect(failed.graph.nodes[runIdOf('a')]).toMatchObject({ id: runIdOf('a'), title: 'Read ×3' });
+  expect(failed.graph.nodes[runIdOf('b')]).toBeUndefined();
+  expect(pairs(failed.graph)).toEqual(['p->a', `p->${runIdOf('a')}`].sort());
+  for (const edge of Object.values(early.graph.edges)) {
+    expect(early.graph.nodes[edge.from]).toBeDefined();
+    expect(early.graph.nodes[edge.to]).toBeDefined();
+  }
+});
+
+test('calls next to an expanded run form a run with its own id, not the expanded one\'s', () => {
+  const nodes = ['a', 'b', 'c', 'd', 'f', 'h'].map((id) => read(id, 1, { parentId: 'p' }));
+  const g = graph([node('p', 'prompt', 0), ...nodes], nodes.map((x) => e('p', x.id, 'fork')));
+  const r = compactGraph(g, { exclude: new Set(['a', 'b', 'c']) });
+  expect([...r.runs.entries()]).toEqual([[runIdOf('d'), ['d', 'f', 'h']]]);
+  expect(r.graph.nodes[runIdOf('d')]).toBeDefined();
 });
 
 test('a batch behind a mixed batch is one run: the calls of a message share parentId (server edge shape)', () => {
