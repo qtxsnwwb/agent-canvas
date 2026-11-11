@@ -445,3 +445,6 @@ button.cc-reason:focus-visible, .cc-reason-current:focus-visible { outline: 3px 
 .cc-node.cc-stalled { border-style: dashed; box-shadow: 0 2px 0 var(--ledge); }
 .cc-node.cc-stalled::before { opacity: 0.45; }
 .cc-stalled-label, .cc-stalled .cc-status { background: #ffe0b8; color: var(--ink); }
+
+/* Lines routed around the nodes: between two turns of the grid, or between two columns of a folded turn. */
+.react-flow__edge.cc-edge-routed:not(.cc-hl-chain) .react-flow__edge-path { opacity: 0.7; }
