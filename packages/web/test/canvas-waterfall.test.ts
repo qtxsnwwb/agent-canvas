@@ -1,7 +1,7 @@
 import { expect, test } from 'vitest';
 import type { Graph, GraphEdge, GraphNode, NodeKind } from '@claude-canvas/shared';
 import { buildView } from '../src/canvas/view';
-import { barOf, buildWaterfall, scopeOf, stepChain } from '../src/canvas/waterfall';
+import { barOf, buildWaterfall, durationPlacement, scopeOf, stepChain, waterfallClock } from '../src/canvas/waterfall';
 
 const EPOCH = Date.parse('2026-01-01T00:00:00Z');
 const iso = (t: number) => new Date(EPOCH + t).toISOString();
@@ -144,4 +144,55 @@ test('stepChain continues from an agent step through its dispatch node into the 
   const chain = stepChain(g, 'i2');
   expect([...chain.ids].sort()).toEqual(['a', 'd1', 'd2', 'i1', 'i2', 'p1']);
   expect(chain.reasoning.map((n) => n.id)).toEqual(['i2']);
+});
+
+test('stepChain.direct: the nearest reasoning on each path, with the reasoning right before it; else the prompt', () => {
+  const g = graph(
+    [
+      node('p', 'prompt', 't1', null, 0), node('x0', 'text', 't1', null, 1), node('a', 'tool', 't1', null, 2),
+      node('th', 'thinking', 't1', null, 3, { summary: 'why' }), node('gap', 'thinking', 't1', null, 4, { summary: '' }),
+      node('x1', 'text', 't1', null, 5), node('b', 'tool', 't1', null, 6), node('c', 'tool', 't1', null, 7),
+    ],
+    [e('p', 'x0'), e('x0', 'a'), e('a', 'th'), e('th', 'gap'), e('gap', 'x1'), e('x1', 'b'), e('b', 'c')],
+  );
+  // c <- b <- x1 (reply) <- gap (empty thinking, passed through) <- th (thinking); the run ends at tool a.
+  expect([...stepChain(g, 'c').direct].sort()).toEqual(['th', 'x1']);
+  expect([...stepChain(g, 'c').ids].sort()).toEqual(['a', 'b', 'c', 'gap', 'p', 'th', 'x0', 'x1']);
+  expect([...stepChain(g, 'a').direct]).toEqual(['x0']);
+  expect([...stepChain(g, 'x0').direct]).toEqual(['p']);
+  expect(stepChain(g, 'p').direct.size).toBe(0);
+  expect(stepChain(g, null).direct.size).toBe(0);
+});
+
+test('waterfallClock ticks only while the session is progressing; otherwise open steps end at the last activity', () => {
+  const at = iso(60_000);
+  const now = EPOCH + 120_000;
+  expect(waterfallClock({ status: 'running', lastActivityAt: at }, now)).toEqual({ nowMs: now, ticking: true });
+  expect(waterfallClock({ status: 'awaiting_permission', lastActivityAt: at }, now)).toEqual({ nowMs: now, ticking: true });
+  expect(waterfallClock({ status: 'idle', lastActivityAt: at }, now)).toEqual({ nowMs: EPOCH + 60_000, ticking: false });
+  expect(waterfallClock({ status: 'ended', lastActivityAt: at }, now)).toEqual({ nowMs: EPOCH + 60_000, ticking: false });
+  // Running, but silent for an hour: displayed as stale, so nothing is growing.
+  expect(waterfallClock({ status: 'running', lastActivityAt: at }, now + 3_600_000)).toEqual({ nowMs: EPOCH + 60_000, ticking: false });
+});
+
+test('durationPlacement: after a bar with room on its right, before one with room on its left, inside a full-width one', () => {
+  expect(durationPlacement(0.1, 0.2)).toBe('after');
+  expect(durationPlacement(0.6, 0.4)).toBe('before');
+  expect(durationPlacement(0, 1)).toBe('inside');
+  expect(durationPlacement(0.2, 0.7)).toBe('inside');
+});
+
+test('stepChain.direct inside an agent: its task prompt counts, and the walk does not go on into the main thread', () => {
+  const g = graph(
+    [
+      node('p', 'prompt', 't1', null, 0), node('x', 'text', 't1', null, 1),
+      node('d', 'subagent', 't1', null, 2, { childAgentId: 'ag' }),
+      node('ap', 'prompt', null, 'ag', 3), node('r', 'tool', null, 'ag', 4), node('out', 'text', null, 'ag', 5),
+    ],
+    [e('p', 'x'), e('x', 'd'), e('d', 'ap', 'spawn'), e('ap', 'r'), e('r', 'out')],
+  );
+  expect([...stepChain(g, 'out').direct]).toEqual(['ap']);
+  expect([...stepChain(g, 'r').direct]).toEqual(['ap']);
+  expect([...stepChain(g, 'ap').direct]).toEqual(['x']);
+  expect([...stepChain(g, 'out').ids].sort()).toEqual(['ap', 'd', 'out', 'p', 'r', 'x']);
 });

@@ -1,4 +1,4 @@
-import type { Graph, GraphNode } from '@claude-canvas/shared';
+import { effectiveStatus, type Graph, type GraphNode, type Session } from '@claude-canvas/shared';
 import { isNoise } from './compact';
 import { turnNodes, type ViewNode } from './view';
 
@@ -82,6 +82,24 @@ export function buildWaterfall(graph: Graph, scope: WaterfallScope, options: { c
   return { rows, startMs, endMs: Math.max(endMs, startMs + 1) };
 }
 
+/**
+ * The "now" that still-open steps end at. While the session is running or awaiting a permission it is the clock
+ * (`ticking`); otherwise (idle, ended, waiting for input, or running but silent for too long) nothing is progressing, and
+ * open steps end at the session's last activity.
+ */
+export function waterfallClock(session: Pick<Session, 'status' | 'lastActivityAt'>, nowMs: number): { nowMs: number; ticking: boolean } {
+  const status = effectiveStatus(session, nowMs);
+  if (status === 'running' || status === 'awaiting_permission') return { nowMs, ticking: true };
+  const last = Date.parse(session.lastActivityAt);
+  return { nowMs: Number.isNaN(last) ? nowMs : last, ticking: false };
+}
+
+/** Where the duration label of a bar goes: after it, before it, or inside it when it leaves no room on either side. */
+export function durationPlacement(left: number, width: number): 'after' | 'before' | 'inside' {
+  if (left + width < 0.75) return 'after';
+  return left > 0.25 ? 'before' : 'inside';
+}
+
 /** Where a row's bar sits on the track, as fractions of the range (0..1). */
 export function barOf(w: Pick<Waterfall, 'startMs' | 'endMs'>, row: Pick<WaterfallRow, 'startMs' | 'endMs'>): { left: number; width: number } {
   const span = w.endMs - w.startMs;
@@ -110,11 +128,20 @@ function incomingOf(graph: Graph): Map<string, string[]> {
  * an agent's first step into the node that dispatched it, up to and including the main-thread prompt of the turn (where
  * the walk ends). `ids` includes the start; `reasoning`: the thinking / text nodes among them, by time then id. Empty
  * for null or an unknown id.
+ *
+ * `direct`: what the step was decided on — walking back from it, the first thinking / reply steps met on each path,
+ * together with the thinking / reply steps right before those (one message's thinking and reply, say); the turn's
+ * prompt when a path reaches it without meeting any; inside an agent, the agent's task prompt counts like a reply. A
+ * thinking step without text is passed through, not counted. In a
+ * turn whose steps follow one another `ids` is simply everything before the step; `direct` is the part worth reading.
  */
-export function stepChain(graph: Graph, stepId: string | null): { ids: ReadonlySet<string>; reasoning: GraphNode[] } {
+export function stepChain(graph: Graph, stepId: string | null): {
+  ids: ReadonlySet<string>; reasoning: GraphNode[]; direct: ReadonlySet<string>;
+} {
   const ids = new Set<string>();
   const reasoning: GraphNode[] = [];
-  if (stepId === null || graph.nodes[stepId] === undefined) return { ids, reasoning };
+  const direct = directBasis(graph, stepId);
+  if (stepId === null || graph.nodes[stepId] === undefined) return { ids, reasoning, direct };
   const incoming = incomingOf(graph);
   const queue = [stepId];
   ids.add(stepId);
@@ -132,5 +159,46 @@ export function stepChain(graph: Graph, stepId: string | null): { ids: ReadonlyS
   }
   const ms = (n: GraphNode): number => parseMs(n.timestamp) ?? 0;
   reasoning.sort((a, b) => ms(a) - ms(b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-  return { ids, reasoning };
+  return { ids, reasoning, direct };
+}
+
+function directBasis(graph: Graph, stepId: string | null): Set<string> {
+  const direct = new Set<string>();
+  if (stepId === null || graph.nodes[stepId] === undefined) return direct;
+  const incoming = incomingOf(graph);
+  // An agent's task prompt is what its steps were decided on, like a reply or a thought.
+  const says = (n: GraphNode): boolean =>
+    n.kind === 'text' || (n.kind === 'thinking' && n.summary !== '') || (n.kind === 'prompt' && n.agentId !== null);
+  const isTurnPrompt = (n: GraphNode): boolean => n.kind === 'prompt' && n.agentId === null;
+  // `inRun`: the walk has reached reasoning on this path and only continues through more of it.
+  const seen = new Set<string>([`0${stepId}`]);
+  const queue: { id: string; inRun: boolean }[] = [{ id: stepId, inRun: false }];
+  for (let head = 0; head < queue.length; head++) {
+    const { id, inRun } = queue[head]!;
+    const node = graph.nodes[id]!;
+    if (isTurnPrompt(node)) continue;
+    for (const from of incoming.get(id) ?? []) {
+      const prev = graph.nodes[from];
+      if (prev === undefined) continue;
+      const passThrough = prev.kind === 'thinking' && prev.summary === '';
+      let next: boolean;
+      if (says(prev)) {
+        direct.add(from);
+        next = true;
+      } else if (passThrough) {
+        next = inRun;
+      } else if (inRun) {
+        continue; // the run of reasoning ends at a step of another kind
+      } else {
+        if (isTurnPrompt(prev)) direct.add(from);
+        next = false;
+      }
+      const key = `${next ? 1 : 0}${from}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        queue.push({ id: from, inRun: next });
+      }
+    }
+  }
+  return direct;
 }

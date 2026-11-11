@@ -1,13 +1,15 @@
 import { memo, useEffect, useMemo, useRef, type MouseEvent } from 'react';
-import type { Graph } from '@claude-canvas/shared';
+import type { Graph, Session } from '@claude-canvas/shared';
 import { NODE_STATUS_LABEL } from '../labels';
 import { useNow } from '../useNow';
 import { formatDuration } from './format';
 import { KIND_LABEL, nodeColor } from './nodes';
-import { barOf, buildWaterfall, type WaterfallRow, type WaterfallScope } from './waterfall';
+import { barOf, buildWaterfall, durationPlacement, waterfallClock, type WaterfallRow, type WaterfallScope } from './waterfall';
 
 export interface WaterfallProps {
   graph: Graph;
+  /** Decides whether still-open steps keep growing (see waterfallClock). */
+  session: Pick<Session, 'status' | 'lastActivityAt'>;
   scope: WaterfallScope;
   /** The turn's prompt, or the agent's type and task. */
   title: string;
@@ -17,6 +19,8 @@ export interface WaterfallProps {
   selectedId: string | null;
   /** The steps that led to the selected row (see stepChain); the other rows are dimmed. Null: no highlighting. */
   chainIds: ReadonlySet<string> | null;
+  /** Among them, the steps the selected row was decided on (stepChain's `direct`): marked more strongly. */
+  directIds: ReadonlySet<string> | null;
   onSelectRow(id: string): void;
   /** A subagent row's "内部步骤": show that agent's steps instead (takes the dispatch node's id). */
   onOpenAgent(dispatchNodeId: string): void;
@@ -34,10 +38,12 @@ function formatClock(ms: number): string {
 }
 const pct = (f: number): string => `${(f * 100).toFixed(3)}%`;
 
-const Row = memo(function Row({ row, left, width, selected, chain, onSelectRow, onOpenAgent }: {
+const Row = memo(function Row({ row, left, width, selected, ticking, chain, onSelectRow, onOpenAgent }: {
   row: WaterfallRow; left: number; width: number; selected: boolean;
-  /** 'on': led to the selected row; 'off': did not (dimmed); null: nothing is selected. */
-  chain: 'on' | 'off' | null;
+  /** The session is progressing: an open bar is animated. */
+  ticking: boolean;
+  /** 'direct': what the selected row was decided on; 'on': led to it; 'off': did not (dimmed); null: nothing is selected. */
+  chain: 'direct' | 'on' | 'off' | null;
   onSelectRow(id: string): void; onOpenAgent(id: string): void;
 }) {
   const { node } = row;
@@ -48,10 +54,9 @@ const Row = memo(function Row({ row, left, width, selected, chain, onSelectRow, 
     e.stopPropagation(); // not a row click
     onOpenAgent(row.id);
   };
-  // The duration is written after the bar, or before it when the bar ends in the right-hand third of the track.
-  const after = left + width < 0.7;
+  const place = durationPlacement(left, width);
   return (
-    <div className={`cc-wf-row${selected ? ' cc-wf-selected' : ''}${chain === 'on' ? ' cc-wf-chain' : chain === 'off' ? ' cc-wf-dim' : ''}`}
+    <div className={`cc-wf-row${selected ? ' cc-wf-selected' : ''}${chain === 'direct' ? ' cc-wf-direct' : chain === 'on' ? ' cc-wf-chain' : chain === 'off' ? ' cc-wf-dim' : ''}`}
       onClick={() => onSelectRow(row.id)}>
       <div className="cc-wf-label">
         <span className="cc-wf-dot" style={{ background: color }} />
@@ -68,10 +73,13 @@ const Row = memo(function Row({ row, left, width, selected, chain, onSelectRow, 
       </div>
       <div className="cc-wf-track">
         {width > 0
-          ? <span className={`cc-wf-bar${row.open ? ' cc-wf-open' : ''}`} style={{ left: pct(left), width: pct(width), background: color }} />
+          ? <span className={`cc-wf-bar${row.open && ticking ? ' cc-wf-open' : ''}`} style={{ left: pct(left), width: pct(width), background: color }} />
           : <span className="cc-wf-mark" style={{ left: pct(left), background: color }} />}
         {duration !== '' && (
-          <span className="cc-wf-dur" style={after ? { left: pct(left + width) } : { right: pct(1 - left) }}>{duration}</span>
+          <span className={`cc-wf-dur${place === 'inside' ? ' cc-wf-dur-inside' : ''}`}
+            style={place === 'after' ? { left: pct(left + width) } : place === 'before' ? { right: pct(1 - left) } : { left: pct(left) }}>
+            {duration}
+          </span>
         )}
       </div>
     </div>
@@ -84,16 +92,18 @@ const Row = memo(function Row({ row, left, width, selected, chain, onSelectRow, 
  * the panel re-renders every second and, if the reader is at the bottom of the list, keeps up with new rows.
  */
 export const Waterfall = memo(function Waterfall({
-  graph, scope, title, compact, selectedId, chainIds, onSelectRow, onOpenAgent, onClose,
+  graph, session, scope, title, compact, selectedId, chainIds, directIds, onSelectRow, onOpenAgent, onClose,
 }: WaterfallProps) {
   const now = useNow(1000);
   const scopeKey = scope.type === 'turn' ? `turn:${scope.turnKey}` : `agent:${scope.agentId}`;
   // `scope` is rebuilt by the caller on every render; the key says whether it changed.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const base = useMemo(() => buildWaterfall(graph, scope, { compact, nowMs: 0 }), [graph, scopeKey, compact]);
-  const live = base.rows.some((r) => r.open);
+  const open = base.rows.some((r) => r.open);
+  const clock = waterfallClock(session, now);
+  const live = open && clock.ticking;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  const wf = useMemo(() => (live ? buildWaterfall(graph, scope, { compact, nowMs: now }) : base), [base, live, now]);
+  const wf = useMemo(() => (open ? buildWaterfall(graph, scope, { compact, nowMs: clock.nowMs }) : base), [base, open, clock.nowMs]);
 
   const body = useRef<HTMLDivElement>(null);
   const stick = useRef(false);
@@ -124,6 +134,7 @@ export const Waterfall = memo(function Waterfall({
         <span className="cc-wf-meta">
           {count} 步{count > 0 && ` · ${formatClock(wf.startMs)} 开始 · 历时 ${formatDuration(span)}`}
           {live && <span className="cc-wf-live"> · 进行中</span>}
+          {open && !live && <span className="cc-wf-stalled"> · 有步骤未结束</span>}
         </span>
         <button type="button" className="cc-drawer-close" onClick={onClose} aria-label="关闭执行过程">×</button>
       </div>
@@ -140,8 +151,8 @@ export const Waterfall = memo(function Waterfall({
         {wf.rows.map((row) => {
           const { left, width } = barOf(wf, row);
           return (
-            <Row key={row.id} row={row} left={left} width={width} selected={row.id === selectedId}
-              chain={chainIds === null ? null : chainIds.has(row.id) ? 'on' : 'off'}
+            <Row key={row.id} row={row} left={left} width={width} selected={row.id === selectedId} ticking={clock.ticking}
+              chain={chainIds === null ? null : directIds?.has(row.id) ? 'direct' : chainIds.has(row.id) ? 'on' : 'off'}
               onSelectRow={onSelectRow} onOpenAgent={onOpenAgent} />
           );
         })}

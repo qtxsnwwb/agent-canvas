@@ -339,6 +339,8 @@ button.cc-reason:focus-visible, .cc-reason-current:focus-visible { outline: 2px 
 .cc-wf-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; font-size: 13px; }
 .cc-wf-meta { flex: none; color: #64748b; font-variant-numeric: tabular-nums; }
 .cc-wf-live { color: #2563eb; font-weight: 600; }
+.cc-wf-stalled { color: #b45309; }
+.cc-wf-dur.cc-wf-dur-inside { color: #fff; font-weight: 600; }
 .cc-wf-axis, .cc-wf-row { display: flex; align-items: center; min-width: 0; }
 .cc-wf-axis { flex: none; height: 20px; border-bottom: 1px solid #e2e8f0; color: #94a3b8; font-size: 11px; padding-right: 12px; }
 .cc-wf-label { flex: none; width: 38%; max-width: 420px; min-width: 200px; box-sizing: border-box; display: flex; align-items: center; gap: 6px; padding: 0 8px 0 12px; }
@@ -368,4 +370,13 @@ button.cc-reason:focus-visible, .cc-reason-current:focus-visible { outline: 2px 
 .cc-wf-dur { position: absolute; top: 5px; padding: 0 5px; color: #64748b; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 /* A step is open in the drawer: the steps that led to it keep their colour and get a left accent, the rest are dimmed. */
 .cc-wf-row.cc-wf-dim { opacity: 0.38; }
-.cc-wf-row.cc-wf-chain { box-shadow: inset 3px 0 0 #f59e0b; }
+.cc-wf-row.cc-wf-chain { box-shadow: inset 3px 0 0 #cbd5e1; }
+.cc-wf-row.cc-wf-direct { box-shadow: inset 3px 0 0 #f59e0b; background: #fffbeb; }
+.cc-reason-direct { flex: none; padding: 0 5px; border-radius: 4px; background: #fef3c7; color: #92400e; font-size: 11px; font-weight: 600; }
+
+/* A narrow window: the drawer would cover most of the waterfall, so it sits above the panel instead (over the canvas
+   only) and the panel keeps the full width. */
+@media (max-width: 1100px) {
+  .cc-waterfall-open .cc-drawer { bottom: max(46%, 200px); }
+  .cc-drawer-open .cc-waterfall { padding-right: 0; }
+}

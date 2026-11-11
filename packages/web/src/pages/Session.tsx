@@ -118,7 +118,7 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
     const rows: ReasoningRow[] = [];
     for (const n of steps.reasoning) {
       const row = reasoningRow(n, detailId);
-      if (row !== null && !(compactNow && row.missing && !row.current)) rows.push(row);
+      if (row !== null && !(compactNow && row.missing && !row.current)) rows.push({ ...row, direct: steps.direct.has(n.id) });
     }
     return rows;
   }, [steps, detailId, compactNow]);
@@ -197,11 +197,13 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
         {scope !== null && (
           <Waterfall
             graph={graphNow}
+            session={live.getSession()}
             scope={scope}
             title={scopeTitle}
             compact={canvas.compact}
             selectedId={detailId}
             chainIds={steps !== null ? steps.ids : null}
+            directIds={steps !== null ? steps.direct : null}
             onSelectRow={setDetailId}
             onOpenAgent={openAgent}
             onClose={closePanel}

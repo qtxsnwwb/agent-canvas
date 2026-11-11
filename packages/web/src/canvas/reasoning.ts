@@ -21,6 +21,8 @@ export interface ReasoningRow {
   missing: boolean;
   durationMs: number | null;
   current: boolean;
+  /** Outline view: the step was decided on this row (see stepChain's `direct`). */
+  direct?: boolean;
 }
 
 /** The rows for `chain.reasoning`, in its order; ids that are not graph nodes of kind thinking / text in `view` are skipped. */

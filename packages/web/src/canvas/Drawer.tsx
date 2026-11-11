@@ -56,6 +56,7 @@ function ReasoningList({ rows, truncated, onSelect, onExpand, pendingFocus }: {
     <>
       <span className="cc-kind" style={{ ['--cc-color' as string]: r.kind === 'thinking' ? THINKING_COLOR : TEXT_COLOR }}>{r.label}</span>
       <span className="cc-reason-time">{formatTime(r.time)}</span>
+      {r.direct && <span className="cc-reason-direct">直接依据</span>}
       <span className={`cc-reason-text${r.missing ? ' cc-muted' : ''}`} title={r.missing ? undefined : r.text}>
         {r.text}
         {r.durationMs !== null && ` · ${formatDuration(r.durationMs)}`}
