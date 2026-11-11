@@ -1,7 +1,7 @@
 import type { GraphNode, GraphSnapshot, Session } from '@claude-canvas/shared';
 
 export const baseSession: Session = {
-  id: 's1', projectId: 'p1', cwd: null, title: null, gitBranch: null, status: 'running',
+  id: 's1', projectId: 'p1', origin: 'claude', cwd: null, title: null, gitBranch: null, status: 'running',
   sourceDeleted: false, startedAt: '2026-01-01T00:00:00Z', lastActivityAt: '2026-01-01T00:00:00Z',
 };
 

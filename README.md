@@ -1,6 +1,6 @@
 # claude-canvas
 
-claude-canvas 是一个本地服务：它读取 Claude Code 的 transcript 文件并接收 hook 事件，在固定的本地网址上用网页展示每个 Claude Code 会话正在做什么。
+claude-canvas 是一个本地服务：它读取 Claude Code 的 transcript 文件和 OpenAI Codex 的会话文件，并接收 hook 事件，在固定的本地网址上用网页展示每个会话正在做什么。两种工具的会话用同一套页面展示（Codex 见下文“Codex”）。
 每个会话显示为一张实时更新的画布。默认的“概览”视角只画骨架（每个轮次一张卡片，下面挂它派出的子代理），选中一个轮次或子代理，它的执行过程在下方以瀑布图列出。另有逐步、拓扑、因果、复盘四个视角（见下文“画布”）。首页可以检索会话，诊断页给出服务和 hooks 的运行情况。
 
 ## 环境要求
@@ -106,6 +106,50 @@ claude-canvas listening on http://127.0.0.1:4317
 - 工具和子代理节点下方多一行耗时和 token（输入 / 输出），回复节点只显示 token；时间轴右侧是到该时刻为止的节点数和 token 合计，同一条消息拆成的多个节点只计一次。
 - 历史会话里工具的耗时由开始和结束时间推算（hook 提供了 `duration_ms` 时用 hook 的值）。
 
+## Codex
+
+- 服务启动时会自动读取 `~/.codex/sessions` 下的 Codex 会话文件（Codex 桌面应用和 CLI 写的都是这里），并持续监视。目录不存在时跳过，不报错。
+- 用环境变量 `CLAUDE_CANVAS_CODEX_DIR` 指定别的目录；设为空字符串表示不读取 Codex。
+- 会话标题取自 `~/.codex/session_index.jsonl`（Codex 给会话起的名字），没有时取第一条提示。
+- 同一个工作目录下的 Claude Code 会话和 Codex 会话属于同一个项目。
+- 首页会话卡片、检索结果和会话页信息栏上标明来源（Claude Code 或 Codex）。两种来源都有的项目，项目卡片上有两个小标记。
+- 有 Codex 会话时，首页项目列表上方出现“全部 / Claude Code / Codex”筛选，选择记在这个浏览器里。筛选后没有该来源会话的项目不显示；地址里指定的项目即使被筛掉也照常显示。服务给出的项目会话数不分来源，所以筛选时，同时有两种来源的项目不显示会话数，顶部只在数字准确时显示会话总数和进行中的数量。
+- Codex 的子代理是单独的线程，显示为派出它的那一步下面的子代理，展开后是它内部的步骤。
+
+### Codex hooks（可选）
+
+不装 hooks 也能用：服务靠监视会话文件得到 Codex 会话，延迟几秒。装上后多了两样，接近实时（1 秒内）：会话状态的变化（开始运行、结束、已退出），以及等待权限确认（会话显示“等待权限确认”，该轮次里最新一个还在执行的工具节点也显示等待确认）。hooks 不新建节点，也不决定节点的结果：步骤一律来自会话文件，所以工具节点并不会因为装了 hooks 而更早出现；除了等待权限确认期间那个临时的“等待确认”标记，有没有 hooks 画出来的图完全一样。
+
+Codex 的 hook 只能运行命令，不能直接发 HTTP，所以 claude-canvas 提供一个转发命令：`node <claude-canvas>/packages/server/dist/cli.js hook-forward --origin codex --port 4317`。它从标准输入读 Codex 给的 JSON，原样发给本机服务的 `/hooks?origin=codex`，然后退出。
+
+安装与移除（流程和 Claude Code 的 hooks 一样：先列出改动、确认、备份、只追加）：
+
+```bash
+node packages/server/dist/cli.js hooks install --codex      # 写入 ~/.codex/hooks.json（不存在时新建）
+node packages/server/dist/cli.js hooks uninstall --codex    # 只移除本安装、本端口的那几条
+```
+
+- 写入 11 个事件：`SessionStart`、`SessionEnd`、`UserPromptSubmit`、`PreToolUse`、`PermissionRequest`、`PostToolUse`、`SubagentStart`、`SubagentStop`、`Stop`、`PostCompact`、`Interrupt`。每条都是 `async: true`（后台运行，不改变 Codex 的结果），`command` 和 `commandWindows` 都写，用绝对路径指向当前的 `node` 和这份 `cli.js`。超时：`SessionEnd`、`Interrupt` 是 3 秒（Codex 对这两个事件最多允许 3 秒），其余 5 秒。
+- 选项和 Claude Code 的一样：`--port <n>`、`--yes`（非交互终端必须加）、`--settings <file>`（写别的文件）；环境变量 `CLAUDE_CANVAS_CODEX_HOOKS_FILE` 改默认路径。`~/.codex` 目录不存在时视为没装 Codex，不做任何改动。
+- **装完要在 Codex 里确认信任这些 hooks 才会运行**：桌面应用在“设置 → Hooks”，CLI 里输入 `/hooks`。没确认时 claude-canvas 只靠会话文件工作，诊断页的 Codex 一栏会显示“尚未收到 Codex 的 hook”。
+- Codex 的信任绑定在 hook 的内容上。移动或升级 claude-canvas 后命令里的路径会变：先 `hooks uninstall --codex`（在旧位置运行）或手动删掉旧的几条，再在新位置 `hooks install --codex`，并重新确认信任。
+- 换了 node（例如用 nvm / fnm 升级后旧路径失效）时，再运行一次 `hooks install --codex`：它认得出本安装的旧条目、说明它们已过期，并在同一次写入里换成当前 `node` 的命令（之后同样要在 Codex 里重新确认信任）。判断“本安装的条目”时按命令解析出 `cli.js` 的路径比较（Windows 上不分大小写），端口写成 `--port 4317`、`--port=4317` 或不写（默认 4317）都认。
+- 失败行为：转发命令永远以退出码 0 结束、不输出任何内容、不读写文件；服务没启动时立刻退出（连接被拒），服务不回应时 1 秒后放弃。Codex 的行为不受影响。每个 hook 事件会启动一次 node（本机实测转发命令从启动到退出约 0.25 秒，和空跑 `node` 差不多）。大多数事件因为是 `async` 在后台运行，不拖慢 Codex；但 `SessionEnd`（以及 `Interrupt`）即使写了 `async: true`，Codex 也同步运行它，所以退出（或打断）时会多等一次转发：通常约 0.25 秒，服务卡住时最多约 1.3 秒（转发命令自己的 1 秒上限加启动），无论如何不超过 3 秒的超时。
+- hooks 只给出会话状态和权限等待，节点、状态、开始和结束时间都以会话文件为准。会话状态由会话文件里主线程的轮次和 hook 留下的标记一起算出，与两者到达的先后无关：子代理线程的 hook（带 `agent_id`，或它的轮次已在会话文件里归到子线程）不会把已经结束的会话改回运行中；同一轮次在 `Stop` 之后又收到 `UserPromptSubmit` 或 `PermissionRequest`，说明这一轮还在继续，会重新算作运行中；`Stop` 先于或晚于会话文件里的轮次结束到达，结果一样。
+
+已知限制：
+
+- 思考内容：Codex 的思考正文是加密的，只有摘要，而且摘要多数为空。Codex 会话的“因果”视角主要靠回复文本。
+- token：不显示 Codex 的 token 用量，复盘视角里 Codex 会话的 token 合计为 0。
+- 已归档会话（`~/.codex/archived_sessions`）不导入。归档一个会话后，它在这里显示为“源文件已删除”，已采集的内容仍可看。
+- Codex 的会话文件格式不是稳定接口，升级 Codex 后可能出现未识别的记录，可在诊断页查看。
+- Codex 自己发起的审批复核线程（不是由某次工具调用派出的）不显示。
+- Codex hooks 需要使用者在 Codex 里手动确认信任，改动或重新安装后要再确认一次；没确认时只靠会话文件，延迟几秒。
+- Codex hook 载荷的字段取自官方文档，还没有用真实载荷核对过（尤其是 `turn_id` 是否和会话文件里的轮次 id 一致、子代理里的 hook 带什么 `session_id` / `agent_id`，以及 Windows 上 `commandWindows` 由哪个 shell 执行）。所以第一版的 hooks 不建节点（例如在 `exec` 里跑的命令，hook 报的工具名和 id 都可能和会话文件里的调用对不上）；录到真实载荷后再考虑让 hooks 提前显示工具节点。
+- 权限确认之后到工具结束之前没有 hook，所以批准后那个工具节点和会话会一直显示“等待权限确认”，直到该轮次的下一个 hook（例如工具结束的 `PostToolUse`）或会话文件里该轮次的调用都结束。权限请求不带工具调用的 id，显示等待的是该轮次里最新一个还在执行的工具节点，并行调用时可能不是真正在等的那个。
+- 派发子代理的调用找不到对应的子代理线程时（例如派出失败），派发节点在派出它的轮次进行中显示执行中，轮次结束后显示失败；之后子代理线程出现，就改为跟着它走。
+- 追加给子代理的任务（`followup_task`、`send_message`），在逐步视角的因果链上接在子代理上一个任务的回复之后，而不是接在发出追加任务的那次调用上。
+
 ## Hooks（可选）
 
 不装 hooks 也能用：服务只靠 transcript 就能工作。区别是：
@@ -152,10 +196,10 @@ claude-canvas 没有运行时，HTTP hook 连接失败会立刻报错，而 Clau
 页面右上角的“诊断”打开 `#/diagnostics`（<http://127.0.0.1:4317/#/diagnostics>），每 5 秒自动刷新，内容来自 `GET /api/diagnostics`：
 
 - 服务：是否正在导入、推导规则版本、数据库标识。
-- Hooks：是否收到过 hook、最近一次收到的时间（超过 10 分钟没有收到时提示）；每个事件收到的次数和最近一次的时间；以及 14 个事件中哪些从未收到过（装了 hooks 但某些事件一直没出现，通常只是还没有触发它的操作，例如 `PermissionDenied`）。
+- Hooks：是否收到过 hook、最近一次收到的时间（超过 10 分钟没有收到时提示）；每个事件收到的次数和最近一次的时间；以及 14 个事件中哪些从未收到过（装了 hooks 但某些事件一直没出现，通常只是还没有触发它的操作，例如 `PermissionDenied`）。Codex 会话目录存在（即使还没有 Codex 会话）或有 Codex 数据时按来源分成 Claude Code 和 Codex 两部分（只装了 Claude Code 的机器上不出现 Codex）；Codex 一栏先显示一行 Codex 会话目录及它是否存在，再按它自己的 11 个事件计算从未收到的事件；一个 Codex hook 都没收到时提示 Codex hooks 尚未安装或尚未在 Codex 里确认信任。
 - 导入失败：读取或处理失败的文件、错误信息和时间。
 - 未识别的记录类型：每种类型的次数和一条样例（样例可能含对话内容，展开后才显示）。
-- 文件读取进度：已记录的文件总数和尚未读完的文件（已读 / 总字节）。
+- 文件读取进度：已记录的文件总数和尚未读完的文件（已读 / 总字节）。Codex 文件的路径以 `codex:` 开头，前面带 Codex 标记（导入失败一节同样）。
 
 ## 数据与环境变量
 
@@ -163,7 +207,9 @@ claude-canvas 没有运行时，HTTP hook 连接失败会立刻报错，而 Clau
 | --- | --- | --- |
 | `CLAUDE_CANVAS_PROJECTS_DIR` | `~/.claude/projects` | 读取 transcript 的目录 |
 | `CLAUDE_CANVAS_DATA_DIR` | `~/.claude-canvas` | 数据目录，数据库文件为 `data.db` |
+| `CLAUDE_CANVAS_CODEX_DIR` | `~/.codex/sessions` | 读取 Codex 会话文件的目录；空字符串表示不读取 |
 | `CLAUDE_CANVAS_SETTINGS_FILE` | `~/.claude/settings.json` | `hooks install` / `hooks uninstall` 修改的 settings 文件 |
+| `CLAUDE_CANVAS_CODEX_HOOKS_FILE` | `~/.codex/hooks.json` | `hooks install --codex` / `hooks uninstall --codex` 修改的文件 |
 
 ## rebuild
 

@@ -2,6 +2,10 @@ export type NodeKind = 'prompt' | 'thinking' | 'text' | 'tool' | 'subagent' | 's
 export type NodeStatus = 'running' | 'awaiting_permission' | 'succeeded' | 'failed' | 'denied';
 export type SessionStatus = 'running' | 'awaiting_input' | 'awaiting_permission' | 'idle' | 'ended';
 export type EdgeKind = 'sequence' | 'fork' | 'spawn';
+/** Which agent a session (and every raw event, file and hook behind it) comes from. */
+export type Origin = 'claude' | 'codex';
+/** Every origin, in the order lists of origins are given in (Project.origins, diagnostics). */
+export const ORIGINS: readonly Origin[] = ['claude', 'codex'];
 export const TERMINAL_STATUSES: readonly NodeStatus[] = ['succeeded', 'failed', 'denied'];
 export const SUMMARY_MAX = 200;
 
@@ -33,7 +37,8 @@ export interface GraphEdge { id: string; sessionId: string; from: string; to: st
 
 export interface Session {
   id: string;
-  projectId: string;             // ~/.claude/projects 下的目录名
+  projectId: string;             // ~/.claude/projects 下的目录名（Codex 会话：其 cwd 按同样规则编码）
+  origin: Origin;
   cwd: string | null;
   title: string | null;
   gitBranch: string | null;
@@ -43,7 +48,10 @@ export interface Session {
   lastActivityAt: string;
 }
 
-/** activeSessionCount counts sessions in running, awaiting_input or awaiting_permission. */
-export interface Project { id: string; cwd: string | null; sessionCount: number; activeSessionCount: number }
+/**
+ * activeSessionCount counts sessions in running, awaiting_input or awaiting_permission. origins: the origins of the
+ * project's sessions, each once, in ORIGINS order.
+ */
+export interface Project { id: string; cwd: string | null; sessionCount: number; activeSessionCount: number; origins: Origin[] }
 
 export interface NodeDetail { nodeId: string; input: unknown; output: unknown; text: string | null; raw: unknown }

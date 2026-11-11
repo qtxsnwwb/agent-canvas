@@ -3,6 +3,11 @@ import path from 'node:path';
 
 export interface Config {
   projectsDir: string;
+  /**
+   * Codex rollout files (`CLAUDE_CANVAS_CODEX_DIR`, default `~/.codex/sessions`); null = Codex is not read (the
+   * variable set to the empty string).
+   */
+  codexSessionsDir: string | null;
   dataDir: string;
   dbPath: string;
   host: '127.0.0.1';
@@ -21,6 +26,15 @@ export interface Config {
 export function loadConfig(env: NodeJS.ProcessEnv = process.env, overrides: Partial<Config> = {}): Config {
   const dataDir = overrides.dataDir ?? env.CLAUDE_CANVAS_DATA_DIR ?? path.join(os.homedir(), '.claude-canvas');
   const projectsDir = overrides.projectsDir ?? env.CLAUDE_CANVAS_PROJECTS_DIR ?? path.join(os.homedir(), '.claude', 'projects');
+  const codexEnv = env.CLAUDE_CANVAS_CODEX_DIR;
+  const codexSessionsDir =
+    overrides.codexSessionsDir !== undefined
+      ? overrides.codexSessionsDir
+      : codexEnv === undefined
+        ? path.join(os.homedir(), '.codex', 'sessions')
+        : codexEnv === ''
+          ? null
+          : codexEnv;
   return {
     host: '127.0.0.1',
     port: 4317,
@@ -30,6 +44,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, overrides: Part
     webDist: null,
     ...overrides,
     projectsDir,
+    codexSessionsDir,
     dataDir,
     dbPath: overrides.dbPath ?? path.join(dataDir, 'data.db'),
   };

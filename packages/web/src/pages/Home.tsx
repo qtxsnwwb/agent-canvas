@@ -2,7 +2,12 @@ import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { SEARCH_MIN_CHARS, type Project, type SearchField, type SearchHit, type Session } from '@claude-canvas/shared';
 import { api, openLiveSessions } from '../client';
 import { sessionStatusView } from '../labels';
-import { pickProject, projectLook, projectName, relativeTime } from '../home';
+import {
+  effectiveOriginFilter, filterEmptyMessage, heroTotals, matchesOrigin, ORIGIN_FILTER_KEY, ORIGIN_FILTER_OPTIONS, originLook, parseOriginFilter,
+  projectCountsExact, projectLook, projectName, relativeTime, shownProjectId, showOriginFilter, stripProjects,
+  type OriginFilter,
+} from '../home';
+import { OriginBadge } from '../OriginBadge';
 import { createSearcher, highlightParts, type SearchResult } from '../search';
 import { createThrottle } from '../throttle';
 import { useNow } from '../useNow';
@@ -29,11 +34,37 @@ function Highlighted({ text, q }: { text: string; q: string }) {
   );
 }
 
-function SearchResults({ result, q, now }: { result: SearchResult | null; q: string; now: number }) {
+function readOriginFilter(): OriginFilter {
+  try { return parseOriginFilter(window.localStorage.getItem(ORIGIN_FILTER_KEY)); } catch { return 'all'; }
+}
+
+/** 全部 / Claude Code / Codex; shown only when some project has Codex sessions. */
+function OriginFilterSwitch({ value, onChange }: { value: OriginFilter; onChange(value: OriginFilter): void }) {
+  return (
+    <div className="origin-filter">
+      <div className="view-switch" role="group" aria-label="来源">
+        {ORIGIN_FILTER_OPTIONS.map((o) => (
+          <button key={o.value} type="button" data-origin={o.value} aria-pressed={value === o.value} onClick={() => onChange(o.value)}>
+            {o.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SearchResults({ result, q, now, filter }: { result: SearchResult | null; q: string; now: number; filter: OriginFilter }) {
   if (result === null || result.q !== q) return <p className="muted search-note">搜索中…</p>;
   if (result.error !== null) return <p className="error">搜索失败：{result.error}</p>;
-  const hits: SearchHit[] = result.hits ?? [];
-  if (hits.length === 0) return <p className="muted search-note">没有匹配的会话</p>;
+  const all: SearchHit[] = result.hits ?? [];
+  const hits = all.filter((h) => matchesOrigin(filter, h.session.origin));
+  if (hits.length === 0) {
+    return (
+      <p className="muted search-note">
+        {all.length === 0 || filter === 'all' ? '没有匹配的会话' : `没有匹配的 ${originLook(filter).label} 会话（其他来源有 ${all.length} 个）`}
+      </p>
+    );
+  }
   return (
     <ul className="search-results">
       {hits.map(({ session: s, matches }) => {
@@ -44,6 +75,7 @@ function SearchResults({ result, q, now }: { result: SearchResult | null; q: str
               <div className="session-title">{s.title ?? s.id.slice(0, 8)}</div>
               <div className="session-meta">
                 <span className={`status status-${status.status}`}>{status.label}</span>
+                <OriginBadge origin={s.origin} />
                 {s.cwd !== null && <span className="chip" title={s.cwd}>📁 {projectName(s.cwd)}</span>}
                 <span className="muted" title={formatTime(s.lastActivityAt)}>{relativeTime(s.lastActivityAt, now)}</span>
               </div>
@@ -66,8 +98,16 @@ export function Home({ projectId }: { projectId: string | null }) {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [error, setError] = useState<string | null>(null);
   const now = useNow();
-  // With no project in the address, the busiest one is shown (the page is never an empty "pick something").
-  const shownId = projectId ?? pickProject(projects)?.id ?? null;
+  const [chosenFilter, setChosenFilter] = useState<OriginFilter>(readOriginFilter);
+  const chooseFilter = (value: OriginFilter): void => {
+    try { window.localStorage.setItem(ORIGIN_FILTER_KEY, value); } catch { /* storage unavailable: not remembered */ }
+    setChosenFilter(value);
+  };
+  // Without any Codex project the filter is hidden and has no effect.
+  const filter = effectiveOriginFilter(chosenFilter, projects);
+  // With no project in the address, the busiest visible one is shown (the page is never an empty "pick something");
+  // a project in the address is shown even when the filter hides it.
+  const shownId = shownProjectId(projectId, projects, filter);
   const selected = useRef(shownId);
   selected.current = shownId;
 
@@ -136,17 +176,25 @@ export function Home({ projectId }: { projectId: string | null }) {
   const q = query.trim();
   const searching = Array.from(q).length >= SEARCH_MIN_CHARS;
 
-  const totalSessions = projects.reduce((n, p) => n + p.sessionCount, 0);
-  const totalActive = projects.reduce((n, p) => n + p.activeSessionCount, 0);
+  // Session counts come per project across origins: under a filter they are shown only where they are exact.
+  const totals = heroTotals(projects, filter);
+  const strip = stripProjects(projects, filter, shownId);
   const shown = projects.find((p) => p.id === shownId);
+  const shownSessions = sessions.filter((s) => matchesOrigin(filter, s.origin));
 
   return (
     <>
     <div className="hero">
-      <h1><span className="hero-wave" aria-hidden="true">👋</span> Claude 现在在忙什么？</h1>
+      <h1><span className="hero-wave" aria-hidden="true">👋</span> 现在都在忙什么？</h1>
       <p className="hero-sub">
-        {projects.length} 个项目 · {totalSessions} 个会话 ·{' '}
-        {totalActive > 0 ? <strong className="hero-live">{totalActive} 个正在进行</strong> : '此刻都在休息'}
+        {totals.projects} 个项目
+        {filter !== 'all' && <> · 只看 {originLook(filter).label}</>}
+        {totals.sessions !== null && totals.active !== null && (
+          <>
+            {' '}· {totals.sessions} 个会话 ·{' '}
+            {totals.active > 0 ? <strong className="hero-live">{totals.active} 个正在进行</strong> : '此刻都在休息'}
+          </>
+        )}
       </p>
       <div className="search-bar">
         <input
@@ -160,13 +208,15 @@ export function Home({ projectId }: { projectId: string | null }) {
       </div>
     </div>
     {searching ? (
-      <SearchResults result={result} q={q} now={now} />
+      <SearchResults result={result} q={q} now={now} filter={filter} />
     ) : (
     <div className="home">
       {error !== null && <p className="error">加载失败：{error}</p>}
+      {showOriginFilter(projects) && <OriginFilterSwitch value={chosenFilter} onChange={chooseFilter} />}
       <nav className="project-strip" aria-label="项目">
-        {projects.length === 0 && <p className="muted">还没有项目。在任意目录里用一次 Claude Code，它就会出现在这里。</p>}
-        {projects.map((p) => {
+        {projects.length === 0 && <p className="muted">还没有项目。在任意目录里用一次 Claude Code 或 Codex，它就会出现在这里。</p>}
+        {filterEmptyMessage(projects, filter) !== null && <p className="muted">{filterEmptyMessage(projects, filter)}</p>}
+        {strip.map((p) => {
           const look = projectLook(p.id);
           const path = p.cwd ?? p.id;
           return (
@@ -178,8 +228,15 @@ export function Home({ projectId }: { projectId: string | null }) {
                 <span className="project-path" title={path}>{path}</span>
               </span>
               <span className="project-counts">
-                <span className="chip">{p.sessionCount} 个会话</span>
-                {p.activeSessionCount > 0 && <span className="chip chip-live">{p.activeSessionCount} 个进行中</span>}
+                {projectCountsExact(p, filter) && (
+                  <>
+                    <span className="chip">{p.sessionCount} 个会话</span>
+                    {p.activeSessionCount > 0 && <span className="chip chip-live">{p.activeSessionCount} 个进行中</span>}
+                  </>
+                )}
+                {filter === 'all' && p.origins.length > 1 && (
+                  <span className="origin-dots">{p.origins.map((o) => <OriginBadge key={o} origin={o} iconOnly />)}</span>
+                )}
               </span>
             </a>
           );
@@ -188,8 +245,11 @@ export function Home({ projectId }: { projectId: string | null }) {
       <section className="sessions">
         <h2>{shown !== undefined ? `${projectName(shown.cwd ?? shown.id)} 的会话` : '会话'}</h2>
         {shownId !== null && sessions.length === 0 && <p className="muted">这个项目还没有会话</p>}
+        {sessions.length > 0 && shownSessions.length === 0 && filter !== 'all' && (
+          <p className="muted">这个项目没有 {originLook(filter).label} 会话</p>
+        )}
         <ul className="session-grid">
-          {sessions.map((s) => {
+          {shownSessions.map((s) => {
             const status = sessionStatusView(s, now);
             return (
             <li key={s.id}>
@@ -197,6 +257,7 @@ export function Home({ projectId }: { projectId: string | null }) {
                 <div className="session-title">{s.title ?? s.id.slice(0, 8)}</div>
                 <div className="session-meta">
                   <span className={`status status-${status.status}`}>{status.label}</span>
+                  <OriginBadge origin={s.origin} />
                   {s.gitBranch !== null && <span className="chip chip-branch" title={s.gitBranch}>🌿 {s.gitBranch}</span>}
                   <span className="muted" title={formatTime(s.lastActivityAt)}>{relativeTime(s.lastActivityAt, now)}</span>
                   {s.sourceDeleted && <span className="tag">源文件已删除</span>}

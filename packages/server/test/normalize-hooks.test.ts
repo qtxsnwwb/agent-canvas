@@ -239,6 +239,7 @@ test('hook 创建会话：cwd、时间、projectId 来自 hook，之后被 trans
       session: {
         id: 's1',
         projectId: 'unknown',
+        origin: 'claude',
         cwd: '/w',
         title: null,
         gitBranch: null,

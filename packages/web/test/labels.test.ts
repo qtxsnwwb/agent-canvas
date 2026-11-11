@@ -3,7 +3,7 @@ import { STALE_AFTER_MS, type Session } from '@claude-canvas/shared';
 import { SESSION_STATUS_LABEL, sessionStatusView } from '../src/labels';
 
 const session = (over: Partial<Session>): Session => ({
-  id: 's1', projectId: 'p1', cwd: null, title: null, gitBranch: null, status: 'running',
+  id: 's1', projectId: 'p1', origin: 'claude', cwd: null, title: null, gitBranch: null, status: 'running',
   sourceDeleted: false, startedAt: '2026-01-01T00:00:00.000Z', lastActivityAt: '2026-01-01T00:00:00.000Z', ...over,
 });
 

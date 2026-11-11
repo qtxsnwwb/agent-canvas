@@ -8,6 +8,7 @@ import { acquireLock, lockPath } from '../src/lock.js';
 import { NORMALIZER_VERSION } from '../src/normalize/version.js';
 import { openStore } from '../src/store/store.js';
 import type { RawEvent } from '../src/store/store.js';
+import { rollout, rolloutRel, sessionMetaLine, taskStarted } from './codex-rollout.js';
 import { assistantBlock, userPrompt } from './fixtures.js';
 
 let tmp: string;
@@ -33,6 +34,7 @@ function deadPid(): number {
 }
 
 beforeEach(async () => {
+  vi.stubEnv('CLAUDE_CANVAS_CODEX_DIR', ''); // never the real ~/.codex/sessions: no Codex source
   tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-cli-'));
   projectsDir = path.join(tmp, 'projects');
   dataDir = path.join(tmp, 'data');
@@ -45,6 +47,7 @@ beforeEach(async () => {
 afterEach(async () => {
   for (const a of apps.splice(0)) await a.close().catch(() => undefined);
   await fs.rm(tmp, { recursive: true, force: true, maxRetries: 10 });
+  vi.unstubAllEnvs();
 });
 
 test('锁文件：同一数据目录只能有一个持有者，释放后可再取', async () => {
@@ -125,4 +128,32 @@ test('rebuild 报告进度', async () => {
   const progress: [number, number][] = [];
   rebuild({ projectsDir, dataDir }, { progress: (done, total) => progress.push([done, total]) });
   expect(progress.at(-1)).toEqual([1, 1]);
+});
+
+test('CLAUDE_CANVAS_CODEX_DIR 指向存在的目录时 start 读取 Codex 会话文件并推导出 codex 会话', async () => {
+  const codexDir = path.join(tmp, 'codex', 'sessions');
+  const rel = rolloutRel('019a0000-0000-7000-8000-00000000000a');
+  await fs.mkdir(path.join(codexDir, ...rel.split('/').slice(0, -1)), { recursive: true });
+  await fs.writeFile(
+    path.join(codexDir, ...rel.split('/')),
+    rollout(sessionMetaLine({ id: '019a0000-0000-7000-8000-00000000000a', cwd: path.join(tmp, 'work') }), taskStarted('t1')),
+  );
+  vi.stubEnv('CLAUDE_CANVAS_CODEX_DIR', codexDir);
+  const app = await launch();
+  await vi.waitFor(
+    async () => {
+      const diag = (await (await fetch(`${app.url}/api/diagnostics`)).json()) as { files: { path: string }[] };
+      expect(diag.files.map((f) => f.path)).toContain(`codex:${rel}`);
+    },
+    { timeout: 5000 },
+  );
+  await stop(app);
+  const s = openStore(dbPath());
+  try {
+    expect(s.rawForSession('019a0000-0000-7000-8000-00000000000a').map((e) => e.origin)).toEqual(['codex', 'codex']);
+    expect(s.getSession('019a0000-0000-7000-8000-00000000000a')).toMatchObject({ origin: 'codex', status: 'running' });
+  } finally {
+    s.close();
+  }
+  rebuild({ projectsDir, dataDir }); // the Codex source is constructed for rebuild too
 });

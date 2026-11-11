@@ -1,20 +1,32 @@
+import path from 'node:path';
 import chokidar from 'chokidar';
 import type { Config } from '../../config.js';
 import type { Pipeline } from '../../pipeline.js';
 
 /**
- * Watches projectsDir with chokidar and, independently, rescans hot files every `rescanMs` and lists the whole
- * directory every `fullScanMs`, so that missed file-system events (common on Windows and network drives) are still
- * picked up.
+ * Watches the root directory of each of the pipeline's file sources with chokidar (one watcher per source, at the
+ * source's depth) and, independently, rescans hot files every `rescanMs` and lists every source's files every
+ * `fullScanMs`, so that missed file-system events (common on Windows and network drives) are still picked up.
  */
 export function startWatcher(pipeline: Pipeline, config: Config): { ready: Promise<void>; close(): Promise<void> } {
   let closed = false;
   const swallow = (): void => {};
-  const watcher = chokidar.watch(config.projectsDir, { ignoreInitial: true, depth: 3 });
   const onFile = (file: string): void => {
     if (!closed) void pipeline.ingestFile(file).catch(swallow);
   };
-  watcher.on('add', onFile).on('change', onFile).on('error', swallow);
+  const watchers = pipeline.fileSources().flatMap((source) => [
+    chokidar.watch(source.rootDir, { ignoreInitial: true, depth: source.watchDepth }).on('add', onFile).on('change', onFile).on('error', swallow),
+    // Index files may live outside rootDir (Codex's session_index.jsonl): watch each one's directory, that file only.
+    ...(source.indexFiles?.() ?? []).map((file) => {
+      const target = path.resolve(file);
+      const dir = path.dirname(target);
+      return chokidar
+        .watch(dir, { ignoreInitial: true, depth: 0, ignored: (p: string) => path.resolve(p) !== dir && path.resolve(p) !== target })
+        .on('add', onFile)
+        .on('change', onFile)
+        .on('error', swallow);
+    }),
+  ]);
 
   // Two cadences on one timer, never overlapping: the hot-set rescan every rescanMs, and a full scan (directory
   // listing: missed files, deletions) once fullScanMs has passed since the last one.
@@ -29,10 +41,13 @@ export function startWatcher(pipeline: Pipeline, config: Config): { ready: Promi
     });
   }, config.rescanMs);
 
-  const watcherReady = new Promise<void>((resolve) => {
-    watcher.once('ready', () => resolve());
-  });
-  const ready = Promise.all([watcherReady, pipeline.scanAll()]).then(() => undefined);
+  const watchersReady = watchers.map(
+    (w) =>
+      new Promise<void>((resolve) => {
+        w.once('ready', () => resolve());
+      }),
+  );
+  const ready = Promise.all([...watchersReady, pipeline.scanAll()]).then(() => undefined);
 
   return {
     ready,
@@ -41,7 +56,7 @@ export function startWatcher(pipeline: Pipeline, config: Config): { ready: Promi
       clearInterval(timer);
       await ready.catch(swallow);
       await rescanning;
-      await watcher.close();
+      await Promise.all(watchers.map((w) => w.close()));
     },
   };
 }
