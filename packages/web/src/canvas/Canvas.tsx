@@ -344,7 +344,9 @@ function useFollow(snapshot: CanvasSnapshot) {
     clearTimeout(timer.current);
     timer.current = setTimeout(() => { programmatic.current = false; }, PROGRAMMATIC_TIMEOUT);
     void setCenter(tx, ty - (FOLLOW_LIFT * heightRef.current) / zoom, duration > 0 ? { zoom, duration } : { zoom });
-  }, [following, ready, tx, ty, setCenter, getZoom]);
+    // `height`: the canvas is resized when a panel opens or closes under it (the waterfall, the replay bar); what was
+    // centred before is then off centre, or out of sight.
+  }, [following, ready, tx, ty, height, setCenter, getZoom]);
 
   const stop = useCallback(() => setFollowing(false), []);
   const check = (vp: Viewport) => {
