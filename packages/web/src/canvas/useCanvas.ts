@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 
 import type { Graph, Usage } from '@claude-canvas/shared';
 import type { LiveSession } from '../client';
 import { createThrottle } from '../throttle';
-import { groupInput, placeAgentGroups, stackTurns, turnInput, type Box, type TurnLayout } from './layout';
+import { groupInput, placeAgentGroups, wrapTurns, turnInput, type Box, type TurnLayout } from './layout';
 import { createBrowserLayoutWorker, createLayoutClient, type LayoutClient } from './layoutClient';
 import { clampToRange, graphAt, replayRange, turnMarks, usageTotal, type ReplayRange } from './replay';
 import { createCompactor, type CompactResult } from './compact';
@@ -318,7 +318,7 @@ export function createCanvasModel(
     const inputs = view.turns.map((t) => turnInput(view, t, sizes)).filter((x) => x.nodes.length > 0);
     const layouts = await Promise.all(inputs.map((x) => layout.layout(x)));
     if (disposed) return null;
-    const stacked = stackTurns(layouts);
+    const stacked = wrapTurns(layouts);
     const { positions, containerBoxes } = placeAgentGroups(stacked, placed.reverse()); // outer groups first
     return { positions, turnBoxes: stacked.turnBoxes, containerBoxes };
   };

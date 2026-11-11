@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProper
 import {
   Background,
   BackgroundVariant,
+  BaseEdge,
   Controls,
   Panel,
   MarkerType,
@@ -12,12 +13,15 @@ import {
   useReactFlow,
   useStore,
   type Edge,
+  type EdgeProps,
+  type EdgeTypes,
   type NodeHandle,
   type Viewport,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import './canvas.css';
-import { TURN_HEADER } from './layout';
+import { TURN_HEADER, TURN_MIN_WIDTH, type Box } from './layout';
+import { columnGapX, isColumnWrap, roundedPath, sideLink, turnLink } from './edges';
 import { followTarget, resumeZoom, viewportMoved } from './follow';
 import { sizeOf } from './sizes';
 import { edgeZ, groupDepths, HEADER_Z, nodeZ } from './stacking';
@@ -60,7 +64,7 @@ const EDGE_COLOR = { sequence: '#b3a8d6', fork: '#ff8fc0' } as const;
 const CHAIN_COLOR = '#ffb703';
 /** Header strip height: the turn's reserved TURN_HEADER minus a small gap above its first node. */
 const HEADER_HEIGHT = TURN_HEADER - 6;
-const HEADER_MIN_WIDTH = 200;
+const HEADER_MIN_WIDTH = TURN_MIN_WIDTH;
 const HEADER_PREFIX = 'cc-header:';
 
 type Pos = { x: number; y: number };
@@ -257,8 +261,12 @@ function useFlowNodes(
  * React Flow edges between drawn nodes. An edge out of a node with two or more outgoing edges is drawn in the fork
  * colour; an edge into a running or awaiting-permission node is animated.
  */
-function useFlowEdges({ view, positions }: Pick<FlowInputs, 'view' | 'positions'>, chain: UpstreamChain, progressing: Progressing): Edge[] {
-  type Cached = { src: ViewEdge; animated: boolean; fork: boolean; zIndex: number; highlight: Highlight; edge: Edge };
+function useFlowEdges(
+  { view, positions, turnBoxes, containerBoxes, layoutMode }: FlowInputs, chain: UpstreamChain, progressing: Progressing,
+): Edge[] {
+  type Cached = {
+    src: ViewEdge; animated: boolean; fork: boolean; zIndex: number; highlight: Highlight; path: string | null; edge: Edge;
+  };
   const cache = useRef(new Map<string, Cached>());
   const last = useRef<Edge[] | null>(null);
   return useMemo(() => {
@@ -268,6 +276,37 @@ function useFlowEdges({ view, positions }: Pick<FlowInputs, 'view' | 'positions'
     const forks = forkSources(view.edges, (id) => view.nodes.get(id)?.type === 'earlier');
     const depths = groupDepths(view);
     const active = chainActive(view, chain);
+    // Which turn / agent group each drawn node belongs to: an edge between two turns, or between two columns of a
+    // folded group, is routed around the nodes instead of top-to-bottom.
+    const turnOf = new Map<string, string>();
+    const groupOf = new Map<string, readonly string[]>();
+    for (const t of view.turns) for (const id of t.nodeIds) { turnOf.set(id, t.key); groupOf.set(id, t.nodeIds); }
+    for (const g of view.agentGroups) for (const id of g.nodeIds) groupOf.set(id, g.nodeIds);
+    const rectOf = (id: string): Box | null => {
+      const pos = positions[id];
+      const vn = view.nodes.get(id);
+      if (!pos || !vn) return null;
+      const size = (vn.type === 'node' && vn.expanded ? containerBoxes[id] : undefined) ?? sizeOf(vn, layoutMode);
+      return { x: pos.x, y: pos.y, width: size.width, height: size.height };
+    };
+    const routed = (e: ViewEdge): string | null => {
+      const [a, b] = [rectOf(e.from), rectOf(e.to)];
+      if (!a || !b) return null;
+      const [ta, tb] = [turnOf.get(e.from), turnOf.get(e.to)];
+      if (ta !== undefined && tb !== undefined && ta !== tb) {
+        const [boxA, boxB] = [turnBoxes[ta], turnBoxes[tb]];
+        return boxA && boxB ? roundedPath(turnLink(a, b, boxA, boxB)) : null;
+      }
+      const group = groupOf.get(e.from);
+      if (!group || group !== groupOf.get(e.to) || !isColumnWrap(a, b)) return null;
+      const rects: Box[] = [];
+      for (const id of group) {
+        const r = rectOf(id);
+        if (r) rects.push(r);
+      }
+      const gapX = columnGapX(a, rects);
+      return gapX === null ? null : roundedPath(sideLink(a, b, gapX));
+    };
     for (const e of view.edges) {
       if (!positions[e.from] || !positions[e.to]) continue;
       const target = view.nodes.get(e.to);
@@ -278,30 +317,38 @@ function useFlowEdges({ view, positions }: Pick<FlowInputs, 'view' | 'positions'
       const highlight: Highlight = !active ? 'none' : chain.edgeIds.has(e.id) ? 'chain' : 'dim';
       // Inside a container: above its background, below the nodes of the same group; chain edges above dimmed ones.
       const zIndex = edgeZ(view, depths, e, highlight === 'chain');
+      const path = routed(e);
       const old = prev.get(e.id);
       let edge: Edge;
       if (old && old.animated === animated && old.fork === fork && old.zIndex === zIndex && old.highlight === highlight
-        && old.src.from === e.from && old.src.to === e.to) {
+        && old.path === path && old.src.from === e.from && old.src.to === e.to) {
         edge = old.edge;
       } else {
         const onChain = highlight === 'chain';
         const color = onChain ? CHAIN_COLOR : fork ? EDGE_COLOR.fork : EDGE_COLOR.sequence;
         const hl = highlightClass(highlight);
         edge = {
-          id: e.id, source: e.from, target: e.to, type: 'smoothstep', animated, zIndex,
+          id: e.id, source: e.from, target: e.to, animated, zIndex,
+          ...(path === null ? { type: 'smoothstep' } : { type: 'routed', data: { path } }),
           selectable: false, focusable: false,
-          className: `cc-edge cc-edge-${fork ? 'fork' : 'sequence'}${hl !== '' ? ` ${hl}` : ''}`,
+          className: `cc-edge cc-edge-${fork ? 'fork' : 'sequence'}${path !== null ? ' cc-edge-routed' : ''}${hl !== '' ? ` ${hl}` : ''}`,
           style: { stroke: color, strokeWidth: onChain ? 4 : 2.25, strokeLinecap: 'round' },
           markerEnd: { type: MarkerType.ArrowClosed, color, width: 13, height: 13 },
         };
       }
-      next.set(e.id, { src: e, animated, fork, zIndex, highlight, edge });
+      next.set(e.id, { src: e, animated, fork, zIndex, highlight, path, edge });
       out.push(edge);
     }
     cache.current = next;
     return (last.current = sameElements(last.current, out));
-  }, [view, positions, chain, progressing]);
+  }, [view, positions, turnBoxes, containerBoxes, layoutMode, chain, progressing]);
 }
+
+/** An edge drawn along a path computed from the layout (see `routed` in useFlowEdges), not between the handles. */
+function RoutedEdge({ id, data, style, markerEnd }: EdgeProps) {
+  return <BaseEdge id={id} path={(data as { path: string }).path} style={style} markerEnd={markerEnd} />;
+}
+const edgeTypes: EdgeTypes = { routed: RoutedEdge };
 
 function miniMapColor(n: FlowNode): string {
   if (n.type === 'graphNode') return nodeColor(n.data.node);
@@ -524,6 +571,7 @@ function CanvasInner({
         nodes={nodes}
         edges={edges}
         nodeTypes={nodeTypes}
+        edgeTypes={edgeTypes}
         onNodeClick={onNodeClick}
         onPaneClick={onPaneClick}
         onMoveStart={follow.onMoveStart}

@@ -3,7 +3,8 @@ import ELK from 'elkjs/lib/elk.bundled.js';
 import { emptyGraph, type Graph, type GraphEdge, type GraphNode, type NodeKind } from '@claude-canvas/shared';
 import { agentGroupKey, buildView, type AgentGroup, type CanvasView } from '../src/canvas/view';
 import {
-  groupInput, layoutTurn, placeAgentGroups, stackTurns, turnInput, turnSignature, TURN_GAP, TURN_HEADER, type ElkLike, type TurnLayout,
+  groupInput, layoutTurn, placeAgentGroups, wrapColumns, wrapTurns, turnInput, turnSignature, COLUMN_GAP, ROW_WIDTH, TURN_GAP, TURN_GAP_X, TURN_HEADER,
+  TURN_MIN_WIDTH, type ElkLike, type TurnLayout, type TurnLayoutInput,
 } from '../src/canvas/layout';
 import { containerSize, sizeOf } from '../src/canvas/sizes';
 
@@ -51,20 +52,6 @@ test('没有边的多个节点也不重叠（占位节点尚未接上）', async
   expect(Math.abs(a.x - b.x) >= 240 || Math.abs(a.y - b.y) >= 52).toBe(true);
 });
 
-test('stackTurns：轮次按锚点居中堆叠；给最后一个轮次加高不改变前面轮次的任何坐标', () => {
-  const t1: TurnLayout = { key: 't1', width: 300, height: 100, anchorX: 150, positions: { a: { x: 0, y: 0 }, b: { x: 60, y: 48 } } };
-  const t2: TurnLayout = { key: 't2', width: 500, height: 80, anchorX: 250, positions: { c: { x: 130, y: 0 } } };
-  const s = stackTurns([t1, t2]);
-  expect(s.turnBoxes.t1).toEqual({ x: -150, y: 0, width: 300, height: TURN_HEADER + 100 });
-  expect(s.positions.a).toEqual({ x: -150, y: TURN_HEADER });
-  expect(s.turnBoxes.t2!.y).toBe(TURN_HEADER + 100 + TURN_GAP);
-  expect(s.positions.c).toEqual({ x: -250 + 130, y: TURN_HEADER + 100 + TURN_GAP + TURN_HEADER });
-  const s2 = stackTurns([t1, { ...t2, height: 400, width: 900, anchorX: 450, positions: { c: { x: 330, y: 0 }, d: { x: 0, y: 300 } } }]);
-  expect(s2.positions.a).toEqual(s.positions.a);
-  expect(s2.positions.b).toEqual(s.positions.b);
-  expect(s2.turnBoxes.t1).toEqual(s.turnBoxes.t1);
-});
-
 test('turnInput 只带本轮次内部的边；turnSignature 随节点或边变化', () => {
   const v = buildView(twoTurnsLinked(), new Map());
   const input = turnInput(v, v.turns[0]!);
@@ -74,22 +61,6 @@ test('turnInput 只带本轮次内部的边；turnSignature 随节点或边变�
   expect(turnSignature(input)).toBe(turnSignature(turnInput(v, v.turns[0]!)));
   expect(turnSignature({ ...input, nodes: [...input.nodes, n('z')] })).not.toBe(turnSignature(input));
   expect(turnSignature({ ...input, edges: input.edges.slice(1) })).not.toBe(turnSignature(input));
-});
-
-test('stackTurns：每个轮次的第一个节点中心都在 x = 0（直的主干），加高最后一个轮次不改前面的坐标', () => {
-  // t1: first node a (width 240) starts at relative x 400 -> centre 520; t2: first node c (width 280) at 0 -> centre 140.
-  const t1: TurnLayout = { key: 't1', width: 900, height: 100, anchorX: 520, positions: { a: { x: 400, y: 0 }, b: { x: 0, y: 48 } } };
-  const t2: TurnLayout = { key: 't2', width: 600, height: 80, anchorX: 140, positions: { c: { x: 0, y: 0 } } };
-  const s = stackTurns([t1, t2]);
-  expect(s.positions.a!.x + 120).toBe(0);
-  expect(s.positions.c!.x + 140).toBe(0);
-  expect(s.turnBoxes.t1!.x + 520).toBe(0);
-  expect(s.turnBoxes.t2!.x + 140).toBe(0);
-  const s2 = stackTurns([t1, { ...t2, height: 300, width: 1200, anchorX: 700, positions: { c: { x: 560, y: 0 }, d: { x: 0, y: 200 } } }]);
-  expect(s2.positions.a).toEqual(s.positions.a);
-  expect(s2.positions.b).toEqual(s.positions.b);
-  expect(s2.turnBoxes.t1).toEqual(s.turnBoxes.t1);
-  expect(s2.positions.c!.x + 140).toBe(0);
 });
 
 test('layoutTurn 的 anchorX 是第一个输入节点的水平中心', async () => {
@@ -177,16 +148,6 @@ test('placeAgentGroups：容器没有位置时，其分组（及更深的分组�
   expect(r.containerBoxes).toEqual({});
 });
 
-test('stackTurns：没有节点的轮次不占纵向空间，也没有轮次框', () => {
-  const t1: TurnLayout = { key: 't1', width: 300, height: 100, anchorX: 150, positions: { a: { x: 0, y: 0 } } };
-  const empty: TurnLayout = { key: 't2', width: 0, height: 0, anchorX: 0, positions: {} };
-  const t3: TurnLayout = { key: 't3', width: 300, height: 80, anchorX: 150, positions: { c: { x: 0, y: 0 } } };
-  const s = stackTurns([t1, empty, t3]);
-  expect(s.turnBoxes.t2).toBeUndefined();
-  expect(s.turnBoxes.t3!.y).toBe(TURN_HEADER + 100 + TURN_GAP);
-  expect(s.turnBoxes.t3).toEqual(stackTurns([t1, t3]).turnBoxes.t3);
-});
-
 test('因果视角下思考节点用大尺寸，其余尺寸不变', () => {
   const nodes = [node('th', 'thinking', 't1', 1), node('tl', 'tool', 't1', 2)];
   const g: Graph = { ...emptyGraph(), nodes: Object.fromEntries(nodes.map((x) => [x.id, x])), edges: {} };
@@ -227,4 +188,123 @@ test('placeAgentGroups：容器被撑到最小宽度时，较窄的内部布局�
   expect(r.containerBoxes.s1).toEqual({ x: 100, y: 200, width: 260, height: 140 });
   // (260 - 2 * 16 - 100) / 2 = 64 to the right of the padding.
   expect(r.positions.i1).toEqual({ x: 100 + 16 + 64, y: 284 });
+});
+
+const tl = (key: string, width: number, height: number, ids: string[] = [key + 'n']): TurnLayout => ({
+  key, width, height, anchorX: width / 2, positions: Object.fromEntries(ids.map((id, i) => [id, { x: 0, y: i * 10 }])),
+});
+
+test('wrapTurns：同一行从左到右、顶部对齐；放不下就换行，下一行在本行最高的轮次之下', () => {
+  const s = wrapTurns([tl('t1', 300, 100), tl('t2', 300, 240), tl('t3', 300, 80)], 700);
+  expect(s.turnBoxes.t1).toEqual({ x: 0, y: 0, width: 300, height: TURN_HEADER + 100 });
+  expect(s.turnBoxes.t2).toEqual({ x: 300 + TURN_GAP_X, y: 0, width: 300, height: TURN_HEADER + 240 });
+  expect(s.turnBoxes.t3).toEqual({ x: 0, y: TURN_HEADER + 240 + TURN_GAP, width: 300, height: TURN_HEADER + 80 });
+  expect(s.positions.t2n).toEqual({ x: 300 + TURN_GAP_X, y: TURN_HEADER });
+  expect(s.positions.t3n).toEqual({ x: 0, y: TURN_HEADER + 240 + TURN_GAP + TURN_HEADER });
+});
+
+test('wrapTurns：默认一行放得下四张大纲卡片，第五张换行', () => {
+  const s = wrapTurns(['a', 'b', 'c', 'd', 'e'].map((k) => tl(k, 340, 60)));
+  expect(['a', 'b', 'c', 'd'].map((k) => s.turnBoxes[k]!.y)).toEqual([0, 0, 0, 0]);
+  expect(s.turnBoxes.d!.x + 340).toBe(ROW_WIDTH);
+  expect(s.turnBoxes.e).toEqual({ x: 0, y: TURN_HEADER + 60 + TURN_GAP, width: 340, height: TURN_HEADER + 60 });
+});
+
+test('wrapTurns：比一行还宽的轮次独占一行；窄于最小宽度的轮次在格子里居中', () => {
+  const s = wrapTurns([tl('wide', 2000, 50), tl('thin', 100, 50), tl('next', 300, 50)], 700);
+  expect(s.turnBoxes.wide).toEqual({ x: 0, y: 0, width: 2000, height: TURN_HEADER + 50 });
+  expect(s.turnBoxes.thin).toEqual({ x: 0, y: TURN_HEADER + 50 + TURN_GAP, width: TURN_MIN_WIDTH, height: TURN_HEADER + 50 });
+  expect(s.positions.thinn!.x).toBe((TURN_MIN_WIDTH - 100) / 2);
+  expect(s.turnBoxes.next!.x).toBe(TURN_MIN_WIDTH + TURN_GAP_X);
+});
+
+test('wrapTurns：给最后一个轮次加高或加宽不改变前面轮次的任何坐标', () => {
+  const head = [tl('t1', 300, 100, ['a', 'b']), tl('t2', 300, 80, ['c'])];
+  const s = wrapTurns([...head, tl('t3', 300, 80, ['d'])], 1000);
+  const s2 = wrapTurns([...head, tl('t3', 900, 4000, ['d', 'e'])], 1000);
+  for (const id of ['a', 'b', 'c']) expect(s2.positions[id]).toEqual(s.positions[id]);
+  expect(s2.turnBoxes.t1).toEqual(s.turnBoxes.t1);
+  expect(s2.turnBoxes.t2).toEqual(s.turnBoxes.t2);
+  expect(s2.turnBoxes.t3!.x).toBe(0); // no longer fits the first row
+});
+
+test('wrapTurns：没有节点的轮次不占空间，也没有轮次框', () => {
+  const empty: TurnLayout = { key: 't2', width: 0, height: 0, anchorX: 0, positions: {} };
+  const s = wrapTurns([tl('t1', 300, 100), empty, tl('t3', 300, 80)]);
+  expect(s.turnBoxes.t2).toBeUndefined();
+  expect(s.turnBoxes.t3).toEqual(wrapTurns([tl('t1', 300, 100), tl('t3', 300, 80)]).turnBoxes.t3);
+});
+
+/** A chain of `count` nodes (240 x 50) laid out top to bottom with a 30 px gap: node i at y = i * 80. */
+function chain(count: number): { layout: TurnLayout; input: TurnLayoutInput } {
+  const ids = Array.from({ length: count }, (_, i) => `n${i}`);
+  return {
+    input: { key: 't', nodes: ids.map((id) => n(id, 240, 50)), edges: ids.slice(1).map((id, i) => ({ id: `${ids[i]}->${id}`, from: ids[i]!, to: id })) },
+    layout: { key: 't', width: 240, height: count * 80 - 30, anchorX: 120, positions: Object.fromEntries(ids.map((id, i) => [id, { x: 0, y: i * 80 }])) },
+  };
+}
+
+test('wrapColumns：放得下的布局原样返回', () => {
+  const { layout, input } = chain(4);
+  expect(wrapColumns(layout, input, 400)).toBe(layout);
+});
+
+test('wrapColumns：长链折成并排的几列，每列从顶部开始、不超过上限，顺序是先上后下、先左后右', () => {
+  const { layout, input } = chain(10); // 770 tall
+  const w = wrapColumns(layout, input, 300); // 4 nodes per column: 3 * 80 + 50 = 290
+  expect(w.positions.n0).toEqual({ x: 0, y: 0 });
+  expect(w.positions.n3).toEqual({ x: 0, y: 240 });
+  expect(w.positions.n4).toEqual({ x: 240 + COLUMN_GAP, y: 0 });
+  expect(w.positions.n8).toEqual({ x: 2 * (240 + COLUMN_GAP), y: 0 });
+  expect(w.positions.n9).toEqual({ x: 2 * (240 + COLUMN_GAP), y: 80 });
+  expect(w.height).toBe(290);
+  expect(w.width).toBe(3 * 240 + 2 * COLUMN_GAP);
+  expect(w.anchorX).toBe(120);
+});
+
+test('wrapColumns：分叉到汇合之间不拆开，整块留在同一列', () => {
+  // a -> {b1, b2} -> c -> d, each layer 80 apart; the limit would cut between the fork layer and c.
+  const input: TurnLayoutInput = {
+    key: 't', nodes: ['a', 'b1', 'b2', 'c', 'd'].map((id) => n(id, 240, 50)),
+    edges: [['a', 'b1'], ['a', 'b2'], ['b1', 'c'], ['b2', 'c'], ['c', 'd']].map(([from, to]) => ({ id: `${from}->${to}`, from: from!, to: to! })),
+  };
+  const layout: TurnLayout = {
+    key: 't', width: 504, height: 290, anchorX: 252,
+    positions: { a: { x: 132, y: 0 }, b1: { x: 0, y: 80 }, b2: { x: 264, y: 80 }, c: { x: 132, y: 160 }, d: { x: 132, y: 240 } },
+  };
+  const w = wrapColumns(layout, input, 150);
+  // a..c is one piece (two edges cross every line inside it): it gets a column of its own although it is 210 tall.
+  expect(w.positions.a).toEqual({ x: 132, y: 0 });
+  expect(w.positions.b2).toEqual({ x: 264, y: 80 });
+  expect(w.positions.c).toEqual({ x: 132, y: 160 });
+  expect(w.positions.d).toEqual({ x: 504 + COLUMN_GAP, y: 0 });
+  expect(w.width).toBe(504 + COLUMN_GAP + 240);
+  expect(w.height).toBe(210);
+});
+
+test('wrapColumns：一个节点本身就超过上限（展开的容器）时不拆，前后照常分列', () => {
+  const input: TurnLayoutInput = {
+    key: 't', nodes: [n('a', 240, 50), n('big', 400, 900), n('z', 240, 50)],
+    edges: [{ id: 'a->big', from: 'a', to: 'big' }, { id: 'big->z', from: 'big', to: 'z' }],
+  };
+  const layout: TurnLayout = { key: 't', width: 400, height: 1090, anchorX: 200, positions: { a: { x: 80, y: 0 }, big: { x: 0, y: 80 }, z: { x: 80, y: 1010 } } };
+  const w = wrapColumns(layout, input, 300);
+  expect(w.positions.a).toEqual({ x: 0, y: 0 });
+  expect(w.positions.big).toEqual({ x: 240 + COLUMN_GAP, y: 0 });
+  expect(w.positions.z).toEqual({ x: 240 + COLUMN_GAP + 400 + COLUMN_GAP, y: 0 });
+  expect(w.height).toBe(900);
+});
+
+test('layoutTurn：很长的链经过 elk 之后被折成多列，节点互不重叠', async () => {
+  const { input } = chain(40);
+  const l = await layoutTurn(elk, input);
+  expect(l.height).toBeLessThanOrEqual(720);
+  expect(l.width).toBeGreaterThan(240);
+  const boxes = input.nodes.map((x) => ({ ...l.positions[x.id]!, w: x.width, h: x.height }));
+  for (let i = 0; i < boxes.length; i++) {
+    for (let j = i + 1; j < boxes.length; j++) {
+      const [a, b] = [boxes[i]!, boxes[j]!];
+      expect(a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y).toBe(true);
+    }
+  }
 });
