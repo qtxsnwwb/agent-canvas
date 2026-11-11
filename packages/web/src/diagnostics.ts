@@ -81,10 +81,11 @@ export interface OriginHooks {
 
 /**
  * The hooks section, one entry per origin (ORIGINS order): Claude Code always (the page looks as before on a
- * Claude-only install), Codex once its sessions directory is configured, or any Codex hook event or file is known.
+ * Claude-only install), Codex once its sessions directory exists, or any Codex hook event or file is known (the
+ * default directory is configured even where Codex is not installed, so being configured alone says nothing).
  */
 export function hooksByOrigin(d: Diagnostics): OriginHooks[] {
-  const codexKnown = d.codex.sessionsDir !== null || d.files.some((f) => fileOrigin(f.path) === 'codex');
+  const codexKnown = d.codex.sessionsDirExists || d.files.some((f) => fileOrigin(f.path) === 'codex');
   const out: OriginHooks[] = [];
   for (const origin of ORIGINS) {
     const events = d.hookEvents.filter((e) => e.origin === origin);

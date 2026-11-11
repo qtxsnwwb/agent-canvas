@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest';
 import type { Project } from '@claude-canvas/shared';
-import { effectiveOriginFilter, heroTotals, matchesOrigin, ORIGIN_FILTER_KEY, ORIGIN_FILTER_OPTIONS, originLook, parseOriginFilter, pickProject, projectCountsExact, projectLook, projectName, relativeTime, shownProjectId, showOriginFilter, stripProjects, visibleProjects } from '../src/home';
+import { effectiveOriginFilter, filterEmptyMessage, heroTotals, matchesOrigin, ORIGIN_FILTER_KEY, ORIGIN_FILTER_OPTIONS, originLook, parseOriginFilter, pickProject, projectCountsExact, projectLook, projectName, relativeTime, shownProjectId, showOriginFilter, stripProjects, visibleProjects } from '../src/home';
 
 const project = (id: string, sessionCount: number, activeSessionCount: number): Project => ({ id, cwd: null, sessionCount, activeSessionCount, origins: ['claude'] });
 
@@ -82,6 +82,15 @@ test('stripProjects：可见的项目，加上被筛掉但正被选中的那个�
   expect(stripProjects(ps, 'codex', 'c').map((p) => p.id)).toEqual(['b', 'c']);
   expect(stripProjects(ps, 'codex', 'missing').map((p) => p.id)).toEqual(['b']);
   expect(stripProjects(ps, 'all', 'a').map((p) => p.id)).toEqual(['a', 'b', 'c']);
+});
+
+test('filterEmptyMessage：筛选后一个项目都不剩时说明是哪个筛选；有项目或没筛选时不说', () => {
+  const ps = [mixed('a', ['claude']), mixed('c', ['claude'])];
+  expect(filterEmptyMessage(ps, 'codex')).toBe('没有 Codex 的项目');
+  expect(filterEmptyMessage([mixed('b', ['codex'])], 'claude')).toBe('没有 Claude Code 的项目');
+  expect(filterEmptyMessage(ps, 'claude')).toBeNull();
+  expect(filterEmptyMessage(ps, 'all')).toBeNull();
+  expect(filterEmptyMessage([], 'codex')).toBeNull(); // no project at all: the page has its own message
 });
 
 test('shownProjectId：地址里的项目优先（即使被筛掉），否则只在可见项目里挑', () => {

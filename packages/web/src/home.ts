@@ -43,6 +43,12 @@ export function visibleProjects(projects: readonly Project[], filter: OriginFilt
   return filter === 'all' ? [...projects] : projects.filter((p) => p.origins.includes(filter));
 }
 
+/** Shown under the strip when the filter leaves no project (but there are projects): which filter did it. */
+export function filterEmptyMessage(projects: readonly Project[], filter: OriginFilter): string | null {
+  if (filter === 'all' || projects.length === 0 || visibleProjects(projects, filter).length > 0) return null;
+  return `没有 ${ORIGIN_LOOK[filter].label} 的项目`;
+}
+
 /** The project strip: the visible projects plus the selected one when the filter hides it (order kept). */
 export function stripProjects(projects: readonly Project[], filter: OriginFilter, selectedId: string | null): Project[] {
   return projects.filter((p) => p.id === selectedId || filter === 'all' || p.origins.includes(filter));

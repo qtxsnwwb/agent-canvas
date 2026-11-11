@@ -3,7 +3,7 @@ import { SEARCH_MIN_CHARS, type Project, type SearchField, type SearchHit, type 
 import { api, openLiveSessions } from '../client';
 import { sessionStatusView } from '../labels';
 import {
-  effectiveOriginFilter, heroTotals, matchesOrigin, ORIGIN_FILTER_KEY, ORIGIN_FILTER_OPTIONS, originLook, parseOriginFilter,
+  effectiveOriginFilter, filterEmptyMessage, heroTotals, matchesOrigin, ORIGIN_FILTER_KEY, ORIGIN_FILTER_OPTIONS, originLook, parseOriginFilter,
   projectCountsExact, projectLook, projectName, relativeTime, shownProjectId, showOriginFilter, stripProjects,
   type OriginFilter,
 } from '../home';
@@ -185,7 +185,7 @@ export function Home({ projectId }: { projectId: string | null }) {
   return (
     <>
     <div className="hero">
-      <h1><span className="hero-wave" aria-hidden="true">👋</span> Claude 现在在忙什么？</h1>
+      <h1><span className="hero-wave" aria-hidden="true">👋</span> 现在都在忙什么？</h1>
       <p className="hero-sub">
         {totals.projects} 个项目
         {filter !== 'all' && <> · 只看 {originLook(filter).label}</>}
@@ -215,6 +215,7 @@ export function Home({ projectId }: { projectId: string | null }) {
       {showOriginFilter(projects) && <OriginFilterSwitch value={chosenFilter} onChange={chooseFilter} />}
       <nav className="project-strip" aria-label="项目">
         {projects.length === 0 && <p className="muted">还没有项目。在任意目录里用一次 Claude Code 或 Codex，它就会出现在这里。</p>}
+        {filterEmptyMessage(projects, filter) !== null && <p className="muted">{filterEmptyMessage(projects, filter)}</p>}
         {strip.map((p) => {
           const look = projectLook(p.id);
           const path = p.cwd ?? p.id;
