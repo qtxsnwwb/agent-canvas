@@ -10,6 +10,8 @@ import { confirmOnStreams, defaultSettingsFile, runHooksInstall, runHooksUninsta
 import { acquireLock } from './lock.js';
 import { NORMALIZER_VERSION } from './normalize/version.js';
 import { NORMALIZER_VERSION_KEY, Pipeline, REBUILD_FLAG } from './pipeline.js';
+import { ClaudeFileSource } from './sources/claude.js';
+import type { FileSource } from './sources/source.js';
 import { startWatcher } from './sources/transcript/watcher.js';
 import { openStore, type Store } from './store/store.js';
 
@@ -33,6 +35,11 @@ const USAGE = `Usage:
 function defaultWebDist(): string | null {
   const dir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'web', 'dist');
   return fs.existsSync(dir) && fs.statSync(dir).isDirectory() ? dir : null;
+}
+
+/** The session-file directories read for this configuration: Claude Code's projects directory. */
+export function fileSources(config: Config): FileSource[] {
+  return [new ClaudeFileSource(config.projectsDir)];
 }
 
 function resolveConfig(overrides: Partial<Config>): Config {
@@ -72,7 +79,7 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
   let pipeline: Pipeline;
   try {
     store = openStore(config.dbPath, options.log ? { log: options.log } : {});
-    pipeline = new Pipeline(store, config, { log: (line) => process.stderr.write(`${line}\n`) });
+    pipeline = new Pipeline(store, config, { log: (line) => process.stderr.write(`${line}\n`), sources: fileSources(config) });
     const reason = rebuildReason(store);
     if (reason !== null) {
       options.log?.(`claude-canvas rebuilding derived data (reason: ${reason})`);
@@ -119,7 +126,7 @@ export function rebuild(overrides: Partial<Config> = {}, options: { progress?: (
   try {
     const store = openStore(config.dbPath);
     try {
-      new Pipeline(store, config).rebuild(options.progress);
+      new Pipeline(store, config, { sources: fileSources(config) }).rebuild(options.progress);
     } finally {
       store.close();
     }

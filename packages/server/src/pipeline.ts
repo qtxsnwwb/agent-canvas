@@ -1,10 +1,10 @@
 import fsp from 'node:fs/promises';
-import path from 'node:path';
-import { STALE_AFTER_MS, type Change, type SeqChange } from '@claude-canvas/shared';
+import { STALE_AFTER_MS, type Change, type Origin, type SeqChange } from '@claude-canvas/shared';
 import type { Config } from './config.js';
-import { Normalizer } from './normalize/normalizer.js';
+import { NormalizerRegistry } from './normalize/registry.js';
 import { NORMALIZER_VERSION } from './normalize/version.js';
-import { classifyPath, classifyRelPath, relPath, type TranscriptFile } from './sources/transcript/paths.js';
+import { ClaudeFileSource } from './sources/claude.js';
+import { isPromise, originOfKey, type FileClass, type FileSource, type MaybePromise } from './sources/source.js';
 import { readNewLines } from './sources/transcript/reader.js';
 import type { RawEvent, Store, StoredRawEvent } from './store/store.js';
 
@@ -24,6 +24,13 @@ const LOG_EVERY_MS = 60_000;
 export interface PipelineOptions {
   /** Receives failure lines (stderr in the CLI). No conversation content is ever passed. */
   log?: (line: string) => void;
+  /** The directories of session files to read; default: Claude Code's projectsDir only (defaultSources). */
+  sources?: readonly FileSource[];
+}
+
+/** The sources a pipeline reads when none are given: Claude Code's projects directory. */
+export function defaultSources(config: Config): FileSource[] {
+  return [new ClaudeFileSource(config.projectsDir)];
 }
 /** meta keys */
 export const REBUILD_FLAG = 'rebuild_in_progress';
@@ -56,7 +63,9 @@ function topLevelType(text: string): string {
 }
 
 export class Pipeline {
-  private normalizer = new Normalizer();
+  /** One normalizer per origin; replaced wholesale by a rebuild (hydration checks identity to notice). */
+  private normalizer = new NormalizerRegistry();
+  private readonly sources: readonly FileSource[];
   private readonly listeners = new Set<Listener>();
   private readonly resyncListeners = new Set<ResyncListener>();
   /**
@@ -95,7 +104,13 @@ export class Pipeline {
     options: PipelineOptions = {},
   ) {
     this.log = options.log ?? (() => {});
+    this.sources = options.sources ?? defaultSources(config);
     this.dirty = new Set(store.dirtySessionIds());
+  }
+
+  /** The file sources this pipeline reads (the watcher watches each). */
+  fileSources(): readonly FileSource[] {
+    return this.sources;
   }
 
   /** True while the initial full scan or a rebuild is running. */
@@ -180,14 +195,21 @@ export class Pipeline {
   }
 
   /**
-   * `transcriptPath` is the payload's `transcript_path`: when it classifies as a session or agent file under
-   * projectsDir, its project is stored with the raw event (so replay reproduces it) and used for a new session.
+   * `transcriptPath` is the payload's `transcript_path`: when the source of `origin` knows it as a session or agent
+   * transcript, its project is stored with the raw event (so replay reproduces it) and used for a new session.
    */
-  ingestHook(eventName: string, sessionId: string | null, payload: string, transcriptPath?: string | null): void {
+  ingestHook(
+    eventName: string,
+    sessionId: string | null,
+    payload: string,
+    transcriptPath?: string | null,
+    origin: Origin = 'claude',
+  ): void {
     const receivedAt = new Date().toISOString();
-    const cls = typeof transcriptPath === 'string' && transcriptPath !== '' ? classifyPath(this.config.projectsDir, transcriptPath) : null;
-    const projectId = cls !== null && (cls.kind === 'session' || cls.kind === 'agent') ? cls.projectId : null;
-    const event: RawEvent = { source: 'hook', receivedAt, eventName, sessionId, payload, projectId };
+    const source = this.sourceFor(origin);
+    const projectId =
+      source !== null && typeof transcriptPath === 'string' && transcriptPath !== '' ? source.projectOfTranscript(transcriptPath) : null;
+    const event: RawEvent = { source: 'hook', origin, receivedAt, eventName, sessionId, payload, projectId };
     this.seed();
     if (this.lastHook === null || receivedAt > this.lastHook) this.lastHook = receivedAt;
     const key = `hook:${sessionId}`;
@@ -249,7 +271,14 @@ export class Pipeline {
     const files = await this.listFiles();
     const groups = new Map<string, { sessionId: string; files: string[] }>();
     for (const file of files) {
-      const cls = classifyPath(this.config.projectsDir, file);
+      let cls: FileClass | null;
+      try {
+        const classified = this.classifyFile(file);
+        cls = isPromise(classified) ? await classified : classified;
+      } catch (err) {
+        this.reportFailure(file, err);
+        continue;
+      }
       if (cls === null) continue;
       this.registerFile(cls.sessionId, file);
       const key = `${cls.projectId}\u0000${cls.sessionId}`;
@@ -264,7 +293,7 @@ export class Pipeline {
       }
       this.evictIfOld(sessionId);
     }
-    this.markDeletedSources(new Set(files.map((f) => this.rel(f))));
+    await this.markDeletedSources(new Set(files.map((f) => this.rel(f))));
   }
 
   /**
@@ -312,12 +341,12 @@ export class Pipeline {
   private rebuildAll(progress?: (done: number, total: number) => void): void {
     this.store.setMeta(REBUILD_FLAG, '1');
     this.store.clearDerived();
-    this.normalizer = new Normalizer();
+    this.normalizer = new NormalizerRegistry();
     this.lastTouch.clear();
     const ids = this.store.allSessionIdsInRaw();
     try {
       ids.forEach((id, i) => {
-        this.normalizer = new Normalizer();
+        this.normalizer = new NormalizerRegistry();
         const changes: Change[] = [];
         const unknown: [string, string][] = [];
         let after = 0;
@@ -337,12 +366,12 @@ export class Pipeline {
           for (const [type, sample] of unknown) this.store.bumpUnknown(type, sample);
           return changes;
         });
-        this.normalizer = new Normalizer(); // release this session before the next one
+        this.normalizer = new NormalizerRegistry(); // release this session before the next one
         if ((i + 1) % REBUILD_PROGRESS_EVERY === 0 || i + 1 === ids.length) progress?.(i + 1, ids.length);
       });
     } finally {
       // Sessions are re-hydrated on demand; leave nothing loaded-but-untracked.
-      this.normalizer = new Normalizer();
+      this.normalizer = new NormalizerRegistry();
       this.lastTouch.clear();
     }
     this.store.setMeta(NORMALIZER_VERSION_KEY, String(NORMALIZER_VERSION));
@@ -355,18 +384,10 @@ export class Pipeline {
     this.flagsChecked = false;
   }
 
-  /** Files under projectsDir that classifyPath recognizes, in stable order. */
+  /** The files every source lists (absolute paths), in stable order. */
   async listFiles(): Promise<string[]> {
-    let entries: string[];
-    try {
-      entries = await fsp.readdir(this.config.projectsDir, { recursive: true });
-    } catch {
-      return [];
-    }
-    return entries
-      .map((rel) => path.join(this.config.projectsDir, rel))
-      .filter((abs) => classifyPath(this.config.projectsDir, abs) !== null)
-      .sort();
+    const lists = await Promise.all(this.sources.map((s) => s.listFiles()));
+    return lists.flat().sort();
   }
 
   // ---------------------------------------------------------------- internals
@@ -413,9 +434,34 @@ export class Pipeline {
     return Date.now() - Date.parse(session.lastActivityAt) > STALE_AFTER_MS;
   }
 
-  /** Store key of a file: path relative to projectsDir with `/` separators. */
+  /** Store key of a file (see FileSource.keyOf); the absolute path when no source knows it. */
   private rel(absPath: string): string {
-    return relPath(this.config.projectsDir, absPath) ?? absPath;
+    return this.locate(absPath)?.key ?? absPath;
+  }
+
+  /** The source an absolute path belongs to and its key there (the first source that has a key for it). */
+  private locate(absPath: string): { source: FileSource; key: string } | null {
+    for (const source of this.sources) {
+      const key = source.keyOf(absPath);
+      if (key !== null) return { source, key };
+    }
+    return null;
+  }
+
+  /** The configured source of the origin a store key belongs to (told by its prefix), or null. */
+  private sourceOfKey(key: string): FileSource | null {
+    return this.sourceFor(originOfKey(key));
+  }
+
+  private sourceFor(origin: Origin): FileSource | null {
+    return this.sources.find((s) => s.origin === origin) ?? null;
+  }
+
+  /** Classification of an absolute path by its source (a promise only from a source that classifies asynchronously). */
+  private classifyFile(absPath: string): MaybePromise<FileClass | null> {
+    const hit = this.locate(absPath);
+    if (hit === null) return null;
+    return hit.source.classify(hit.key);
   }
 
   /** `file` is the relative store key. */
@@ -480,12 +526,19 @@ export class Pipeline {
   }
 
   private async doIngest(absPath: string): Promise<void> {
-    const cls = classifyPath(this.config.projectsDir, absPath);
+    const hit = this.locate(absPath);
+    if (hit === null) return;
+    const { source, key: file } = hit;
+    // A synchronous source (Claude Code) is not awaited: the read starts in the same tick as before.
+    const classified = source.classify(file);
+    const cls = isPromise(classified) ? await classified : classified;
     if (cls === null) return;
-    if (cls.kind === 'title' || cls.kind === 'agent_meta') return this.ingestMeta(absPath, cls);
+    if (cls.kind === 'title' || cls.kind === 'agent_meta') return this.ingestMeta(absPath, source, file, cls);
 
-    const agentId = cls.kind === 'agent' ? cls.agentId : null;
-    const file = this.rel(absPath);
+    const agentId = cls.kind === 'agent' ? (cls.agentId ?? null) : null;
+    const origin = source.origin;
+    // Stored with each line only when the key does not name the project, so replay never has to read the file.
+    const projectId = source.projectOfKey(file) === null ? cls.projectId : null;
     this.registerFile(cls.sessionId, absPath);
     for (;;) {
       let size: number;
@@ -508,7 +561,17 @@ export class Pipeline {
           const changes: Change[] = [];
           for (const { offset, text } of res.lines) {
             const recordType = topLevelType(text);
-            const event: RawEvent = { source: 'transcript', file, offset, line: text, recordType, sessionId: cls.sessionId, agentId };
+            const event: RawEvent = {
+              source: 'transcript',
+              origin,
+              file,
+              offset,
+              line: text,
+              recordType,
+              sessionId: cls.sessionId,
+              agentId,
+              projectId,
+            };
             if (this.store.insertRaw(event) === null) continue;
             const out = this.normalizer.apply(event, cls.projectId);
             changes.push(...out.changes);
@@ -531,7 +594,8 @@ export class Pipeline {
     }
   }
 
-  private async ingestMeta(absPath: string, cls: Extract<TranscriptFile, { kind: 'title' | 'agent_meta' }>): Promise<void> {
+  /** `file` is the store key of `absPath` in `source`. */
+  private async ingestMeta(absPath: string, source: FileSource, file: string, cls: FileClass): Promise<void> {
     let content: string;
     try {
       content = await fsp.readFile(absPath, 'utf8');
@@ -539,14 +603,13 @@ export class Pipeline {
       return;
     }
     const size = Buffer.byteLength(content);
-    const agentId = cls.kind === 'agent_meta' ? cls.agentId : null;
-    const file = this.rel(absPath);
+    const agentId = cls.kind === 'agent_meta' ? (cls.agentId ?? null) : null;
     this.registerFile(cls.sessionId, absPath);
     await this.enqueue(cls.sessionId, () => {
       // Compare against what is stored (not an in-memory cache) so the check survives restarts;
       // a file that was never recorded cannot have a stored copy, so skip the lookup.
       if (this.store.getOffset(file) > 0 && this.store.latestMeta(file) === content) return;
-      const event: RawEvent = { source: 'meta', file, sessionId: cls.sessionId, agentId, payload: content };
+      const event: RawEvent = { source: 'meta', origin: source.origin, file, sessionId: cls.sessionId, agentId, payload: content };
       this.atomically(
         cls.sessionId,
         () => {
@@ -675,9 +738,14 @@ export class Pipeline {
     }
   }
 
-  /** Derives the project from what is stored (relative path or the hook's stored projectId), never from projectsDir. */
+  /**
+   * Derives the project from what is stored (the event's stored projectId, else what its origin's source reads from the
+   * key alone), never from a directory or a file's content.
+   */
   private projectOf(ev: StoredRawEvent): string {
-    return ev.source === 'hook' ? (ev.projectId ?? UNKNOWN_PROJECT) : (classifyRelPath(ev.file)?.projectId ?? UNKNOWN_PROJECT);
+    if (ev.source === 'hook') return ev.projectId ?? UNKNOWN_PROJECT;
+    if (ev.source === 'transcript' && ev.projectId != null) return ev.projectId;
+    return this.sourceFor(ev.origin)?.projectOfKey(ev.file) ?? UNKNOWN_PROJECT;
   }
 
   private replayOne(ev: StoredRawEvent): Change[] {
@@ -753,23 +821,27 @@ export class Pipeline {
    * Flags sessions whose recorded source file is missing from the full scan's directory listing (data is kept; the
    * flag is sticky) and clears it for sessions whose file is back, including flags left over from a previous run.
    */
-  private markDeletedSources(listed: ReadonlySet<string>): void {
+  private async markDeletedSources(listed: ReadonlySet<string>): Promise<void> {
     const changes: Change[] = [];
     const firstPass = !this.flagsChecked;
     this.flagsChecked = true;
-    for (const file of this.sizeMap().keys()) {
-      const cls = classifyRelPath(file);
-      if (cls?.kind !== 'session') continue;
+    for (const file of [...this.sizeMap().keys()]) {
+      const source = this.sourceOfKey(file);
+      if (source === null) continue; // a key of a source that is not configured now
+      // A synchronous source (Claude Code) is not awaited: the whole pass stays one synchronous step, as before.
+      const main = source.mainSessionOf(file);
+      const sessionId = isPromise(main) ? await main : main;
+      if (sessionId === null) continue;
       if (listed.has(file)) {
-        if (firstPass || this.deleted.has(cls.sessionId)) {
-          this.deleted.delete(cls.sessionId);
-          const session = this.store.getSession(cls.sessionId);
+        if (firstPass || this.deleted.has(sessionId)) {
+          this.deleted.delete(sessionId);
+          const session = this.store.getSession(sessionId);
           if (session?.sourceDeleted) changes.push({ type: 'session_upserted', session: { ...session, sourceDeleted: false } });
         }
         continue;
       }
-      this.deleted.add(cls.sessionId);
-      const session = this.store.getSession(cls.sessionId);
+      this.deleted.add(sessionId);
+      const session = this.store.getSession(sessionId);
       if (session && !session.sourceDeleted) changes.push({ type: 'session_upserted', session: { ...session, sourceDeleted: true } });
     }
     this.commit(changes);

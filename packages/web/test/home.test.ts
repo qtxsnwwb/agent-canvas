@@ -2,7 +2,7 @@ import { expect, test } from 'vitest';
 import type { Project } from '@claude-canvas/shared';
 import { pickProject, projectLook, projectName, relativeTime } from '../src/home';
 
-const project = (id: string, sessionCount: number, activeSessionCount: number): Project => ({ id, cwd: null, sessionCount, activeSessionCount });
+const project = (id: string, sessionCount: number, activeSessionCount: number): Project => ({ id, cwd: null, sessionCount, activeSessionCount, origins: ['claude'] });
 
 test('projectName is the last path segment, for either separator', () => {
   expect(projectName('D:\\Projects\\Enterprise')).toBe('Enterprise');

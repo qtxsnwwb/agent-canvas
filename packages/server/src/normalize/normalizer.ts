@@ -19,11 +19,9 @@ import {
   type MessageMeta,
   type TranscriptRecord,
 } from './transcript.js';
+import type { AgentNormalizer, NormalizeResult } from './types.js';
 
-export interface NormalizeResult {
-  changes: Change[];
-  unknownRecordType?: string;
-}
+export type { NormalizeResult } from './types.js';
 
 const EPOCH = '1970-01-01T00:00:00.000Z';
 /** Title sources, highest priority first. */
@@ -157,7 +155,8 @@ function elapsedMs(start: string, end: string): number | null {
   return Number.isNaN(a) || Number.isNaN(b) ? null : Math.max(0, b - a);
 }
 
-export class Normalizer {
+/** The Claude Code normalizer: every session it creates has origin 'claude'. */
+export class Normalizer implements AgentNormalizer {
   private readonly sessions = new Map<string, SessionState>();
   /**
    * Current title per source, per session. Kept outside SessionState so a title arriving before its session exists is
@@ -816,6 +815,7 @@ export class Normalizer {
       const session: Session = {
         id: sessionId,
         projectId,
+        origin: 'claude',
         cwd: str(record.cwd),
         title: this.bestTitle(sessionId),
         gitBranch: str(record.gitBranch),

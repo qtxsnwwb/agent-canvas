@@ -104,7 +104,7 @@ describe('pipeline timing', () => {
       {
         type: 'session_upserted',
         session: {
-          id: 's1', projectId: 'proj', cwd: null, title: null, gitBranch: null, status: 'idle',
+          id: 's1', projectId: 'proj', origin: 'claude', cwd: null, title: null, gitBranch: null, status: 'idle',
           sourceDeleted: false, startedAt: '2026-01-01T00:00:00.000Z', lastActivityAt: '2026-01-01T00:00:00.000Z',
         },
       },

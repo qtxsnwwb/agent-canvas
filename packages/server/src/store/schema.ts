@@ -5,8 +5,8 @@ export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS raw_event (
   ingest_id   INTEGER PRIMARY KEY AUTOINCREMENT,
   source      TEXT NOT NULL,
-  file        TEXT,            -- relative to projectsDir, '/' separators
-  project_id  TEXT,            -- hooks: project derived from transcript_path at ingest (null when unknown)
+  file        TEXT,            -- store key: relative to projectsDir, '/' separators (Codex: 'codex:' + relative path)
+  project_id  TEXT,            -- hooks: project derived from transcript_path at ingest (null when unknown); transcript: set by sources whose keys do not name the project (Codex)
   "offset"    INTEGER,
   line_hash   TEXT,
   record_type TEXT,
@@ -14,7 +14,8 @@ CREATE TABLE IF NOT EXISTS raw_event (
   agent_id    TEXT,
   event_name  TEXT,
   received_at TEXT,
-  body        TEXT NOT NULL
+  body        TEXT NOT NULL,
+  origin      TEXT NOT NULL DEFAULT 'claude' -- 'claude' | 'codex'; added by migrateSchema on older databases
 );
 CREATE UNIQUE INDEX IF NOT EXISTS raw_event_transcript_dedupe
   ON raw_event (file, line_hash) WHERE source = 'transcript';
@@ -23,12 +24,15 @@ CREATE INDEX IF NOT EXISTS raw_event_session ON raw_event (session_id, ingest_id
 -- it after the one-time hook_stat backfill, which still uses it on databases that have it.
 CREATE INDEX IF NOT EXISTS raw_event_meta ON raw_event (file, ingest_id) WHERE source = 'meta';
 
--- Per-event-name hook counters, bumped in the transaction that inserts the raw hook row. Not derived graph data:
--- rebuild (clearDerived) leaves it alone. Backfilled once from the raw log when empty (databases from before it existed).
+-- Per-(origin, event name) hook counters, bumped in the transaction that inserts the raw hook row. Not derived graph
+-- data: rebuild (clearDerived) leaves it alone. Backfilled once from the raw log when empty (databases from before it
+-- existed). Databases from before the origin dimension had it keyed by event name only: migrateSchema rekeys it.
 CREATE TABLE IF NOT EXISTS hook_stat (
-  event_name TEXT PRIMARY KEY,
+  origin     TEXT NOT NULL,
+  event_name TEXT NOT NULL,
   count      INTEGER NOT NULL,
-  last_at    TEXT NOT NULL
+  last_at    TEXT NOT NULL,
+  PRIMARY KEY (origin, event_name)
 );
 
 -- Sessions whose committed raw events are ahead of their derived rows (a hook whose processing failed was stored
@@ -39,7 +43,7 @@ CREATE TABLE IF NOT EXISTS dirty_session (
 );
 
 CREATE TABLE IF NOT EXISTS file_offset (
-  file     TEXT PRIMARY KEY,   -- relative to projectsDir, '/' separators
+  file     TEXT PRIMARY KEY,   -- store key, as raw_event.file
   "offset" INTEGER NOT NULL,
   size     INTEGER NOT NULL
 );
@@ -101,3 +105,24 @@ CREATE TABLE IF NOT EXISTS meta (
   value TEXT NOT NULL
 );
 `;
+
+/**
+ * Steps that bring a database created before the origin dimension up to SCHEMA_SQL; migrateSchema (store.ts) runs each
+ * one only when its column is missing, after SCHEMA_SQL, in one transaction. rawEventOrigin: every existing row is a
+ * Claude Code row. hookStatByOrigin: rekeys hook_stat by (origin, event name), keeping the existing counters as 'claude'.
+ */
+export const MIGRATIONS = {
+  rawEventOrigin: `ALTER TABLE raw_event ADD COLUMN origin TEXT NOT NULL DEFAULT 'claude'`,
+  hookStatByOrigin: `
+CREATE TABLE hook_stat_by_origin (
+  origin     TEXT NOT NULL,
+  event_name TEXT NOT NULL,
+  count      INTEGER NOT NULL,
+  last_at    TEXT NOT NULL,
+  PRIMARY KEY (origin, event_name)
+);
+INSERT INTO hook_stat_by_origin (origin, event_name, count, last_at) SELECT 'claude', event_name, count, last_at FROM hook_stat;
+DROP TABLE hook_stat;
+ALTER TABLE hook_stat_by_origin RENAME TO hook_stat;
+`,
+} as const;

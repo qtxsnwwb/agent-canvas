@@ -11,24 +11,45 @@ import {
   SEARCH_MAX_MATCHES,
   SEARCH_MIN_CHARS,
   SEARCH_SNIPPET_CHARS,
+  ORIGINS,
   STALE_AFTER_MS,
   type Change,
   type Diagnostics,
   type GraphSnapshot,
   type NodeDetail,
+  type Origin,
   type Project,
   type SearchHit,
   type SearchMatch,
   type SeqChange,
   type Session,
 } from '@claude-canvas/shared';
-import { DERIVED_TABLES, SCHEMA_SQL } from './schema.js';
+import { DERIVED_TABLES, MIGRATIONS, SCHEMA_SQL } from './schema.js';
 
-/** `file` of transcript and meta events is relative to projectsDir with `/` separators. */
+/**
+ * `source` is the channel an event came through (a session file, a hook, a file read whole); `origin` is the agent it
+ * comes from (absent = 'claude'). `file` of transcript and meta events is the source's store key: for Claude Code the
+ * path relative to projectsDir with `/` separators.
+ */
 export type RawEvent =
-  | { source: 'transcript'; file: string; offset: number; line: string; recordType: string; sessionId: string; agentId: string | null }
+  | {
+      source: 'transcript';
+      origin?: Origin;
+      file: string;
+      offset: number;
+      line: string;
+      recordType: string;
+      sessionId: string;
+      agentId: string | null;
+      /**
+       * Set by sources whose file keys do not name the project (Codex: it comes from the file's first line); replay uses
+       * it instead of the key. Absent / null for Claude Code, whose key names the project.
+       */
+      projectId?: string | null;
+    }
   | {
       source: 'hook';
+      origin?: Origin;
       receivedAt: string;
       eventName: string;
       sessionId: string | null;
@@ -36,8 +57,12 @@ export type RawEvent =
       /** Project derived from the payload's transcript_path at ingest; replay uses this stored value. */
       projectId?: string | null;
     }
-  | { source: 'meta'; file: string; sessionId: string; agentId: string | null; payload: string }; // custom-title.json, agent-*.meta.json contents
-export type StoredRawEvent = RawEvent & { ingestId: number };
+  // custom-title.json, agent-*.meta.json contents
+  | { source: 'meta'; origin?: Origin; file: string; sessionId: string; agentId: string | null; payload: string };
+/** As read back: `origin` is always present (rows stored before origins existed are 'claude'). */
+export type StoredRawEvent = RawEvent & { ingestId: number; origin: Origin };
+/** One hook counter of one origin (Diagnostics.hookEvents without the origin). */
+export type HookEventStat = Omit<Diagnostics['hookEvents'][number], 'origin'>;
 
 /** The change log keeps at most this many rows; older ones are pruned down to 90% of it. */
 export const CHANGE_LOG_MAX_ROWS = 200_000;
@@ -159,8 +184,13 @@ export interface Store {
   epoch(): string;
   /** Latest receivedAt of any stored hook event (kept in `meta`, no raw_event scan). */
   lastHookAt(): string | null;
-  /** Hook counts and latest receivedAt per event name (ascending), read from the hook_stat counters only. */
-  hookEventStats(): Diagnostics['hookEvents'];
+  /**
+   * Hook counts and latest receivedAt per event name (ascending) of one origin (default 'claude'), read from the
+   * hook_stat counters only.
+   */
+  hookEventStats(origin?: Origin): HookEventStat[];
+  /** Every hook counter, by origin then event name (ascending), read from the hook_stat counters only. */
+  allHookEventStats(): Diagnostics['hookEvents'];
   /** The stored part of Diagnostics; the API adds the pipeline's live fields. */
   diagnostics(): StoreDiagnostics;
   close(): void;
@@ -179,6 +209,7 @@ export const HOOK_STAT_BACKFILL_NOTICE = 'claude-canvas counting stored hook eve
 interface RawRow {
   ingest_id: number;
   source: string;
+  origin: Origin;
   file: string | null;
   offset: number | null;
   record_type: string | null;
@@ -196,17 +227,20 @@ function toStoredRaw(r: RawRow): StoredRawEvent {
       return {
         ingestId: r.ingest_id,
         source: 'transcript',
+        origin: r.origin,
         file: r.file!,
         offset: r.offset!,
         line: r.body,
         recordType: r.record_type!,
         sessionId: r.session_id!,
         agentId: r.agent_id,
+        projectId: r.project_id,
       };
     case 'hook':
       return {
         ingestId: r.ingest_id,
         source: 'hook',
+        origin: r.origin,
         receivedAt: r.received_at!,
         eventName: r.event_name!,
         sessionId: r.session_id,
@@ -217,6 +251,7 @@ function toStoredRaw(r: RawRow): StoredRawEvent {
       return {
         ingestId: r.ingest_id,
         source: 'meta',
+        origin: r.origin,
         file: r.file!,
         sessionId: r.session_id!,
         agentId: r.agent_id,
@@ -277,6 +312,21 @@ function startCheckpointer(db: Database.Database, dbPath: string): Worker | null
   }
 }
 
+const hasColumn = (db: Database.Database, table: string, column: string): boolean =>
+  (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).some((c) => c.name === column);
+
+/**
+ * Brings a database written by a version before the origin dimension up to SCHEMA_SQL (see MIGRATIONS), in one
+ * transaction; does nothing on a current database. Derived session rows written before it lack `origin`: the
+ * normalizer version bump makes start rebuild them, and listProjects reads a missing origin as 'claude'.
+ */
+function migrateSchema(db: Database.Database): void {
+  db.transaction(() => {
+    if (!hasColumn(db, 'raw_event', 'origin')) db.exec(MIGRATIONS.rawEventOrigin);
+    if (!hasColumn(db, 'hook_stat', 'origin')) db.exec(MIGRATIONS.hookStatByOrigin);
+  })();
+}
+
 export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   const maxRows = options.changeLogMaxRows ?? CHANGE_LOG_MAX_ROWS;
   const pruneEvery = options.pruneCheckEvery ?? PRUNE_CHECK_EVERY;
@@ -285,24 +335,25 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   // A WAL that grew during an import is cut back to this size the next time it restarts after a full checkpoint.
   db.pragma(`journal_size_limit = ${options.walSizeLimitBytes ?? WAL_SIZE_LIMIT_BYTES}`);
   db.exec(SCHEMA_SQL);
+  migrateSchema(db);
   const checkpointer = dbPath === ':memory:' || dbPath === '' ? null : startCheckpointer(db, dbPath);
 
   // INSERT ... SELECT ... WHERE NOT EXISTS (rather than INSERT OR IGNORE): with AUTOINCREMENT, an
   // ignored insert would still consume an ingest_id and leave gaps.
   const insertRawTranscript = db.prepare(
-    `INSERT INTO raw_event (source, file, "offset", line_hash, record_type, session_id, agent_id, body)
-     SELECT 'transcript', @file, @offset, @lineHash, @recordType, @sessionId, @agentId, @line
+    `INSERT INTO raw_event (source, origin, file, "offset", line_hash, record_type, session_id, agent_id, project_id, body)
+     SELECT 'transcript', @origin, @file, @offset, @lineHash, @recordType, @sessionId, @agentId, @projectId, @line
      WHERE NOT EXISTS (
        SELECT 1 FROM raw_event WHERE source = 'transcript' AND file = @file AND line_hash = @lineHash
      )`,
   );
   const insertRawHook = db.prepare(
-    `INSERT INTO raw_event (source, event_name, received_at, session_id, project_id, body)
-     VALUES ('hook', @eventName, @receivedAt, @sessionId, @projectId, @payload)`,
+    `INSERT INTO raw_event (source, origin, event_name, received_at, session_id, project_id, body)
+     VALUES ('hook', @origin, @eventName, @receivedAt, @sessionId, @projectId, @payload)`,
   );
   const insertRawMeta = db.prepare(
-    `INSERT INTO raw_event (source, file, session_id, agent_id, body)
-     VALUES ('meta', @file, @sessionId, @agentId, @payload)`,
+    `INSERT INTO raw_event (source, origin, file, session_id, agent_id, body)
+     VALUES ('meta', @origin, @file, @sessionId, @agentId, @payload)`,
   );
   const selectOffset = db.prepare(`SELECT "offset" AS off FROM file_offset WHERE file = ?`);
   const upsertOffset = db.prepare(
@@ -346,12 +397,14 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   // effectiveStatus in shared/status.ts. One divergence: an unparseable last_activity_at is not counted active
   // here (strftime gives NULL, so the >= test is false), while effectiveStatus is never stale for it (a NaN
   // comparison is false), i.e. it would count as active.
+  // A session row written before sessions had an origin (rebuilt on the next start) counts as 'claude'.
   const selectProjects = db.prepare(
-    `SELECT project_id AS id, json_extract(body, '$.cwd') AS cwd, COUNT(*) AS sessionCount,
+    `SELECT project_id AS id, json_extract(body, '$.cwd') AS cwd,
+            COALESCE(json_extract(body, '$.origin'), 'claude') AS origin, COUNT(*) AS sessionCount,
             SUM(CASE WHEN status IN ('awaiting_input', 'awaiting_permission') THEN 1
                      WHEN status = 'running' AND strftime('%Y-%m-%dT%H:%M:%fZ', last_activity_at) >= @cutoff THEN 1
                      ELSE 0 END) AS activeSessionCount
-     FROM session GROUP BY project_id, cwd ORDER BY project_id`,
+     FROM session GROUP BY project_id, cwd, origin ORDER BY project_id`,
   );
   const selectSessions = db.prepare(`SELECT body FROM session WHERE project_id = ? ORDER BY last_activity_at DESC, id`);
   const selectSession = db.prepare(`SELECT body FROM session WHERE id = ?`).pluck();
@@ -410,26 +463,30 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
      ON CONFLICT(record_type) DO UPDATE SET count = count + 1`,
   );
   const selectHookStats = db.prepare(
-    `SELECT event_name AS eventName, count, last_at AS lastAt FROM hook_stat ORDER BY event_name`,
+    `SELECT event_name AS eventName, count, last_at AS lastAt FROM hook_stat WHERE origin = ? ORDER BY event_name`,
+  );
+  const selectAllHookStats = db.prepare(
+    `SELECT origin, event_name AS eventName, count, last_at AS lastAt FROM hook_stat ORDER BY origin, event_name`,
   );
   const bumpHookStat = db.prepare(
-    `INSERT INTO hook_stat (event_name, count, last_at) VALUES (?, 1, ?)
-     ON CONFLICT(event_name) DO UPDATE SET count = count + 1, last_at = MAX(last_at, excluded.last_at)`,
+    `INSERT INTO hook_stat (origin, event_name, count, last_at) VALUES (?, ?, 1, ?)
+     ON CONFLICT(origin, event_name) DO UPDATE SET count = count + 1, last_at = MAX(last_at, excluded.last_at)`,
   );
   const insertHookTx = db.transaction((event: Extract<RawEvent, { source: 'hook' }>): number => {
-    const id = Number(insertRawHook.run({ ...event, projectId: event.projectId ?? null }).lastInsertRowid);
+    const origin = event.origin ?? 'claude';
+    const id = Number(insertRawHook.run({ ...event, origin, projectId: event.projectId ?? null }).lastInsertRowid);
     upsertLaterMeta.run('last_hook_at', event.receivedAt);
-    bumpHookStat.run(event.eventName, event.receivedAt);
+    bumpHookStat.run(origin, event.eventName, event.receivedAt);
     return id;
   });
   // Databases from before hook_stat existed: backfill it once (one transaction), then never again. It runs before the
   // old raw_event_hook index is dropped, so on such a database it reads that index instead of scanning raw_event
-  // bodies. A database created just now has nothing to backfill.
+  // bodies. A database created just now has nothing to backfill. Such a database predates origins: every hook is 'claude'.
   db.transaction(() => {
     if (selectMeta.get(HOOK_STAT_READY) !== undefined) return;
     if (!created && db.prepare(`SELECT 1 FROM hook_stat LIMIT 1`).get() === undefined) {
       options.log?.(HOOK_STAT_BACKFILL_NOTICE);
-      db.exec(`INSERT INTO hook_stat (event_name, count, last_at) ${HOOK_STAT_BACKFILL_SELECT}`);
+      db.exec(`INSERT INTO hook_stat (origin, event_name, count, last_at) SELECT 'claude', * FROM (${HOOK_STAT_BACKFILL_SELECT})`);
     }
     upsertMeta.run(HOOK_STAT_READY, '1');
   })();
@@ -550,11 +607,11 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     insertRaw(event) {
       if (event.source === 'transcript') {
         const lineHash = createHash('sha1').update(event.line).digest('hex');
-        const res = insertRawTranscript.run({ ...event, lineHash });
+        const res = insertRawTranscript.run({ ...event, origin: event.origin ?? 'claude', projectId: event.projectId ?? null, lineHash });
         return res.changes === 0 ? null : Number(res.lastInsertRowid);
       }
       if (event.source === 'hook') return insertHookTx(event);
-      return Number(insertRawMeta.run(event).lastInsertRowid);
+      return Number(insertRawMeta.run({ ...event, origin: event.origin ?? 'claude' }).lastInsertRowid);
     },
     getOffset(file) {
       const row = selectOffset.get(file) as { off: number } | undefined;
@@ -569,22 +626,33 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     },
     listProjects(nowMs) {
       const cutoff = new Date(nowMs - STALE_AFTER_MS).toISOString();
-      const rows = selectProjects.all({ cutoff }) as { id: string; cwd: string | null; sessionCount: number; activeSessionCount: number }[];
-      const byId = new Map<string, { project: Project; best: { cwd: string; n: number } | null }>();
+      const rows = selectProjects.all({ cutoff }) as {
+        id: string;
+        cwd: string | null;
+        origin: Origin;
+        sessionCount: number;
+        activeSessionCount: number;
+      }[];
+      const byId = new Map<string, { project: Project; cwdCounts: Map<string, number> }>();
       for (const r of rows) {
         let entry = byId.get(r.id);
         if (!entry) {
-          entry = { project: { id: r.id, cwd: null, sessionCount: 0, activeSessionCount: 0 }, best: null };
+          entry = { project: { id: r.id, cwd: null, sessionCount: 0, activeSessionCount: 0, origins: [] }, cwdCounts: new Map() };
           byId.set(r.id, entry);
         }
         entry.project.sessionCount += r.sessionCount;
         entry.project.activeSessionCount += r.activeSessionCount;
+        if (!entry.project.origins.includes(r.origin)) entry.project.origins.push(r.origin);
         if (r.cwd !== null && r.cwd.replace(/[^A-Za-z0-9]/g, '-') === r.id) {
-          const b = entry.best;
-          if (b === null || r.sessionCount > b.n || (r.sessionCount === b.n && r.cwd < b.cwd)) entry.best = { cwd: r.cwd, n: r.sessionCount };
+          entry.cwdCounts.set(r.cwd, (entry.cwdCounts.get(r.cwd) ?? 0) + r.sessionCount);
         }
       }
-      return [...byId.values()].map(({ project, best }) => ({ ...project, cwd: best?.cwd ?? null }));
+      return [...byId.values()].map(({ project, cwdCounts }) => {
+        let best: { cwd: string; n: number } | null = null;
+        for (const [cwd, n] of cwdCounts) if (best === null || n > best.n || (n === best.n && cwd < best.cwd)) best = { cwd, n };
+        const origins = ORIGINS.filter((o) => project.origins.includes(o));
+        return { ...project, cwd: best?.cwd ?? null, origins };
+      });
     },
     listSessions(projectId) {
       return (selectSessions.all(projectId) as { body: string }[]).map((r) => JSON.parse(r.body) as Session);
@@ -702,7 +770,8 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     deleteMeta(key) {
       deleteMeta.run(key);
     },
-    hookEventStats: () => selectHookStats.all() as Diagnostics['hookEvents'],
+    hookEventStats: (origin = 'claude') => selectHookStats.all(origin) as HookEventStat[],
+    allHookEventStats: () => selectAllHookStats.all() as Diagnostics['hookEvents'],
     hasRawEvents: () => selectAnyRaw.get() !== undefined,
     hasRawForSession: (sessionId) => selectAnyRawForSession.get(sessionId) !== undefined,
     diagnostics() {

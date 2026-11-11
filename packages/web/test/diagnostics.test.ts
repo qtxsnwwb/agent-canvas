@@ -30,9 +30,9 @@ test('missingHookEvents 是 14 个事件里没出现的，顺序同 EXPECTED_HOO
   expect(EXPECTED_HOOK_EVENTS).toHaveLength(14);
   expect(summarizeDiagnostics(base, NOW).missingHookEvents).toEqual([...EXPECTED_HOOK_EVENTS]);
   const seen = [EXPECTED_HOOK_EVENTS[3]!, EXPECTED_HOOK_EVENTS[0]!, 'SomethingNew'];
-  const d = { ...base, hookEvents: seen.map((eventName) => ({ eventName, count: 1, lastAt: at(1) })) };
+  const d = { ...base, hookEvents: seen.map((eventName) => ({ origin: 'claude' as const, eventName, count: 1, lastAt: at(1) })) };
   expect(summarizeDiagnostics(d, NOW).missingHookEvents).toEqual(EXPECTED_HOOK_EVENTS.filter((e) => !seen.includes(e)));
-  const all = { ...base, hookEvents: EXPECTED_HOOK_EVENTS.map((eventName) => ({ eventName, count: 1, lastAt: at(1) })) };
+  const all = { ...base, hookEvents: EXPECTED_HOOK_EVENTS.map((eventName) => ({ origin: 'claude' as const, eventName, count: 1, lastAt: at(1) })) };
   expect(summarizeDiagnostics(all, NOW).missingHookEvents).toEqual([]);
 });
 

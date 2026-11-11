@@ -16,6 +16,7 @@ function sessionUpsert(id: string, projectId: string, status: SessionStatus = 'i
   const session: Session = {
     id,
     projectId,
+    origin: 'claude',
     cwd,
     title: null,
     gitBranch: null,

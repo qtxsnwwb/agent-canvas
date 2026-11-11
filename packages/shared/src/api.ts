@@ -1,13 +1,16 @@
 import type { SeqChange } from './change.js';
-import type { GraphEdge, GraphNode, Session } from './model.js';
+import type { GraphEdge, GraphNode, Origin, Session } from './model.js';
 
 export interface GraphSnapshot { session: Session; nodes: GraphNode[]; edges: GraphEdge[]; seq: number }
 export interface Diagnostics {
   unknownRecords: { recordType: string; count: number; sample: string }[];
   lastHookAt: string | null;
-  /** Hook events received, by event name ascending; an event never received does not appear. */
-  hookEvents: { eventName: string; count: number; lastAt: string }[];
-  /** path is relative to the projects directory, `/` separators. */
+  /** Hook events received, by origin (ORIGINS order) then event name ascending; an event never received does not appear. */
+  hookEvents: { origin: Origin; eventName: string; count: number; lastAt: string }[];
+  /**
+   * path is the file's store key: relative to the projects directory with `/` separators (Codex files, later:
+   * `codex:` + the path relative to the Codex sessions directory).
+   */
   files: { path: string; offset: number; size: number }[];
   /** Files (relative path) and hook sessions (`hook:<sessionId>`) whose last ingest attempt failed. */
   ingestFailures: { file: string; error: string; at: string }[];

@@ -47,7 +47,7 @@ function randomChanges(r: () => number, n: number): Change[] {
     if (k < 0.35) out.push({ type: 'node_added', node: node({ id: pick(), title: `t${i}` }), detail: {} });
     else if (k < 0.7) out.push({ type: 'node_updated', sessionId: 's1', id: pick(), patch: r() < 0.5 ? { status: 'failed' } : { summary: `s${i}` } });
     else if (k < 0.9) out.push({ type: 'edge_added', edge: { id: `${pick()}->${pick()}`, sessionId: 's1', from: pick(), to: pick(), kind: 'sequence' } });
-    else out.push({ type: 'session_upserted', session: { id: 's1', projectId: 'p', cwd: null, title: null, gitBranch: null, status: 'idle', sourceDeleted: false, startedAt: '', lastActivityAt: '' } });
+    else out.push({ type: 'session_upserted', session: { id: 's1', projectId: 'p', origin: 'claude', cwd: null, title: null, gitBranch: null, status: 'idle', sourceDeleted: false, startedAt: '', lastActivityAt: '' } });
   }
   return out;
 }
