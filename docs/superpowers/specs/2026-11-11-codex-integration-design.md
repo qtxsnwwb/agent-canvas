@@ -122,22 +122,30 @@ POST /hooks（两种来源）────────────────┘
 
 | Codex 记录 | 产生什么 |
 |---|---|
-| `task_started` | 开始一个轮次（`turnId` = `turn_id`）；会话状态 → 运行中 |
-| `item_completed/UserMessage` | 提示节点（轮次的第一个节点）。子代理线程里，派出时给它的任务也作为提示节点 |
+| `task_started` | 开始一个轮次（`turnId` = `turn_id`）；主线程：会话状态 → 运行中（见 7.3 的状态规则） |
+| `item_completed/UserMessage` | 提示节点（轮次的第一个节点）。子代理线程的轮次没有它时，该轮次第一次模型输出之前的最后一条 role user 消息作为提示节点（派出或追加时给它的任务） |
 | `response_item/message`（assistant） | 回复节点；`phase` 记在 `systemSubtype` 以外不展示 |
 | `response_item/reasoning` | 思考节点；摘要作为内容（为空则为空，精简模式下不显示），时长取对应 `item_completed/Reasoning` 的起止时间 |
 | `custom_tool_call` / `function_call` | 工具节点，状态"执行中"；`toolUseId` = `call_id` |
 | 对应的 `…_output` | 该节点结束：成功或失败，记录结束时间和耗时 |
-| 调用期间出现的 `CommandExecution` / `McpToolCall` / `FileChange` 等 | 不单独成节点，归到正在进行的那次调用上：命令文本作为节点摘要，各条的退出码和耗时进节点详情；任何一条失败则节点为失败 |
+| `CommandExecution` / `McpToolCall` / `FileChange` 等 | 按条目的开始时间归到那时正在进行的调用上（调用记录到输出记录之间的时间窗含该时刻的、开始最晚的那个；没有开始时间时归到最近打开、尚未结束的调用）：命令文本作为节点摘要，各条的退出码和耗时进节点详情；任何一条失败则节点为失败（输出之后才到的失败条目也让它变为失败）。不落在任何调用里的条目自成一个已结束的工具节点，id 用自己的前缀 `item:`（条目 id 可能和调用 id 相同） |
 | `spawn_agent` 调用 + `SubAgentActivity` | 子代理节点，`childAgentId` = `agent_thread_id`，标题取代理的昵称或路径 |
 | 子代理线程的记录 | 该子代理内部的节点（`agentId` = 线程 id），和派发节点之间有派发边 |
-| `task_complete` | 轮次结束；主线程：会话状态 → 空闲；`error` 非空时在轮次末尾加一个失败的系统节点 |
+| `task_complete` | 轮次结束；主线程：会话状态 → 空闲；`error` 非空时在轮次末尾加一个“轮次失败”的系统节点（只是标记，不带状态） |
 | `turn_aborted` | 中断的系统节点；会话状态 → 空闲 |
 | `compaction` / `compacted` | 压缩的系统节点 |
 | 其余已知但不展示的类型 | 忽略，不计入"未识别" |
 | 不认识的类型 | 计入诊断页的"未识别的记录类型" |
 
 **子代理节点的状态**：Codex 的子代理是长期存在的线程，可以被反复追加任务（`send_message`、`followup_task`），不是一次性的。派发节点的状态跟着子代理线程走：线程里有轮次在进行 → 执行中；最后一个轮次已结束 → 成功（结束时间取那个轮次的结束时间）；之后又开始新轮次 → 回到执行中。会话已结束或长时间无动静时的显示沿用主规格现有规则（"未结束"）。
+
+**派发时还不知道子代理线程**（`SubAgentActivity` 和子线程自己的 `session_meta` 都对不上，例如派出失败）：派出它的那个轮次进行中 → 执行中；那个轮次已结束 → 失败（结束时间取轮次结束时间）。之后子代理线程出现，就改按上一段的规则。两者都是当前状态的函数，与记录到达的先后无关。
+
+**分叉出的子线程**：文件开头抄来的父线程历史（序号小于 `subagent_history_start_ordinal` 的记录，以及随之抄来的父线程 `session_meta`）不产生节点，它们已经在父线程里显示过。
+
+**不显示的线程**：Codex 自己发起的审批复核线程（不是由某次工具调用派出的）没有派发节点可挂，不显示。
+
+**记录时间解析不了**时，不作为会话的开始或活动时间，节点时间取该线程此前最后一个有效时间。
 
 **节点的连接**：同一线程内按记录顺序串联；同一条模型响应里的多个工具调用按并行处理（同父分叉、之后汇合），和 Claude 的规则一致。
 
@@ -161,16 +169,28 @@ node <claude-canvas>/packages/server/dist/cli.js hook-forward --origin codex --p
 
 - `hooks install --codex` / `hooks uninstall --codex`，默认操作 `~/.codex/hooks.json`（可用 `--settings` 指定别的文件）。
 - 写入的事件：`SessionStart`、`SessionEnd`、`UserPromptSubmit`、`PreToolUse`、`PermissionRequest`、`PostToolUse`、`SubagentStart`、`SubagentStop`、`Stop`、`PostCompact`、`Interrupt`。不装 `PreModelRequest`、`PostModelRequest`、`PreCompact`（量大，用不上）。
-- 每条 hook：`type: command`，`command` 和 `commandWindows` 都写（用绝对路径指向当前安装的 `node` 和 `cli.js`），`async: true`，`timeout: 5`。
+- 每条 hook：`type: command`，`command` 和 `commandWindows` 都写（用绝对路径指向当前安装的 `node` 和 `cli.js`），`async: true`，`timeout: 5`；`SessionEnd`、`Interrupt` 是 `timeout: 3`（Codex 对这两个事件最多允许 3 秒，而且不管 `async` 都同步运行）。
+- 认哪些条目是本安装的：从命令里解析出 `cli.js` 的路径比较（Windows 上不分大小写），其后是 `hook-forward`，端口相同（`--port n`、`--port=n`，不写为 4317）。本安装的条目但命令里的 `node` 不是当前的（例如升级 node 后），报告为过期，install 在同一次写入里替换。
 - 沿用现有安装流程的全部保护：先列出改动、确认、备份、只追加不改动已有内容、遇到不寻常的文件拒绝写入。文件不存在时新建。
 - 安装成功后明确提示：**需要在 Codex 里确认信任这些 hooks 才会生效**（桌面应用"设置 → Hooks"，CLI 里 `/hooks`）；升级 claude-canvas 后如果命令路径变了，要重新安装并重新确认。
 
 ### 7.3 接收
 
 - `POST /hooks` 读查询参数 `origin`（缺省 `claude`，现有 Claude Code 的 hook 配置不用动）。
-- Codex 的 hook 事件和 Claude 的含义相同，映射到同样的效果：`PreToolUse` 提前建立"执行中"的工具节点、`PermissionRequest` → 等待权限确认、`PostToolUse` 结算、`Stop` → 空闲、`SessionEnd` → 已结束、`SubagentStart/Stop`、`Interrupt` → 中断。
-- 子代理的 hook 带的是父会话的 `session_id` 和它自己的 `agent_id`，正好对上本系统的会话和线程。
-- hook 和会话文件说的是同一件事时，以会话文件为准（和 Claude 一致）。
+- **第一版的 Codex hooks 不建、不确认、不结算任何节点**，节点只来自会话文件：有没有 hooks，节点、id、父子关系、边、开始时间和终态都完全一样。原因：嵌套命令（在 `exec` 里跑的命令）的 hook 载荷长什么样还没核对过（文档说 shell 命令的 hook 工具名是 `Bash`，id 很可能是嵌套命令自己的，和会话文件里 `exec` 调用的 `call_id` 对不上），而会话文件本身就会及时写下调用记录。录到真实载荷（第 11 节里程碑 5）后再重新考虑。
+- hooks 提供的是：
+  - **会话状态**，由当前状态算出（不比较 hook 的接收时间和记录时间，与两者到达的先后无关，重建结果相同）。hook 按 `turn_id` 留下轮次标记：开始（`UserPromptSubmit`，以及 `PreToolUse` / `PostToolUse` / `PermissionRequest`）、停止（`Stop`、`Interrupt`；不带 `turn_id` 时停止已标记的全部轮次）、等待权限（`PermissionRequest`，该轮次之后的任何 hook 清除）；会话级标记：结束（`SessionEnd`）、恢复（之后的 `SessionStart` / `UserPromptSubmit`；子代理的这几个事件不算）。规则：
+    - 轮次属于哪个线程以会话文件为准（`task_started` / 轮次结束记录在哪个线程），否则算"还不知道"；属于子代理线程的轮次不影响会话状态（子代理的工具 hook 在主轮次结束后才到，也不会把会话改回运行中）。
+    - 轮次"已结束"：会话文件里有它的 `task_complete` / `turn_aborted`，或有它的 `Stop` / `Interrupt` hook，或（主线程）主线程里已经开始了更新的轮次。
+    - 最近一个会话级标记是结束 → 已结束；
+    - 否则，有主线程或还不知道的轮次在等待权限且未结束 → 等待权限确认；
+    - 否则，主线程最新的轮次在会话文件里没结束、也没被 `Stop` / `Interrupt` hook 停止，或 hook 开始过一个主线程或还不知道的、未结束的轮次 → 运行中；
+    - 否则 → 空闲。
+    - 等待权限还会在会话文件显示该轮次的调用都已有输出（至少一个）时清除。
+  - **节点上的等待权限确认**：轮次在等待权限时，该轮次所在线程（还不知道时为主线程）里最新一个状态未结束的工具或派发节点显示"等待权限确认"（轮次已知时只看该轮次的节点）；等待清除后恢复会话文件给它的状态。不按工具名匹配。
+  - hook 事件的统计（诊断页）。
+- 没见过的会话：`SessionStart`、`UserPromptSubmit`、`PreToolUse`、`PermissionRequest`、`PostToolUse` 可以建出会话（来源 codex，项目和 cwd 取自 hook）；其他事件不建，但它们留下的标记在会话出现后照样生效。会话文件的第一条记录到达后，项目和 cwd 只由会话文件决定，hook 不再改动。
+- 子代理的 hook 带的是父会话的 `session_id` 和它自己的 `agent_id`，正好对上本系统的会话。
 
 ## 8. 页面
 
@@ -186,6 +206,9 @@ node <claude-canvas>/packages/server/dist/cli.js hook-forward --origin codex --p
 - token：第一版不显示 Codex 的 token 用量。
 - 已归档会话不导入。归档一个会话后，它在本系统里显示为"源文件已删除"，已采集的内容仍可看。
 - hooks 需要使用者在 Codex 里手动确认信任；没确认时本系统只靠会话文件工作。
+- 第一版的 hooks 只让会话状态和权限等待接近实时，不让工具节点更早出现（见 7.3）。批准权限之后到下一个 hook 之前，节点和会话一直显示等待权限确认；权限请求不带调用 id，显示等待的是该轮次最新一个未结束的节点，并行调用时可能不是真正在等的那个。
+- 派发子代理但找不到子代理线程时，派出它的轮次结束后派发节点显示失败。
+- 追加给子代理的任务，在因果链上接在子代理上一个任务的回复之后，而不是接在发出追加任务的那次调用上。
 - Codex 的会话文件格式不是稳定接口（官方文档原话），升级后可能出现未识别的记录。
 
 ## 10. 测试
@@ -211,7 +234,7 @@ node <claude-canvas>/packages/server/dist/cli.js hook-forward --origin codex --p
 | 风险 | 应对 |
 |---|---|
 | 会话文件格式随 Codex 版本变化 | 原始记录保留、派生可重建、未识别类型进诊断页；归一器集中在一个文件并以夹具覆盖 |
-| hook 的 `tool_use_id` 和文件里的 `call_id` 对不上 | 验收时用真实载荷核对；对不上时按"同一线程里最近一个同名、未结束的调用"匹配，和 Claude 的权限匹配同一思路 |
+| hook 的 `tool_use_id` 和文件里的 `call_id` 对不上（嵌套在 `exec` 里的命令很可能如此） | 第一版的 hooks 不建节点，不需要配对；会话状态和权限等待只用 `turn_id`。验收时用真实载荷核对 `tool_use_id`、`tool_name`、`turn_id`，再决定是否让 hooks 提前显示工具节点 |
 | 每个 hook 事件启动一次 node 进程，拖慢 Codex | `async: true` 不阻塞；验收时实测一次转发的耗时并写进 README |
 | 一次 `exec` 调用里的多条命令被收成一个节点，丢了细节 | 详情里逐条列出；瀑布图以调用为单位，后续可按需要拆开 |
 | 子代理线程文件先于主线程文件被读到 | 线程 → 会话的对应关系来自文件自己的第一行，不依赖读取顺序；派发边在两端都出现后补上（和现有做法相同） |
