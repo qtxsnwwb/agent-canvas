@@ -64,10 +64,15 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
   const canvas = useCanvas(live);
   // Whether the session is progressing; re-evaluated when its status changes (a change that brings no node change
   // publishes no canvas snapshot) and every 30 s (a running session that went silent turns stale).
-  const getStatus = useCallback(() => live.getSession().status, [live]);
+  // The snapshot is the status plus the last activity in 30 s steps: activity alone (a background agent's records, a
+  // stale session waking up) changes the answer too, but must not re-render this on every record.
+  const getStatus = useCallback(() => {
+    const s = live.getSession();
+    return `${s.status}|${Math.floor(Date.parse(s.lastActivityAt) / 30_000)}`;
+  }, [live]);
   useSyncExternalStore(live.subscribe, getStatus);
   const clock = useNow();
-  const progressing = waterfallClock(live.getSession(), clock).ticking;
+  const sessionProgressing = waterfallClock(live.getSession(), Math.max(clock, Date.now())).ticking;
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // Drop a selection whose node is no longer in the view (its turn was folded, it went into an "earlier" node, a
   // resync removed it): hidden at once, and cleared so the drawer cannot reopen by itself when the node comes back.
@@ -248,7 +253,8 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
           onToggleAgent={canvas.toggleAgent}
           onFollowingChange={canvas.setAutoFold}
           stopFollowingSignal={stopFollowingSignal}
-          progressing={progressing}
+          // The replay view shows history: "running" there is what was running at the replay time.
+          progressing={sessionProgressing || replaying}
         />
         {selectedNode !== null && (
           <Drawer
@@ -257,6 +263,7 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
             chain={chain}
             view={view}
             replay={replaying}
+            stalled={!sessionProgressing && !replaying}
             reasoning={stepReasoning}
             onSelect={outline ? openChainStep : setSelectedId}
             onExpandCut={expandChainCut}

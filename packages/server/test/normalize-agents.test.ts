@@ -529,3 +529,67 @@ test('同一个子代理被后台派出两次：各自按自己时间窗口里�
   const partial = run(new Normalizer(), [...main, ends[0]!]).graph;
   expect(partial.nodes['tool:tu2']).toMatchObject({ status: 'running', endedAt: null });
 });
+
+test('先前台、后后台派出同一个子代理：前台那次的信号不会结算后台的派发节点', () => {
+  const rest = [
+    assistantBlock('s1', null, { type: 'text', text: 'first done' }, { agentId: 'ag1', stopReason: 'end_turn', timestamp: '2026-01-01T00:12:00.000Z' }),
+    hook('SubagentStop', { agent_id: 'ag1' }, '2026-01-01T00:12:01.000Z'),
+    assistantBlock('a2', 'u2', { type: 'tool_use', id: 'tu2', name: 'Agent', input: {} }, { timestamp: '2026-01-01T00:30:00.000Z' }),
+    toolResult('u3', 'a2', 'tu2', 'launched', undefined, ASYNC),
+  ];
+  const head = [
+    userPrompt('u1', null, 'x'),
+    assistantBlock('a1', 'u1', { type: 'tool_use', id: 'tu1', name: 'Agent', input: {} }, { timestamp: '2026-01-01T00:10:00.000Z' }),
+    agentMeta('ag1', { toolUseId: 'tu1', agentType: 'Explore', description: 'd' }),
+    toolResult('u2', 'a1', 'tu1', 'result', undefined, { timestamp: '2026-01-01T00:12:02.000Z' }),
+  ];
+  for (const order of permutations(rest)) {
+    if (order.indexOf(rest[2]!) > order.indexOf(rest[3]!)) continue; // a result cannot precede its tool_use
+    const { graph } = run(new Normalizer(), [...head, ...order]);
+    expect(graph.nodes['tool:tu2']).toMatchObject({ status: 'running', endedAt: null });
+    expect(graph.nodes['tool:tu1']!.status).toBe('succeeded');
+  }
+});
+
+test('后台派出：会话结束后又恢复，没有自己的结束信号的派发节点回到运行中，任意先后都一样', () => {
+  const head = [
+    userPrompt('u1', null, 'x'),
+    assistantBlock('a1', 'u1', { type: 'tool_use', id: 'tu1', name: 'Agent', input: {} }, { timestamp: '2026-01-01T00:10:00.000Z' }),
+  ];
+  const rest = [
+    toolResult('u2', 'a1', 'tu1', 'launched', undefined, ASYNC),
+    agentMeta('ag1', { toolUseId: 'tu1', agentType: 'Explore', description: 'd' }),
+    hook('SessionEnd', {}, '2026-01-01T05:00:00.000Z'),
+    hook('SessionStart', {}, '2026-01-01T06:00:00.000Z'),
+  ];
+  const outcomes = new Set(permutations(rest).map((order) => JSON.stringify(pickEnd(run(new Normalizer(), [...head, ...order]).graph))));
+  expect([...outcomes]).toEqual([JSON.stringify({ status: 'running', endedAt: null, durationMs: null })]);
+});
+
+test('同一个子代理被后台派出两次、第一次没有自己的信号：第一次在第二次开始时算结束，会话结束在哪都一样', () => {
+  const head = [
+    userPrompt('u1', null, 'x'),
+    assistantBlock('a1', 'u1', { type: 'tool_use', id: 'tu1', name: 'Agent', input: {} }, { timestamp: '2026-01-01T00:10:00.000Z' }),
+    assistantBlock('a2', 'a1', { type: 'tool_use', id: 'tu2', name: 'Agent', input: {} }, { timestamp: '2026-01-01T00:30:00.000Z' }),
+  ];
+  const rest = [
+    toolResult('u2', 'a2', 'tu1', 'launched', undefined, ASYNC),
+    toolResult('u3', 'u2', 'tu2', 'launched', undefined, ASYNC),
+    hook('SessionEnd', {}, '2026-01-01T05:00:00.000Z'),
+  ];
+  const outcomes = new Set(permutations(rest).map((order) => {
+    const { graph } = run(new Normalizer(), [...head, ...order]);
+    return JSON.stringify([graph.nodes['tool:tu1']!.status, graph.nodes['tool:tu1']!.endedAt, graph.nodes['tool:tu2']!.status, graph.nodes['tool:tu2']!.endedAt]);
+  }));
+  expect([...outcomes]).toEqual([JSON.stringify(['succeeded', '2026-01-01T00:30:00.000Z', 'failed', '2026-01-01T05:00:00.000Z'])]);
+});
+
+test('前台子代理：SubagentStop hook 早于元数据到达时不再丢失', () => {
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x'),
+    assistantBlock('a1', 'u1', { type: 'tool_use', id: 'tu1', name: 'Agent', input: {} }),
+    hook('SubagentStop', { agent_id: 'ag1' }, '2026-01-01T00:20:05.000Z'),
+    agentMeta('ag1', { toolUseId: 'tu1', agentType: 'Explore', description: 'd' }),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ status: 'succeeded', endedAt: '2026-01-01T00:20:05.000Z' });
+});

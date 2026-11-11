@@ -1,7 +1,7 @@
 import { expect, test } from 'vitest';
 import type { Graph, GraphEdge, GraphNode, NodeKind } from '@claude-canvas/shared';
 import { buildView, turnKeyOf } from '../src/canvas/view';
-import { barOf, buildWaterfall, durationPlacement, scopeKey, scopeOf, stepChain, waterfallClock, withNow } from '../src/canvas/waterfall';
+import { barOf, buildWaterfall, durationPlacement, QUIET_AFTER_MS, scopeKey, scopeOf, stepChain, waterfallClock, withNow } from '../src/canvas/waterfall';
 
 const EPOCH = Date.parse('2026-01-01T00:00:00Z');
 const iso = (t: number) => new Date(EPOCH + t).toISOString();
@@ -164,15 +164,21 @@ test('stepChain.direct: the nearest reasoning on each path, with the reasoning r
   expect(stepChain(g, null).direct.size).toBe(0);
 });
 
-test('waterfallClock ticks only while the session is progressing; otherwise open steps end at the last activity', () => {
+test('waterfallClock: progressing while running or awaiting permission, and for a while after the last activity', () => {
   const at = iso(60_000);
-  const now = EPOCH + 120_000;
-  expect(waterfallClock({ status: 'running', lastActivityAt: at }, now)).toEqual({ nowMs: now, ticking: true });
-  expect(waterfallClock({ status: 'awaiting_permission', lastActivityAt: at }, now)).toEqual({ nowMs: now, ticking: true });
-  expect(waterfallClock({ status: 'idle', lastActivityAt: at }, now)).toEqual({ nowMs: EPOCH + 60_000, ticking: false });
-  expect(waterfallClock({ status: 'ended', lastActivityAt: at }, now)).toEqual({ nowMs: EPOCH + 60_000, ticking: false });
+  const soon = EPOCH + 120_000; // one minute after the last activity
+  const later = EPOCH + 60_000 + QUIET_AFTER_MS; // exactly the quiet limit
+  expect(waterfallClock({ status: 'running', lastActivityAt: at }, soon)).toEqual({ nowMs: soon, ticking: true });
+  expect(waterfallClock({ status: 'awaiting_permission', lastActivityAt: at }, later)).toEqual({ nowMs: later, ticking: true });
+  // Idle, but something (a background agent) was active a minute ago: still progressing.
+  expect(waterfallClock({ status: 'idle', lastActivityAt: at }, soon)).toEqual({ nowMs: soon, ticking: true });
+  expect(waterfallClock({ status: 'awaiting_input', lastActivityAt: at }, soon).ticking).toBe(true);
+  // Quiet for the whole limit: open steps end at the last activity.
+  expect(waterfallClock({ status: 'idle', lastActivityAt: at }, later)).toEqual({ nowMs: EPOCH + 60_000, ticking: false });
+  // An ended session is over at once.
+  expect(waterfallClock({ status: 'ended', lastActivityAt: at }, soon)).toEqual({ nowMs: EPOCH + 60_000, ticking: false });
   // Running, but silent for an hour: displayed as stale, so nothing is growing.
-  expect(waterfallClock({ status: 'running', lastActivityAt: at }, now + 3_600_000)).toEqual({ nowMs: EPOCH + 60_000, ticking: false });
+  expect(waterfallClock({ status: 'running', lastActivityAt: at }, soon + 3_600_000)).toEqual({ nowMs: EPOCH + 60_000, ticking: false });
 });
 
 test('durationPlacement: after a bar with room on its right, before one with room on its left, inside a full-width one', () => {

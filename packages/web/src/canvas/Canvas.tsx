@@ -245,7 +245,7 @@ function useFlowNodes(
  * React Flow edges between drawn nodes. An edge out of a node with two or more outgoing edges is drawn in the fork
  * colour; an edge into a running or awaiting-permission node is animated.
  */
-function useFlowEdges({ view, positions }: Pick<FlowInputs, 'view' | 'positions'>, chain: UpstreamChain): Edge[] {
+function useFlowEdges({ view, positions }: Pick<FlowInputs, 'view' | 'positions'>, chain: UpstreamChain, progressing: boolean): Edge[] {
   type Cached = { src: ViewEdge; animated: boolean; fork: boolean; zIndex: number; highlight: Highlight; edge: Edge };
   const cache = useRef(new Map<string, Cached>());
   const last = useRef<Edge[] | null>(null);
@@ -259,7 +259,8 @@ function useFlowEdges({ view, positions }: Pick<FlowInputs, 'view' | 'positions'
     for (const e of view.edges) {
       if (!positions[e.from] || !positions[e.to]) continue;
       const target = view.nodes.get(e.to);
-      const animated = target?.type === 'node' && isActive(target.node.status);
+      // Not while the session is not progressing: nothing is flowing into an unfinished step.
+      const animated = progressing && target?.type === 'node' && isActive(target.node.status);
       const fork = forks.has(e.from);
       const highlight: Highlight = !active ? 'none' : chain.edgeIds.has(e.id) ? 'chain' : 'dim';
       // Inside a container: above its background, below the nodes of the same group; chain edges above dimmed ones.
@@ -286,7 +287,7 @@ function useFlowEdges({ view, positions }: Pick<FlowInputs, 'view' | 'positions'
     }
     cache.current = next;
     return (last.current = sameElements(last.current, out));
-  }, [view, positions, chain]);
+  }, [view, positions, chain, progressing]);
 }
 
 function miniMapColor(n: FlowNode): string {
@@ -402,7 +403,7 @@ function CanvasInner({
   progressing = true,
 }: CanvasProps) {
   const nodes = useFlowNodes(snapshot, selectedId, chain);
-  const edges = useFlowEdges(snapshot, chain);
+  const edges = useFlowEdges(snapshot, chain, progressing);
   const follow = useFollow(snapshot);
   const { following } = follow;
   useEffect(() => { onFollowingChange?.(following); }, [following, onFollowingChange]);

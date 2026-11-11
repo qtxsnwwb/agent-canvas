@@ -96,15 +96,20 @@ export function buildWaterfall(graph: Graph, scope: WaterfallScope, options: { c
   return { rows, startMs, endMs: Math.max(endMs, startMs + 1) };
 }
 
+/** A session that is not running still counts as progressing for this long after its last activity (see waterfallClock). */
+export const QUIET_AFTER_MS = 5 * 60_000;
+
 /**
- * The "now" that still-open steps end at. While the session is running or awaiting a permission it is the clock
- * (`ticking`); otherwise (idle, ended, waiting for input, or running but silent for too long) nothing is progressing, and
- * open steps end at the session's last activity.
+ * The "now" that still-open steps end at, and whether the session is progressing (`ticking`). It is while the session
+ * is running or awaiting a permission, and also — unless it has ended — for QUIET_AFTER_MS after its last activity:
+ * background agents go on working (and writing records) while the main thread is idle, and their records do not
+ * change the session's status. Otherwise nothing is progressing, and open steps end at the session's last activity.
  */
 export function waterfallClock(session: Pick<Session, 'status' | 'lastActivityAt'>, nowMs: number): { nowMs: number; ticking: boolean } {
   const status = effectiveStatus(session, nowMs);
   if (status === 'running' || status === 'awaiting_permission') return { nowMs, ticking: true };
   const last = Date.parse(session.lastActivityAt);
+  if (status !== 'ended' && !Number.isNaN(last) && nowMs - last < QUIET_AFTER_MS) return { nowMs, ticking: true };
   return { nowMs: Number.isNaN(last) ? nowMs : last, ticking: false };
 }
 

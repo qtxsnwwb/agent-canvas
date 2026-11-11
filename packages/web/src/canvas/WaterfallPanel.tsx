@@ -4,7 +4,7 @@ import type { LiveSession } from '../client';
 import { NODE_STATUS_LABEL } from '../labels';
 import { useNow } from '../useNow';
 import { formatDuration } from './format';
-import { KIND_LABEL, nodeColor } from './nodes';
+import { KIND_LABEL, nodeColor, UNFINISHED_LABEL } from './nodes';
 import {
   barOf, buildWaterfall, durationPlacement, scopeKey, waterfallClock, withNow, type WaterfallRow, type WaterfallScope,
 } from './waterfall';
@@ -78,7 +78,9 @@ const Row = memo(function Row({ row, offset, place, selected, ticking, chain, on
           <span className="cc-wf-summary">{node.summary}</span>
         </button>
         {node.status !== null && node.status !== 'succeeded' && (
-          <span className="cc-wf-status" style={{ color }}>{NODE_STATUS_LABEL[node.status] ?? node.status}</span>
+          <span className="cc-wf-status" style={{ color }}>
+            {row.open && !ticking ? UNFINISHED_LABEL : NODE_STATUS_LABEL[node.status] ?? node.status}
+          </span>
         )}
         {row.childAgentId !== null && (
           <button type="button" className="cc-wf-inner" onClick={openAgent}>内部步骤</button>

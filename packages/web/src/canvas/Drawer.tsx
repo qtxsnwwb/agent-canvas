@@ -5,7 +5,7 @@ import { NODE_STATUS_LABEL } from '../labels';
 import type { UpstreamChain } from './chain';
 import { formatDuration } from './format';
 import { DETAIL_MAX_CHARS, detailSections } from './detail';
-import { KIND_LABEL, nodeColor } from './nodes';
+import { KIND_LABEL, nodeColor, UNFINISHED_LABEL } from './nodes';
 import { CHAIN_FOLDED, NO_REASONING, reasoningRows, type ReasoningRow } from './reasoning';
 import type { CanvasView } from './view';
 
@@ -146,6 +146,8 @@ export interface DrawerProps {
   view: CanvasView;
   /** Replay view: the header says the content is the node's current state, not the replayed one. */
   replay?: boolean;
+  /** The session is not progressing: a status of running / awaiting permission is shown as "未结束". */
+  stalled?: boolean;
   /** Outline view: the "推理链" rows of the step (from stepChain), listed instead of the causal view's chain. */
   reasoning?: ReasoningRow[];
   /** Selects another node (a row of the "推理链" list). */
@@ -155,7 +157,7 @@ export interface DrawerProps {
   onClose(): void;
 }
 
-export function Drawer({ sessionId, node, chain, view, replay = false, reasoning, onSelect, onExpandCut, onClose }: DrawerProps) {
+export function Drawer({ sessionId, node, chain, view, replay = false, stalled = false, reasoning, onSelect, onExpandCut, onClose }: DrawerProps) {
   const closeRef = useRef<HTMLButtonElement>(null);
   // Focus the close button on open; give focus back to whatever had it when the drawer closes.
   useEffect(() => {
@@ -188,7 +190,11 @@ export function Drawer({ sessionId, node, chain, view, replay = false, reasoning
           <button ref={closeRef} type="button" className="cc-drawer-close" onClick={onClose} aria-label="关闭">×</button>
         </div>
         <div className="cc-drawer-meta">
-          {node.status !== null && <span className="cc-status">{NODE_STATUS_LABEL[node.status] ?? node.status}</span>}
+          {node.status !== null && (
+            <span className="cc-status">
+              {stalled && (node.status === 'running' || node.status === 'awaiting_permission') ? UNFINISHED_LABEL : NODE_STATUS_LABEL[node.status] ?? node.status}
+            </span>
+          )}
           <span>{formatTime(node.timestamp)}</span>
           {duration !== '' && <span>{duration}</span>}
           {node.usage !== null && <span>输入 {node.usage.inputTokens} · 输出 {node.usage.outputTokens}</span>}
