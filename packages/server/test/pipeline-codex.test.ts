@@ -64,7 +64,7 @@ test('Claude 与 Codex 会话一起导入：来源正确、同一工作目录同
   root.complete();
   sub.meta();
   sub.started('s1');
-  sub.context('user', 'the task');
+  sub.context('user', 'the task', 'task1');
   sub.exec('x1', 'run');
   sub.command('e1', 'make');
   sub.output('x1');
@@ -92,8 +92,8 @@ test('Claude 与 Codex 会话一起导入：来源正确、同一工作目录同
   const g = store.getGraph(ROOT)!;
   const byId = new Map(g.nodes.map((x) => [x.id, x]));
   expect(byId.get('tool:call1')).toMatchObject({ kind: 'subagent', childAgentId: SUB, title: 'Hubble', status: 'succeeded' });
-  expect(byId.get('tool:x1')).toMatchObject({ agentId: SUB, parentId: 'tool:call1', summary: 'make', status: 'succeeded' });
-  expect(g.edges.filter((e) => e.kind === 'spawn').map((e) => e.id)).toEqual(['tool:call1->tool:x1']);
+  expect(byId.get('tool:x1')).toMatchObject({ agentId: SUB, parentId: 'prompt:task1', summary: 'make', status: 'succeeded' });
+  expect(g.edges.filter((e) => e.kind === 'spawn').map((e) => e.id)).toEqual(['tool:call1->prompt:task1']);
   expect(store.diagnostics().unknownRecords).toEqual([]);
   expect(p.ingestFailures()).toEqual([]);
 

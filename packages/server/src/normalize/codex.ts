@@ -44,6 +44,17 @@ type Obj = Record<string, unknown>;
 const isObject = (v: unknown): v is Obj => typeof v === 'object' && v !== null && !Array.isArray(v);
 const str = (v: unknown): string | null => (typeof v === 'string' ? v : null);
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+/** Epoch milliseconds as ISO time; null for anything a Date cannot represent (NaN, ±1e20, …). */
+function isoOf(ms: number | null): string | null {
+  if (ms === null) return null;
+  const d = new Date(ms);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+/** Epoch milliseconds of an ISO time; null when it does not parse. */
+function msOf(iso: string): number | null {
+  const ms = Date.parse(iso);
+  return Number.isNaN(ms) ? null : ms;
+}
 const obj = (v: unknown): Obj => (isObject(v) ? v : {});
 const lastSegment = (p: string | null): string | null => {
   if (p === null) return null;
@@ -96,8 +107,16 @@ interface ThreadState {
   currentTurn: string | null;
   /** Tool node ids of calls still waiting for their output, in open order. */
   openCalls: string[];
-  /** call_id -> tool node id (a node id is suffixed when another thread took `tool:<call_id>` first). */
+  /** Every call of the thread with its time window [call record, output record] (end null while open), in file order. */
+  callWindows: { nodeId: string; startMs: number; endMs: number | null }[];
+  /** call_id -> tool node id. */
   callNodes: Map<string, string>;
+  /** The current turn has an `item_completed/UserMessage` (subagent prompt synthesis is then not needed). */
+  turnHasUserMessage: boolean;
+  /** The current turn has had model output (assistant text, reasoning, a call). */
+  turnHasOutput: boolean;
+  /** Subagent threads: the last role-user message of the current turn before its first model output. */
+  pendingTask: { id: string | null; text: string; ts: string; offset: number } | null;
   /** Increases at every record that ends a model response's run of calls (see parallel calls). */
   group: number;
   /** The current run of calls of one response (parallel siblings). */
@@ -246,12 +265,18 @@ export class CodexNormalizer implements AgentNormalizer {
   private readonly preSessionRestored = new Set<string>();
 
   apply(event: RawEvent, projectId: string): NormalizeResult {
+    // Every state mutation pushes its change right away, so on a failure the changes made so far are still returned:
+    // the derived data never falls behind the in-memory state.
+    const changes: Change[] = [];
     try {
-      if (event.source === 'transcript') return this.applyTranscript(event, projectId);
-      if (event.source === 'meta') return this.applyMeta(event);
-      return { changes: [] }; // hooks: not yet (a later task)
+      if (event.source === 'transcript') {
+        const unknown = this.applyTranscript(event, projectId, changes);
+        return unknown === undefined ? { changes } : { changes, unknownRecordType: unknown };
+      }
+      if (event.source === 'meta') this.applyMeta(event, changes);
+      return { changes }; // hooks: not yet (a later task)
     } catch {
-      return { changes: [], unknownRecordType: 'normalizer-error' };
+      return { changes, unknownRecordType: 'normalizer-error' };
     }
   }
 
@@ -269,7 +294,7 @@ export class CodexNormalizer implements AgentNormalizer {
   restorePreSession(sessionId: string, events: Iterable<RawEvent>): void {
     this.dropSession(sessionId);
     try {
-      for (const ev of events) if (ev.source === 'meta' && ev.sessionId === sessionId) this.applyMeta(ev);
+      for (const ev of events) if (ev.source === 'meta' && ev.sessionId === sessionId) this.applyMeta(ev, []);
     } catch (err) {
       this.dropSession(sessionId);
       throw err;
@@ -291,17 +316,15 @@ export class CodexNormalizer implements AgentNormalizer {
 
   // ---- titles ----
 
-  private applyMeta(event: Extract<RawEvent, { source: 'meta' }>): NormalizeResult {
-    if (event.agentId !== null) return { changes: [] };
+  private applyMeta(event: Extract<RawEvent, { source: 'meta' }>, changes: Change[]): void {
+    if (event.agentId !== null) return;
     let parsed: unknown;
     try {
       parsed = JSON.parse(event.payload);
     } catch {
-      return { changes: [] };
+      return;
     }
-    const changes: Change[] = [];
     if (isObject(parsed)) this.setTitle(event.sessionId, 'index', str(parsed.thread_name), changes);
-    return { changes };
   }
 
   private bestTitle(sessionId: string): string | null {
@@ -375,7 +398,11 @@ export class CodexNormalizer implements AgentNormalizer {
         turns: [],
         currentTurn: null,
         openCalls: [],
+        callWindows: [],
         callNodes: new Map(),
+        turnHasUserMessage: false,
+        turnHasOutput: false,
+        pendingTask: null,
         group: 0,
         batch: null,
         reasoningMs: new Map(),
@@ -431,21 +458,21 @@ export class CodexNormalizer implements AgentNormalizer {
 
   // ---- records ----
 
-  private applyTranscript(event: Transcript, projectId: string): NormalizeResult {
+  /** Pushes the record's changes; returns the unknown-record label, if any. */
+  private applyTranscript(event: Transcript, projectId: string, changes: Change[]): string | undefined {
     let parsed: unknown;
     try {
       parsed = JSON.parse(event.line);
     } catch {
-      return { changes: [], unknownRecordType: 'invalid-json' };
+      return 'invalid-json';
     }
-    if (!isObject(parsed)) return { changes: [], unknownRecordType: 'invalid-json' };
+    if (!isObject(parsed)) return 'invalid-json';
     const type = parsed.type;
-    if (typeof type !== 'string') return { changes: [], unknownRecordType: 'missing-type' };
+    if (typeof type !== 'string') return 'missing-type';
     const payload = obj(parsed.payload);
     const kind = classify(type, payload);
-    if (kind.kind === 'unknown') return { changes: [], unknownRecordType: kind.type };
+    if (kind.kind === 'unknown') return kind.type;
 
-    const changes: Change[] = [];
     const existing = this.sessions.get(event.sessionId);
     const ts = str(parsed.timestamp) ?? existing?.session.lastActivityAt ?? EPOCH;
     const state = this.stateFor(event.sessionId, ts, projectId, changes);
@@ -454,16 +481,16 @@ export class CodexNormalizer implements AgentNormalizer {
 
     // The parent's history copied into a forked thread's file: already shown in the parent's thread.
     const ordinal = num(parsed.ordinal);
-    if (thread.historyStart !== null && ordinal !== null && ordinal > 0 && ordinal < thread.historyStart) return { changes };
+    if (thread.historyStart !== null && ordinal !== null && ordinal > 0 && ordinal < thread.historyStart) return undefined;
     // A second session_meta in the file is the parent's (copied with its history).
-    if (type === 'session_meta' && str(payload.id) !== null && str(payload.id) !== thread.id) return { changes };
+    if (type === 'session_meta' && str(payload.id) !== null && str(payload.id) !== thread.id) return undefined;
 
     this.touchSession(state, ts, projectId, isRoot, changes);
     if (kind.kind === 'ignored') {
       if (type === 'token_usage_record' || type === 'response_item') thread.group += 1; // ends a response's run of calls
-      return { changes };
+      return undefined;
     }
-    const ctx: Ctx = { state, thread, event, payload, ts, changes, isRoot };
+    const ctx: Ctx = { state, thread, event, payload, ts, changes, isRoot, unknown: undefined };
     switch (type) {
       case 'session_meta':
         this.applySessionMeta(ctx);
@@ -478,7 +505,7 @@ export class CodexNormalizer implements AgentNormalizer {
         this.applyResponseItem(ctx);
         break;
     }
-    return { changes };
+    return ctx.unknown;
   }
 
   private applySessionMeta(ctx: Ctx): void {
@@ -505,6 +532,9 @@ export class CodexNormalizer implements AgentNormalizer {
         const id = str(payload.turn_id) ?? `turn@${ctx.event.offset}`;
         thread.turns.push({ id, endedAt: null, failed: false });
         thread.currentTurn = id;
+        thread.turnHasUserMessage = false;
+        thread.turnHasOutput = false;
+        thread.pendingTask = null;
         if (ctx.isRoot) this.setStatus(ctx.state, 'running', ctx.ts, ctx.changes);
         this.threadTurnsChanged(ctx);
         break;
@@ -544,6 +574,11 @@ export class CodexNormalizer implements AgentNormalizer {
     }
     turn.endedAt = ctx.ts;
     turn.failed = failed;
+    // Calls left without an output (an aborted turn) stop being fold targets: nothing after the turn ran inside them.
+    const endMs = msOf(ctx.ts);
+    for (const w of thread.callWindows) if (w.endMs === null && endMs !== null) w.endMs = endMs;
+    thread.openCalls = [];
+    thread.pendingTask = null;
     // Only the end of the thread's latest turn makes the session idle (a stale end does not).
     if (ctx.isRoot && thread.turns[thread.turns.length - 1] === turn) this.setStatus(ctx.state, 'idle', ctx.ts, ctx.changes);
     this.threadTurnsChanged(ctx);
@@ -561,6 +596,8 @@ export class CodexNormalizer implements AgentNormalizer {
     switch (itype) {
       case 'UserMessage': {
         thread.group += 1;
+        thread.turnHasUserMessage = true;
+        thread.pendingTask = null;
         const text = joinParts(item.content, (p) => (p.type === 'text' ? str(p.text) : p.type === 'local_image' || p.type === 'image' ? '[image]' : null), '\n');
         if (ctx.isRoot && !ctx.state.firstPromptSeen) {
           // Only the first root-thread prompt can name the session, even when it yields no usable text.
@@ -583,8 +620,9 @@ export class CodexNormalizer implements AgentNormalizer {
         return;
       }
       case 'SubAgentActivity': {
+        // Only `started` links a spawn call to its thread (`interacted` / `completed` name other calls or none).
         const agentThreadId = str(item.agent_thread_id);
-        if (itemId === null || agentThreadId === null || ctx.state.activity.has(itemId)) return;
+        if (item.kind !== 'started' || itemId === null || agentThreadId === null || ctx.state.activity.has(itemId)) return;
         ctx.state.activity.set(itemId, { agentThreadId, agentPath: str(item.agent_path) });
         this.refreshDispatches(ctx.state, ctx.changes);
         return;
@@ -598,18 +636,25 @@ export class CodexNormalizer implements AgentNormalizer {
       exitCode: num(item.exit_code),
       durationMs: itemDuration(item, payload),
     };
-    const target = thread.openCalls[thread.openCalls.length - 1];
-    if (target !== undefined && ctx.state.nodes.has(target)) {
+    const startedMs = num(payload.started_at_ms);
+    const startedAt = isoOf(startedMs);
+    const target = this.foldTarget(thread, startedAt === null ? null : startedMs);
+    const node = target === undefined ? undefined : ctx.state.nodes.get(target);
+    if (target !== undefined && node) {
       const list = [...(ctx.state.folded.get(target) ?? []), entry];
       ctx.state.folded.set(target, list);
-      const node = ctx.state.nodes.get(target)!;
       const patch: Partial<GraphNode> = {};
-      if (list.length === 1 && node.kind === 'tool' && entry.name !== '') patch.summary = summarize(entry.name);
+      if (node.kind === 'tool') {
+        // The first command names the call; without one, the first item that has a name.
+        const named = list.find((e) => e.type === 'CommandExecution' && e.name !== '') ?? list.find((e) => e.name !== '');
+        if (named !== undefined && summarize(named.name) !== node.summary) patch.summary = summarize(named.name);
+        // An item can arrive after the call's output: a failure still fails the settled call.
+        if (node.status === 'succeeded' && entryFailed(entry)) patch.status = 'failed';
+      }
       this.patch(ctx.state, target, patch, ctx.changes, { raw: { items: list } });
       return;
     }
-    // Nothing open to fold into: the item is a finished tool step of its own.
-    const startedMs = num(payload.started_at_ms);
+    // No call it ran in: the item is a finished tool step of its own.
     this.addNode(ctx, {
       id: itemId !== null ? `tool:${itemId}` : null,
       kind: 'tool',
@@ -617,10 +662,46 @@ export class CodexNormalizer implements AgentNormalizer {
       summary: summarize(entry.name),
       toolName: itype,
       status: entryFailed(entry) ? 'failed' : 'succeeded',
-      timestamp: startedMs !== null ? new Date(startedMs).toISOString() : ctx.ts,
+      timestamp: startedAt ?? ctx.ts,
       endedAt: ctx.ts,
       durationMs: entry.durationMs,
       detail: { raw: { items: [entry] } },
+    });
+  }
+
+  /**
+   * The call a folded item ran in: the latest-starting call of the thread whose window [call record, output record]
+   * holds the item's start (a call without an output yet, or closed by its turn's end, has an open-ended window, resp.
+   * the turn end as its end). Without a usable start time: the most recently opened call still open. Undefined = none.
+   */
+  private foldTarget(thread: ThreadState, startedMs: number | null): string | undefined {
+    if (startedMs === null) return thread.openCalls[thread.openCalls.length - 1];
+    let best: ThreadState['callWindows'][number] | undefined;
+    for (const w of thread.callWindows) {
+      if (w.startMs > startedMs || (w.endMs !== null && startedMs > w.endMs)) continue;
+      if (best === undefined || w.startMs >= best.startMs) best = w;
+    }
+    return best?.nodeId;
+  }
+
+  /**
+   * A subagent thread's task arrives as a role-user message, not as a UserMessage item: before the turn's first model
+   * output, the last such message of the turn becomes its prompt node (only when the turn has no UserMessage item).
+   */
+  private beginModelOutput(ctx: Ctx): void {
+    const { thread } = ctx;
+    if (thread.turnHasOutput) return;
+    thread.turnHasOutput = true;
+    const task = thread.pendingTask;
+    thread.pendingTask = null;
+    if (task === null || thread.agentId === null || thread.turnHasUserMessage) return;
+    this.addNode(ctx, {
+      id: task.id !== null ? `prompt:${task.id}` : `prompt:${thread.id}@${task.offset}`,
+      kind: 'prompt',
+      title: 'Prompt',
+      summary: summarize(task.text),
+      timestamp: task.ts,
+      detail: { text: task.text },
     });
   }
 
@@ -628,6 +709,7 @@ export class CodexNormalizer implements AgentNormalizer {
     const { payload, thread } = ctx;
     const ptype = str(payload.type) ?? '';
     if (CALLS.has(ptype)) {
+      this.beginModelOutput(ctx);
       this.applyCall(ctx, ptype);
       return;
     }
@@ -638,13 +720,20 @@ export class CodexNormalizer implements AgentNormalizer {
     }
     switch (ptype) {
       case 'message': {
+        if (payload.role === 'user' && thread.agentId !== null && !thread.turnHasOutput && !thread.turnHasUserMessage) {
+          // Possibly the subagent's task (see beginModelOutput); the last one before the first output wins.
+          const text = joinParts(payload.content, (p) => (p.type === 'input_text' || p.type === 'text' ? str(p.text) : null), '\n');
+          thread.pendingTask = { id: str(payload.id), text, ts: ctx.ts, offset: ctx.event.offset };
+        }
         if (payload.role !== 'assistant') return; // user / developer messages are context injection
+        this.beginModelOutput(ctx);
         const text = joinParts(payload.content, (p) => (p.type === 'output_text' ? str(p.text) : null), '');
         const id = str(payload.id);
         this.addNode(ctx, { id: id !== null ? `text:${id}` : null, kind: 'text', title: 'Text', summary: summarize(text), detail: { text, raw: { phase: str(payload.phase) } } });
         return;
       }
       case 'reasoning': {
+        this.beginModelOutput(ctx);
         const text = joinParts(payload.summary, (p) => str(p.text), '\n');
         const rid = str(payload.id);
         const placed = this.addNode(ctx, {
@@ -694,6 +783,8 @@ export class CodexNormalizer implements AgentNormalizer {
     if (id === null) return;
     thread.callNodes.set(callId, id);
     thread.openCalls.push(id);
+    const startMs = msOf(ctx.ts);
+    if (startMs !== null) thread.callWindows.push({ nodeId: id, startMs, endMs: null });
     state.toolInputs.set(id, input);
     if (isSpawn) {
       state.spawns.set(id, { threadId: thread.id, callId, taskName, toolName, timestamp: ctx.ts });
@@ -708,6 +799,8 @@ export class CodexNormalizer implements AgentNormalizer {
     const node = id === undefined ? undefined : state.nodes.get(id);
     if (id === undefined || !node) return; // its call is not in this thread (e.g. never written)
     thread.openCalls = thread.openCalls.filter((x) => x !== id);
+    const endMs = msOf(ctx.ts);
+    for (const w of thread.callWindows) if (w.nodeId === id && endMs !== null) w.endMs = endMs;
     state.toolInputs.delete(id);
     const detail = { output: payload.output ?? null };
     // A dispatch node follows its agent's thread, not the immediate answer to the spawn call.
@@ -749,7 +842,7 @@ export class CodexNormalizer implements AgentNormalizer {
   /**
    * Places a node in its thread: it hangs off the thread's last node, except that calls of one model response are
    * siblings (fork from the first one's parent) and the next node after such a run joins all of them. Returns the node
-   * id, or null when the record repeats a node this thread already has.
+   * id, or null when the id is already taken in the session (reported as `duplicate-node-id`).
    */
   private addNode(
     ctx: Ctx,
@@ -770,12 +863,11 @@ export class CodexNormalizer implements AgentNormalizer {
     isCall = false,
   ): string | null {
     const { state, thread, changes } = ctx;
-    let id = spec.id ?? `${spec.kind}:${thread.id}@${ctx.event.offset}`;
-    const taken = state.nodes.get(id);
-    if (taken) {
-      if (taken.agentId === thread.agentId) return null; // the same record again
-      id = `${id}@${thread.id}`; // another thread uses the same id
-      if (state.nodes.has(id)) return null;
+    const id = spec.id ?? `${spec.kind}:${thread.id}@${ctx.event.offset}`;
+    if (state.nodes.has(id)) {
+      // The id is taken (by this or another thread): a repeated record. Nothing is placed; diagnostics show it.
+      ctx.unknown = 'duplicate-node-id';
+      return null;
     }
     let parentId = thread.lastNode;
     let edgeKind: GraphEdge['kind'] = 'sequence';
@@ -948,4 +1040,6 @@ interface Ctx {
   ts: string;
   changes: Change[];
   isRoot: boolean;
+  /** Set when the record is reported in diagnostics although it was applied (a duplicate node id). */
+  unknown: string | undefined;
 }

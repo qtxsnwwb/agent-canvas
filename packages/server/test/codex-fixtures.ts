@@ -53,7 +53,8 @@ export class CodexThread {
 
   /** One line of this file as a raw event (`over` replaces top-level fields of the record). */
   record(type: string, payload: Record<string, unknown>, over: Record<string, unknown> = {}): RawEvent {
-    const line = JSON.stringify({ timestamp: nextTime(), ordinal: this.ordinal++, type, payload, ...over });
+    const timestamp = typeof over.timestamp === 'string' ? over.timestamp : nextTime();
+    const line = JSON.stringify({ timestamp, ordinal: this.ordinal++, type, payload, ...over });
     return this.line(line, type);
   }
 
@@ -146,8 +147,8 @@ export class CodexThread {
   }
 
   /** Context injection: a `response_item/message` with role user or developer. */
-  context(role: 'user' | 'developer', text: string): RawEvent {
-    return this.record('response_item', { type: 'message', id: `msg_ctx_${this.ordinal}`, role, content: [{ type: 'input_text', text }], ...this.turnMeta() });
+  context(role: 'user' | 'developer', text: string, id = `msg_ctx_${this.ordinal}`): RawEvent {
+    return this.record('response_item', { type: 'message', id, role, content: [{ type: 'input_text', text }], ...this.turnMeta() });
   }
 
   /** Assistant text, preceded by its `item_completed/AgentMessage` duplicate (as Codex writes it). */
@@ -219,9 +220,10 @@ export class CodexThread {
     });
   }
 
-  command(id: string, cmd: string, opts: { status?: string; exitCode?: number; durationMs?: number } = {}): RawEvent {
+  command(id: string, cmd: string, opts: { status?: string; exitCode?: number; durationMs?: number; startedAtMs?: number | null } = {}): RawEvent {
     const ms = opts.durationMs ?? 250;
-    return this.item({
+    return this.item(
+      {
       type: 'CommandExecution',
       id,
       process_id: 4242,
@@ -233,7 +235,9 @@ export class CodexThread {
       aggregated_output: 'ok',
       exit_code: opts.exitCode ?? 0,
       duration: { secs: Math.floor(ms / 1000), nanos: (ms % 1000) * 1_000_000 },
-    });
+      },
+      opts.startedAtMs === undefined ? {} : { started_at_ms: opts.startedAtMs },
+    );
   }
 
   mcp(id: string, server: string, tool: string, status = 'completed'): RawEvent {
@@ -253,16 +257,17 @@ export class CodexThread {
     return this.item({ type: 'SubAgentActivity', model: 'gpt-x', reasoning_effort: 'high', id: callId, kind, agent_thread_id: agentThreadId, agent_path: agentPath });
   }
 
-  /** Any `event_msg/item_completed`. */
-  item(item: Record<string, unknown>, timing: { started_at_ms?: number; completed_at_ms?: number } = {}): RawEvent {
-    return this.record('event_msg', {
-      type: 'item_completed',
-      thread_id: this.id,
-      turn_id: this.turn,
-      item,
-      started_at_ms: timing.started_at_ms ?? 1793071184000,
-      completed_at_ms: timing.completed_at_ms ?? 1793071184250,
-    });
+  /**
+   * Any `event_msg/item_completed`. By default the item completed at the record's own time and started 250 ms before it
+   * (so it falls in the window of the call open just before it); `started_at_ms: null` leaves the field out.
+   */
+  item(item: Record<string, unknown>, timing: { started_at_ms?: number | null; completed_at_ms?: number } = {}): RawEvent {
+    const at = nextTime();
+    const atMs = Date.parse(at);
+    const payload: Record<string, unknown> = { type: 'item_completed', thread_id: this.id, turn_id: this.turn, item };
+    if (timing.started_at_ms !== null) payload.started_at_ms = timing.started_at_ms ?? atMs - 250;
+    payload.completed_at_ms = timing.completed_at_ms ?? atMs;
+    return this.record('event_msg', payload, { timestamp: at });
   }
 
   usage(): RawEvent {

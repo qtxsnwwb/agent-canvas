@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from 'vitest';
-import type { Change, GraphNode } from '@claude-canvas/shared';
+import { applyChanges, emptyGraph, type Change, type GraphNode } from '@claude-canvas/shared';
 import { CodexNormalizer } from '../src/normalize/codex.js';
 import type { RawEvent } from '../src/store/store.js';
 import { CodexThread, interleave, run, titleMeta, type RunResult } from './codex-fixtures.js';
@@ -286,24 +286,37 @@ describe('未识别与忽略', () => {
     expect(ids(r)).toEqual([]);
   });
 
-  test('垃圾输入不抛异常', () => {
+  test('畸形输入：每条有确定的结果（未识别标签、不产生节点或边、节点字段无 undefined），之后的正常记录照常处理', () => {
     const root = new CodexThread({ id: 'root1' });
-    const garbage: RawEvent[] = [
-      root.line('not json'),
-      root.line('[]'),
-      root.line('null'),
-      root.line('{"type":5}'),
-      root.line('{"type":"event_msg","payload":null}'),
-      root.line('{"type":"event_msg","payload":{"type":"item_completed","item":7}}'),
-      root.line('{"type":"response_item","payload":{"type":"function_call"}}'),
-      root.line('{"type":"response_item","payload":{"type":"function_call_output","call_id":{}}}'),
-      root.line('{"type":"session_meta","payload":{"id":42}}'),
-      root.line('{"type":"event_msg","timestamp":12,"payload":{"type":"task_complete","turn_id":[1]}}'),
-      { source: 'meta', origin: 'codex', file: 'codex:index/root1', sessionId: 'root1', agentId: null, payload: '{oops' },
-      { source: 'meta', origin: 'codex', file: 'codex:index/root1', sessionId: 'root1', agentId: null, payload: '{"thread_name":7}' },
-      { source: 'hook', origin: 'codex', receivedAt: 'x', eventName: 'PreToolUse', sessionId: 'root1', payload: 'nope' },
+    run(n, [root.meta(), root.started('t1')]);
+    const meta = (payload: string): RawEvent => ({ source: 'meta', origin: 'codex', file: 'codex:index/root1', sessionId: 'root1', agentId: null, payload });
+    const cases: [RawEvent, string | undefined][] = [
+      [root.line('not json'), 'invalid-json'],
+      [root.line('[]'), 'invalid-json'],
+      [root.line('null'), 'invalid-json'],
+      [root.line('{"type":5}'), 'missing-type'],
+      [root.line('{"type":"event_msg","payload":null}'), 'event_msg'],
+      [root.line('{"type":"event_msg","payload":{"type":"item_completed","item":7}}'), 'item_completed/?'],
+      [root.line('{"type":"response_item","payload":{"type":"function_call"}}'), undefined], // no call_id: no node
+      [root.line('{"type":"response_item","payload":{"type":"function_call_output","call_id":{}}}'), undefined],
+      [root.line('{"type":"session_meta","payload":{"id":42}}'), undefined],
+      [root.line('{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","exit_code":"x"},"started_at_ms":"y"}}'), undefined],
+      [meta('{oops'), undefined],
+      [meta('{"thread_name":7}'), undefined],
+      [{ source: 'hook', origin: 'codex', receivedAt: 'x', eventName: 'PreToolUse', sessionId: 'root1', payload: 'nope' }, undefined],
     ];
-    for (const ev of garbage) expect(() => n.apply(ev, 'p1')).not.toThrow();
+    for (const [ev, unknown] of cases) {
+      const res = n.apply(ev, 'p1');
+      expect(res.unknownRecordType).toBe(unknown);
+      const graphChanges = res.changes.filter((c) => c.type !== 'session_upserted' && !(c.type === 'node_added' && c.node.kind === 'tool'));
+      expect(graphChanges).toEqual([]);
+      for (const c of res.changes) if (c.type === 'node_added') expect(Object.values(c.node)).not.toContain(undefined);
+    }
+    // The malformed CommandExecution (no call open) became a finished tool node with sane fields.
+    const after = run(n, [root.user('u1', 'still works'), ...root.assistant('m1', 'yes')]);
+    expect(after.unknown).toEqual([]);
+    expect(node(after, 'prompt:u1').kind).toBe('prompt');
+    expect(node(after, 'text:m1').parentId).toBe('prompt:u1');
   });
 });
 
@@ -364,7 +377,7 @@ describe('子代理', () => {
       ...root.assistant('m1', 'spawned'),
       root.complete(),
     ];
-    const subStart = [sub.meta(), sub.started('s-t1'), sub.context('developer', 'rules'), sub.context('user', 'please do the sub task')];
+    const subStart = [sub.meta(), sub.started('s-t1'), sub.context('developer', 'rules'), sub.context('user', 'please do the sub task', 'task1')];
     const subWork = [...sub.reasoning('srs1', []), sub.exec('sc1', 'work'), sub.command('se1', 'make'), sub.output('sc1'), ...sub.assistant('sm1', 'sub done')];
     const subDone = sub.complete();
     return { root, sub, rootEvs, subStart, subWork, subDone, subEvs: [...subStart, ...subWork, subDone] };
@@ -378,10 +391,12 @@ describe('子代理', () => {
     for (const r of [r1, r2]) {
       expect(r.unknown).toEqual([]);
       expect(node(r, 'tool:c9')).toMatchObject({ kind: 'subagent', agentId: null, childAgentId: SUB, title: 'Hubble', summary: 'helper', toolName: 'collaboration.spawn_agent', toolUseId: 'c9', status: 'succeeded' });
-      expect(node(r, 'thinking:srs1')).toMatchObject({ agentId: SUB, parentId: 'tool:c9', turnId: 's-t1' });
+      // The child's task (its role-user message) is its first node, hanging off the dispatch node.
+      expect(node(r, 'prompt:task1')).toMatchObject({ kind: 'prompt', agentId: SUB, parentId: 'tool:c9', turnId: 's-t1', summary: 'please do the sub task' });
+      expect(node(r, 'thinking:srs1')).toMatchObject({ agentId: SUB, parentId: 'prompt:task1', turnId: 's-t1' });
       expect(node(r, 'tool:sc1')).toMatchObject({ agentId: SUB, parentId: 'thinking:srs1', summary: 'make' });
-      expect(edgeKinds(r)['tool:c9->thinking:srs1']).toBe('spawn');
-      expect(spawnEdgesAdded(r.changes)).toEqual(['tool:c9->thinking:srs1']);
+      expect(edgeKinds(r)['tool:c9->prompt:task1']).toBe('spawn');
+      expect(spawnEdgesAdded(r.changes)).toEqual(['tool:c9->prompt:task1']);
       expect(node(r, 'text:m1').parentId).toBe('tool:c9');
     }
     // Same records, either order: same graph (times differ between the two builds, so compare the shape).
@@ -454,7 +469,7 @@ describe('子代理', () => {
         const norm = new CodexNormalizer();
         const r = run(norm, subFirst ? [...s.subEvs, ...s.rootEvs] : [...s.rootEvs, ...s.subEvs]);
         expect(node(r, 'tool:c9')).toMatchObject({ kind: 'subagent', childAgentId: SUB, title: 'Hubble', status: 'succeeded' });
-        expect(spawnEdgesAdded(r.changes)).toEqual(['tool:c9->thinking:srs1']);
+        expect(spawnEdgesAdded(r.changes)).toEqual(['tool:c9->prompt:task1']);
       }
     }
   });
@@ -516,6 +531,180 @@ describe('子代理', () => {
       expect(r.graph).toEqual(base.graph);
       expect(r.sessions.get(ROOT)).toEqual(base.sessions.get(ROOT));
       expect(spawnEdgesAdded(r.changes)).toHaveLength(1);
+    }
+  });
+});
+
+// ---- fix round 1 ----
+
+const ms = (ev: RawEvent): number => Date.parse(timeOf(ev));
+
+describe('折叠按条目开始的时间归到调用', () => {
+  test('调用结束之后才写下的条目仍归到它开始时所在的调用；失败的条目让已成功的调用变为失败', () => {
+    const root = new CodexThread({ id: 'root1' });
+    const head = [root.meta(), root.started('t1'), root.user('u1', 'x')];
+    const call = root.exec('c1', 'a');
+    const out = root.output('c1');
+    const late = root.command('late1', 'make', { status: 'failed', exitCode: 2, startedAtMs: ms(call) + 400 });
+    const r = run(n, [...head, call, out, late]);
+    expect(r.graph.nodes['tool:late1']).toBeUndefined();
+    expect(node(r, 'tool:c1')).toMatchObject({ status: 'failed', summary: 'make', endedAt: timeOf(out), durationMs: ms(out) - ms(call) });
+    expect(detailOf(r.changes, 'tool:c1').raw).toEqual({ items: [{ type: 'CommandExecution', name: 'make', status: 'failed', exitCode: 2, durationMs: 250 }] });
+  });
+
+  test('条目开始于较早调用的时间窗内、而最近打开的是另一个调用：归到较早的那个', () => {
+    const root = new CodexThread({ id: 'root1' });
+    const head = [root.meta(), root.started('t1'), root.user('u1', 'x')];
+    const c1 = root.exec('c1', 'a');
+    const c2 = root.exec('c2', 'b');
+    const item = root.command('e1', 'ls', { startedAtMs: ms(c1) + 300 });
+    const r = run(n, [...head, c1, c2, item, root.output('c1'), root.output('c2')]);
+    expect(ms(c2)).toBeGreaterThan(ms(c1) + 300);
+    expect(node(r, 'tool:c1').summary).toBe('ls');
+    expect(node(r, 'tool:c2').summary).toBe('b');
+    expect(detailOf(r.changes, 'tool:c2').raw).toBeUndefined();
+  });
+
+  test('不落在任何调用时间窗内的条目自成节点；没有开始时间的条目归到最近打开的进行中调用，没有则自成节点', () => {
+    const root = new CodexThread({ id: 'root1' });
+    const head = [root.meta(), root.started('t1'), root.user('u1', 'x'), root.exec('c1', 'a')];
+    const out = root.output('c1');
+    const r = run(n, [...head, out, root.command('e9', 'sleep 1', { startedAtMs: ms(out) + 500 })]);
+    expect(node(r, 'tool:e9')).toMatchObject({ status: 'succeeded', parentId: 'tool:c1', timestamp: new Date(ms(out) + 500).toISOString() });
+    const r2 = run(n, [root.exec('c2', 'b'), root.exec('c3', 'c'), root.command('e10', 'pwd', { startedAtMs: null })]);
+    expect(node(r2, 'tool:c3').summary).toBe('pwd');
+    const r3 = run(n, [root.output('c2'), root.output('c3'), root.command('e11', 'id', { startedAtMs: null })]);
+    expect(node(r3, 'tool:e11').kind).toBe('tool');
+  });
+
+  test('摘要取第一条命令：调用里 MCP 条目在命令之前时也一样', () => {
+    const root = new CodexThread({ id: 'root1' });
+    const r = run(n, [root.meta(), root.started('t1'), root.exec('c1', 'script'), root.mcp('m1', 'docs', 'search'), root.command('e1', 'npm test'), root.output('c1')]);
+    expect(node(r, 'tool:c1').summary).toBe('npm test');
+  });
+
+  test('超出范围的开始时间（1e20、-1e20）不出错：时间退回记录自己的时间', () => {
+    const root = new CodexThread({ id: 'root1' });
+    run(n, [root.meta(), root.started('t1')]);
+    for (const [id, start] of [['big', 1e20], ['neg', -1e20]] as const) {
+      const ev = root.command(id, 'x', { startedAtMs: start });
+      const res = n.apply(ev, 'p1');
+      expect(res.unknownRecordType).toBeUndefined();
+      const added = res.changes.find((c): c is Extract<Change, { type: 'node_added' }> => c.type === 'node_added');
+      expect(added?.node).toMatchObject({ id: `tool:${id}`, timestamp: timeOf(ev) });
+    }
+  });
+});
+
+describe('重复的节点 id', () => {
+  test('同一会话里已有的 id（本线程或别的线程）：不放节点，报告 duplicate-node-id', () => {
+    const root = new CodexThread({ id: 'root1' });
+    const sub = new CodexThread({ id: 'sub1', sessionId: 'root1', parent: 'root1', agentPath: '/root/x' });
+    const first = run(n, [root.meta(), root.started('t1'), root.exec('c1', 'a'), ...root.assistant('m1', 'one')]);
+    expect(first.unknown).toEqual([]);
+    const again = run(n, [...root.assistant('m1', 'one again'), sub.meta(), sub.started('s1'), sub.exec('c1', 'copied')]);
+    expect(again.unknown).toEqual(['duplicate-node-id', 'duplicate-node-id']);
+    expect(again.changes.filter((c) => c.type === 'node_added' || c.type === 'edge_added')).toEqual([]);
+  });
+});
+
+describe('子代理线程的任务作为提示节点', () => {
+  const subThread = () => new CodexThread({ id: 'sub1', sessionId: 'root1', parent: 'root1', agentPath: '/root/helper' });
+
+  test('一轮里没有 UserMessage：首个模型输出之前的最后一条 role user 消息成为提示节点，时间和 id 取那条消息；追加任务的轮次各有自己的提示', () => {
+    const s = subThread();
+    const head = [s.meta(), s.started('s-t1'), s.context('user', 'environment', 'task-a'), s.context('developer', 'rules')];
+    const second = s.context('user', 'the real task', 'task-b');
+    const r = run(n, [...head, second, ...s.reasoning('rs1'), s.context('user', 'after output', 'task-c'), ...s.assistant('m1', 'done')]);
+    expect(ids(r)).toEqual(['prompt:task-b', 'thinking:rs1', 'text:m1']);
+    expect(node(r, 'prompt:task-b')).toMatchObject({ kind: 'prompt', agentId: 'sub1', turnId: 's-t1', timestamp: timeOf(second), summary: 'the real task', parentId: null });
+    expect(node(r, 'thinking:rs1').parentId).toBe('prompt:task-b');
+    expect(detailOf(r.changes, 'prompt:task-b')).toEqual({ text: 'the real task' });
+
+    const r2 = run(n, [s.started('s-t2'), s.context('user', 'more work', 'task-d'), s.exec('c1', 'x')]);
+    expect(node(r2, 'prompt:task-d')).toMatchObject({ parentId: 'text:m1', turnId: 's-t2' });
+    expect(node(r2, 'tool:c1').parentId).toBe('prompt:task-d');
+    // A turn with a UserMessage item uses that, not the role-user message.
+    const r3 = run(n, [s.started('s-t3'), s.context('user', 'ctx', 'task-e'), s.user('um1', 'typed'), ...s.assistant('m3', 'ok')]);
+    expect(ids(r3)).toEqual(['prompt:um1', 'text:m3']);
+  });
+
+  test('主线程的 role user 消息仍不产生节点', () => {
+    const root = new CodexThread({ id: 'root1' });
+    const r = run(n, [root.meta(), root.started('t1'), root.context('user', 'env', 'ctx1'), ...root.assistant('m1', 'hi')]);
+    expect(ids(r)).toEqual(['text:m1']);
+  });
+});
+
+describe('SubAgentActivity 只有 started 建立派发关系', () => {
+  test('interacted / completed 不连，也不计入未识别', () => {
+    const root = new CodexThread({ id: 'root1' });
+    const r = run(n, [root.meta(), root.started('t1'), root.spawn('c9', 'nobody'), root.activity('c9', 'sub1', '/root/x', 'interacted'), root.activity('c9', 'sub2', '/root/y', 'completed')]);
+    expect(r.unknown).toEqual([]);
+    expect(node(r, 'tool:c9')).toMatchObject({ childAgentId: null, status: 'running', title: 'collaboration.spawn_agent' });
+  });
+});
+
+describe('重放回归', () => {
+  /** Root (two turns) spawning A (activity) and B (meta only); A spawns grandchild G; B aborts. */
+  function world() {
+    const root = new CodexThread({ id: 'root1' });
+    const a = new CodexThread({ id: 'thA', sessionId: 'root1', parent: 'root1', nickname: 'Ada', agentPath: '/root/a' });
+    const b = new CodexThread({ id: 'thB', sessionId: 'root1', parent: 'root1', nickname: 'Bo', agentPath: '/root/b' });
+    const g = new CodexThread({ id: 'thG', sessionId: 'root1', parent: 'thA', nickname: 'Gus', agentPath: '/root/a/g' });
+    const rootEvs = [
+      root.meta(), root.started('t1'), root.user('u1', 'start'), root.spawn('cA', 'a'), root.activity('cA', 'thA', '/root/a'),
+      root.output('cA', '{}', 'function'), root.spawn('cB', 'b'), root.output('cB', '{}', 'function'), root.exec('cx', 'x'),
+      root.command('ex', 'echo'), root.output('cx'), ...root.assistant('m1', 'waiting'), root.complete(),
+      root.started('t2'), root.user('u2', 'more'), root.call('cf', 'followup_task', { target: '/root/a' }, 'collaboration'),
+      root.output('cf', 'ok', 'function'), root.complete(),
+    ];
+    const aEvs = [
+      a.meta(), a.started('a1'), a.context('user', 'task a', 'ta1'), ...a.reasoning('ar1'), a.spawn('cG', 'g'), a.activity('cG', 'thG', '/root/a/g'),
+      a.output('cG', '{}', 'function'), ...a.assistant('am1', 'a done'), a.complete(),
+      a.started('a2'), a.context('user', 'more a', 'ta2'), ...a.assistant('am2', 'a again'), a.complete(),
+    ];
+    const bEvs = [b.meta(), b.started('b1'), b.context('user', 'task b', 'tb1'), b.exec('bx', 'y'), b.aborted()];
+    const gEvs = [g.meta(), g.started('g1'), g.context('user', 'task g', 'tg1'), ...g.assistant('gm1', 'g done'), g.complete()];
+    return { threads: [rootEvs, aEvs, bEvs, gEvs], meta: titleMeta('root1', 'Named') };
+  }
+
+  test('四个线程任意交错、标题 meta 在任意位置（定种子）：图和会话都与顺序导入相同', () => {
+    const w = world();
+    const base = run(new CodexNormalizer(), [w.meta, ...w.threads.flat()]);
+    expect(base.unknown).toEqual([]);
+    expect(node(base, 'tool:cA')).toMatchObject({ childAgentId: 'thA', status: 'succeeded' });
+    expect(node(base, 'tool:cB')).toMatchObject({ childAgentId: 'thB', status: 'failed' });
+    expect(node(base, 'tool:cG')).toMatchObject({ childAgentId: 'thG', status: 'succeeded', agentId: 'thA' });
+    expect(base.sessions.get('root1')!.title).toBe('Named');
+    for (let seed = 1; seed <= 60; seed++) {
+      const mixed = interleave(w.threads, seed);
+      mixed.splice((seed * 7919) % (mixed.length + 1), 0, w.meta);
+      const r = run(new CodexNormalizer(), mixed);
+      expect(r.unknown).toEqual([]);
+      expect(r.graph).toEqual(base.graph);
+      expect(r.sessions.get('root1')).toEqual(base.sessions.get('root1'));
+    }
+  });
+
+  test('在任意位置重启并按管线的方式补回状态（会话前恢复或整段重放），结果与一次导入相同', () => {
+    const w = world();
+    const events = [titleMeta('root1', 'Early'), ...interleave(w.threads, 3)];
+    events.splice(6, 0, w.meta);
+    const once = run(new CodexNormalizer(), events);
+    for (let k = 0; k <= events.length; k++) {
+      const before = run(new CodexNormalizer(), events.slice(0, k));
+      const fresh = new CodexNormalizer();
+      if (before.sessions.has('root1')) {
+        for (const ev of events.slice(0, k)) fresh.apply(ev, 'p1'); // hydrate: replay, changes already stored
+      } else if (fresh.needsPreSessionReplay('root1')) {
+        fresh.restorePreSession('root1', events.slice(0, k)); // no session row yet
+      }
+      const rest = run(fresh, events.slice(k));
+      const merged = [...before.changes, ...rest.changes];
+      const sessions = merged.flatMap((c) => (c.type === 'session_upserted' ? [c.session] : []));
+      expect({ k, session: sessions[sessions.length - 1] }).toEqual({ k, session: once.sessions.get('root1') });
+      expect({ k, graph: applyChanges(emptyGraph(), merged) }).toEqual({ k, graph: once.graph });
     }
   });
 });
