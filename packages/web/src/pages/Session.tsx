@@ -105,9 +105,18 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
   // The latest values for the stable callbacks below.
   const now = useRef({ outline, selected, scopeNodeId, currentScope, view: canvas.view });
   now.current = { outline, selected, scopeNodeId, currentScope, view: canvas.view };
+  /** The turn card openStep selected on the reader's behalf (to pin the panel); undone when the drawer closes. */
+  const pinned = useRef<string | null>(null);
   const closeDrawer = useCallback(() => {
-    if (now.current.outline) setDetail(null);
-    else setSelectedId(null);
+    if (now.current.outline) {
+      setDetail(null);
+      // Back to following the latest turn, unless the reader has picked something themself since.
+      const pin = pinned.current;
+      pinned.current = null;
+      if (pin !== null) setSelectedId((id) => (id === pin ? null : id));
+    } else {
+      setSelectedId(null);
+    }
   }, []);
   const scopeView = scopeNodeId !== null ? canvas.view.nodes.get(scopeNodeId) : undefined;
   const scopeTitle = scope === null
@@ -126,7 +135,10 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
   const openStep = useCallback((id: string) => {
     const cur = now.current;
     if (cur.currentScope === null) return;
-    if (cur.selected === null && cur.scopeNodeId !== null) setSelectedId(cur.scopeNodeId);
+    if (cur.selected === null && cur.scopeNodeId !== null) {
+      pinned.current = cur.scopeNodeId;
+      setSelectedId(cur.scopeNodeId);
+    }
     setDetail({ id, scope: cur.currentScope });
   }, []);
   // A row of the drawer's "推理链" may belong to another thread (an agent's chain continues into the main thread): the
@@ -176,6 +188,7 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
       expandRun(id);
     } else {
       if (id !== null) setPanelClosed(false);
+      pinned.current = null; // the reader's own choice
       setSelectedId(id);
     }
   }, [expandRun]);

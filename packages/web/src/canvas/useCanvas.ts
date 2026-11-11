@@ -419,8 +419,11 @@ export function createCanvasModel(
     if (willReduce && !reducedShown) frozenRuns = null;
     const reduced = willReduce ? reduce(graph) : null;
     currentRuns = reduced?.runs ?? new Map();
-    if (willReduce && !autoFold && frozenRuns === null) frozenRuns = new Set(currentRuns.keys());
-    reducedShown = willReduce;
+    // The replay view is not frozen (the reader moves in time), and what it showed is not what a later view preserves.
+    const freezable = willReduce && mode !== 'replay';
+    if (freezable && !autoFold && frozenRuns === null) frozenRuns = new Set(currentRuns.keys());
+    if (!freezable) frozenRuns = null;
+    reducedShown = freezable;
     const view = buildView(reduced?.graph ?? graph, effectiveOverrides(), fullTurns, {
       frozenHidden: frozen, keepVisible, expandedAgents, mode, runs: reduced?.runs, thinkingMs: reduced?.thinkingMs,
     });

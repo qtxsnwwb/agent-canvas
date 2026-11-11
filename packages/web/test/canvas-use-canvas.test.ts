@@ -1387,3 +1387,14 @@ test('进出概览不会丢掉逐步视图里的“展开全部”', () => {
   expect(model.getSnapshot().view.nodes.size).toBe(101);
   model.dispose();
 });
+
+test('在复盘里停止跟随，切回逐步视图后仍然会合并', () => {
+  const nodes = [node('p', 't1', 0), readCall('a', 2), readCall('b', 3), readCall('c', 4), node('x', 't1', 5)];
+  const model = createCanvasModel(fakeLive(graph(nodes)), fakeLayout().client);
+  model.setMode('replay');
+  model.setReplayTime(EPOCH + 1); // only p exists at this time: no run
+  model.setAutoFold(false);
+  model.setMode('live');
+  expect(shownIds(model)).toEqual(['p', 'run:a', 'x']);
+  model.dispose();
+});

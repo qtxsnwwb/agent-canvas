@@ -83,9 +83,9 @@ function runNode(members: GraphNode[]): GraphNode {
  *    happening now); their duration is reported for the node(s) right after them (`thinkingMs`);
  *  - system nodes are removed, except context compaction and interrupts;
  *  - RUN_MIN or more successful, confirmed calls of one tool in a row — one after another, or issued in parallel from
- *    the same parent — in one turn and one thread become a single run node (kind 'tool', id runIdOf(first member),
- *    title `Read ×5`). Parallel calls are not merged while one of them is still running or awaiting permission, so a
- *    run's id (its first member) does not change when a slow first call finishes last.
+ *    the same parent — in one turn and one thread become a single run node (kind 'tool', title `Read ×5`). Its id
+ *    is runIdOf(the earliest call of the group, counting parallel calls of the same tool that are not merged — still
+ *    running, failed), so it does not change when a slow first call finishes last and joins the run.
  * Edges through removed nodes are contracted (they take the kind of the edge into the removed node). Untouched nodes
  * and edges keep their objects. The compactor keeps a run's node object while its members are the same objects.
  */
@@ -134,8 +134,14 @@ export function createCompactor(): Compactor {
     if (removed.size > 0) {
       for (const n of all) {
         if (!removed.has(n.id)) continue;
-        let carried = n.kind === 'thinking' ? n.durationMs ?? 0 : 0;
-        for (const ms of carry.get(n.id)?.values() ?? []) carried += ms;
+        const own = n.kind === 'thinking' ? n.durationMs ?? 0 : 0;
+        const incomingTime = carry.get(n.id);
+        let carried = own;
+        for (const ms of incomingTime?.values() ?? []) carried += ms;
+        // A node that adds nothing passes a single source on under that source's own id, so two such nodes side by side
+        // behind one thought do not make it count twice further down.
+        const [passed] = own === 0 && incomingTime?.size === 1 ? incomingTime.keys() : [];
+        const sourceId = passed ?? n.id;
         const out = succs.get(n.id);
         const inc = preds.get(n.id);
         if (out) {
@@ -144,7 +150,7 @@ export function createCompactor(): Compactor {
             if (carried > 0) {
               let from = carry.get(s);
               if (!from) carry.set(s, (from = new Map()));
-              from.set(n.id, carried);
+              from.set(sourceId, carried);
             }
           }
         }
@@ -198,18 +204,25 @@ export function createCompactor(): Compactor {
     const sameLane = (a: GraphNode, b: GraphNode): boolean =>
       a.toolName === b.toolName && a.agentId === b.agentId && a.turnId === b.turnId;
     const candidates = kept.filter(mergeable);
+    /** Position in time order. */
+    const order = new Map<string, number>();
+    kept.forEach((n, k) => order.set(n.id, k));
+    /** Call -> an earlier parallel call of the same tool that is not mergeable (see runIdOf's stability, function comment). */
+    const anchorOf = new Map<string, GraphNode>();
     if (candidates.length >= RUN_MIN) {
       for (const n of candidates) {
         parent.set(n.id, n.id);
         membersOf.set(n.id, [n.id]);
       }
       /**
-       * Parallel calls share their parents. Parents are compared as classes: after a batch has become one class, the
-       * calls of the next batch hang off it — the first off every member, the others only off its last member (the
-       * shape the server gives consecutive batches) — and are siblings all the same. Null: no parent outside the
-       * node's own class, or an only child.
+       * Parallel calls: the calls of one message share `parentId` (the server gives every member of a batch the same
+       * one, however the batch is wired to the batch before it). Without a parentId the parents in the graph are
+       * compared, as classes: after a batch has become one class, the calls of the next batch hang off it — the first
+       * off every member, the others only off its last member. Null: no parent outside the node's own class, or an
+       * only child.
        */
       const siblingKey = (n: GraphNode, own: string | null): string | null => {
+        if (n.parentId !== null) return `P\n${n.toolName}\n${n.agentId}\n${n.turnId}\n${n.parentId}`;
         const inc = preds.get(n.id);
         if (!inc || inc.size === 0) return null;
         if (inc.size === 1) {
@@ -224,20 +237,22 @@ export function createCompactor(): Compactor {
         if (roots.size === 0) return null;
         return JSON.stringify([n.toolName, n.agentId, n.turnId, [...roots].sort()]);
       };
-      /** Calls still in flight: their siblings wait for them (see the function comment). */
-      const inFlight = kept.filter((n) => n.kind === 'tool' && n.toolName !== null
-        && (n.status === 'running' || n.status === 'awaiting_permission'));
+      /** Calls of a tool that cannot be merged (in flight, failed, the selection, ...): they still anchor their group's id. */
+      const others = kept.filter((n) => n.kind === 'tool' && n.toolName !== null && !parent.has(n.id));
       const mergeSiblings = (): boolean => {
         let changed = false;
-        const blocked = new Set<string>();
-        for (const n of inFlight) {
+        // `kept` is in time order, so the first node seen with a key is the group's earliest.
+        const earliest = new Map<string, GraphNode>();
+        for (const n of others) {
           const key = siblingKey(n, null);
-          if (key !== null) blocked.add(key);
+          if (key !== null && !earliest.has(key)) earliest.set(key, n);
         }
         const firstOf = new Map<string, string>();
         for (const n of candidates) {
           const key = siblingKey(n, find(n.id));
-          if (key === null || blocked.has(key)) continue;
+          if (key === null) continue;
+          const anchor = earliest.get(key);
+          if (anchor !== undefined && order.get(anchor.id)! < order.get(n.id)!) anchorOf.set(n.id, anchor);
           const other = firstOf.get(key);
           if (other === undefined) firstOf.set(key, n.id);
           else if (union(other, n.id)) changed = true;
@@ -305,7 +320,12 @@ export function createCompactor(): Compactor {
     for (const ids of membersOf.values()) {
       if (ids.length < RUN_MIN) continue;
       const members = sortByTime(ids.map((id) => graph.nodes[id]!));
-      const id = runIdOf(members[0]!.id);
+      let first = members[0]!;
+      for (const m of members) {
+        const anchor = anchorOf.get(m.id);
+        if (anchor !== undefined && order.get(anchor.id)! < order.get(first.id)!) first = anchor;
+      }
+      const id = runIdOf(first.id);
       if (options.allowRun && !options.allowRun(id)) continue;
       const old = cache.get(id);
       const entry = old && old.members.length === members.length && old.members.every((m, i) => m === members[i])

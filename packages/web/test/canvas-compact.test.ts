@@ -202,15 +202,45 @@ test('four parallel calls are one run of four, and a following batch of the same
   expect(pairs(r.graph)).toEqual([`${runIdOf('a')}->x`, `p->${runIdOf('a')}`].sort());
 });
 
-test('parallel calls are not merged while one of them is still in flight, so the run id does not change later', () => {
+test('a run keeps its id when its earliest call is still in flight and joins later', () => {
   const build = (aStatus: GraphNode['status']) => graph(
     [node('p', 'prompt', 0), read('a', 1, { status: aStatus }), read('b', 1), read('c', 1), read('d', 1)],
     [e('p', 'a', 'fork'), e('p', 'b', 'fork'), e('p', 'c', 'fork'), e('p', 'd', 'fork')],
   );
   const compactor = createCompactor();
-  expect(compactor(build('running')).runs.size).toBe(0);
-  expect(compactor(build('awaiting_permission')).runs.size).toBe(0);
+  const early = compactor(build('running'));
+  expect(early.runs.get(runIdOf('a'))).toEqual(['b', 'c', 'd']);
+  expect(early.graph.nodes.a).toBeDefined(); // still drawn on its own
   expect(compactor(build('succeeded')).runs.get(runIdOf('a'))).toEqual(['a', 'b', 'c', 'd']);
+  // A call that failed stays out for good; the id is the same.
+  expect(compactor(build('failed')).runs.get(runIdOf('a'))).toEqual(['b', 'c', 'd']);
+});
+
+test('a batch behind a mixed batch is one run: the calls of a message share parentId (server edge shape)', () => {
+  // Previous message: Read a + Grep b (no run). Next message: Read d, f, g, h — d joined from a and b, the others off b.
+  const batch = (dStatus: GraphNode['status']) => graph(
+    [
+      node('p', 'prompt', 0), read('a', 1, { parentId: 'p' }),
+      read('b', 1, { parentId: 'p', toolName: 'Grep', title: 'Grep' }),
+      read('d', 2, { parentId: 'b', status: dStatus }), read('f', 2, { parentId: 'b' }),
+      read('g', 2, { parentId: 'b' }), read('h', 2, { parentId: 'b' }),
+    ],
+    [e('p', 'a', 'fork'), e('p', 'b', 'fork'), e('a', 'd'), e('b', 'd'), e('b', 'f'), e('b', 'g'), e('b', 'h')],
+  );
+  const compactor = createCompactor();
+  const early = compactor(batch('running'));
+  expect([...early.runs.entries()]).toEqual([[runIdOf('d'), ['f', 'g', 'h']]]);
+  const done = compactor(batch('succeeded'));
+  expect([...done.runs.entries()]).toEqual([[runIdOf('d'), ['d', 'f', 'g', 'h']]]);
+  expect(pairs(done.graph)).toEqual([`a->${runIdOf('d')}`, `b->${runIdOf('d')}`, 'p->a', 'p->b'].sort());
+});
+
+test('two removed nodes side by side behind one thought do not count it twice', () => {
+  const g = graph(
+    [node('p', 'prompt', 0), node('th', 'thinking', 1, { durationMs: 3000 }), node('s1', 'system', 2), node('s2', 'system', 2), node('x', 'text', 3)],
+    [e('p', 'th'), e('th', 's1'), e('th', 's2'), e('s1', 'x'), e('s2', 'x')],
+  );
+  expect(compactGraph(g).thinkingMs.get('x')).toBe(3000);
 });
 
 test('exclude keeps the named calls out of every run; the calls after them can still form one', () => {
