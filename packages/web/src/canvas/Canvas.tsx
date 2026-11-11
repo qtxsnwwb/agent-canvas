@@ -180,7 +180,10 @@ function useFlowNodes(
         const container = box !== undefined;
         const expandable = canExpand && vn.expandable;
         const d = old?.type === 'graphNode' ? old.data : undefined;
+        const runCount = vn.runCount ?? 0;
+        const thinkingMs = vn.thinkingMs ?? 0;
         n = old && d && d.node === vn.node && d.innerCount === vn.innerCount && d.expanded === vn.expanded
+          && d.runCount === runCount && d.thinkingMs === thinkingMs
           && d.expandable === expandable && d.container === container && d.causal === causal && d.replay === replay
           && d.highlight === highlight
           && old.zIndex === zIndex
@@ -194,7 +197,10 @@ function useFlowNodes(
             // node.style after it.
             className: wrapperClass(container, highlight),
             style: container ? CONTAINER_STYLE : undefined,
-            data: { node: vn.node, innerCount: vn.innerCount, expanded: vn.expanded, expandable, container, causal, replay, highlight },
+            data: {
+              node: vn.node, innerCount: vn.innerCount, expanded: vn.expanded, expandable, container, causal, replay, highlight,
+              runCount, thinkingMs,
+            },
             handles: container ? makeHandles(width, height) : handlesFor(width, height), draggable: false, connectable: false,
           };
       } else if (vn.type === 'turn_summary') {

@@ -33,7 +33,7 @@ pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
 .session-bar h2 { margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .session-bar .branch { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-family: ui-monospace, monospace; }
 .session-bar .tag { margin: 0; }
-.session-bar-end { margin-left: auto; flex: none; display: flex; align-items: center; }
+.session-bar-end { margin-left: auto; flex: none; display: flex; align-items: center; gap: 8px; }
 /* Live / topology switch: two joined buttons, the pressed one filled. */
 .view-switch { display: inline-flex; border: 1px solid #cbd5e1; border-radius: 6px; overflow: hidden; }
 .view-switch button {

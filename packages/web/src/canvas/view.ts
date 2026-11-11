@@ -38,6 +38,10 @@ export type ViewNode =
   | {
     type: 'node'; id: string; turnKey: string; groupKey: string; node: GraphNode; innerCount: number;
     expanded: boolean; expandable: boolean;
+    /** Compact view: how many calls a run node stands for (0 / absent for any other node). */
+    runCount?: number;
+    /** Compact view: the duration of the empty thinking nodes removed right in front of this node (0 / absent: none). */
+    thinkingMs?: number;
   }
   | { type: 'turn_summary'; id: string; turnKey: string; groupKey: string; summary: TurnSummary }
   /**
@@ -97,6 +101,10 @@ export interface BuildViewOptions {
   expandedAgents?: ReadonlySet<string>;
   /** Default 'live'. In topology mode the in-turn fold counts only nodes visible in that mode. */
   mode?: ViewMode;
+  /** Compact view (see compactGraph): run node id -> member ids. A run counts as that many tool calls. */
+  runs?: ReadonlyMap<string, readonly string[]>;
+  /** Compact view (see compactGraph): node id -> thinking time removed in front of it. */
+  thinkingMs?: ReadonlyMap<string, number>;
 }
 export interface CanvasView {
   turns: TurnView[];
@@ -138,14 +146,14 @@ function hiddenInTopology(node: GraphNode): boolean {
   return node.kind === 'thinking' || node.kind === 'text';
 }
 
-function summarize(key: string, entries: Entry[]): TurnSummary {
+function summarize(key: string, entries: Entry[], toolWeight: (node: GraphNode) => number): TurnSummary {
   const first = entries[0]!;
   const last = entries[entries.length - 1]!;
   let toolCount = 0;
   let failedCount = 0;
   let running = false;
   for (const { node } of entries) {
-    if (node.kind === 'tool' || node.kind === 'subagent') toolCount++;
+    toolCount += toolWeight(node);
     if (node.status === 'failed' || node.status === 'denied') failedCount++;
     if (isActiveStatus(node)) running = true;
   }
@@ -184,6 +192,11 @@ export function buildView(
   const expandedAgents = topology ? NO_AGENTS : options.expandedAgents ?? NO_AGENTS;
   /** Main-thread nodes not drawn in this mode (they still count in turn summaries and edges are contracted through them). */
   const isHidden = (node: GraphNode): boolean => topology && hiddenInTopology(node);
+  const runs = options.runs;
+  const thinkingMs = options.thinkingMs;
+  /** How many tool calls the node counts as (a run node: its members). */
+  const toolWeight = (node: GraphNode): number =>
+    node.kind === 'tool' || node.kind === 'subagent' ? runs?.get(node.id)?.length ?? 1 : 0;
   // Pass over nodes: main-thread entries, inner-node counts per agent, inner entries of the agents asked to expand.
   const main: Entry[] = [];
   const innerByAgent = new Map<string, number>();
@@ -269,7 +282,10 @@ export function buildView(
       claimedAgents.add(child);
       pending.push({ agentId: child, containerId: node.id, parentGroupKey: groupKey, turnKey, depth: depth + 1, ancestors });
     }
-    nodes.set(node.id, { type: 'node', id: node.id, turnKey, groupKey, node, innerCount, expanded, expandable });
+    nodes.set(node.id, {
+      type: 'node', id: node.id, turnKey, groupKey, node, innerCount, expanded, expandable,
+      runCount: runs?.get(node.id)?.length ?? 0, thinkingMs: thinkingMs?.get(node.id) ?? 0,
+    });
   };
   /**
    * The ids of an expanded turn / agent group to fold into `earlier` (empty: show everything). `head`: how many leading
@@ -307,7 +323,7 @@ export function buildView(
       if (hidden.has(node.id)) {
         foldedInto.set(node.id, earlierId);
         foldedIds.push(node.id);
-        if (node.kind === 'tool' || node.kind === 'subagent') toolCount++;
+        toolCount += toolWeight(node);
         if (node.status === 'failed' || node.status === 'denied') failedCount++;
         continue;
       }
@@ -325,7 +341,7 @@ export function buildView(
     const collapsed = expandedOverride === undefined
       ? i < ordered.length - EXPANDED_RECENT_TURNS && !holdsKept
       : !expandedOverride;
-    const summary = summarize(key, all);
+    const summary = summarize(key, all, toolWeight);
     let nodeIds: string[];
     let foldedIds: string[] = [];
     if (collapsed) {

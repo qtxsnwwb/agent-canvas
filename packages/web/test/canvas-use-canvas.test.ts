@@ -1282,3 +1282,53 @@ test('expandTurn 只展开：折叠的轮次被展开，已展开的轮次不变
   model.expandTurn('nope');
   model.dispose();
 });
+
+const readCall = (id: string, tMs: number, extra: Partial<GraphNode> = {}): GraphNode => ({
+  ...node(id, 't1', tMs), kind: 'tool', status: 'succeeded', toolName: 'Read', title: 'Read', confirmed: true, ...extra,
+});
+const shownIds = (model: { getSnapshot(): { view: { nodes: Map<string, unknown> } } }) => [...model.getSnapshot().view.nodes.keys()].sort();
+
+test('精简默认开启：空思考节点不画，连续的同类调用合并；setCompact(false) 画出全部', () => {
+  const nodes = [
+    node('p', 't1', 0), { ...node('th', 't1', 1), kind: 'thinking' as const, durationMs: 2000 },
+    readCall('a', 2), readCall('b', 3), readCall('c', 4), node('x', 't1', 5),
+  ];
+  const model = createCanvasModel(fakeLive(graph(nodes)), fakeLayout().client);
+  expect(model.getSnapshot().compact).toBe(true);
+  expect(shownIds(model)).toEqual(['p', 'run:a', 'x']);
+  const run = model.getSnapshot().view.nodes.get('run:a');
+  expect(run).toMatchObject({ runCount: 3, thinkingMs: 2000 });
+  model.setCompact(false);
+  expect(model.getSnapshot().compact).toBe(false);
+  expect(shownIds(model)).toEqual(['a', 'b', 'c', 'p', 'th', 'x']);
+  model.setCompact(true);
+  expect(shownIds(model)).toEqual(['p', 'run:a', 'x']);
+  model.dispose();
+});
+
+test('expandRun 之后这组调用保持展开，新增的同类调用也不再并回去', async () => {
+  const nodes = [node('p', 't1', 0), readCall('a', 2), readCall('b', 3), readCall('c', 4)];
+  const live = fakeLive(graph(nodes));
+  const model = createCanvasModel(live, fakeLayout().client);
+  expect(shownIds(model)).toEqual(['p', 'run:a']);
+  model.expandRun('run:a');
+  expect(shownIds(model)).toEqual(['a', 'b', 'c', 'p']);
+  live.set(graph([...nodes, readCall('d', 5)]));
+  await vi.advanceTimersByTimeAsync(60);
+  expect(shownIds(model)).toEqual(['a', 'b', 'c', 'd', 'p']);
+  model.dispose();
+});
+
+test('自动折叠关闭期间不形成新的合并节点；重新开启后合并', async () => {
+  const nodes = [node('p', 't1', 0), readCall('a', 2), readCall('b', 3)];
+  const live = fakeLive(graph(nodes));
+  const model = createCanvasModel(live, fakeLayout().client);
+  expect(shownIds(model)).toEqual(['a', 'b', 'p']);
+  model.setAutoFold(false);
+  live.set(graph([...nodes, readCall('c', 4)]));
+  await vi.advanceTimersByTimeAsync(60);
+  expect(shownIds(model)).toEqual(['a', 'b', 'c', 'p']);
+  model.setAutoFold(true);
+  expect(shownIds(model)).toEqual(['p', 'run:a']);
+  model.dispose();
+});

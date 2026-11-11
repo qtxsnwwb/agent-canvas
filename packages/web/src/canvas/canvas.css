@@ -54,6 +54,9 @@
 .cc-title { font-weight: 600; }
 .cc-status { flex: none; color: var(--cc-color); font-size: 11px; font-weight: 600; }
 .cc-duration { flex: none; color: #64748b; font-size: 11px; font-variant-numeric: tabular-nums; }
+.cc-thought { flex: none; color: #94a3b8; font-size: 11px; font-variant-numeric: tabular-nums; }
+/* A run node (several calls of one tool merged): drawn as a small stack; a click shows the calls. */
+.cc-run { cursor: pointer; box-shadow: 3px 3px 0 -1px #fff, 3px 3px 0 0 #cbd5e1, 6px 6px 0 -1px #fff, 6px 6px 0 0 #cbd5e1; }
 .cc-summary { color: #475569; }
 /* Replay view: the duration / token row, in the node's extra 16 px (see sizeOf). */
 .cc-overlay { color: #64748b; font-size: 11px; font-variant-numeric: tabular-nums; }

@@ -69,6 +69,10 @@ export type GraphNodeData = {
   causal: boolean;
   /** Replay view: tool, subagent (collapsed) and text nodes get a duration / token row (see sizeOf, replayOverlay). */
   replay: boolean;
+  /** Compact view: > 0 for a run node (that many calls merged; a click shows them). */
+  runCount: number;
+  /** Compact view: thinking time removed in front of this node (0: none). */
+  thinkingMs: number;
   highlight: Highlight;
 };
 /**
@@ -104,6 +108,8 @@ export interface CanvasActionsValue {
 /** Callbacks for controls inside nodes; a context keeps them out of node data (which must stay stable). */
 export const CanvasActions = createContext<CanvasActionsValue>({ toggleTurn() {}, showFullTurn() {}, toggleAgent() {} });
 
+const THINKING_CHIP_MIN_MS = 1_000;
+
 function boxStyle(width: number | undefined, height: number | undefined, color: string): CSSProperties {
   return { width, height, ['--cc-color' as string]: color };
 }
@@ -133,6 +139,10 @@ function GraphNodeView({ data, width, height, selected }: NodeProps<GraphFlowNod
   const style = boxStyle(width, height, nodeColor(node));
   const kindLabel = KIND_LABEL[node.kind] ?? node.kind;
   const tag = unconfirmed ? <span className="cc-tag">未确认</span> : null;
+  // Shown from one second up: shorter pauses are not worth a label.
+  const thought = data.thinkingMs >= THINKING_CHIP_MIN_MS
+    ? <span className="cc-thought" title="这一步之前的思考耗时">思考 {formatDuration(data.thinkingMs)}</span>
+    : null;
 
   // Causal view: thinking gets two rows, "思考 · 3.4s" and its text (or a grey placeholder when none was recorded).
   if (node.kind === 'thinking' && data.causal) {
@@ -178,6 +188,7 @@ function GraphNodeView({ data, width, height, selected }: NodeProps<GraphFlowNod
         <span className="cc-title cc-ellipsis cc-grow">{showTitle ? node.title : ''}</span>
         {node.status !== null && <span className="cc-status">{NODE_STATUS_LABEL[node.status] ?? node.status}</span>}
         {duration !== '' && <span className="cc-duration">{duration}</span>}
+        {thought}
         {tag}
         {button}
       </div>
@@ -194,8 +205,9 @@ function GraphNodeView({ data, width, height, selected }: NodeProps<GraphFlowNod
   if (node.kind === 'subagent') {
     return <SubagentView data={data} className={className} style={style} rows={rows} overlayRow={overlayRow} />;
   }
+  const run = data.runCount > 0;
   return (
-    <div className={className} style={style}>
+    <div className={`${className}${run ? ' cc-run' : ''}`} style={style} title={run ? `点击展开这 ${data.runCount} 次调用` : undefined}>
       <Handles />
       {rows(null)}
       {overlayRow}

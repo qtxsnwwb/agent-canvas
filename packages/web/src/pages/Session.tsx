@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { openLiveSession, type LiveSession } from '../client';
 import { Canvas } from '../canvas/Canvas';
 import { EMPTY_CHAIN, expandCut, upstreamChain } from '../canvas/chain';
+import { isRunId } from '../canvas/compact';
 import { Drawer } from '../canvas/Drawer';
 import { Timeline } from '../canvas/Timeline';
 import { useCanvas } from '../canvas/useCanvas';
@@ -37,6 +38,18 @@ function ViewSwitch({ mode, disabled, onChange }: { mode: ViewMode; disabled: bo
   );
 }
 
+/** "精简" leaves out empty thinking and system nodes and merges repeated tool calls; "完整" draws every node. */
+function DensitySwitch({ compact, disabled, onChange }: { compact: boolean; disabled: boolean; onChange(compact: boolean): void }) {
+  return (
+    <div className="view-switch" role="group" aria-label="节点密度">
+      <button type="button" aria-pressed={compact} disabled={disabled} onClick={() => onChange(true)}
+        title="不画没有内容的思考节点和系统节点，连续的同类工具调用合并成一个节点">精简</button>
+      <button type="button" aria-pressed={!compact} disabled={disabled} onClick={() => onChange(false)}
+        title="每条记录都画成一个节点">完整</button>
+    </div>
+  );
+}
+
 /**
  * Memoized on `live` and the info bar's slot for the view switch, so the info bar's per-second and per-update
  * re-renders do not reach React Flow; it re-renders when the canvas snapshot or the selection changes. Every handler
@@ -62,6 +75,17 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
     ? (replaying ? live.getGraph().nodes[selectedView.id] : undefined) ?? selectedView.node
     : null;
   const closeDrawer = useCallback(() => setSelectedId(null), []);
+  const [stopFollowingSignal, setStopFollowingSignal] = useState(0);
+  // A run node has no content of its own: selecting it shows its calls instead (and, like any expand, stops following).
+  const { expandRun } = canvas;
+  const select = useCallback((id: string | null) => {
+    if (id !== null && isRunId(id)) {
+      setStopFollowingSignal((n) => n + 1);
+      expandRun(id);
+    } else {
+      setSelectedId(id);
+    }
+  }, [expandRun]);
   // Causal view: the selection's upstream chain, once per (view, selection); highlighted on the canvas and listed in
   // the drawer. EMPTY_CHAIN in the other views and without a selected graph node.
   const view = canvas.view;
@@ -71,7 +95,6 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
   // (in full too, so one click reveals the upstream instead of running into the long-turn fold). Like a canvas button
   // it stops following; auto-fold goes off first, so the rebuilds below already keep everything in place.
   const { showFullTurn, expandTurn, setAutoFold } = canvas;
-  const [stopFollowingSignal, setStopFollowingSignal] = useState(0);
   const expandChainCut = useCallback(() => {
     const { fullTurns, turns } = expandCut(view, chain.cutAt);
     setAutoFold(false);
@@ -89,14 +112,20 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
     && (!canvas.ready || (canvas.view.nodes.size > 0 && !hasKeys(canvas.positions)));
   return (
     <>
-      {toolbar !== null && createPortal(<ViewSwitch mode={canvas.view.mode} disabled={!canvas.ready} onChange={canvas.setMode} />, toolbar)}
+      {toolbar !== null && createPortal(
+        <>
+          <DensitySwitch compact={canvas.compact} disabled={!canvas.ready} onChange={canvas.setCompact} />
+          <ViewSwitch mode={canvas.view.mode} disabled={!canvas.ready} onChange={canvas.setMode} />
+        </>,
+        toolbar,
+      )}
       {canvas.layoutError !== null && <div className="canvas-error">布局失败，正在自动重试：{canvas.layoutError}</div>}
       <div className={`canvas-area${selectedNode !== null ? ' cc-drawer-open' : ''}${canvas.replay !== null ? ' cc-replay' : ''}`}>
         <Canvas
           snapshot={canvas}
           selectedId={selected}
           chain={chain}
-          onSelect={setSelectedId}
+          onSelect={select}
           onToggleTurn={canvas.toggleTurn}
           onShowFullTurn={canvas.showFullTurn}
           onToggleAgent={canvas.toggleAgent}

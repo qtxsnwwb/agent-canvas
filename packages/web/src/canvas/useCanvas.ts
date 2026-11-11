@@ -5,6 +5,7 @@ import { createThrottle } from '../throttle';
 import { groupInput, placeAgentGroups, stackTurns, turnInput, type Box, type TurnLayout } from './layout';
 import { createBrowserLayoutWorker, createLayoutClient, type LayoutClient } from './layoutClient';
 import { clampToRange, graphAt, replayRange, turnMarks, usageTotal, type ReplayRange } from './replay';
+import { createCompactor, type CompactResult } from './compact';
 import { containerSize } from './sizes';
 import { agentGroupKey, buildView, type AgentGroup, type CanvasView, type ViewMode } from './view';
 
@@ -37,6 +38,8 @@ export interface CanvasSnapshot {
   layoutError: string | null;
   /** The replay timeline (see CanvasModel.getReplay); null outside the replay view. */
   replay: ReplayInfo | null;
+  /** Whether the view is built from the compacted graph (see CanvasModel.setCompact). */
+  compact: boolean;
 }
 export interface CanvasModel {
   getSnapshot(): CanvasSnapshot;
@@ -72,6 +75,14 @@ export interface CanvasModel {
   setMode(mode: ViewMode): void;
   getMode(): ViewMode;
   /**
+   * Default true: the view is built from compactGraph(graph) — empty thinking nodes and most system nodes are left out,
+   * calls of one tool in a row are merged into run nodes. False draws every node. Rebuilds at once. While auto-fold is
+   * off no new run is formed (nothing visible is merged away under a reader); existing runs still grow.
+   */
+  setCompact(enabled: boolean): void;
+  /** Shows the members of a run node (its id, see runIdOf) as separate nodes from now on; rebuilds at once. */
+  expandRun(runId: string): void;
+  /**
    * Replay view only (ignored otherwise): moves the replay time (clamped to the range; NaN ignored). The new time is
    * published at once; the view follows through the throttled rebuild, like a live update.
    */
@@ -99,6 +110,7 @@ const EMPTY_SNAPSHOT: CanvasSnapshot = {
   layoutMode: 'live',
   layoutError: null,
   replay: null,
+  compact: true,
 };
 const NO_REPLAY: ReplayInfo = { range: null, timeMs: 0, marks: [], totals: { nodeCount: 0, usage: { inputTokens: 0, outputTokens: 0 } } };
 
@@ -183,7 +195,28 @@ function sameRecord<T>(a: Record<string, T>, b: Record<string, T>, same: (x: T, 
  * to the one the view was built from counts as unchanged; live updates still extend the range and marks, but do not
  * move the time.
  */
-export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscribe'>, layout: LayoutClient): CanvasModel {
+export function createCanvasModel(
+  live: Pick<LiveSession, 'getGraph' | 'subscribe'>, layout: LayoutClient, initial: { compact?: boolean } = {},
+): CanvasModel {
+  let compact = initial.compact ?? true;
+  const compactor = createCompactor();
+  /** Run ids the user expanded. */
+  const expandedRuns = new Set<string>();
+  /** The run ids of the last compaction, and (while auto-fold is off) the only runs that may exist. */
+  let currentRuns: ReadonlySet<string> = new Set();
+  let frozenRuns: ReadonlySet<string> | null = null;
+  const allowRun = (id: string): boolean => !expandedRuns.has(id) && (frozenRuns === null || frozenRuns.has(id));
+  /** The last compaction and what it was computed from; reused while those are the same (a fold, a mode switch). */
+  let lastCompaction: {
+    graph: Graph; keep: string | null; frozen: ReadonlySet<string> | null; expanded: number; result: CompactResult;
+  } | null = null;
+  const reduce = (graph: Graph): CompactResult => {
+    const c = lastCompaction;
+    if (c && c.graph === graph && c.keep === keepVisible && c.frozen === frozenRuns && c.expanded === expandedRuns.size) return c.result;
+    const result = compactor(graph, { keep: keepVisible, allowRun });
+    lastCompaction = { graph, keep: keepVisible, frozen: frozenRuns, expanded: expandedRuns.size, result };
+    return result;
+  };
   /** Turn key -> expanded, set by the user. */
   const overrides = new Map<string, boolean>();
   /** Turn key -> expanded, recorded while auto-fold is off for turns the default rule had expanded. */
@@ -196,7 +229,7 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
   const expandedAgents = new Set<string>();
   let mode: ViewMode = 'live';
   const listeners = new Set<() => void>();
-  let snapshot: CanvasSnapshot = EMPTY_SNAPSHOT;
+  let snapshot: CanvasSnapshot = { ...EMPTY_SNAPSHOT, compact };
   let disposed = false;
   let autoFold = true;
   let roundRunning = false;
@@ -371,7 +404,11 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
     builtGraph = graph;
     builtSource = source;
     cancelRetry(); // this rebuild is the retry
-    const view = buildView(graph, effectiveOverrides(), fullTurns, { frozenHidden: frozen, keepVisible, expandedAgents, mode });
+    const reduced = compact ? reduce(graph) : null;
+    currentRuns = new Set(reduced?.runs.keys());
+    const view = buildView(reduced?.graph ?? graph, effectiveOverrides(), fullTurns, {
+      frozenHidden: frozen, keepVisible, expandedAgents, mode, runs: reduced?.runs, thinkingMs: reduced?.thinkingMs,
+    });
     // A collapsed turn forgets "show all" and its frozen fold, however it got collapsed: re-expanding it folds the
     // middle by the length rule again.
     for (const t of view.turns) {
@@ -394,6 +431,7 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
       turnBoxes: pick(snapshot.turnBoxes, (k) => turnKeys.has(k)),
       containerBoxes: pick(snapshot.containerBoxes, (id) => isExpandedContainer(view, id)),
       replay,
+      compact,
     });
     if (roundRunning) dirty = true;
     else startRound(view);
@@ -444,8 +482,10 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
       autoFold = enabled;
       if (!enabled) {
         freeze(snapshot.view);
+        frozenRuns = currentRuns;
         return; // nothing on screen changes
       }
+      frozenRuns = null;
       implicit.clear();
       frozen.clear();
       rebuildNow();
@@ -473,6 +513,16 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
       rebuildNow();
     },
     getMode: () => mode,
+    setCompact(enabled) {
+      if (disposed || enabled === compact) return;
+      compact = enabled;
+      rebuildNow();
+    },
+    expandRun(runId) {
+      if (disposed || expandedRuns.has(runId)) return;
+      expandedRuns.add(runId);
+      rebuildNow();
+    },
     setReplayTime(ms) {
       if (disposed || mode !== 'replay' || !Number.isFinite(ms) || replayInfo.range === null) return;
       const timeMs = clampToRange(ms, replayInfo.range);
@@ -494,16 +544,22 @@ export function createCanvasModel(live: Pick<LiveSession, 'getGraph' | 'subscrib
   };
 }
 
+/** The viewer's "精简 / 完整" choice, remembered in this browser. */
+const COMPACT_KEY = 'claude-canvas.compact';
+function readCompactPreference(): boolean {
+  try { return window.localStorage.getItem(COMPACT_KEY) !== '0'; } catch { return true; }
+}
+
 /** One model and one layout worker per live session; both are disposed when the page unmounts. */
 export type UseCanvasResult = CanvasSnapshot
-  & Pick<CanvasModel, 'toggleTurn' | 'expandTurn' | 'showFullTurn' | 'setAutoFold' | 'setKeepVisible' | 'toggleAgent' | 'setMode' | 'setReplayTime'>
+  & Pick<CanvasModel, 'toggleTurn' | 'expandTurn' | 'showFullTurn' | 'setAutoFold' | 'setKeepVisible' | 'toggleAgent' | 'setMode' | 'setReplayTime' | 'setCompact' | 'expandRun'>
   & { /** False until the model exists (the snapshot is then an empty placeholder). */ ready: boolean };
 
 export function useCanvas(live: LiveSession): UseCanvasResult {
   const [model, setModel] = useState<CanvasModel | null>(null);
   useEffect(() => {
     const client = createLayoutClient(createBrowserLayoutWorker);
-    const m = createCanvasModel(live, client);
+    const m = createCanvasModel(live, client, { compact: readCompactPreference() });
     setModel(m);
     return () => {
       m.dispose();
@@ -523,10 +579,19 @@ export function useCanvas(live: LiveSession): UseCanvasResult {
   const toggleAgent = useCallback((agentId: string) => model?.toggleAgent(agentId), [model]);
   const setMode = useCallback((mode: ViewMode) => model?.setMode(mode), [model]);
   const setReplayTime = useCallback((ms: number) => model?.setReplayTime(ms), [model]);
+  const setCompact = useCallback((enabled: boolean) => {
+    try { window.localStorage.setItem(COMPACT_KEY, enabled ? '1' : '0'); } catch { /* storage unavailable: not remembered */ }
+    model?.setCompact(enabled);
+  }, [model]);
+  const expandRun = useCallback((runId: string) => model?.expandRun(runId), [model]);
   // Same object until the snapshot changes, so consumers can memoize on it.
   const ready = model !== null;
   return useMemo(
-    () => ({ ...snapshot, toggleTurn, expandTurn, showFullTurn, setAutoFold, setKeepVisible, toggleAgent, setMode, setReplayTime, ready }),
-    [snapshot, toggleTurn, expandTurn, showFullTurn, setAutoFold, setKeepVisible, toggleAgent, setMode, setReplayTime, ready],
+    () => ({
+      ...snapshot, toggleTurn, expandTurn, showFullTurn, setAutoFold, setKeepVisible, toggleAgent, setMode, setReplayTime,
+      setCompact, expandRun, ready,
+    }),
+    [snapshot, toggleTurn, expandTurn, showFullTurn, setAutoFold, setKeepVisible, toggleAgent, setMode, setReplayTime,
+      setCompact, expandRun, ready],
   );
 }
