@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { SEARCH_MIN_CHARS, type Project, type SearchField, type SearchHit, type Session } from '@claude-canvas/shared';
 import { api, openLiveSessions } from '../client';
 import { sessionStatusView } from '../labels';
+import { pickProject, projectLook, projectName, relativeTime } from '../home';
 import { createSearcher, highlightParts, type SearchResult } from '../search';
 import { createThrottle } from '../throttle';
 import { useNow } from '../useNow';
@@ -39,12 +40,12 @@ function SearchResults({ result, q, now }: { result: SearchResult | null; q: str
         const status = sessionStatusView(s, now);
         return (
           <li key={s.id}>
-            <a href={`#/s/${encodeURIComponent(s.id)}`}>
+            <a className="session-card" href={`#/s/${encodeURIComponent(s.id)}`}>
               <div className="session-title">{s.title ?? s.id.slice(0, 8)}</div>
-              <div className="muted">
-                {s.cwd !== null && <span>{s.cwd} · </span>}
+              <div className="session-meta">
                 <span className={`status status-${status.status}`}>{status.label}</span>
-                <span> · {formatTime(s.lastActivityAt)}</span>
+                {s.cwd !== null && <span className="chip" title={s.cwd}>📁 {projectName(s.cwd)}</span>}
+                <span className="muted" title={formatTime(s.lastActivityAt)}>{relativeTime(s.lastActivityAt, now)}</span>
               </div>
               {matches.map((m, i) => (
                 <div key={i} className="search-match">
@@ -65,8 +66,10 @@ export function Home({ projectId }: { projectId: string | null }) {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [error, setError] = useState<string | null>(null);
   const now = useNow();
-  const selected = useRef(projectId);
-  selected.current = projectId;
+  // With no project in the address, the busiest one is shown (the page is never an empty "pick something").
+  const shownId = projectId ?? pickProject(projects)?.id ?? null;
+  const selected = useRef(shownId);
+  selected.current = shownId;
 
   // Projects: initial load, plus a throttled refetch whenever any session changes (counts move with status). A throttle,
   // not a debounce: during a long import upserts never stop, and the list must still refresh (at most every 500 ms).
@@ -109,14 +112,14 @@ export function Home({ projectId }: { projectId: string | null }) {
 
   useEffect(() => {
     setSessions([]);
-    if (projectId === null) return;
+    if (shownId === null) return;
     let alive = true;
-    api.sessions(projectId).then(
+    api.sessions(shownId).then(
       (s) => { if (alive) { setSessions(s); setError(null); } },
       (e: unknown) => { if (alive) setError(String(e)); },
     );
     return () => { alive = false; };
-  }, [projectId]);
+  }, [shownId]);
 
   const [query, setQuery] = useState('');
   const [result, setResult] = useState<SearchResult | null>(null);
@@ -133,53 +136,70 @@ export function Home({ projectId }: { projectId: string | null }) {
   const q = query.trim();
   const searching = Array.from(q).length >= SEARCH_MIN_CHARS;
 
+  const totalSessions = projects.reduce((n, p) => n + p.sessionCount, 0);
+  const totalActive = projects.reduce((n, p) => n + p.activeSessionCount, 0);
+  const shown = projects.find((p) => p.id === shownId);
+
   return (
     <>
-    <div className="search-bar">
-      <input
-        type="search"
-        value={query}
-        placeholder="搜索历史会话：标题、分支、目录、提示内容"
-        aria-label="搜索历史会话"
-        onChange={(e) => onQuery(e.target.value)}
-        onKeyDown={(e) => { if (e.key === 'Escape') onQuery(''); }}
-      />
+    <div className="hero">
+      <h1><span className="hero-wave" aria-hidden="true">👋</span> Claude 现在在忙什么？</h1>
+      <p className="hero-sub">
+        {projects.length} 个项目 · {totalSessions} 个会话 ·{' '}
+        {totalActive > 0 ? <strong className="hero-live">{totalActive} 个正在进行</strong> : '此刻都在休息'}
+      </p>
+      <div className="search-bar">
+        <input
+          type="search"
+          value={query}
+          placeholder="搜一搜：标题、分支、目录、说过的话"
+          aria-label="搜索历史会话"
+          onChange={(e) => onQuery(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Escape') onQuery(''); }}
+        />
+      </div>
     </div>
     {searching ? (
       <SearchResults result={result} q={q} now={now} />
     ) : (
     <div className="home">
       {error !== null && <p className="error">加载失败：{error}</p>}
-      <nav className="projects">
-        <h2>项目</h2>
-        {projects.length === 0 && <p className="muted">暂无项目</p>}
-        <ul>
-          {projects.map((p) => (
-            <li key={p.id} className={p.id === projectId ? 'selected' : undefined}>
-              <a href={`#/p/${encodeURIComponent(p.id)}`}>
-                <div className="project-name">{p.cwd ?? p.id}</div>
-                <div className="muted">{p.sessionCount} 个会话，{p.activeSessionCount} 个活跃</div>
-              </a>
-            </li>
-          ))}
-        </ul>
+      <nav className="project-strip" aria-label="项目">
+        {projects.length === 0 && <p className="muted">还没有项目。在任意目录里用一次 Claude Code，它就会出现在这里。</p>}
+        {projects.map((p) => {
+          const look = projectLook(p.id);
+          const path = p.cwd ?? p.id;
+          return (
+            <a key={p.id} className={`project-tile${p.id === shownId ? ' selected' : ''}`} href={`#/p/${encodeURIComponent(p.id)}`}
+              aria-current={p.id === shownId ? 'true' : undefined} style={{ ['--hue' as string]: look.hue } as CSSProperties}>
+              <span className="project-avatar" aria-hidden="true">{look.emoji}</span>
+              <span className="project-text">
+                <span className="project-name">{projectName(path)}</span>
+                <span className="project-path" title={path}>{path}</span>
+              </span>
+              <span className="project-counts">
+                <span className="chip">{p.sessionCount} 个会话</span>
+                {p.activeSessionCount > 0 && <span className="chip chip-live">{p.activeSessionCount} 个进行中</span>}
+              </span>
+            </a>
+          );
+        })}
       </nav>
       <section className="sessions">
-        <h2>会话</h2>
-        {projectId === null && <p className="muted">请选择一个项目</p>}
-        {projectId !== null && sessions.length === 0 && <p className="muted">暂无会话</p>}
-        <ul>
+        <h2>{shown !== undefined ? `${projectName(shown.cwd ?? shown.id)} 的会话` : '会话'}</h2>
+        {shownId !== null && sessions.length === 0 && <p className="muted">这个项目还没有会话</p>}
+        <ul className="session-grid">
           {sessions.map((s) => {
             const status = sessionStatusView(s, now);
             return (
             <li key={s.id}>
-              <a href={`#/s/${encodeURIComponent(s.id)}`}>
+              <a className={`session-card is-${status.status}`} href={`#/s/${encodeURIComponent(s.id)}`}>
                 <div className="session-title">{s.title ?? s.id.slice(0, 8)}</div>
-                <div className="muted">
+                <div className="session-meta">
                   <span className={`status status-${status.status}`}>{status.label}</span>
-                  {s.gitBranch !== null && <span> · {s.gitBranch}</span>}
-                  <span> · {formatTime(s.lastActivityAt)}</span>
-                  {s.sourceDeleted && <span className="tag"> 源文件已删除</span>}
+                  {s.gitBranch !== null && <span className="chip chip-branch" title={s.gitBranch}>🌿 {s.gitBranch}</span>}
+                  <span className="muted" title={formatTime(s.lastActivityAt)}>{relativeTime(s.lastActivityAt, now)}</span>
+                  {s.sourceDeleted && <span className="tag">源文件已删除</span>}
                 </div>
               </a>
             </li>
