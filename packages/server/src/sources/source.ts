@@ -3,13 +3,28 @@ import { ORIGINS, type Origin } from '@claude-canvas/shared';
 /**
  * What a file is to the pipeline. `session` / `agent`: an appended JSONL of the session's main thread / of one of its
  * agents' threads (read line by line); `title` / `agent_meta`: a small file read whole (stored as a meta raw event).
- * `agentId` is set for `agent` and `agent_meta`.
+ * `agentId` is set for `agent` and `agent_meta`. `index`: a file read whole that holds entries of many sessions (see
+ * FileSource.indexEntries); its `projectId` and `sessionId` are empty and unused.
  */
 export interface FileClass {
-  kind: 'session' | 'agent' | 'agent_meta' | 'title';
+  kind: 'session' | 'agent' | 'agent_meta' | 'title' | 'index';
   projectId: string;
   sessionId: string;
   agentId?: string;
+}
+
+/**
+ * One session's entry of an index file, stored as a meta raw event under its own `key` (so "unchanged since last
+ * emitted" is decided per session) and applied to that session only.
+ */
+export interface IndexEntry {
+  /** Store key of the entry (raw_event.file of the meta event); stable per session. */
+  key: string;
+  sessionId: string;
+  agentId: string | null;
+  /** Project of the session, passed to the normalizer with the event. */
+  projectId: string;
+  payload: string;
 }
 
 /** A value, or a promise of it: synchronous sources answer directly, so the pipeline never waits on them. */
@@ -68,6 +83,18 @@ export interface FileSource {
    * when the key is another kind of file or the source cannot tell. Called for every recorded key on each full scan.
    */
   mainSessionOf(key: string): MaybePromise<string | null>;
+  /**
+   * Optional. Absolute paths of index files (classified `index`), possibly outside rootDir: each is also watched
+   * (its directory at depth 0), listed by listFiles when it exists, and checked by every rescan.
+   */
+  indexFiles?(): readonly string[];
+  /** Optional, with indexFiles: the entries the source can place now, given an index file's whole content. */
+  indexEntries?(key: string, content: string): IndexEntry[];
+  /**
+   * Optional, with indexFiles: a value that changes whenever indexEntries could place more entries than before (e.g. a
+   * new root thread was seen); the pipeline then re-reads the index files even when their size did not change.
+   */
+  indexVersion?(): number;
 }
 
 export function isPromise<T>(v: MaybePromise<T>): v is Promise<T> {

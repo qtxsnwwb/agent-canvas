@@ -64,6 +64,7 @@ function collect(ws: WebSocket): () => Change[] {
 }
 
 beforeEach(async () => {
+  vi.stubEnv('CLAUDE_CANVAS_CODEX_DIR', ''); // never the real ~/.codex/sessions: no Codex source
   tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-e2e-'));
   projectsDir = path.join(tmp, 'projects');
   dataDir = path.join(tmp, 'data');
@@ -73,6 +74,7 @@ afterEach(async () => {
   for (const s of sockets.splice(0)) s.terminate();
   for (const a of apps.splice(0)) await a.close().catch(() => undefined);
   await fs.rm(tmp, { recursive: true, force: true, maxRetries: 5 });
+  vi.unstubAllEnvs();
 });
 
 test('回放一轮带权限确认和子代理的会话', async () => {

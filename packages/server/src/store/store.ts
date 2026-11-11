@@ -57,8 +57,20 @@ export type RawEvent =
       /** Project derived from the payload's transcript_path at ingest; replay uses this stored value. */
       projectId?: string | null;
     }
-  // custom-title.json, agent-*.meta.json contents
-  | { source: 'meta'; origin?: Origin; file: string; sessionId: string; agentId: string | null; payload: string };
+  // custom-title.json, agent-*.meta.json contents; a Codex session_index.jsonl line
+  | {
+      source: 'meta';
+      origin?: Origin;
+      file: string;
+      sessionId: string;
+      agentId: string | null;
+      payload: string;
+      /**
+       * Set by sources whose keys do not name the project (Codex index entries); stored in project_id and used by replay
+       * instead of the key. Absent for Claude Code (and absent, not null, when read back without one).
+       */
+      projectId?: string | null;
+    };
 /** As read back: `origin` is always present (rows stored before origins existed are 'claude'). */
 export type StoredRawEvent = RawEvent & { ingestId: number; origin: Origin };
 /** One hook counter of one origin (Diagnostics.hookEvents without the origin). */
@@ -159,6 +171,14 @@ export interface Store {
   rawForSessionAfter(sessionId: string, afterIngestId: number, limit: number, maxBytes?: number): StoredRawEvent[];
   /** Payload of the most recent meta raw event for that file, or null. */
   latestMeta(file: string): string | null;
+  /**
+   * Session, agent and project stored with the first transcript raw event of a store key (served by the dedupe
+   * index), or null when the key has none. Lets a source whose keys do not name the session (Codex) place a file that
+   * is gone.
+   */
+  transcriptFileOwner(file: string): { sessionId: string; agentId: string | null; projectId: string | null } | null;
+  /** Distinct project ids of the derived sessions, ascending. */
+  sessionProjectIds(): string[];
   allSessionIdsInRaw(): string[];
   /** Clears derived tables, the change log and unknown_stat; keeps raw_event, file_offset and meta. */
   clearDerived(): void;
@@ -256,6 +276,7 @@ function toStoredRaw(r: RawRow): StoredRawEvent {
         sessionId: r.session_id!,
         agentId: r.agent_id,
         payload: r.body,
+        ...(r.project_id !== null ? { projectId: r.project_id } : {}),
       };
   }
 }
@@ -352,8 +373,8 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
      VALUES ('hook', @origin, @eventName, @receivedAt, @sessionId, @projectId, @payload)`,
   );
   const insertRawMeta = db.prepare(
-    `INSERT INTO raw_event (source, origin, file, session_id, agent_id, body)
-     VALUES ('meta', @origin, @file, @sessionId, @agentId, @payload)`,
+    `INSERT INTO raw_event (source, origin, file, session_id, agent_id, project_id, body)
+     VALUES ('meta', @origin, @file, @sessionId, @agentId, @projectId, @payload)`,
   );
   const selectOffset = db.prepare(`SELECT "offset" AS off FROM file_offset WHERE file = ?`);
   const upsertOffset = db.prepare(
@@ -455,6 +476,11 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   const selectLatestMeta = db.prepare(
     `SELECT body FROM raw_event WHERE source = 'meta' AND file = ? ORDER BY ingest_id DESC LIMIT 1`,
   );
+  const selectTranscriptOwner = db.prepare(
+    `SELECT session_id AS sessionId, agent_id AS agentId, project_id AS projectId FROM raw_event
+     WHERE source = 'transcript' AND file = ? LIMIT 1`,
+  );
+  const selectSessionProjectIds = db.prepare(`SELECT DISTINCT project_id FROM session ORDER BY project_id`).pluck();
   const selectRawSessionIds = db.prepare(
     `SELECT DISTINCT session_id AS id FROM raw_event WHERE session_id IS NOT NULL ORDER BY session_id`,
   );
@@ -611,7 +637,7 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
         return res.changes === 0 ? null : Number(res.lastInsertRowid);
       }
       if (event.source === 'hook') return insertHookTx(event);
-      return Number(insertRawMeta.run({ ...event, origin: event.origin ?? 'claude' }).lastInsertRowid);
+      return Number(insertRawMeta.run({ ...event, origin: event.origin ?? 'claude', projectId: event.projectId ?? null }).lastInsertRowid);
     },
     getOffset(file) {
       const row = selectOffset.get(file) as { off: number } | undefined;
@@ -738,6 +764,13 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     latestMeta(file) {
       const row = selectLatestMeta.get(file) as { body: string } | undefined;
       return row?.body ?? null;
+    },
+    transcriptFileOwner(file) {
+      const row = selectTranscriptOwner.get(file) as { sessionId: string; agentId: string | null; projectId: string | null } | undefined;
+      return row ?? null;
+    },
+    sessionProjectIds() {
+      return selectSessionProjectIds.all() as string[];
     },
     allSessionIdsInRaw() {
       return (selectRawSessionIds.all() as { id: string }[]).map((r) => r.id);

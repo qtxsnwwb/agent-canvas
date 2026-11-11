@@ -1,3 +1,4 @@
+import path from 'node:path';
 import chokidar from 'chokidar';
 import type { Config } from '../../config.js';
 import type { Pipeline } from '../../pipeline.js';
@@ -13,9 +14,19 @@ export function startWatcher(pipeline: Pipeline, config: Config): { ready: Promi
   const onFile = (file: string): void => {
     if (!closed) void pipeline.ingestFile(file).catch(swallow);
   };
-  const watchers = pipeline.fileSources().map((source) =>
+  const watchers = pipeline.fileSources().flatMap((source) => [
     chokidar.watch(source.rootDir, { ignoreInitial: true, depth: source.watchDepth }).on('add', onFile).on('change', onFile).on('error', swallow),
-  );
+    // Index files may live outside rootDir (Codex's session_index.jsonl): watch each one's directory, that file only.
+    ...(source.indexFiles?.() ?? []).map((file) => {
+      const target = path.resolve(file);
+      const dir = path.dirname(target);
+      return chokidar
+        .watch(dir, { ignoreInitial: true, depth: 0, ignored: (p: string) => path.resolve(p) !== dir && path.resolve(p) !== target })
+        .on('add', onFile)
+        .on('change', onFile)
+        .on('error', swallow);
+    }),
+  ]);
 
   // Two cadences on one timer, never overlapping: the hot-set rescan every rescanMs, and a full scan (directory
   // listing: missed files, deletions) once fullScanMs has passed since the last one.

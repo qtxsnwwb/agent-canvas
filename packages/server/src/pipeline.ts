@@ -97,6 +97,10 @@ export class Pipeline {
   /** Hook events already inserted into raw_event (so a failed task does not insert them twice). */
   private readonly persistedHooks = new WeakSet<object>();
   private flagsChecked = false;
+  /** Absolute paths whose last classification threw (reported); cleared, with the failure, once one succeeds. */
+  private readonly classifyFailed = new Set<string>();
+  /** Index file (absolute path) -> its source's indexVersion when it was last read. */
+  private readonly indexVersions = new Map<string, number>();
 
   constructor(
     private readonly store: Store,
@@ -270,16 +274,20 @@ export class Pipeline {
     await this.touchDirty();
     const files = await this.listFiles();
     const groups = new Map<string, { sessionId: string; files: string[] }>();
+    const indexes: string[] = [];
     for (const file of files) {
       let cls: FileClass | null;
       try {
         const classified = this.classifyFile(file);
         cls = isPromise(classified) ? await classified : classified;
-      } catch (err) {
-        this.reportFailure(file, err);
-        continue;
+      } catch {
+        continue; // reported by classifyFile
       }
       if (cls === null) continue;
+      if (cls.kind === 'index') {
+        indexes.push(file);
+        continue;
+      }
       this.registerFile(cls.sessionId, file);
       const key = `${cls.projectId}\u0000${cls.sessionId}`;
       const g = groups.get(key) ?? { sessionId: cls.sessionId, files: [] };
@@ -293,6 +301,8 @@ export class Pipeline {
       }
       this.evictIfOld(sessionId);
     }
+    // After every session file: the threads classified above are what an index's entries are placed by.
+    for (const file of indexes) if (await this.indexDue(file)) await this.safeIngest(file);
     await this.markDeletedSources(new Set(files.map((f) => this.rel(f))));
   }
 
@@ -313,6 +323,9 @@ export class Pipeline {
     for (const file of [...targets].sort()) {
       if (await this.unchanged(file)) continue;
       await this.safeIngest(file);
+    }
+    for (const source of this.sources) {
+      for (const file of source.indexFiles?.() ?? []) if (await this.indexDue(file)) await this.safeIngest(file);
     }
     for (const [id, touched] of [...this.lastTouch]) {
       if (now - touched > this.config.evictAfterMs && !this.tails.has(id) && this.mayEvict(id)) this.drop(id);
@@ -461,7 +474,48 @@ export class Pipeline {
   private classifyFile(absPath: string): MaybePromise<FileClass | null> {
     const hit = this.locate(absPath);
     if (hit === null) return null;
-    return hit.source.classify(hit.key);
+    return this.classifyAt(absPath, hit.source, hit.key);
+  }
+
+  /**
+   * `source.classify(key)`, where a throw (e.g. a Codex rollout whose first line is not complete yet) is reported as an
+   * ingest failure of the file on every path (full scan, rescan, watcher event) and rethrown; the next classification
+   * that succeeds clears that failure. A synchronous answer stays synchronous.
+   */
+  private classifyAt(absPath: string, source: FileSource, key: string): MaybePromise<FileClass | null> {
+    const ok = (cls: FileClass | null): FileClass | null => {
+      if (this.classifyFailed.delete(absPath)) this.failures.delete(absPath);
+      return cls;
+    };
+    const fail = (err: unknown): never => {
+      this.classifyFailed.add(absPath);
+      this.reportFailure(absPath, err);
+      throw err;
+    };
+    let classified: MaybePromise<FileClass | null>;
+    try {
+      classified = source.classify(key);
+    } catch (err) {
+      return fail(err);
+    }
+    return isPromise(classified) ? classified.then(ok, fail) : ok(classified);
+  }
+
+  /**
+   * An index file is read again when its source can place more entries than at the last read (indexVersion), or when
+   * its size differs from the recorded one; never while it does not exist.
+   */
+  private async indexDue(absPath: string): Promise<boolean> {
+    const hit = this.locate(absPath);
+    if (hit === null) return false;
+    let size: number;
+    try {
+      size = (await fsp.stat(absPath)).size;
+    } catch {
+      return false;
+    }
+    if ((this.indexVersions.get(absPath) ?? 0) !== (hit.source.indexVersion?.() ?? 0)) return true;
+    return this.sizeMap().get(hit.key) !== size;
   }
 
   /** `file` is the relative store key. */
@@ -530,9 +584,10 @@ export class Pipeline {
     if (hit === null) return;
     const { source, key: file } = hit;
     // A synchronous source (Claude Code) is not awaited: the read starts in the same tick as before.
-    const classified = source.classify(file);
+    const classified = this.classifyAt(absPath, source, file);
     const cls = isPromise(classified) ? await classified : classified;
     if (cls === null) return;
+    if (cls.kind === 'index') return this.ingestIndex(absPath, source, file);
     if (cls.kind === 'title' || cls.kind === 'agent_meta') return this.ingestMeta(absPath, source, file, cls);
 
     const agentId = cls.kind === 'agent' ? (cls.agentId ?? null) : null;
@@ -622,6 +677,45 @@ export class Pipeline {
         () => this.sizeMap().set(file, size),
       );
     });
+  }
+
+  /**
+   * An index file (many sessions' entries in one file, e.g. Codex's session_index.jsonl): read whole; each entry the
+   * source can place becomes a meta raw event of its own session under its own key, written only when it differs from
+   * the latest one stored for that key (so nothing is written twice, across restarts too), in that session's work
+   * chain. `file` is the store key of `absPath` in `source`; its size is recorded so scans only revisit it on change.
+   */
+  private async ingestIndex(absPath: string, source: FileSource, file: string): Promise<void> {
+    if (source.indexEntries === undefined) return;
+    const version = source.indexVersion?.() ?? 0;
+    let content: string;
+    try {
+      content = await fsp.readFile(absPath, 'utf8');
+    } catch {
+      return;
+    }
+    const size = Buffer.byteLength(content);
+    for (const entry of source.indexEntries(file, content)) {
+      if (this.store.latestMeta(entry.key) === entry.payload) continue;
+      await this.enqueue(entry.sessionId, () => {
+        if (this.store.latestMeta(entry.key) === entry.payload) return;
+        const event: RawEvent = {
+          source: 'meta',
+          origin: source.origin,
+          file: entry.key,
+          sessionId: entry.sessionId,
+          agentId: entry.agentId,
+          payload: entry.payload,
+          projectId: entry.projectId, // stored: replay gives the normalizer the same project
+        };
+        this.atomically(entry.sessionId, () => {
+          this.store.insertRaw(event);
+          return this.normalizer.apply(event, entry.projectId).changes;
+        });
+      });
+    }
+    this.recordOffset(file, size, size);
+    this.indexVersions.set(absPath, version);
   }
 
   private applyHook(event: Extract<RawEvent, { source: 'hook' }>): void {
@@ -744,7 +838,7 @@ export class Pipeline {
    */
   private projectOf(ev: StoredRawEvent): string {
     if (ev.source === 'hook') return ev.projectId ?? UNKNOWN_PROJECT;
-    if (ev.source === 'transcript' && ev.projectId != null) return ev.projectId;
+    if ((ev.source === 'transcript' || ev.source === 'meta') && ev.projectId != null) return ev.projectId;
     return this.sourceFor(ev.origin)?.projectOfKey(ev.file) ?? UNKNOWN_PROJECT;
   }
 

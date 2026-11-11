@@ -198,3 +198,36 @@ test('迁移：hook_stat 出现之前的数据库（没有计数表）仍回填�
     s.close();
   }
 });
+
+test('transcriptFileOwner：某个键的转写原始事件存的会话、线程和项目（走去重索引）；sessionProjectIds：会话的项目 id', () => {
+  const base = { source: 'transcript' as const, origin: 'codex' as const, offset: 0, recordType: 'event_msg' };
+  store.insertRaw({ ...base, file: 'codex:a/rollout-1.jsonl', line: '{"a":1}', sessionId: 'root', agentId: null, projectId: 'D--x' });
+  store.insertRaw({ ...base, file: 'codex:a/rollout-2.jsonl', line: '{"a":1}', sessionId: 'root', agentId: 'sub', projectId: 'D--x' });
+  expect(store.transcriptFileOwner('codex:a/rollout-1.jsonl')).toEqual({ sessionId: 'root', agentId: null, projectId: 'D--x' });
+  expect(store.transcriptFileOwner('codex:a/rollout-2.jsonl')).toEqual({ sessionId: 'root', agentId: 'sub', projectId: 'D--x' });
+  expect(store.transcriptFileOwner('codex:a/missing.jsonl')).toBeNull();
+  store.insertRaw({ source: 'meta', origin: 'codex', file: 'codex:index/root', sessionId: 'root', agentId: null, payload: '{}' });
+  expect(store.transcriptFileOwner('codex:index/root')).toBeNull();
+
+  const sql: string[] = [];
+  const s = openStore(':memory:', { verbose: (q) => sql.push(String(q)) });
+  try {
+    s.transcriptFileOwner('k');
+    const q = sql.find((x) => /FROM raw_event/.test(x) && /LIMIT 1/.test(x))!;
+    const db = new Database(':memory:');
+    try {
+      db.exec(`CREATE TABLE raw_event (ingest_id INTEGER PRIMARY KEY, source TEXT, file TEXT, line_hash TEXT, session_id TEXT, agent_id TEXT, project_id TEXT);
+        CREATE UNIQUE INDEX raw_event_transcript_dedupe ON raw_event (file, line_hash) WHERE source = 'transcript';`);
+      const plan = (db.prepare(`EXPLAIN QUERY PLAN ${q}`).all() as { detail: string }[]).map((r) => r.detail).join('\n');
+      expect(plan).toMatch(/USING INDEX raw_event_transcript_dedupe/);
+    } finally {
+      db.close();
+    }
+  } finally {
+    s.close();
+  }
+
+  expect(store.sessionProjectIds()).toEqual([]);
+  store.applyChanges([upsert('s2', 'p-b', 'claude'), upsert('s1', 'p-a', 'codex'), upsert('s3', 'p-a', 'claude')]);
+  expect(store.sessionProjectIds()).toEqual(['p-a', 'p-b']);
+});

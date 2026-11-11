@@ -11,6 +11,8 @@ import { acquireLock } from './lock.js';
 import { NORMALIZER_VERSION } from './normalize/version.js';
 import { NORMALIZER_VERSION_KEY, Pipeline, REBUILD_FLAG } from './pipeline.js';
 import { ClaudeFileSource } from './sources/claude.js';
+import { storeLookup } from './sources/codex/lookup.js';
+import { CodexFileSource } from './sources/codex/source.js';
 import type { FileSource } from './sources/source.js';
 import { startWatcher } from './sources/transcript/watcher.js';
 import { openStore, type Store } from './store/store.js';
@@ -37,9 +39,22 @@ function defaultWebDist(): string | null {
   return fs.existsSync(dir) && fs.statSync(dir).isDirectory() ? dir : null;
 }
 
-/** The session-file directories read for this configuration: Claude Code's projects directory. */
-export function fileSources(config: Config): FileSource[] {
-  return [new ClaudeFileSource(config.projectsDir)];
+/**
+ * The session-file directories read for this configuration: Claude Code's projects directory, and Codex's sessions
+ * directory when `codexSessionsDir` names an existing directory (otherwise Codex is skipped silently). `store` lets the
+ * Codex source place files from their stored raw events (files that are gone, restarts) without reading them.
+ */
+export function fileSources(config: Config, store?: Store): FileSource[] {
+  const sources: FileSource[] = [new ClaudeFileSource(config.projectsDir)];
+  const codexDir = config.codexSessionsDir;
+  let isDir = false;
+  try {
+    isDir = codexDir !== null && codexDir !== '' && fs.statSync(codexDir).isDirectory();
+  } catch {
+    isDir = false;
+  }
+  if (isDir) sources.push(new CodexFileSource(codexDir!, store ? storeLookup(store, config.projectsDir) : undefined));
+  return sources;
 }
 
 function resolveConfig(overrides: Partial<Config>): Config {
@@ -79,7 +94,7 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
   let pipeline: Pipeline;
   try {
     store = openStore(config.dbPath, options.log ? { log: options.log } : {});
-    pipeline = new Pipeline(store, config, { log: (line) => process.stderr.write(`${line}\n`), sources: fileSources(config) });
+    pipeline = new Pipeline(store, config, { log: (line) => process.stderr.write(`${line}\n`), sources: fileSources(config, store) });
     const reason = rebuildReason(store);
     if (reason !== null) {
       options.log?.(`claude-canvas rebuilding derived data (reason: ${reason})`);
@@ -126,7 +141,7 @@ export function rebuild(overrides: Partial<Config> = {}, options: { progress?: (
   try {
     const store = openStore(config.dbPath);
     try {
-      new Pipeline(store, config, { sources: fileSources(config) }).rebuild(options.progress);
+      new Pipeline(store, config, { sources: fileSources(config, store) }).rebuild(options.progress);
     } finally {
       store.close();
     }

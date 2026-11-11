@@ -4,11 +4,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import type { GraphSnapshot, SeqChange } from '@claude-canvas/shared';
+import { fileSources } from '../src/cli.js';
 import { loadConfig, type Config } from '../src/config.js';
 import { NORMALIZER_VERSION } from '../src/normalize/version.js';
 import { Pipeline } from '../src/pipeline.js';
 import { startWatcher } from '../src/sources/transcript/watcher.js';
-import { openStore, type RawEvent, type Store } from '../src/store/store.js';
+import { openStore, type RawEvent, type Store, type StoredRawEvent } from '../src/store/store.js';
+import { indexLine, rollout, rolloutRel, sessionMetaLine, taskComplete, taskStarted } from './codex-rollout.js';
 import { assistantBlock, toolResult, userPrompt } from './fixtures.js';
 
 const reads = vi.hoisted(() => ({ active: 0, max: 0, calls: 0, failFor: null as string | null }));
@@ -999,5 +1001,280 @@ describe('pipeline', () => {
     expect(resyncs).toEqual([]);
     expect(store.dirtySessionIds()).toEqual([]);
     spy.mockRestore();
+  });
+});
+
+// ---- Codex file source (no Codex normalizer yet: raw events are stored, nothing is derived) ----
+
+describe('pipeline 与 Codex 文件源', () => {
+  const ROOT = '019a0000-0000-7000-8000-00000000000a';
+  const SUB = '019a0000-0000-7000-8000-00000000000b';
+  const OTHER = '019a0000-0000-7000-8000-00000000000c';
+  const CWD = path.join(path.sep === '\\' ? 'D:\\' : '/', 'work', 'app');
+  const PROJECT = CWD.replace(/[^A-Za-z0-9]/g, '-');
+  const WORKTREE = path.join(CWD, '.worktrees', 'helper');
+
+  let tmp: string;
+  let store: Store;
+  let config: Config;
+  let codexDir: string;
+  const cabs = (rel: string): string => path.join(codexDir, ...rel.split('/'));
+  const ckey = (rel: string): string => `codex:${rel}`;
+  const indexFile = (): string => path.join(path.dirname(codexDir), 'session_index.jsonl');
+  async function cwrite(rel: string, content: string): Promise<void> {
+    await fs.mkdir(path.dirname(cabs(rel)), { recursive: true });
+    await fs.writeFile(cabs(rel), content);
+  }
+  async function write(rel: string, events: RawEvent[]): Promise<void> {
+    const file = path.join(config.projectsDir, ...rel.split('/'));
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, linesOf(events));
+  }
+  const newPipeline = (opts: { log?: (l: string) => void } = {}): Pipeline =>
+    new Pipeline(store, config, { ...opts, sources: fileSources(config, store) });
+  const rows = (sessionId: string): [string, string, string | null, string | null | undefined, string][] =>
+    store.rawForSession(sessionId).map((e) => [
+      e.source,
+      e.source === 'hook' ? '' : e.file,
+      e.source === 'hook' ? null : e.agentId,
+      e.source === 'transcript' ? e.projectId : undefined,
+      e.origin,
+    ]);
+  const projectsOf = (sessionId: string, agentId?: string): Set<string | null | undefined> =>
+    new Set(
+      store
+        .rawForSession(sessionId)
+        .filter((e): e is Extract<StoredRawEvent, { source: 'transcript' }> => e.source === 'transcript')
+        .filter((e) => agentId === undefined || e.agentId === agentId)
+        .map((e) => e.projectId),
+    );
+  const metas = (id: string): [string, string | null, string, string][] =>
+    store
+      .rawForSession(id)
+      .filter((e): e is Extract<StoredRawEvent, { source: 'meta' }> => e.source === 'meta')
+      .map((e) => [e.file, e.agentId, e.payload, e.origin]);
+  const rootLines = (): string => rollout(sessionMetaLine({ id: ROOT, cwd: CWD }), taskStarted('t1'), taskComplete('t1'));
+  const subLines = (cwd = CWD): string => rollout(sessionMetaLine({ id: SUB, sessionId: ROOT, parent: ROOT, cwd }), taskStarted('t2'));
+
+  beforeEach(async () => {
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-pipeline-codex-'));
+    codexDir = path.join(tmp, 'codex', 'sessions');
+    config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: codexDir });
+    await fs.mkdir(config.projectsDir, { recursive: true });
+    await fs.mkdir(codexDir, { recursive: true });
+    store = openStore(':memory:');
+  });
+  afterEach(async () => {
+    store.close();
+    await fs.rm(tmp, { recursive: true, force: true, maxRetries: 10 });
+  });
+
+  test('fileSources：codexSessionsDir 是存在的目录时才加 Codex 来源；null、不存在、是文件时静默跳过', async () => {
+    expect(fileSources(config, store).map((s) => [s.origin, s.rootDir])).toEqual([
+      ['claude', config.projectsDir],
+      ['codex', codexDir],
+    ]);
+    expect(fileSources({ ...config, codexSessionsDir: null }).map((s) => s.origin)).toEqual(['claude']);
+    expect(fileSources({ ...config, codexSessionsDir: path.join(tmp, 'missing') }).map((s) => s.origin)).toEqual(['claude']);
+    await fs.writeFile(path.join(tmp, 'a-file'), '');
+    expect(fileSources({ ...config, codexSessionsDir: path.join(tmp, 'a-file') }).map((s) => s.origin)).toEqual(['claude']);
+  });
+
+  test('原始事件带 codex 来源、会话、线程和项目；没有归一器时不推导、不留脏标记；偏移前进，重复导入无变化', async () => {
+    // The subagent's file sorts (and is read) before its root thread's file.
+    await cwrite(rolloutRel(SUB, '2026/11/10'), subLines());
+    await cwrite(rolloutRel(ROOT), rootLines());
+    const p = newPipeline();
+    await p.scanAll();
+    await p.idle();
+    const subKey = ckey(rolloutRel(SUB, '2026/11/10'));
+    const rootKey = ckey(rolloutRel(ROOT));
+    expect(rows(ROOT)).toEqual([
+      ['transcript', subKey, SUB, PROJECT, 'codex'],
+      ['transcript', subKey, SUB, PROJECT, 'codex'],
+      ['transcript', rootKey, null, PROJECT, 'codex'],
+      ['transcript', rootKey, null, PROJECT, 'codex'],
+      ['transcript', rootKey, null, PROJECT, 'codex'],
+    ]);
+    expect(store.rawForSession(SUB)).toEqual([]);
+    expect(store.getSession(ROOT)).toBeNull();
+    expect(store.listProjects(Date.now())).toEqual([]);
+    expect(store.dirtySessionIds()).toEqual([]);
+    expect(p.ingestFailures()).toEqual([]);
+    expect(store.getOffset(rootKey)).toBe((await fs.stat(cabs(rolloutRel(ROOT)))).size);
+    expect(store.getOffset(subKey)).toBe((await fs.stat(cabs(rolloutRel(SUB, '2026/11/10')))).size);
+
+    const count = store.rawForSession(ROOT).length;
+    await p.scanAll();
+    await p.rescan();
+    await p.ingestFile(cabs(rolloutRel(ROOT)));
+    await newPipeline().scanAll();
+    expect(store.rawForSession(ROOT)).toHaveLength(count);
+
+    await fs.appendFile(cabs(rolloutRel(ROOT)), rollout(taskStarted('t3')));
+    await p.ingestFile(cabs(rolloutRel(ROOT)));
+    expect(store.rawForSession(ROOT)).toHaveLength(count + 1);
+    expect(store.getSession(ROOT)).toBeNull();
+
+    p.rebuild();
+    expect(store.rawForSession(ROOT)).toHaveLength(count + 1);
+    expect(store.getSession(ROOT)).toBeNull();
+    expect(store.dirtySessionIds()).toEqual([]);
+  });
+
+  test('子代理线程用根线程的项目（它自己的 cwd 是 worktree）', async () => {
+    await cwrite(rolloutRel(ROOT), rootLines());
+    await cwrite(rolloutRel(SUB, '2026/11/12'), subLines(WORKTREE));
+    await newPipeline().scanAll();
+    expect(projectsOf(ROOT)).toEqual(new Set([PROJECT]));
+  });
+
+  test('先读到子代理线程时项目用它自己的 cwd，之后（追加、重启、重建）保持不变', async () => {
+    await cwrite(rolloutRel(ROOT), rootLines());
+    await cwrite(rolloutRel(SUB, '2026/11/12'), subLines(WORKTREE));
+    const worktree = WORKTREE.replace(/[^A-Za-z0-9]/g, '-');
+    const p = newPipeline();
+    await p.ingestFile(cabs(rolloutRel(SUB, '2026/11/12'))); // before the root is known
+    await p.scanAll();
+    expect(projectsOf(ROOT, SUB)).toEqual(new Set([worktree]));
+    expect(projectsOf(ROOT).has(PROJECT)).toBe(true);
+    await fs.appendFile(cabs(rolloutRel(SUB, '2026/11/12')), rollout(taskComplete('t2')));
+    await newPipeline().scanAll();
+    newPipeline().rebuild();
+    expect(projectsOf(ROOT, SUB)).toEqual(new Set([worktree]));
+    expect(store.rawForSession(ROOT).filter((e) => e.source === 'transcript' && e.agentId === SUB)).toHaveLength(3);
+  });
+
+  test.each([
+    ['第一行还没写完', (): string => sessionMetaLine({ id: ROOT, cwd: CWD }).slice(0, 30), /first line incomplete/],
+    ['第一行不是 session_meta', (): string => rollout(taskStarted('t1')), /not session_meta/],
+  ])('无效的 rollout（%s）：什么都不导入，记入导入失败；变成有效后自动导入，失败清除', async (_name, body, error) => {
+    await cwrite(rolloutRel(ROOT), body());
+    const lines: string[] = [];
+    const p = newPipeline({ log: (l) => lines.push(l) });
+    await p.scanAll();
+    expect(store.hasRawEvents()).toBe(false);
+    expect(p.ingestFailures()).toEqual([{ file: ckey(rolloutRel(ROOT)), error: expect.stringMatching(error), at: expect.any(String) }]);
+    expect(lines.join('\n')).toContain(ckey(rolloutRel(ROOT)));
+    // The direct (watcher) path reports it as well.
+    const p2 = newPipeline();
+    await expect(p2.ingestFile(cabs(rolloutRel(ROOT)))).rejects.toThrow(error);
+    expect(p2.ingestFailures().map((f) => f.file)).toEqual([ckey(rolloutRel(ROOT))]);
+
+    await fs.writeFile(cabs(rolloutRel(ROOT)), rootLines());
+    await p.rescan(); // failed files are retried by the hot rescan
+    expect(store.rawForSession(ROOT)).toHaveLength(3);
+    expect(p.ingestFailures()).toEqual([]);
+    await p2.ingestFile(cabs(rolloutRel(ROOT)));
+    expect(p2.ingestFailures()).toEqual([]);
+    expect(store.rawForSession(ROOT)).toHaveLength(3);
+  });
+
+  test('监视器路径：无效 rollout 的失败不被吞掉；补全后由文件事件导入并清除失败；索引文件也被监视', async () => {
+    const p = newPipeline();
+    const w = startWatcher(p, { ...config, rescanMs: 60_000, fullScanMs: 60_000 });
+    try {
+      await w.ready;
+      await cwrite(rolloutRel(ROOT), '{"type":"session_meta"');
+      await vi.waitFor(() => expect(p.ingestFailures().map((f) => f.file)).toEqual([ckey(rolloutRel(ROOT))]), { timeout: 5000 });
+      await fs.writeFile(cabs(rolloutRel(ROOT)), rootLines());
+      await vi.waitFor(
+        () => {
+          expect(store.rawForSession(ROOT)).toHaveLength(3);
+          expect(p.ingestFailures()).toEqual([]);
+        },
+        { timeout: 5000 },
+      );
+      await fs.writeFile(indexFile(), `${indexLine(ROOT, 'watched title')}\n`);
+      await vi.waitFor(() => expect(store.latestMeta(`codex:index/${ROOT}`)).toBe(indexLine(ROOT, 'watched title')), { timeout: 5000 });
+    } finally {
+      await w.close();
+    }
+  });
+
+  test('会话索引：每个已知根线程一条 meta 原始事件；只在该行变化时再写；之后才出现的根线程也会补上', async () => {
+    await cwrite(rolloutRel(ROOT), rootLines());
+    await cwrite(rolloutRel(SUB), subLines());
+    await fs.writeFile(indexFile(), [indexLine(ROOT, 'first'), indexLine(SUB, 'helper'), indexLine(OTHER, 'later')].join('\n') + '\n');
+    const p = newPipeline();
+    await p.scanAll();
+    await p.idle();
+    expect(metas(ROOT)).toEqual([[`codex:index/${ROOT}`, null, indexLine(ROOT, 'first'), 'codex']]);
+    // The project is stored with the entry (its key does not name it), so replay uses the same one.
+    expect(store.rawForSession(ROOT).find((e) => e.source === 'meta')).toMatchObject({ projectId: PROJECT });
+    expect(store.rawForSession(SUB)).toEqual([]);
+    expect(store.rawForSession(OTHER)).toEqual([]);
+    expect(store.getSession(ROOT)).toBeNull();
+    expect(store.getOffset('codex:../session_index.jsonl')).toBe((await fs.stat(indexFile())).size);
+
+    // Nothing new: no new rows (same pipeline, rescan, and a restart).
+    await p.scanAll();
+    await p.rescan();
+    await newPipeline().scanAll();
+    expect(metas(ROOT)).toHaveLength(1);
+
+    // The title changes: one new row, for that session only.
+    await fs.writeFile(indexFile(), [indexLine(ROOT, 'renamed'), indexLine(SUB, 'helper'), indexLine(OTHER, 'later')].join('\n') + '\n');
+    await p.rescan();
+    await p.idle();
+    expect(metas(ROOT).map((m) => m[2])).toEqual([indexLine(ROOT, 'first'), indexLine(ROOT, 'renamed')]);
+
+    // OTHER turns out to be a root thread (its file appears; the index itself does not change).
+    await cwrite(rolloutRel(OTHER), rollout(sessionMetaLine({ id: OTHER, cwd: CWD })));
+    await p.ingestFile(cabs(rolloutRel(OTHER)));
+    await p.rescan();
+    await p.idle();
+    expect(metas(OTHER)).toEqual([[`codex:index/${OTHER}`, null, indexLine(OTHER, 'later'), 'codex']]);
+    expect(metas(ROOT)).toHaveLength(2);
+    p.rebuild();
+    expect(metas(ROOT)).toHaveLength(2);
+    expect(store.getSession(ROOT)).toBeNull();
+  });
+
+  test('源文件消失（归档或删除）：重启后仍从存档的原始事件知道它属于哪个会话；不报错，数据保留', async () => {
+    await cwrite(rolloutRel(ROOT), rootLines());
+    await cwrite(rolloutRel(SUB), subLines());
+    await newPipeline().scanAll();
+    const before = store.rawForSession(ROOT).length;
+    await fs.rm(cabs(rolloutRel(ROOT)));
+    await fs.rm(cabs(rolloutRel(SUB)));
+    const sources = fileSources(config, store);
+    const codex = sources.find((s) => s.origin === 'codex')!;
+    expect(codex.mainSessionOf(ckey(rolloutRel(ROOT)))).toBe(ROOT);
+    expect(codex.mainSessionOf(ckey(rolloutRel(SUB)))).toBeNull();
+    expect(codex.classify(ckey(rolloutRel(SUB)))).toEqual({ kind: 'agent', projectId: PROJECT, sessionId: ROOT, agentId: SUB });
+    expect(codex.projectOfTranscript(cabs(rolloutRel(ROOT)))).toBe(PROJECT);
+    const p = new Pipeline(store, config, { sources });
+    await p.scanAll();
+    await p.rescan();
+    expect(p.ingestFailures()).toEqual([]);
+    p.rebuild();
+    expect(store.rawForSession(ROOT)).toHaveLength(before);
+  });
+
+  test('同一个目录被两个工具使用、只差盘符大小写：Codex 沿用 Claude 的项目 id（全新数据库，一次扫描）', async () => {
+    await write('D--work-app/s1.jsonl', [userPrompt('u1', null, 'x')]);
+    await cwrite(rolloutRel(ROOT), rollout(sessionMetaLine({ id: ROOT, cwd: 'd:\\work\\app' })));
+    await newPipeline().scanAll();
+    expect(store.getSession('s1')!.projectId).toBe('D--work-app');
+    expect(projectsOf(ROOT)).toEqual(new Set(['D--work-app']));
+  });
+
+  test('Codex 的扫描和热扫描不发出扫描 raw_event 的查询', async () => {
+    const sql: string[] = [];
+    const s = openStore(':memory:', { verbose: (q) => sql.push(String(q)) });
+    try {
+      await cwrite(rolloutRel(ROOT), rootLines());
+      await fs.writeFile(indexFile(), `${indexLine(ROOT, 't')}\n`);
+      const p = new Pipeline(s, config, { sources: fileSources(config, s) });
+      await p.scanAll();
+      await p.rescan();
+      await new Pipeline(s, config, { sources: fileSources(config, s) }).scanAll();
+      expect(sql.length).toBeGreaterThan(0);
+      const scans = sql.filter((q) => /FROM raw_event/i.test(q) && !/WHERE[^]*(session_id|file|line_hash)\s*=/i.test(q));
+      expect(scans).toEqual([]);
+    } finally {
+      s.close();
+    }
   });
 });
