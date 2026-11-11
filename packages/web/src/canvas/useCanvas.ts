@@ -200,21 +200,30 @@ export function createCanvasModel(
 ): CanvasModel {
   let compact = initial.compact ?? true;
   const compactor = createCompactor();
-  /** Run ids the user expanded. */
-  const expandedRuns = new Set<string>();
-  /** The run ids of the last compaction, and (while auto-fold is off) the only runs that may exist. */
-  let currentRuns: ReadonlySet<string> = new Set();
+  /** The calls of the runs the user expanded: never merged again (by call, since a run's id depends on its first member). */
+  const expandedCalls = new Set<string>();
+  /** The runs of the last compaction (id -> member ids); empty when the last view was not compacted. */
+  let currentRuns: ReadonlyMap<string, readonly string[]> = new Map();
+  /** Whether the last view was built from a compacted graph. */
+  let reducedShown = false;
+  /**
+   * While auto-fold is off: the only runs that may exist (those on screen when it went off, or when a compacted view
+   * was first shown after that). Null: no restriction. Not applied in the replay view, where the reader moves in time.
+   */
   let frozenRuns: ReadonlySet<string> | null = null;
-  const allowRun = (id: string): boolean => !expandedRuns.has(id) && (frozenRuns === null || frozenRuns.has(id));
+  const allowRun = (id: string): boolean => mode === 'replay' || frozenRuns === null || frozenRuns.has(id);
   /** The last compaction and what it was computed from; reused while those are the same (a fold, a mode switch). */
   let lastCompaction: {
-    graph: Graph; keep: string | null; frozen: ReadonlySet<string> | null; expanded: number; result: CompactResult;
+    graph: Graph; keep: string | null; frozen: ReadonlySet<string> | null; expanded: number; replay: boolean; result: CompactResult;
   } | null = null;
   const reduce = (graph: Graph): CompactResult => {
     const c = lastCompaction;
-    if (c && c.graph === graph && c.keep === keepVisible && c.frozen === frozenRuns && c.expanded === expandedRuns.size) return c.result;
-    const result = compactor(graph, { keep: keepVisible, allowRun });
-    lastCompaction = { graph, keep: keepVisible, frozen: frozenRuns, expanded: expandedRuns.size, result };
+    const replay = mode === 'replay';
+    // `expandedCalls` only grows, so its size identifies its content.
+    if (c && c.graph === graph && c.keep === keepVisible && c.frozen === frozenRuns && c.expanded === expandedCalls.size
+      && c.replay === replay) return c.result;
+    const result = compactor(graph, { keep: keepVisible, allowRun, exclude: expandedCalls });
+    lastCompaction = { graph, keep: keepVisible, frozen: frozenRuns, expanded: expandedCalls.size, replay, result };
     return result;
   };
   /** Turn key -> expanded, set by the user. */
@@ -405,23 +414,31 @@ export function createCanvasModel(
     builtSource = source;
     cancelRetry(); // this rebuild is the retry
     // The outline view counts every step in its turn cards, so it is built from the full graph.
-    const reduced = compact && mode !== 'outline' ? reduce(graph) : null;
-    currentRuns = new Set(reduced?.runs.keys());
+    const willReduce = compact && mode !== 'outline';
+    // Coming from a view that was not compacted there are no runs on screen to preserve: form them all, then freeze.
+    if (willReduce && !reducedShown) frozenRuns = null;
+    const reduced = willReduce ? reduce(graph) : null;
+    currentRuns = reduced?.runs ?? new Map();
+    if (willReduce && !autoFold && frozenRuns === null) frozenRuns = new Set(currentRuns.keys());
+    reducedShown = willReduce;
     const view = buildView(reduced?.graph ?? graph, effectiveOverrides(), fullTurns, {
       frozenHidden: frozen, keepVisible, expandedAgents, mode, runs: reduced?.runs, thinkingMs: reduced?.thinkingMs,
     });
     // A collapsed turn forgets "show all" and its frozen fold, however it got collapsed: re-expanding it folds the
-    // middle by the length rule again.
-    for (const t of view.turns) {
-      if (!t.collapsed) continue;
-      fullTurns.delete(t.key);
-      frozen.delete(t.key);
+    // middle by the length rule again. Not in the outline view, where every turn merely counts as collapsed: the
+    // per-step views keep their folds for when the reader comes back.
+    if (mode !== 'outline') {
+      for (const t of view.turns) {
+        if (!t.collapsed) continue;
+        fullTurns.delete(t.key);
+        frozen.delete(t.key);
+      }
+      // Likewise an agent group that left the view (its turn collapsed, its container folded into `earlier`, topology).
+      const groupKeys = new Set(view.agentGroups.map((g) => g.key));
+      const leftView = (key: string): boolean => key.startsWith(AGENT_KEY_PREFIX) && !groupKeys.has(key);
+      for (const key of [...fullTurns]) if (leftView(key)) fullTurns.delete(key);
+      for (const key of [...frozen.keys()]) if (leftView(key)) frozen.delete(key);
     }
-    // Likewise an agent group that left the view (its turn collapsed, its container folded into `earlier`, topology).
-    const groupKeys = new Set(view.agentGroups.map((g) => g.key));
-    const leftView = (key: string): boolean => key.startsWith(AGENT_KEY_PREFIX) && !groupKeys.has(key);
-    for (const key of [...fullTurns]) if (leftView(key)) fullTurns.delete(key);
-    for (const key of [...frozen.keys()]) if (leftView(key)) frozen.delete(key);
     if (!autoFold) freeze(view); // turns that appeared (or were expanded) since the last rebuild
     const inView = (id: string): boolean => view.nodes.has(id);
     const turnKeys = new Set(view.turns.map((t) => t.key));
@@ -483,7 +500,7 @@ export function createCanvasModel(
       autoFold = enabled;
       if (!enabled) {
         freeze(snapshot.view);
-        frozenRuns = currentRuns;
+        frozenRuns = reducedShown ? new Set(currentRuns.keys()) : null;
         return; // nothing on screen changes
       }
       frozenRuns = null;
@@ -517,11 +534,13 @@ export function createCanvasModel(
     setCompact(enabled) {
       if (disposed || enabled === compact) return;
       compact = enabled;
+      frozen.clear(); // frozen folds name the nodes of the other density; the rebuild freezes the new view again
       rebuildNow();
     },
     expandRun(runId) {
-      if (disposed || expandedRuns.has(runId)) return;
-      expandedRuns.add(runId);
+      const members = currentRuns.get(runId);
+      if (disposed || members === undefined) return;
+      for (const id of members) expandedCalls.add(id);
       rebuildNow();
     },
     setReplayTime(ms) {

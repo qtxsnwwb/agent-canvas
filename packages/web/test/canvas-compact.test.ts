@@ -161,3 +161,63 @@ test('buildView counts a run as its member calls and carries thinking time onto 
   const plain = view.nodes.get('x');
   expect(plain?.type === 'node' && plain.runCount).toBe(0);
 });
+
+// The shape the server gives parallel batches: every member of a batch hangs off the same parent; the first call of the
+// next message is joined from every member, the later calls of that message hang off the last member only.
+test('thinking time in front of parallel calls is counted once on their run', () => {
+  const g = graph(
+    [node('p', 'prompt', 0), node('th', 'thinking', 1, { durationMs: 3000 }), read('a', 2), read('b', 2), read('c', 2), node('x', 'text', 3)],
+    [e('p', 'th'), e('th', 'a'), e('th', 'b'), e('th', 'c'), e('a', 'x'), e('b', 'x'), e('c', 'x')],
+  );
+  const r = compactGraph(g);
+  expect(r.runs.get(runIdOf('a'))).toEqual(['a', 'b', 'c']);
+  expect(r.thinkingMs.get(runIdOf('a'))).toBe(3000);
+});
+
+test('a run of parallel calls survives the next message arriving call by call (server edge shape)', () => {
+  const compactor = createCompactor();
+  const nodes = [node('p', 'prompt', 0), read('a', 1), read('b', 1), read('c', 1)];
+  const edges = [e('p', 'a', 'fork'), e('p', 'b', 'fork'), e('p', 'c', 'fork')];
+  expect([...compactor(graph(nodes, edges)).runs.keys()]).toEqual([runIdOf('a')]);
+  // The next message's first call d is joined from every member ...
+  nodes.push(node('d', 'tool', 2, { status: 'succeeded', toolName: 'Bash', title: 'Bash' }));
+  edges.push(e('a', 'd'), e('b', 'd'), e('c', 'd'));
+  expect(compactor(graph(nodes, edges)).runs.get(runIdOf('a'))).toEqual(['a', 'b', 'c']);
+  // ... its second call f hangs off the last member only.
+  nodes.push(node('f', 'tool', 2, { status: 'succeeded', toolName: 'Bash', title: 'Bash' }));
+  edges.push(e('c', 'f'));
+  const r = compactor(graph(nodes, edges));
+  expect(r.runs.get(runIdOf('a'))).toEqual(['a', 'b', 'c']);
+  expect(pairs(r.graph)).toEqual([`${runIdOf('a')}->d`, `${runIdOf('a')}->f`, `p->${runIdOf('a')}`].sort());
+});
+
+test('four parallel calls are one run of four, and a following batch of the same tool joins it (server edge shape)', () => {
+  const g = graph(
+    [node('p', 'prompt', 0), read('a', 1), read('b', 1), read('c', 1), read('c2', 1), read('d', 2), read('f', 2), node('x', 'text', 3)],
+    [e('p', 'a', 'fork'), e('p', 'b', 'fork'), e('p', 'c', 'fork'), e('p', 'c2', 'fork'),
+      e('a', 'd'), e('b', 'd'), e('c', 'd'), e('c2', 'd'), e('c2', 'f'), e('d', 'x'), e('f', 'x')],
+  );
+  const r = compactGraph(g);
+  expect(r.runs.get(runIdOf('a'))).toEqual(['a', 'b', 'c', 'c2', 'd', 'f']);
+  expect(pairs(r.graph)).toEqual([`${runIdOf('a')}->x`, `p->${runIdOf('a')}`].sort());
+});
+
+test('parallel calls are not merged while one of them is still in flight, so the run id does not change later', () => {
+  const build = (aStatus: GraphNode['status']) => graph(
+    [node('p', 'prompt', 0), read('a', 1, { status: aStatus }), read('b', 1), read('c', 1), read('d', 1)],
+    [e('p', 'a', 'fork'), e('p', 'b', 'fork'), e('p', 'c', 'fork'), e('p', 'd', 'fork')],
+  );
+  const compactor = createCompactor();
+  expect(compactor(build('running')).runs.size).toBe(0);
+  expect(compactor(build('awaiting_permission')).runs.size).toBe(0);
+  expect(compactor(build('succeeded')).runs.get(runIdOf('a'))).toEqual(['a', 'b', 'c', 'd']);
+});
+
+test('exclude keeps the named calls out of every run; the calls after them can still form one', () => {
+  const g = chain([node('p', 'prompt', 0), read('a', 1), read('b', 2), read('c', 3), read('d', 4), read('f', 5), read('h', 6)]);
+  const none = compactGraph(g, { exclude: new Set(['a', 'b', 'c', 'd']) });
+  expect(none.runs.size).toBe(0);
+  const later = compactGraph(g, { exclude: new Set(['a', 'b', 'c']) });
+  expect(later.runs.get(runIdOf('d'))).toEqual(['d', 'f', 'h']);
+  expect(later.graph.nodes.a).toBe(g.nodes.a);
+});

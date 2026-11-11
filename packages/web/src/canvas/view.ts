@@ -165,6 +165,15 @@ function groupByTurn(main: Entry[]): { groups: Map<string, Entry[]>; turnOf: Map
   return { groups, turnOf, turnStart };
 }
 
+/** The turn key (as buildView groups them) of main-thread node `nodeId`; null for an agent's node or an unknown id. */
+export function turnKeyOf(graph: Graph, nodeId: string): string | null {
+  if (graph.nodes[nodeId]?.agentId !== null) return null;
+  const main: Entry[] = [];
+  for (const node of Object.values(graph.nodes)) if (node.agentId === null) main.push({ node, ms: parseMs(node.timestamp) });
+  main.sort(byTimeThenId);
+  return groupByTurn(main).turnOf.get(nodeId) ?? null;
+}
+
 /** The main-thread nodes of turn `turnKey` (as buildView groups them), by time then id. */
 export function turnNodes(graph: Graph, turnKey: string): GraphNode[] {
   const main: Entry[] = [];
@@ -295,6 +304,8 @@ export function buildView(
   const nodes = new Map<string, ViewNode>();
   /** Outline: [parent view id, agent node id]. */
   const outlineEdges: [string, string][] = [];
+  /** Outline: the dispatch nodes already placed under a turn. */
+  const outlineSeen = new Set<string>();
   const turns: TurnView[] = [];
   const collapsedKeys = new Set<string>();
   /** Hidden node id -> the id of the `earlier` node that stands for it. */
@@ -384,8 +395,9 @@ export function buildView(
       nodeIds = [`turn:${key}`];
       nodes.set(nodeIds[0]!, { type: 'turn_summary', id: nodeIds[0]!, turnKey: key, groupKey: key, summary });
       if (outline) {
-        // The turn's agents hang off its summary node, and the agents those dispatched off them (breadth first).
-        const seen = new Set<string>();
+        // The turn's agents hang off its summary node, and the agents those dispatched off them (breadth first). An
+        // agent dispatched from two turns shows its own dispatches under the first only (`outlineSeen`).
+        const seen = outlineSeen;
         const queue = all.filter((x) => x.node.kind === 'subagent').map((x) => ({ entry: x, parentId: nodeIds[0]! }));
         for (let k = 0; k < queue.length; k++) {
           const { entry, parentId } = queue[k]!;
@@ -548,7 +560,8 @@ export function buildView(
   for (let i = 0; i < turns.length; i++) {
     if (turns[i]!.nodeIds.length === 0) continue;
     if (prev >= 0 && !connectedPairs.has(`${prev}:${i}`)) {
-      const from = turns[prev]!.nodeIds[turns[prev]!.nodeIds.length - 1]!;
+      // Outline: a turn's nodes are its card followed by its agents; the next turn follows the card.
+      const from = outline ? turns[prev]!.nodeIds[0]! : turns[prev]!.nodeIds[turns[prev]!.nodeIds.length - 1]!;
       const to = turns[i]!.nodeIds[0]!;
       const id = `${from}->${to}`;
       if (!edges.has(id)) edges.set(id, { id, from, to, kind: 'sequence' });

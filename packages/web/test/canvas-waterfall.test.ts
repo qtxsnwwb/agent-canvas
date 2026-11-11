@@ -1,7 +1,7 @@
 import { expect, test } from 'vitest';
 import type { Graph, GraphEdge, GraphNode, NodeKind } from '@claude-canvas/shared';
-import { buildView } from '../src/canvas/view';
-import { barOf, buildWaterfall, durationPlacement, scopeOf, stepChain, waterfallClock } from '../src/canvas/waterfall';
+import { buildView, turnKeyOf } from '../src/canvas/view';
+import { barOf, buildWaterfall, durationPlacement, scopeKey, scopeOf, stepChain, waterfallClock, withNow } from '../src/canvas/waterfall';
 
 const EPOCH = Date.parse('2026-01-01T00:00:00Z');
 const iso = (t: number) => new Date(EPOCH + t).toISOString();
@@ -195,4 +195,63 @@ test('stepChain.direct inside an agent: its task prompt counts, and the walk doe
   expect([...stepChain(g, 'r').direct]).toEqual(['ap']);
   expect([...stepChain(g, 'ap').direct]).toEqual(['x']);
   expect([...stepChain(g, 'out').ids].sort()).toEqual(['ap', 'd', 'out', 'p', 'r', 'x']);
+});
+
+test('outline view: turns with no edge between them are chained card to card, not from an agent', () => {
+  const g = graph(
+    [node('p1', 'prompt', 't1', null, 0), node('d1', 'subagent', 't1', null, 1, { childAgentId: 'ag1' }), node('p2', 'prompt', 't2', null, 10)],
+    [e('p1', 'd1')],
+  );
+  const v = buildView(g, new Map(), undefined, { mode: 'outline' });
+  expect(v.edges.map((x) => `${x.from}->${x.to}`).sort()).toEqual(['turn:t1->d1', 'turn:t1->turn:t2']);
+});
+
+test('outline view: an agent dispatched from two turns shows its own dispatches once', () => {
+  const g = graph([
+    node('p1', 'prompt', 't1', null, 0), node('d1', 'subagent', 't1', null, 1, { childAgentId: 'ag1' }),
+    node('p2', 'prompt', 't2', null, 10), node('d1b', 'subagent', 't2', null, 11, { childAgentId: 'ag1' }),
+    node('n', 'subagent', null, 'ag1', 2, { childAgentId: 'ag2' }),
+  ]);
+  const v = buildView(g, new Map(), undefined, { mode: 'outline' });
+  expect(v.turns.map((t) => t.nodeIds)).toEqual([['turn:t1', 'd1', 'n'], ['turn:t2', 'd1b']]);
+  expect(v.nodes.get('n')).toMatchObject({ turnKey: 't1' });
+  expect(v.edges.filter((x) => x.to === 'n').map((x) => x.from)).toEqual(['d1']);
+});
+
+test('scopeOf: a subagent whose agent is not known yet stands for its turn; scopeKey names a scope', () => {
+  const g = graph([node('p1', 'prompt', 't1', null, 0), node('d', 'subagent', 't1', null, 1)]);
+  const v = buildView(g, new Map(), undefined, { mode: 'outline' });
+  expect(scopeOf(v.nodes.get('d'))).toEqual({ type: 'turn', turnKey: 't1' });
+  expect(scopeKey({ type: 'turn', turnKey: 't1' })).toBe('turn:t1');
+  expect(scopeKey({ type: 'agent', agentId: 'ag' })).toBe('agent:ag');
+});
+
+test('turnKeyOf gives the turn of a main-thread node (also one without a turn id), null for an agent node', () => {
+  const g = twoTurnsWithAgents();
+  expect(turnKeyOf(g, 'a')).toBe('t1');
+  expect(turnKeyOf(g, 'late')).toBe('t2');
+  expect(turnKeyOf(g, 'i1')).toBeNull();
+  expect(turnKeyOf(g, 'nope')).toBeNull();
+});
+
+test('a step with an unreadable timestamp does not stretch the range', () => {
+  const g = graph([
+    node('p', 'prompt', 't1', null, 1000), node('bad', 'text', 't1', null, 0, { timestamp: '' }),
+    node('a', 'tool', 't1', null, 2000, { status: 'succeeded', endedAt: iso(3000) }),
+  ]);
+  const w = buildWaterfall(g, { type: 'turn', turnKey: 't1' }, opts);
+  expect([w.startMs, w.endMs]).toEqual([EPOCH + 1000, EPOCH + 3000]);
+  expect(w.rows.find((r) => r.id === 'bad')).toMatchObject({ startMs: EPOCH + 1000, endMs: EPOCH + 1000 });
+});
+
+test('withNow moves only the open rows and keeps the other row objects', () => {
+  const g = twoTurnsWithAgents();
+  const base = buildWaterfall(g, { type: 'turn', turnKey: 't2' }, { compact: true, nowMs: 0 });
+  const w = withNow(base, EPOCH + 50_000);
+  expect(w.rows[0]).toBe(base.rows[0]);
+  expect(w.rows[1]).toBe(base.rows[1]);
+  expect(w.rows[2]).toMatchObject({ id: 'b', open: true, endMs: EPOCH + 50_000 });
+  expect(w.endMs).toBe(EPOCH + 50_000);
+  const closed = buildWaterfall(g, { type: 'turn', turnKey: 't1' }, { compact: true, nowMs: 0 });
+  expect(withNow(closed, EPOCH + 50_000).endMs).toBe(closed.endMs);
 });

@@ -7,10 +7,10 @@ import { isRunId } from '../canvas/compact';
 import { Drawer } from '../canvas/Drawer';
 import { Timeline } from '../canvas/Timeline';
 import { useCanvas } from '../canvas/useCanvas';
-import type { ViewMode } from '../canvas/view';
+import { turnKeyOf, type ViewMode } from '../canvas/view';
 import { Waterfall } from '../canvas/WaterfallPanel';
 import { reasoningRow, type ReasoningRow } from '../canvas/reasoning';
-import { scopeOf, stepChain, type WaterfallScope } from '../canvas/waterfall';
+import { scopeKey, scopeOf, stepChain, type WaterfallScope } from '../canvas/waterfall';
 import { sessionStatusView } from '../labels';
 import { sessionLoadState } from '../sessionLoad';
 import { useNow } from '../useNow';
@@ -79,36 +79,81 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
   // Outline view: the canvas selection picks what the waterfall panel lists; a row of the panel opens the drawer.
   const outline = canvas.view.mode === 'outline';
   const [panelClosed, setPanelClosed] = useState(false);
-  const [detailId, setDetailId] = useState<string | null>(null);
-  useEffect(() => { setDetailId(null); }, [outline, selected]);
+  /** The step open in the drawer, and the scope (scopeKey) it belongs to; it is shown only while that scope is listed. */
+  const [detail, setDetail] = useState<{ id: string; scope: string } | null>(null);
   const graphNow = live.getGraph();
-  const selectedNode = outline
-    ? (detailId !== null ? graphNow.nodes[detailId] ?? null : null)
-    : selectedView?.type === 'node'
-      ? (replaying ? graphNow.nodes[selectedView.id] : undefined) ?? selectedView.node
-      : null;
-  const closeDrawer = useCallback(() => {
-    setDetailId(null);
-    setSelectedId((id) => (outlineRef.current ? id : null));
-  }, []);
-  const outlineRef = useRef(outline);
-  outlineRef.current = outline;
-  // With nothing selected the panel follows the latest turn (until it is closed).
+  // With nothing selected the panel follows the latest turn (until it is closed). In the outline view every view node
+  // is a turn card or a subagent, so a selection always has a scope.
   const explicitScope = outline ? scopeOf(selectedView) : null;
   const latestTurn = canvas.view.turns[canvas.view.turns.length - 1];
   const scope: WaterfallScope | null = !outline || panelClosed
     ? null
     : explicitScope ?? (selected === null && latestTurn !== undefined ? { type: 'turn', turnKey: latestTurn.key } : null);
-  const scopeNodeId = scope === null ? null : explicitScope !== null ? selected : `turn:${latestTurn!.key}`;
+  const currentScope = scope !== null ? scopeKey(scope) : null;
+  /** The canvas node the panel belongs to (highlighted): the selection, or the latest turn's card while following it. */
+  const scopeNodeId = scope === null ? null : selected ?? `turn:${latestTurn!.key}`;
+  const detailId = detail !== null && detail.scope === currentScope ? detail.id : null;
+  // A step of a scope that is no longer listed is dropped, so its drawer cannot reopen by itself later.
+  useEffect(() => {
+    if (detail !== null && detailId === null) setDetail(null);
+  }, [detail, detailId]);
+  const selectedNode = outline
+    ? (detailId !== null ? graphNow.nodes[detailId] ?? null : null)
+    : selectedView?.type === 'node'
+      ? (replaying ? graphNow.nodes[selectedView.id] : undefined) ?? selectedView.node
+      : null;
+  // The latest values for the stable callbacks below.
+  const now = useRef({ outline, selected, scopeNodeId, currentScope, view: canvas.view });
+  now.current = { outline, selected, scopeNodeId, currentScope, view: canvas.view };
+  const closeDrawer = useCallback(() => {
+    if (now.current.outline) setDetail(null);
+    else setSelectedId(null);
+  }, []);
   const scopeView = scopeNodeId !== null ? canvas.view.nodes.get(scopeNodeId) : undefined;
-  const scopeTitle = scopeView?.type === 'turn_summary'
-    ? scopeView.summary.promptSummary || '（无提示）'
-    : scopeView?.type === 'node' ? [scopeView.node.title, scopeView.node.summary].filter(Boolean).join(' · ') : '';
+  const scopeTitle = scope === null
+    ? ''
+    : scope.type === 'turn'
+      ? canvas.view.turns.find((t) => t.key === scope.turnKey)?.summary.promptSummary || '（无提示）'
+      : scopeView?.type === 'node' ? [scopeView.node.title, scopeView.node.summary].filter(Boolean).join(' · ') : '';
   const closePanel = useCallback(() => {
     setPanelClosed(true);
     setSelectedId(null);
+    setDetail(null);
   }, []);
   const openAgent = useCallback((dispatchNodeId: string) => setSelectedId(dispatchNodeId), []);
+  // Opening a step while the panel follows the latest turn pins the panel to that turn: a new turn must not take the
+  // list away from under the open drawer.
+  const openStep = useCallback((id: string) => {
+    const cur = now.current;
+    if (cur.currentScope === null) return;
+    if (cur.selected === null && cur.scopeNodeId !== null) setSelectedId(cur.scopeNodeId);
+    setDetail({ id, scope: cur.currentScope });
+  }, []);
+  // A row of the drawer's "推理链" may belong to another thread (an agent's chain continues into the main thread): the
+  // panel moves to the turn or agent that step belongs to.
+  const openChainStep = useCallback((id: string) => {
+    const cur = now.current;
+    const graph = live.getGraph();
+    const node = graph.nodes[id];
+    if (node === undefined || cur.currentScope === null) return;
+    let target: string | null = null;
+    let key: string | null = null;
+    if (node.agentId !== null) {
+      key = `agent:${node.agentId}`;
+      for (const vn of cur.view.nodes.values()) {
+        if (vn.type === 'node' && vn.node.childAgentId === node.agentId) { target = vn.id; break; }
+      }
+    } else {
+      const turnKey = turnKeyOf(graph, id);
+      if (turnKey !== null) target = key = `turn:${turnKey}`;
+    }
+    if (target !== null && key !== null && cur.view.nodes.has(target)) {
+      setSelectedId(target);
+      setDetail({ id, scope: key });
+    } else {
+      setDetail({ id, scope: cur.currentScope });
+    }
+  }, [live]);
   // Outline view: the steps that led to the open step, highlighted in the waterfall and listed in the drawer ("精简"
   // leaves out thinking steps whose content was not recorded).
   const steps = useMemo(() => (outline && detailId !== null ? stepChain(graphNow, detailId) : null), [outline, graphNow, detailId]);
@@ -188,7 +233,7 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
             view={view}
             replay={replaying}
             reasoning={stepReasoning}
-            onSelect={outline ? setDetailId : setSelectedId}
+            onSelect={outline ? openChainStep : setSelectedId}
             onExpandCut={expandChainCut}
             onClose={closeDrawer}
           />
@@ -197,14 +242,14 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
         {scope !== null && (
           <Waterfall
             graph={graphNow}
-            session={live.getSession()}
+            live={live}
             scope={scope}
             title={scopeTitle}
             compact={canvas.compact}
             selectedId={detailId}
             chainIds={steps !== null ? steps.ids : null}
             directIds={steps !== null ? steps.direct : null}
-            onSelectRow={setDetailId}
+            onSelectRow={openStep}
             onOpenAgent={openAgent}
             onClose={closePanel}
           />

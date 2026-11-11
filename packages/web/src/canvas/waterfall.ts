@@ -25,14 +25,22 @@ export interface Waterfall {
   endMs: number;
 }
 
-/** The scope a canvas selection stands for: a turn's summary node, or a subagent node whose agent is known. */
+/**
+ * The scope a canvas selection stands for: a turn's summary node is that turn; a subagent node is its agent, or — while
+ * the agent is not known yet (its metadata has not arrived) — the turn it was dispatched in.
+ */
 export function scopeOf(vn: ViewNode | undefined): WaterfallScope | null {
   if (vn === undefined) return null;
   if (vn.type === 'turn_summary') return { type: 'turn', turnKey: vn.turnKey };
-  if (vn.type === 'node' && vn.node.kind === 'subagent' && vn.node.childAgentId !== null) {
-    return { type: 'agent', agentId: vn.node.childAgentId };
+  if (vn.type === 'node' && vn.node.kind === 'subagent') {
+    return vn.node.childAgentId !== null ? { type: 'agent', agentId: vn.node.childAgentId } : { type: 'turn', turnKey: vn.turnKey };
   }
   return null;
+}
+
+/** `turn:<turnKey>` (also the id of the turn's summary node) or `agent:<agentId>`. */
+export function scopeKey(scope: WaterfallScope): string {
+  return scope.type === 'turn' ? `turn:${scope.turnKey}` : `agent:${scope.agentId}`;
 }
 
 function parseMs(ts: string | null): number | null {
@@ -49,16 +57,22 @@ function isActive(node: GraphNode): boolean {
  * The steps of `scope`, by start time then id. Tool and subagent steps run from their timestamp to `endedAt` (or to
  * timestamp + duration; to `nowMs` while still active). A thinking step's timestamp is when its message was recorded,
  * so it runs for its duration up to that time. Other steps are markers. `compact` leaves out thinking steps without
- * text and system steps other than compaction / interrupt (see isNoise).
+ * text and system steps other than compaction / interrupt (see isNoise). A step whose timestamp cannot be read is put
+ * at the earliest readable time of the scope (it must not stretch the range back to 1970).
  */
 export function buildWaterfall(graph: Graph, scope: WaterfallScope, options: { compact: boolean; nowMs: number }): Waterfall {
   const nodes = scope.type === 'turn'
     ? turnNodes(graph, scope.turnKey)
     : Object.values(graph.nodes).filter((n) => n.agentId === scope.agentId);
   const rows: WaterfallRow[] = [];
+  let earliest: number | null = null;
+  for (const node of nodes) {
+    const ms = parseMs(node.timestamp);
+    if (ms !== null && (earliest === null || ms < earliest)) earliest = ms;
+  }
   for (const node of nodes) {
     if (options.compact && isNoise(node)) continue;
-    const at = parseMs(node.timestamp) ?? 0;
+    const at = parseMs(node.timestamp) ?? earliest ?? 0;
     let startMs = at;
     let endMs = at;
     const open = isActive(node);
@@ -98,6 +112,20 @@ export function waterfallClock(session: Pick<Session, 'status' | 'lastActivityAt
 export function durationPlacement(left: number, width: number): 'after' | 'before' | 'inside' {
   if (left + width < 0.75) return 'after';
   return left > 0.25 ? 'before' : 'inside';
+}
+
+/**
+ * `w` (built with nowMs 0) with its open rows ending at `nowMs`. Rows that are not open keep their objects, so only the
+ * open rows look changed to a memoized list.
+ */
+export function withNow(w: Waterfall, nowMs: number): Waterfall {
+  let endMs = w.startMs + 1;
+  const rows = w.rows.map((r) => {
+    const row = r.open ? { ...r, endMs: Math.max(r.startMs, nowMs) } : r;
+    if (row.endMs > endMs) endMs = row.endMs;
+    return row;
+  });
+  return rows.length === 0 ? w : { rows, startMs: w.startMs, endMs };
 }
 
 /** Where a row's bar sits on the track, as fractions of the range (0..1). */

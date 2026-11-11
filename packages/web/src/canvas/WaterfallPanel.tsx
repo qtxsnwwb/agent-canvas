@@ -1,15 +1,18 @@
-import { memo, useEffect, useMemo, useRef, type MouseEvent } from 'react';
-import type { Graph, Session } from '@claude-canvas/shared';
+import { memo, useEffect, useMemo, useRef, useSyncExternalStore, type CSSProperties, type MouseEvent } from 'react';
+import type { Graph } from '@claude-canvas/shared';
+import type { LiveSession } from '../client';
 import { NODE_STATUS_LABEL } from '../labels';
 import { useNow } from '../useNow';
 import { formatDuration } from './format';
 import { KIND_LABEL, nodeColor } from './nodes';
-import { barOf, buildWaterfall, durationPlacement, waterfallClock, type WaterfallRow, type WaterfallScope } from './waterfall';
+import {
+  barOf, buildWaterfall, durationPlacement, scopeKey, waterfallClock, withNow, type WaterfallRow, type WaterfallScope,
+} from './waterfall';
 
 export interface WaterfallProps {
   graph: Graph;
-  /** Decides whether still-open steps keep growing (see waterfallClock). */
-  session: Pick<Session, 'status' | 'lastActivityAt'>;
+  /** The session is read from here as it changes (its status decides whether open steps keep growing, see waterfallClock). */
+  live: Pick<LiveSession, 'subscribe' | 'getSession'>;
   scope: WaterfallScope;
   /** The turn's prompt, or the agent's type and task. */
   title: string;
@@ -38,8 +41,17 @@ function formatClock(ms: number): string {
 }
 const pct = (f: number): string => `${(f * 100).toFixed(3)}%`;
 
-const Row = memo(function Row({ row, left, width, selected, ticking, chain, onSelectRow, onOpenAgent }: {
-  row: WaterfallRow; left: number; width: number; selected: boolean;
+/**
+ * One step. The bar is placed by CSS from the row's own `--s` (start offset in the range, ms) and `--d` (duration, ms)
+ * and the list's `--span`, so a growing range (a step still running) moves the bars without re-rendering the rows:
+ * only a row whose own data changed renders again.
+ */
+const Row = memo(function Row({ row, offset, place, selected, ticking, chain, onSelectRow, onOpenAgent }: {
+  row: WaterfallRow;
+  /** row.startMs minus the range start. */
+  offset: number;
+  place: 'after' | 'before' | 'inside';
+  selected: boolean;
   /** The session is progressing: an open bar is animated. */
   ticking: boolean;
   /** 'direct': what the selected row was decided on; 'on': led to it; 'off': did not (dimmed); null: nothing is selected. */
@@ -49,18 +61,19 @@ const Row = memo(function Row({ row, left, width, selected, ticking, chain, onSe
   const { node } = row;
   const named = node.kind === 'tool' || node.kind === 'subagent';
   const color = nodeColor(node);
-  const duration = row.endMs > row.startMs ? formatDuration(row.endMs - row.startMs) : '';
+  const length = row.endMs - row.startMs;
+  const duration = length > 0 ? formatDuration(length) : '';
   const openAgent = (e: MouseEvent): void => {
     e.stopPropagation(); // not a row click
     onOpenAgent(row.id);
   };
-  const place = durationPlacement(left, width);
+  const style = { ['--s' as string]: offset, ['--d' as string]: length } as CSSProperties;
   return (
     <div className={`cc-wf-row${selected ? ' cc-wf-selected' : ''}${chain === 'direct' ? ' cc-wf-direct' : chain === 'on' ? ' cc-wf-chain' : chain === 'off' ? ' cc-wf-dim' : ''}`}
-      onClick={() => onSelectRow(row.id)}>
+      style={style} onClick={() => onSelectRow(row.id)}>
       <div className="cc-wf-label">
         <span className="cc-wf-dot" style={{ background: color }} />
-        <button type="button" className="cc-wf-name" title={node.summary || undefined}>
+        <button type="button" className="cc-wf-name" title={node.summary || undefined} aria-current={selected ? 'true' : undefined}>
           <span className="cc-wf-kind">{named ? node.title : KIND_LABEL[node.kind] ?? node.kind}</span>
           <span className="cc-wf-summary">{node.summary}</span>
         </button>
@@ -72,15 +85,10 @@ const Row = memo(function Row({ row, left, width, selected, ticking, chain, onSe
         )}
       </div>
       <div className="cc-wf-track">
-        {width > 0
-          ? <span className={`cc-wf-bar${row.open && ticking ? ' cc-wf-open' : ''}`} style={{ left: pct(left), width: pct(width), background: color }} />
-          : <span className="cc-wf-mark" style={{ left: pct(left), background: color }} />}
-        {duration !== '' && (
-          <span className={`cc-wf-dur${place === 'inside' ? ' cc-wf-dur-inside' : ''}`}
-            style={place === 'after' ? { left: pct(left + width) } : place === 'before' ? { right: pct(1 - left) } : { left: pct(left) }}>
-            {duration}
-          </span>
-        )}
+        {length > 0
+          ? <span className={`cc-wf-bar${row.open && ticking ? ' cc-wf-open' : ''}`} style={{ background: color }} />
+          : <span className="cc-wf-mark" style={{ background: color }} />}
+        {duration !== '' && <span className={`cc-wf-dur cc-wf-dur-${place}`}>{duration}</span>}
       </div>
     </div>
   );
@@ -89,21 +97,23 @@ const Row = memo(function Row({ row, left, width, selected, ticking, chain, onSe
 /**
  * The steps of one turn or one agent as a waterfall: one row per step in time order, its bar placed on a shared time
  * axis (parallel steps overlap in time on separate rows). A row click opens the step's detail. While a step is running
- * the panel re-renders every second and, if the reader is at the bottom of the list, keeps up with new rows.
+ * (and the session is progressing) the panel re-renders every second and, if the reader is at the bottom of the list,
+ * keeps up with new rows.
  */
 export const Waterfall = memo(function Waterfall({
-  graph, session, scope, title, compact, selectedId, chainIds, directIds, onSelectRow, onOpenAgent, onClose,
+  graph, live: liveSession, scope, title, compact, selectedId, chainIds, directIds, onSelectRow, onOpenAgent, onClose,
 }: WaterfallProps) {
   const now = useNow(1000);
-  const scopeKey = scope.type === 'turn' ? `turn:${scope.turnKey}` : `agent:${scope.agentId}`;
+  // Subscribed here: a status change alone (no node change) publishes no canvas snapshot, so the parent does not re-render.
+  const session = useSyncExternalStore(liveSession.subscribe, liveSession.getSession);
+  const key = scopeKey(scope);
   // `scope` is rebuilt by the caller on every render; the key says whether it changed.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  const base = useMemo(() => buildWaterfall(graph, scope, { compact, nowMs: 0 }), [graph, scopeKey, compact]);
+  const base = useMemo(() => buildWaterfall(graph, scope, { compact, nowMs: 0 }), [graph, key, compact]);
   const open = base.rows.some((r) => r.open);
   const clock = waterfallClock(session, now);
   const live = open && clock.ticking;
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const wf = useMemo(() => (open ? buildWaterfall(graph, scope, { compact, nowMs: clock.nowMs }) : base), [base, open, clock.nowMs]);
+  const wf = useMemo(() => (open ? withNow(base, clock.nowMs) : base), [base, open, clock.nowMs]);
 
   const body = useRef<HTMLDivElement>(null);
   const stick = useRef(false);
@@ -114,7 +124,7 @@ export const Waterfall = memo(function Waterfall({
     stick.current = live;
     el.scrollTop = live ? el.scrollHeight : 0;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scopeKey]);
+  }, [key]);
   const count = wf.rows.length;
   useEffect(() => {
     const el = body.current;
@@ -146,12 +156,13 @@ export const Waterfall = memo(function Waterfall({
           ))}
         </div>
       </div>
-      <div className="cc-wf-body" ref={body} onScroll={onScroll}>
+      <div className="cc-wf-body" ref={body} onScroll={onScroll} style={{ ['--span' as string]: span } as CSSProperties}>
         {count === 0 && <p className="cc-wf-empty">这一段还没有步骤</p>}
         {wf.rows.map((row) => {
           const { left, width } = barOf(wf, row);
           return (
-            <Row key={row.id} row={row} left={left} width={width} selected={row.id === selectedId} ticking={clock.ticking}
+            <Row key={row.id} row={row} offset={row.startMs - wf.startMs} place={durationPlacement(left, width)}
+              selected={row.id === selectedId} ticking={clock.ticking}
               chain={chainIds === null ? null : directIds?.has(row.id) ? 'direct' : chainIds.has(row.id) ? 'on' : 'off'}
               onSelectRow={onSelectRow} onOpenAgent={onOpenAgent} />
           );

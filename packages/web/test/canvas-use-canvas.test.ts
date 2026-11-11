@@ -1332,3 +1332,58 @@ test('自动折叠关闭期间不形成新的合并节点；重新开启后合�
   expect(shownIds(model)).toEqual(['p', 'run:a']);
   model.dispose();
 });
+
+test('展开过的调用不会因为选中其中第一个而被重新合并', async () => {
+  const nodes = [node('p', 't1', 0), readCall('a', 2), readCall('b', 3), readCall('c', 4), readCall('d', 5), node('x', 't1', 6)];
+  const live = fakeLive(graph(nodes));
+  const model = createCanvasModel(live, fakeLayout().client);
+  expect(shownIds(model)).toEqual(['p', 'run:a', 'x']);
+  model.expandRun('run:a');
+  model.setKeepVisible('a');
+  live.set(graph([...nodes, node('y', 't1', 7)]));
+  await vi.advanceTimersByTimeAsync(60);
+  expect(shownIds(model)).toEqual(['a', 'b', 'c', 'd', 'p', 'x', 'y']);
+  model.dispose();
+});
+
+test('在没有精简的视图里停止跟随，之后切到精简视图仍然会合并', () => {
+  const nodes = [node('p', 't1', 0), readCall('a', 2), readCall('b', 3), readCall('c', 4), node('x', 't1', 5)];
+  const outline = createCanvasModel(fakeLive(graph(nodes)), fakeLayout().client, { mode: 'outline' });
+  outline.setAutoFold(false);
+  outline.setMode('live');
+  expect(shownIds(outline)).toEqual(['p', 'run:a', 'x']);
+  outline.dispose();
+  const full = createCanvasModel(fakeLive(graph(nodes)), fakeLayout().client, { compact: false });
+  full.setAutoFold(false);
+  full.setCompact(true);
+  expect(shownIds(full)).toEqual(['p', 'run:a', 'x']);
+  full.dispose();
+});
+
+test('停止跟随期间切换精简 / 完整：折叠按新视图重新计算', () => {
+  const nodes: GraphNode[] = [node('p', 't1', 0)];
+  for (let i = 0; i < 150; i++) {
+    nodes.push({ ...node(`th${i}`, 't1', 1 + i * 2), kind: 'thinking', durationMs: 5 }, node(`x${i}`, 't1', 2 + i * 2));
+  }
+  const model = createCanvasModel(fakeLive(graph(nodes)), fakeLayout().client);
+  expect(model.getSnapshot().view.nodes.size).toBe(41); // 151 compact nodes (no prompt): earlier + last 40
+  model.setAutoFold(false);
+  model.setCompact(false);
+  expect(model.getSnapshot().view.nodes.size).toBe(41); // 301 nodes, folded by the same rule
+  model.setCompact(true);
+  expect(model.getSnapshot().view.nodes.size).toBe(41);
+  model.dispose();
+});
+
+test('进出概览不会丢掉逐步视图里的“展开全部”', () => {
+  const nodes: GraphNode[] = [];
+  for (let i = 0; i <= 100; i++) nodes.push(node(`n${i}`, 't1', i));
+  const model = createCanvasModel(fakeLive(graph(nodes)), fakeLayout().client);
+  model.showFullTurn('t1');
+  expect(model.getSnapshot().view.nodes.size).toBe(101);
+  model.setMode('outline');
+  expect([...model.getSnapshot().view.nodes.keys()]).toEqual(['turn:t1']);
+  model.setMode('live');
+  expect(model.getSnapshot().view.nodes.size).toBe(101);
+  model.dispose();
+});

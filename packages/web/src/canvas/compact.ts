@@ -15,8 +15,10 @@ export function isRunId(id: string): boolean {
 export interface CompactOptions {
   /** A node (the selection) that is neither removed nor merged into a run. */
   keep?: string | null;
-  /** Return false to leave the run with this id unmerged (a run the user expanded, a run that would form under a reader). */
+  /** Return false to leave the run with this id unmerged (a run that would form under a reader). */
   allowRun?: (runId: string) => boolean;
+  /** Node ids that are never merged into a run (the calls of a run the user expanded). */
+  exclude?: ReadonlySet<string>;
 }
 export interface CompactResult {
   /** `graph` itself when nothing was removed or merged. */
@@ -81,8 +83,9 @@ function runNode(members: GraphNode[]): GraphNode {
  *    happening now); their duration is reported for the node(s) right after them (`thinkingMs`);
  *  - system nodes are removed, except context compaction and interrupts;
  *  - RUN_MIN or more successful, confirmed calls of one tool in a row — one after another, or issued in parallel from
- *    the same parent into the same child — in one turn and one thread become a single run node (kind 'tool', id
- *    runIdOf(first member), title `Read ×5`).
+ *    the same parent — in one turn and one thread become a single run node (kind 'tool', id runIdOf(first member),
+ *    title `Read ×5`). Parallel calls are not merged while one of them is still running or awaiting permission, so a
+ *    run's id (its first member) does not change when a slow first call finishes last.
  * Edges through removed nodes are contracted (they take the kind of the edge into the removed node). Untouched nodes
  * and edges keep their objects. The compactor keeps a run's node object while its members are the same objects.
  */
@@ -126,17 +129,23 @@ export function createCompactor(): Compactor {
     }
 
     // 2. Contract the edges through removed nodes, earliest first, carrying the thinking time forward.
-    const carry = new Map<string, number>();
+    /** Node -> removed node right in front of it -> the thinking time carried through that node. */
+    const carry = new Map<string, Map<string, number>>();
     if (removed.size > 0) {
       for (const n of all) {
         if (!removed.has(n.id)) continue;
-        const carried = (carry.get(n.id) ?? 0) + (n.kind === 'thinking' ? n.durationMs ?? 0 : 0);
+        let carried = n.kind === 'thinking' ? n.durationMs ?? 0 : 0;
+        for (const ms of carry.get(n.id)?.values() ?? []) carried += ms;
         const out = succs.get(n.id);
         const inc = preds.get(n.id);
         if (out) {
           for (const s of out.keys()) {
             preds.get(s)?.delete(n.id);
-            if (carried > 0) carry.set(s, (carry.get(s) ?? 0) + carried);
+            if (carried > 0) {
+              let from = carry.get(s);
+              if (!from) carry.set(s, (from = new Map()));
+              from.set(n.id, carried);
+            }
           }
         }
         if (inc) {
@@ -156,10 +165,14 @@ export function createCompactor(): Compactor {
 
     // 3. Runs: union-find over mergeable tool calls.
     const kept = removed.size > 0 ? all.filter((n) => !removed.has(n.id)) : all;
+    const exclude = options.exclude;
     const mergeable = (n: GraphNode | undefined): n is GraphNode =>
-      n !== undefined && n.kind === 'tool' && n.status === 'succeeded' && n.confirmed && n.toolName !== null && n.id !== keep;
+      n !== undefined && n.kind === 'tool' && n.status === 'succeeded' && n.confirmed && n.toolName !== null && n.id !== keep
+      && !(exclude !== undefined && exclude.has(n.id));
     const parent = new Map<string, string>();
     const membersOf = new Map<string, string[]>();
+    /** Classes that can never merge forward: they lead to something that is not a mergeable call, to another lane, or nowhere. */
+    const dead = new Set<string>();
     const find = (id: string): string => {
       let root = id;
       while (parent.get(root) !== root) root = parent.get(root)!;
@@ -179,73 +192,110 @@ export function createCompactor(): Compactor {
       const list = membersOf.get(ra)!;
       for (const m of membersOf.get(rb)!) list.push(m);
       membersOf.delete(rb);
+      if (dead.has(rb)) dead.add(ra);
       return true;
     };
     const sameLane = (a: GraphNode, b: GraphNode): boolean =>
       a.toolName === b.toolName && a.agentId === b.agentId && a.turnId === b.turnId;
     const candidates = kept.filter(mergeable);
     if (candidates.length >= RUN_MIN) {
-      const siblings = new Map<string, string>();
       for (const n of candidates) {
         parent.set(n.id, n.id);
         membersOf.set(n.id, [n.id]);
       }
-      // Parallel calls: same tool, same parents, same children.
-      for (const n of candidates) {
+      /**
+       * Parallel calls share their parents. Parents are compared as classes: after a batch has become one class, the
+       * calls of the next batch hang off it — the first off every member, the others only off its last member (the
+       * shape the server gives consecutive batches) — and are siblings all the same. Null: no parent outside the
+       * node's own class, or an only child.
+       */
+      const siblingKey = (n: GraphNode, own: string | null): string | null => {
         const inc = preds.get(n.id);
-        if (!inc || inc.size === 0) continue;
+        if (!inc || inc.size === 0) return null;
         if (inc.size === 1) {
-          // An only child has no siblings.
           const [only] = inc;
-          if (succs.get(only!)!.size === 1) continue;
+          if (succs.get(only!)!.size === 1) return null; // an only child has no siblings
         }
-        const out = succs.get(n.id);
-        const key = JSON.stringify([n.toolName, n.agentId, n.turnId, [...inc].sort(), out ? [...out.keys()].sort() : []]);
-        const other = siblings.get(key);
-        if (other === undefined) siblings.set(key, n.id);
-        else union(other, n.id);
-      }
-      // Calls in a row: everything leaving class C enters class D, and everything entering D comes from C.
-      // Classes that can never merge forward (they lead to something that is not a mergeable call, to another lane, or
-      // nowhere) are dropped from the later passes.
-      for (let active = [...membersOf.keys()]; active.length > 0;) {
-        const next = new Set<string>();
+        const roots = new Set<string>();
+        for (const from of inc) {
+          const root = parent.has(from) ? find(from) : from;
+          if (root !== own) roots.add(root);
+        }
+        if (roots.size === 0) return null;
+        return JSON.stringify([n.toolName, n.agentId, n.turnId, [...roots].sort()]);
+      };
+      /** Calls still in flight: their siblings wait for them (see the function comment). */
+      const inFlight = kept.filter((n) => n.kind === 'tool' && n.toolName !== null
+        && (n.status === 'running' || n.status === 'awaiting_permission'));
+      const mergeSiblings = (): boolean => {
         let changed = false;
-        for (const root of active) {
-          const members = membersOf.get(root);
-          if (!members) continue; // merged away during this pass
-          let target: string | undefined;
-          let dead = false;
-          let split = false;
-          for (const m of members) {
-            for (const succ of succs.get(m)?.keys() ?? []) {
-              if (!parent.has(succ)) { dead = true; break; }
-              const r = find(succ);
-              if (r === root) continue;
-              if (target === undefined) target = r;
-              else if (target !== r) split = true;
-            }
-            if (dead) break;
-          }
-          if (dead || target === undefined || !sameLane(graph.nodes[root]!, graph.nodes[target]!)) continue;
-          let closed = !split;
-          if (closed) {
-            for (const m of membersOf.get(target)!) {
-              for (const pred of preds.get(m) ?? []) {
-                const r = parent.has(pred) ? find(pred) : null;
-                if (r !== root && r !== target) { closed = false; break; }
-              }
-              if (!closed) break;
-            }
-          }
-          if (closed && union(root, target)) {
-            changed = true;
-            next.add(find(root));
-          } else {
-            next.add(root);
-          }
+        const blocked = new Set<string>();
+        for (const n of inFlight) {
+          const key = siblingKey(n, null);
+          if (key !== null) blocked.add(key);
         }
-        active = changed ? [...next] : [];
+        const firstOf = new Map<string, string>();
+        for (const n of candidates) {
+          const key = siblingKey(n, find(n.id));
+          if (key === null || blocked.has(key)) continue;
+          const other = firstOf.get(key);
+          if (other === undefined) firstOf.set(key, n.id);
+          else if (union(other, n.id)) changed = true;
+        }
+        return changed;
+      };
+      /** Calls in a row: everything leaving class C enters class D, and everything entering D comes from C. */
+      const mergeChains = (): boolean => {
+        let any = false;
+        for (let active = [...membersOf.keys()].filter((root) => !dead.has(root)); active.length > 0;) {
+          const next = new Set<string>();
+          let changed = false;
+          for (const root of active) {
+            const members = membersOf.get(root);
+            if (!members || dead.has(root)) continue; // merged away, or merged with a dead class, during this pass
+            let target: string | undefined;
+            let stop = false;
+            let split = false;
+            for (const m of members) {
+              for (const succ of succs.get(m)?.keys() ?? []) {
+                if (!parent.has(succ)) { stop = true; break; }
+                const r = find(succ);
+                if (r === root) continue;
+                if (target === undefined) target = r;
+                else if (target !== r) split = true;
+              }
+              if (stop) break;
+            }
+            if (stop || target === undefined || !sameLane(graph.nodes[root]!, graph.nodes[target]!)) {
+              dead.add(root);
+              continue;
+            }
+            let closed = !split;
+            if (closed) {
+              for (const m of membersOf.get(target)!) {
+                for (const pred of preds.get(m) ?? []) {
+                  const r = parent.has(pred) ? find(pred) : null;
+                  if (r !== root && r !== target) { closed = false; break; }
+                }
+                if (!closed) break;
+              }
+            }
+            if (closed && union(root, target)) {
+              changed = true;
+              any = true;
+              next.add(find(root));
+            } else {
+              next.add(root);
+            }
+          }
+          active = changed ? [...next] : [];
+        }
+        return any;
+      };
+      // A chain merge can make two calls siblings (their parents became one class), and the other way round.
+      for (let changed = true; changed;) {
+        changed = mergeSiblings();
+        if (mergeChains()) changed = true;
       }
     }
     const runs = new Map<string, string[]>();
@@ -268,10 +318,17 @@ export function createCompactor(): Compactor {
     }
     cache = nextCache;
 
+    // A removed node in front of several members of one run (parallel calls behind one thought) counts once.
     const thinkingMs = new Map<string, number>();
-    for (const [id, ms] of carry) {
+    const counted = new Set<string>();
+    for (const [id, sources] of carry) {
       const to = runOf.get(id) ?? id;
-      thinkingMs.set(to, (thinkingMs.get(to) ?? 0) + ms);
+      for (const [source, ms] of sources) {
+        const key = `${to}\n${source}`;
+        if (counted.has(key)) continue;
+        counted.add(key);
+        thinkingMs.set(to, (thinkingMs.get(to) ?? 0) + ms);
+      }
     }
     if (removed.size === 0 && runs.size === 0) return { graph, runs, thinkingMs };
 
