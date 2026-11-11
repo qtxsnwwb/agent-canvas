@@ -96,21 +96,36 @@ export function buildWaterfall(graph: Graph, scope: WaterfallScope, options: { c
   return { rows, startMs, endMs: Math.max(endMs, startMs + 1) };
 }
 
-/** A session that is not running still counts as progressing for this long after its last activity (see waterfallClock). */
+/** Background work still counts as progressing for this long after the session's last activity (see waterfallClock). */
 export const QUIET_AFTER_MS = 5 * 60_000;
 
 /**
- * The "now" that still-open steps end at, and whether the session is progressing (`ticking`). It is while the session
- * is running or awaiting a permission, and also — unless it has ended — for QUIET_AFTER_MS after its last activity:
- * background agents go on working (and writing records) while the main thread is idle, and their records do not
- * change the session's status. Otherwise nothing is progressing, and open steps end at the session's last activity.
+ * Whether work is progressing, and the "now" still-open steps end at, for the main thread and for background work.
+ *  - Main thread (`ticking`, `nowMs`): while the session is running or awaiting a permission. Otherwise (idle, ended,
+ *    waiting for input, or running but silent for too long) a main-thread step still open was cut off: it ends at the
+ *    session's last activity.
+ *  - Background work — a subagent's steps and its dispatch node (`backgroundTicking`, `backgroundNowMs`): also, unless
+ *    the session has ended, for QUIET_AFTER_MS after its last activity. Background agents go on working while the main
+ *    thread is idle, and their records move the last activity but not the session's status.
  */
-export function waterfallClock(session: Pick<Session, 'status' | 'lastActivityAt'>, nowMs: number): { nowMs: number; ticking: boolean } {
+export interface WaterfallClock { nowMs: number; ticking: boolean; backgroundNowMs: number; backgroundTicking: boolean }
+export function waterfallClock(session: Pick<Session, 'status' | 'lastActivityAt'>, nowMs: number): WaterfallClock {
   const status = effectiveStatus(session, nowMs);
-  if (status === 'running' || status === 'awaiting_permission') return { nowMs, ticking: true };
-  const last = Date.parse(session.lastActivityAt);
-  if (status !== 'ended' && !Number.isNaN(last) && nowMs - last < QUIET_AFTER_MS) return { nowMs, ticking: true };
-  return { nowMs: Number.isNaN(last) ? nowMs : last, ticking: false };
+  const parsed = Date.parse(session.lastActivityAt);
+  const last = Number.isNaN(parsed) ? nowMs : parsed;
+  const ticking = status === 'running' || status === 'awaiting_permission';
+  const backgroundTicking = ticking || (status !== 'ended' && !Number.isNaN(parsed) && nowMs - parsed < QUIET_AFTER_MS);
+  return { nowMs: ticking ? nowMs : last, ticking, backgroundNowMs: backgroundTicking ? nowMs : last, backgroundTicking };
+}
+
+/** A subagent's step, or the node that dispatched a subagent: background work in the sense of waterfallClock. */
+export function isBackgroundStep(node: Pick<GraphNode, 'agentId' | 'kind'>): boolean {
+  return node.agentId !== null || node.kind === 'subagent';
+}
+
+/** Whether a step of this kind is being worked on right now, by the clock. */
+export function stepTicking(clock: Pick<WaterfallClock, 'ticking' | 'backgroundTicking'>, node: Pick<GraphNode, 'agentId' | 'kind'>): boolean {
+  return isBackgroundStep(node) ? clock.backgroundTicking : clock.ticking;
 }
 
 /** Where the duration label of a bar goes: after it, before it, or inside it when it leaves no room on either side. */
@@ -120,13 +135,13 @@ export function durationPlacement(left: number, width: number): 'after' | 'befor
 }
 
 /**
- * `w` (built with nowMs 0) with its open rows ending at `nowMs`. Rows that are not open keep their objects, so only the
- * open rows look changed to a memoized list.
+ * `w` (built with nowMs 0) with its open rows ending at the clock's "now" for their kind of step. Rows that are not
+ * open keep their objects, so only the open rows look changed to a memoized list.
  */
-export function withNow(w: Waterfall, nowMs: number): Waterfall {
+export function withNow(w: Waterfall, clock: Pick<WaterfallClock, 'nowMs' | 'backgroundNowMs'>): Waterfall {
   let endMs = w.startMs + 1;
   const rows = w.rows.map((r) => {
-    const row = r.open ? { ...r, endMs: Math.max(r.startMs, nowMs) } : r;
+    const row = r.open ? { ...r, endMs: Math.max(r.startMs, isBackgroundStep(r.node) ? clock.backgroundNowMs : clock.nowMs) } : r;
     if (row.endMs > endMs) endMs = row.endMs;
     return row;
   });

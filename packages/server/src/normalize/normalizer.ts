@@ -99,8 +99,11 @@ interface SessionState {
   agentOfLaunch: Map<string, string>;
   /** Background dispatch node id -> when the same agent's next background launch started (it had ended by then). */
   nextLaunchAt: Map<string, string>;
-  /** When the session became `ended` (null while it is not): a background agent still open then was cut off with it. */
-  sessionEndedAt: string | null;
+  /**
+   * Every time the session became `ended`. A background agent still open at such a moment was cut off with it, and
+   * does not come back when the session is resumed (the process it ran in is gone).
+   */
+  sessionEnds: string[];
   /** agentId -> every end signal seen for the agent's thread. */
   agentSignals: Map<string, AgentSignal[]>;
   /**
@@ -378,9 +381,7 @@ export class Normalizer {
     const at = event.receivedAt;
     const state = this.stateFor(hook.sessionId, { type: 'hook', uuid: '', timestamp: at, cwd: hook.cwd }, projectId, changes);
     // An ended session only comes back on SessionStart / UserPromptSubmit.
-    // A hook older than the last status observation must not overwrite it (same rule as for transcript records).
-    const implied = hook.status !== null && at < state.statusAt ? null : hook.status;
-    const status = state.session.status === 'ended' && !hook.resumes ? null : implied;
+    const status = state.session.status === 'ended' && !hook.resumes ? null : hook.status;
     if (status !== null && at > state.statusAt) state.statusAt = at;
     this.updateSession(state, { type: 'hook', uuid: '', timestamp: at }, projectId, status, false, changes);
     // A background agent still open when the session ends was cut off with it.
@@ -540,7 +541,8 @@ export class Normalizer {
    * Writes onto the dispatch node what its signals and the session's state add up to; a function of the current state
    * only, so it does not matter in which order things were read. For a background launch, in this order: its own end
    * signals (mergeEnd); else, if the same agent was launched again later, succeeded when that launch started; else, if
-   * the session has ended, failed at that time; else running. A foreground dispatch only takes hook signals and keeps
+   * the session ended after it was launched, failed at the first such end (a later resume does not bring it back);
+   * else running. A foreground dispatch only takes hook signals and keeps
    * its first terminal event (its tool_result, a hook), as before; a denied node is never touched.
    */
   private applyEnd(state: SessionState, id: string, changes: Change[]): void {
@@ -554,7 +556,11 @@ export class Normalizer {
     if (end === null && background) {
       const next = state.nextLaunchAt.get(id);
       if (next !== undefined) end = { at: next, status: 'succeeded' };
-      else if (state.sessionEndedAt !== null) end = { at: state.sessionEndedAt, status: 'failed' };
+      else {
+        let cut: string | null = null;
+        for (const at of state.sessionEnds) if (at >= node.timestamp && (cut === null || at < cut)) cut = at;
+        if (cut !== null) end = { at: cut, status: 'failed' };
+      }
     }
     const patch: Partial<GraphNode> = {};
     if (end === null) {
@@ -589,7 +595,10 @@ export class Normalizer {
    * For a background agent this is the one end signal that names the dispatch directly and says how it ended.
    */
   private applyQueueOperation(sessionId: string, record: Record<string, unknown>, changes: Change[]): void {
-    const content = str(record.content);
+    // Usually a string; a list of text blocks is read the same way.
+    const content = Array.isArray(record.content)
+      ? (record.content as unknown[]).flatMap((b) => (isObject(b) && typeof b.text === 'string' ? [b.text] : [])).join('')
+      : str(record.content);
     // The notification is the whole queued item (a queued user prompt that merely quotes one is not a notification).
     if (record.operation !== 'enqueue' || content === null || !content.trimStart().startsWith('<task-notification>')) return;
     const toolUseId = /<tool-use-id>([^<]+)<\/tool-use-id>/.exec(content)?.[1]?.trim();
@@ -833,7 +842,7 @@ export class Normalizer {
         launches: new Map(),
         agentOfLaunch: new Map(),
         nextLaunchAt: new Map(),
-        sessionEndedAt: null,
+        sessionEnds: [],
         agentSignals: new Map(),
         dispatchSignals: new Map(),
         agentEnded: new Set(),
@@ -876,10 +885,10 @@ export class Normalizer {
     };
     this.commitSession(state, next, changes);
     if (status !== null) this.commitSession(state, { ...state.session, status }, changes);
-    // The session ending (or coming back) changes what an open background dispatch amounts to (see applyEnd).
-    const ended = state.session.status === 'ended';
-    if (ended !== (s.status === 'ended')) {
-      state.sessionEndedAt = ended ? ts ?? state.session.lastActivityAt : null;
+    // The session ending changes what an open background dispatch amounts to (see applyEnd).
+    if (state.session.status === 'ended' && s.status !== 'ended') {
+      const at = ts ?? state.session.lastActivityAt;
+      if (!state.sessionEnds.includes(at)) state.sessionEnds.push(at);
       for (const id of state.asyncIds) this.applyEnd(state, id, changes);
     }
   }

@@ -5,6 +5,7 @@ import { NODE_STATUS_LABEL } from '../labels';
 import { formatDuration, nodeAriaLabel } from './format';
 import { THINKING_NOT_RECORDED } from './reasoning';
 import { replayOverlay } from './replay';
+import { isBackgroundStep } from './waterfall';
 import type { TurnSummary } from './view';
 
 export const KIND_LABEL: Record<NodeKind, string> = {
@@ -44,14 +45,15 @@ export function summaryColor(s: TurnSummary): string {
   return SUMMARY_COLOR;
 }
 /** Accessible name for a graph node: kind, title and status. */
-export function graphNodeAriaLabel(node: GraphNode, expanded = false): string {
-  return nodeAriaLabel([
-    KIND_LABEL[node.kind] ?? node.kind, node.title, node.status !== null ? NODE_STATUS_LABEL[node.status] ?? node.status : null,
-    expanded ? '已展开' : null,
-  ]);
+/** `stalled`: the node is active but not being worked on (see SessionProgressing): named "未结束" instead of its status. */
+export function graphNodeAriaLabel(node: GraphNode, expanded = false, stalled = false): string {
+  const status = node.status === null ? null : stalled && isActive(node.status) ? UNFINISHED_LABEL : NODE_STATUS_LABEL[node.status] ?? node.status;
+  return nodeAriaLabel([KIND_LABEL[node.kind] ?? node.kind, node.title, status, expanded ? '已展开' : null]);
 }
-export function summaryAriaLabel(s: TurnSummary, outline = false): string {
-  return nodeAriaLabel([outline ? '轮次' : '已折叠的轮次', s.promptSummary, `${s.nodeCount} 个节点`, s.running ? '运行中' : null]);
+export function summaryAriaLabel(s: TurnSummary, outline = false, stalled = false): string {
+  return nodeAriaLabel([
+    outline ? '轮次' : '已折叠的轮次', s.promptSummary, `${s.nodeCount} 个节点`, s.running ? (stalled ? UNFINISHED_LABEL : '运行中') : null,
+  ]);
 }
 
 export function isActive(status: NodeStatus | null): boolean {
@@ -107,11 +109,13 @@ export interface CanvasActionsValue {
   toggleAgent(agentId: string): void;
 }
 /**
- * Whether the session is progressing (running, or waiting for a permission). When it is not — idle, ended, or silent
- * for too long — a step still marked running is not being worked on (the process went away, an agent was cut off):
- * it is shown as "未结束" without the pulse, instead of claiming to be in progress.
+ * Whether work is progressing, for the main thread and for background work (see waterfallClock). When it is not, a step
+ * still marked running is not being worked on (the process went away, an agent was cut off): it is shown as "未结束"
+ * without the pulse, instead of claiming to be in progress.
  */
-export const SessionProgressing = createContext(true);
+export interface Progressing { main: boolean; background: boolean }
+export const ALL_PROGRESSING: Progressing = { main: true, background: true };
+export const SessionProgressing = createContext<Progressing>(ALL_PROGRESSING);
 /** The label of an active status while the session is not progressing. */
 export const UNFINISHED_LABEL = '未结束';
 
@@ -144,7 +148,7 @@ function pulseClass(status: NodeStatus | null): string {
 function GraphNodeView({ data, width, height, selected }: NodeProps<GraphFlowNode>) {
   const { node } = data;
   const progressing = useContext(SessionProgressing);
-  const stalled = !progressing && isActive(node.status);
+  const stalled = isActive(node.status) && !(isBackgroundStep(node) ? progressing.background : progressing.main);
   const duration = node.durationMs !== null ? formatDuration(node.durationMs) : '';
   const unconfirmed = node.confirmed === false;
   const className = `cc-node cc-kind-${node.kind}${stalled ? ' cc-stalled' : pulseClass(node.status)}${selected ? ' cc-selected' : ''}${unconfirmed ? ' cc-unconfirmed' : ''}`;
@@ -269,7 +273,9 @@ function SubagentView({ data, className, style, rows, overlayRow }: {
 
 function TurnSummaryView({ data, width, height, selected }: NodeProps<SummaryFlowNode>) {
   const { toggleTurn } = useContext(CanvasActions);
-  const progressing = useContext(SessionProgressing);
+  const ctx = useContext(SessionProgressing);
+  // A turn whose open step is a subagent dispatch is background work; otherwise it is the main thread's.
+  const progressing = data.summary.backgroundRunning ? ctx.background : ctx.main;
   const onExpand = (e: MouseEvent): void => {
     e.stopPropagation(); // the node click would expand it as well
     toggleTurn(data.summary.turnKey, e.detail === 0); // detail 0: a click synthesised from Enter / Space

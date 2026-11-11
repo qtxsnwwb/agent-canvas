@@ -10,7 +10,8 @@ import { useCanvas } from '../canvas/useCanvas';
 import { turnKeyOf, type ViewMode } from '../canvas/view';
 import { Waterfall } from '../canvas/WaterfallPanel';
 import { reasoningRow, type ReasoningRow } from '../canvas/reasoning';
-import { scopeKey, scopeOf, stepChain, waterfallClock, type WaterfallScope } from '../canvas/waterfall';
+import { ALL_PROGRESSING, type Progressing } from '../canvas/nodes';
+import { scopeKey, scopeOf, stepChain, stepTicking, waterfallClock, type WaterfallScope } from '../canvas/waterfall';
 import { sessionStatusView } from '../labels';
 import { sessionLoadState } from '../sessionLoad';
 import { useNow } from '../useNow';
@@ -71,8 +72,10 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
     return `${s.status}|${Math.floor(Date.parse(s.lastActivityAt) / 30_000)}`;
   }, [live]);
   useSyncExternalStore(live.subscribe, getStatus);
-  const clock = useNow();
-  const sessionProgressing = waterfallClock(live.getSession(), Math.max(clock, Date.now())).ticking;
+  const clock = useNow(5_000);
+  const sessionClock = waterfallClock(live.getSession(), Math.max(clock, Date.now()));
+  const { ticking: mainTicking, backgroundTicking } = sessionClock;
+  const progressing = useMemo<Progressing>(() => ({ main: mainTicking, background: backgroundTicking }), [mainTicking, backgroundTicking]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // Drop a selection whose node is no longer in the view (its turn was folded, it went into an "earlier" node, a
   // resync removed it): hidden at once, and cleared so the drawer cannot reopen by itself when the node comes back.
@@ -254,7 +257,7 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
           onFollowingChange={canvas.setAutoFold}
           stopFollowingSignal={stopFollowingSignal}
           // The replay view shows history: "running" there is what was running at the replay time.
-          progressing={sessionProgressing || replaying}
+          progressing={replaying ? ALL_PROGRESSING : progressing}
         />
         {selectedNode !== null && (
           <Drawer
@@ -263,7 +266,8 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
             chain={chain}
             view={view}
             replay={replaying}
-            stalled={!sessionProgressing && !replaying}
+            // The drawer shows the node's current state (also in the replay view).
+            stalled={!stepTicking(sessionClock, selectedNode)}
             reasoning={stepReasoning}
             onSelect={outline ? openChainStep : setSelectedId}
             onExpandCut={expandChainCut}

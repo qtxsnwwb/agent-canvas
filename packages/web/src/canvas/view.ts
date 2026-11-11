@@ -33,6 +33,8 @@ export interface TurnSummary {
   durationMs: number;
   /** The title of the turn's latest running / awaiting-permission main-thread node; absent when there is none. */
   activity?: string;
+  /** One of the turn's active main-thread nodes is a subagent dispatch (background work, see waterfallClock); absent otherwise. */
+  backgroundRunning?: boolean;
 }
 /**
  * `groupKey`: the layout group — the turn key for main-thread nodes, summaries and `earlier` nodes;
@@ -204,16 +206,19 @@ function summarize(key: string, entries: Entry[], toolWeight: (node: GraphNode) 
   let failedCount = 0;
   let running = false;
   let activity: string | undefined;
+  let backgroundRunning = false;
   for (const { node } of entries) {
     toolCount += toolWeight(node);
     if (node.status === 'failed' || node.status === 'denied') failedCount++;
     if (isActiveStatus(node)) {
       running = true;
       activity = node.title;
+      if (node.kind === 'subagent') backgroundRunning = true;
     }
   }
   return {
     ...(activity !== undefined ? { activity } : {}),
+    ...(backgroundRunning ? { backgroundRunning } : {}),
     turnKey: key,
     promptSummary: entries.find((x) => x.node.kind === 'prompt')?.node.summary ?? '',
     nodeCount: entries.length,

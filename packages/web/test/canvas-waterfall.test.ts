@@ -1,7 +1,9 @@
 import { expect, test } from 'vitest';
 import type { Graph, GraphEdge, GraphNode, NodeKind } from '@claude-canvas/shared';
 import { buildView, turnKeyOf } from '../src/canvas/view';
-import { barOf, buildWaterfall, durationPlacement, QUIET_AFTER_MS, scopeKey, scopeOf, stepChain, waterfallClock, withNow } from '../src/canvas/waterfall';
+import {
+  barOf, buildWaterfall, durationPlacement, isBackgroundStep, QUIET_AFTER_MS, scopeKey, scopeOf, stepChain, stepTicking, waterfallClock, withNow,
+} from '../src/canvas/waterfall';
 
 const EPOCH = Date.parse('2026-01-01T00:00:00Z');
 const iso = (t: number) => new Date(EPOCH + t).toISOString();
@@ -164,21 +166,30 @@ test('stepChain.direct: the nearest reasoning on each path, with the reasoning r
   expect(stepChain(g, null).direct.size).toBe(0);
 });
 
-test('waterfallClock: progressing while running or awaiting permission, and for a while after the last activity', () => {
+test('waterfallClock: the main thread ticks while running or awaiting permission; background work also for a while after the last activity', () => {
   const at = iso(60_000);
+  const last = EPOCH + 60_000;
   const soon = EPOCH + 120_000; // one minute after the last activity
-  const later = EPOCH + 60_000 + QUIET_AFTER_MS; // exactly the quiet limit
-  expect(waterfallClock({ status: 'running', lastActivityAt: at }, soon)).toEqual({ nowMs: soon, ticking: true });
-  expect(waterfallClock({ status: 'awaiting_permission', lastActivityAt: at }, later)).toEqual({ nowMs: later, ticking: true });
-  // Idle, but something (a background agent) was active a minute ago: still progressing.
-  expect(waterfallClock({ status: 'idle', lastActivityAt: at }, soon)).toEqual({ nowMs: soon, ticking: true });
-  expect(waterfallClock({ status: 'awaiting_input', lastActivityAt: at }, soon).ticking).toBe(true);
-  // Quiet for the whole limit: open steps end at the last activity.
-  expect(waterfallClock({ status: 'idle', lastActivityAt: at }, later)).toEqual({ nowMs: EPOCH + 60_000, ticking: false });
-  // An ended session is over at once.
-  expect(waterfallClock({ status: 'ended', lastActivityAt: at }, soon)).toEqual({ nowMs: EPOCH + 60_000, ticking: false });
+  const later = last + QUIET_AFTER_MS; // exactly the quiet limit
+  expect(waterfallClock({ status: 'running', lastActivityAt: at }, soon)).toEqual({ nowMs: soon, ticking: true, backgroundNowMs: soon, backgroundTicking: true });
+  expect(waterfallClock({ status: 'awaiting_permission', lastActivityAt: at }, later)).toMatchObject({ ticking: true, backgroundTicking: true });
+  // Idle, but something (a background agent) was active a minute ago: only background work is progressing.
+  expect(waterfallClock({ status: 'idle', lastActivityAt: at }, soon)).toEqual({ nowMs: last, ticking: false, backgroundNowMs: soon, backgroundTicking: true });
+  expect(waterfallClock({ status: 'awaiting_input', lastActivityAt: at }, soon)).toMatchObject({ ticking: false, backgroundTicking: true });
+  // Quiet for the whole limit: nothing is progressing, open steps end at the last activity.
+  expect(waterfallClock({ status: 'idle', lastActivityAt: at }, later)).toEqual({ nowMs: last, ticking: false, backgroundNowMs: last, backgroundTicking: false });
+  // An ended session is over at once, background work included.
+  expect(waterfallClock({ status: 'ended', lastActivityAt: at }, soon)).toMatchObject({ ticking: false, backgroundTicking: false, backgroundNowMs: last });
   // Running, but silent for an hour: displayed as stale, so nothing is growing.
-  expect(waterfallClock({ status: 'running', lastActivityAt: at }, soon + 3_600_000)).toEqual({ nowMs: EPOCH + 60_000, ticking: false });
+  expect(waterfallClock({ status: 'running', lastActivityAt: at }, soon + 3_600_000)).toMatchObject({ ticking: false, backgroundTicking: false });
+});
+
+test('stepTicking: a subagent step or a dispatch node follows the background clock, a main-thread tool the main one', () => {
+  const clock = { ticking: false, backgroundTicking: true };
+  expect(stepTicking(clock, { agentId: null, kind: 'tool' })).toBe(false);
+  expect(stepTicking(clock, { agentId: null, kind: 'subagent' })).toBe(true);
+  expect(stepTicking(clock, { agentId: 'ag1', kind: 'tool' })).toBe(true);
+  expect(isBackgroundStep({ agentId: null, kind: 'text' })).toBe(false);
 });
 
 test('durationPlacement: after a bar with room on its right, before one with room on its left, inside a full-width one', () => {
@@ -253,11 +264,17 @@ test('a step with an unreadable timestamp does not stretch the range', () => {
 test('withNow moves only the open rows and keeps the other row objects', () => {
   const g = twoTurnsWithAgents();
   const base = buildWaterfall(g, { type: 'turn', turnKey: 't2' }, { compact: true, nowMs: 0 });
-  const w = withNow(base, EPOCH + 50_000);
+  const w = withNow(base, { nowMs: EPOCH + 50_000, backgroundNowMs: EPOCH + 90_000 });
   expect(w.rows[0]).toBe(base.rows[0]);
   expect(w.rows[1]).toBe(base.rows[1]);
   expect(w.rows[2]).toMatchObject({ id: 'b', open: true, endMs: EPOCH + 50_000 });
   expect(w.endMs).toBe(EPOCH + 50_000);
   const closed = buildWaterfall(g, { type: 'turn', turnKey: 't1' }, { compact: true, nowMs: 0 });
-  expect(withNow(closed, EPOCH + 50_000).endMs).toBe(closed.endMs);
+  expect(withNow(closed, { nowMs: EPOCH + 50_000, backgroundNowMs: EPOCH + 90_000 }).endMs).toBe(closed.endMs);
+  // An open step of an agent ends at the background "now".
+  const agent = withNow(buildWaterfall(g, { type: 'agent', agentId: 'ag1' }, { compact: true, nowMs: 0 }), { nowMs: 0, backgroundNowMs: 0 });
+  expect(agent.rows.every((r) => !r.open)).toBe(true);
+  const running: Graph = { ...g, nodes: { ...g.nodes, i1: { ...g.nodes.i1!, status: 'running', durationMs: null } } };
+  const live = withNow(buildWaterfall(running, { type: 'agent', agentId: 'ag1' }, { compact: true, nowMs: 0 }), { nowMs: EPOCH + 50_000, backgroundNowMs: EPOCH + 90_000 });
+  expect(live.rows.find((r) => r.id === 'i1')).toMatchObject({ open: true, endMs: EPOCH + 90_000 });
 });

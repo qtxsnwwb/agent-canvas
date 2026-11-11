@@ -551,19 +551,58 @@ test('先前台、后后台派出同一个子代理：前台那次的信号不�
   }
 });
 
-test('后台派出：会话结束后又恢复，没有自己的结束信号的派发节点回到运行中，任意先后都一样', () => {
+test('后台派出：会话结束时被切断的派发节点记为失败，会话恢复、再次结束都不改变它', () => {
   const head = [
     userPrompt('u1', null, 'x'),
     assistantBlock('a1', 'u1', { type: 'tool_use', id: 'tu1', name: 'Agent', input: {} }, { timestamp: '2026-01-01T00:10:00.000Z' }),
   ];
-  const rest = [
-    toolResult('u2', 'a1', 'tu1', 'launched', undefined, ASYNC),
-    agentMeta('ag1', { toolUseId: 'tu1', agentType: 'Explore', description: 'd' }),
-    hook('SessionEnd', {}, '2026-01-01T05:00:00.000Z'),
-    hook('SessionStart', {}, '2026-01-01T06:00:00.000Z'),
+  const launchRecord = toolResult('u2', 'a1', 'tu1', 'launched', undefined, ASYNC);
+  const meta = agentMeta('ag1', { toolUseId: 'tu1', agentType: 'Explore', description: 'd' });
+  // Hooks arrive in time order; the launch record and the meta may be read at any point among them.
+  const hooks = [
+    hook('SessionEnd', {}, '2026-01-01T00:30:00.000Z'),
+    hook('SessionStart', {}, '2026-01-01T00:40:00.000Z'),
+    hook('SessionEnd', {}, '2026-01-01T00:50:00.000Z'),
   ];
-  const outcomes = new Set(permutations(rest).map((order) => JSON.stringify(pickEnd(run(new Normalizer(), [...head, ...order]).graph))));
-  expect([...outcomes]).toEqual([JSON.stringify({ status: 'running', endedAt: null, durationMs: null })]);
+  const outcomes = new Set<string>();
+  for (let a = 0; a <= hooks.length; a++) {
+    for (let b = 0; b <= hooks.length; b++) {
+      const order = [...hooks.slice(0, a), launchRecord, ...hooks.slice(a)];
+      const at = b <= a ? b : b + 1;
+      order.splice(at, 0, meta);
+      outcomes.add(JSON.stringify(pickEnd(run(new Normalizer(), [...head, ...order]).graph)));
+    }
+  }
+  expect([...outcomes]).toEqual([JSON.stringify({ status: 'failed', endedAt: '2026-01-01T00:30:00.000Z', durationMs: 1_200_000 })]);
+  // Launched after the session came back: the earlier end does not concern it.
+  const later = run(new Normalizer(), [
+    userPrompt('u1', null, 'x'),
+    hook('SessionEnd', {}, '2026-01-01T00:30:00.000Z'),
+    hook('SessionStart', {}, '2026-01-01T00:40:00.000Z'),
+    assistantBlock('a1', 'u1', { type: 'tool_use', id: 'tu1', name: 'Agent', input: {} }, { timestamp: '2026-01-01T00:45:00.000Z' }),
+    toolResult('u2', 'a1', 'tu1', 'launched', undefined, ASYNC),
+  ]).graph;
+  expect(later.nodes['tool:tu1']).toMatchObject({ status: 'running', endedAt: null });
+});
+
+test('后台派出：PreToolUse 晚到把派出时间提前后，信号重新归属', () => {
+  // Two launches of one agent; the second's record says 00:30, its hook says it really started at 00:19. A signal at
+  // 00:20 belongs to the first launch until the hook is read, and to the second afterwards.
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x'),
+    assistantBlock('a1', 'u1', { type: 'tool_use', id: 'tu1', name: 'Agent', input: {} }, { timestamp: '2026-01-01T00:10:00.000Z' }),
+    toolResult('u2', 'a1', 'tu1', 'launched', undefined, ASYNC),
+    assistantBlock('a2', 'u2', { type: 'tool_use', id: 'tu2', name: 'Agent', input: {} }, { timestamp: '2026-01-01T00:30:00.000Z' }),
+    toolResult('u3', 'a2', 'tu2', 'launched', undefined, ASYNC),
+    assistantBlock('s1', null, { type: 'text', text: 'done' }, { agentId: 'ag1', stopReason: 'end_turn', timestamp: '2026-01-01T00:20:00.000Z' }),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ status: 'succeeded', endedAt: '2026-01-01T00:20:00.000Z' });
+  expect(graph.nodes['tool:tu2']!.status).toBe('running');
+  const moved = run(n, [hook('PreToolUse', { tool_use_id: 'tu2', tool_name: 'Agent', tool_input: {} }, '2026-01-01T00:19:00.000Z')]);
+  const after = (id: string) => moved.changes.filter((c) => c.type === 'node_updated' && c.id === id).reduce((acc, c) => ({ ...acc, ...(c as { patch: object }).patch }), {});
+  expect(after('tool:tu2')).toMatchObject({ timestamp: '2026-01-01T00:19:00.000Z', status: 'succeeded', endedAt: '2026-01-01T00:20:00.000Z' });
+  // The first launch has no signal of its own any more: it had ended when the second one started.
+  expect(after('tool:tu1')).toMatchObject({ endedAt: '2026-01-01T00:19:00.000Z' });
 });
 
 test('同一个子代理被后台派出两次、第一次没有自己的信号：第一次在第二次开始时算结束，会话结束在哪都一样', () => {
@@ -592,4 +631,15 @@ test('前台子代理：SubagentStop hook 早于元数据到达时不再丢失',
     agentMeta('ag1', { toolUseId: 'tu1', agentType: 'Explore', description: 'd' }),
   ]);
   expect(graph.nodes['tool:tu1']).toMatchObject({ status: 'succeeded', endedAt: '2026-01-01T00:20:05.000Z' });
+});
+
+test('任务通知：内容是文本块列表时同样识别', () => {
+  const { graph } = run(n, [
+    ...launch(),
+    rawLine('queue-operation', {
+      operation: 'enqueue', timestamp: '2026-01-01T03:00:00.000Z',
+      content: [{ type: 'text', text: '<task-notification><tool-use-id>tu1</tool-use-id>' }, { type: 'text', text: '<status>completed</status></task-notification>' }],
+    }),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ status: 'succeeded', endedAt: '2026-01-01T03:00:00.000Z' });
 });

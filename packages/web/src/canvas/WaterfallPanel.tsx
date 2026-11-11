@@ -6,7 +6,7 @@ import { useNow } from '../useNow';
 import { formatDuration } from './format';
 import { KIND_LABEL, nodeColor, UNFINISHED_LABEL } from './nodes';
 import {
-  barOf, buildWaterfall, durationPlacement, scopeKey, waterfallClock, withNow, type WaterfallRow, type WaterfallScope,
+  barOf, buildWaterfall, durationPlacement, scopeKey, stepTicking, waterfallClock, withNow, type WaterfallRow, type WaterfallScope,
 } from './waterfall';
 
 export interface WaterfallProps {
@@ -114,8 +114,10 @@ export const Waterfall = memo(function Waterfall({
   const base = useMemo(() => buildWaterfall(graph, scope, { compact, nowMs: 0 }), [graph, key, compact]);
   const open = base.rows.some((r) => r.open);
   const clock = waterfallClock(session, now);
-  const live = open && clock.ticking;
-  const wf = useMemo(() => (open ? withNow(base, clock.nowMs) : base), [base, open, clock.nowMs]);
+  // Main-thread steps and background ones (a subagent's steps, a dispatch) have their own "now" (see waterfallClock).
+  const live = base.rows.some((r) => r.open && stepTicking(clock, r.node));
+  const { nowMs, backgroundNowMs } = clock;
+  const wf = useMemo(() => (open ? withNow(base, { nowMs, backgroundNowMs }) : base), [base, open, nowMs, backgroundNowMs]);
 
   const body = useRef<HTMLDivElement>(null);
   const stick = useRef(false);
@@ -164,7 +166,7 @@ export const Waterfall = memo(function Waterfall({
           const { left, width } = barOf(wf, row);
           return (
             <Row key={row.id} row={row} offset={row.startMs - wf.startMs} place={durationPlacement(left, width)}
-              selected={row.id === selectedId} ticking={clock.ticking}
+              selected={row.id === selectedId} ticking={stepTicking(clock, row.node)}
               chain={chainIds === null ? null : directIds?.has(row.id) ? 'direct' : chainIds.has(row.id) ? 'on' : 'off'}
               onSelectRow={onSelectRow} onOpenAgent={onOpenAgent} />
           );

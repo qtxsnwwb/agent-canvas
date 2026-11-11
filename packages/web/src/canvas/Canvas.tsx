@@ -27,8 +27,9 @@ import type { UpstreamChain } from './chain';
 import { chainAriaLabel, isActivationKey } from './format';
 import {
   CanvasActions, graphNodeAriaLabel, highlightClass, isActive, nodeColor, nodeTypes, summaryAriaLabel, summaryColor,
-  type FlowNode, type Highlight, SessionProgressing,
+  type FlowNode, type Highlight, SessionProgressing, ALL_PROGRESSING, type Progressing,
 } from './nodes';
+import { isBackgroundStep } from './waterfall';
 
 export interface CanvasProps {
   snapshot: CanvasSnapshot;
@@ -45,8 +46,8 @@ export interface CanvasProps {
   onToggleAgent(agentId: string): void;
   /** Called with the follow state whenever it changes (and on mount). */
   onFollowingChange?(following: boolean): void;
-  /** False when the session is not progressing: active steps are shown as unfinished (see SessionProgressing). Default true. */
-  progressing?: boolean;
+  /** Where work is not progressing, active steps are shown as unfinished (see SessionProgressing). Default: all progressing. Pass a stable object. */
+  progressing?: Progressing;
   /**
    * Changing this number stops following, as a canvas button does (for layout changes made outside the canvas, e.g.
    * the drawer's 展开). The caller turns auto-fold off itself before making the change.
@@ -68,7 +69,8 @@ const samePos = (a: Pos, b: Pos): boolean => a.x === b.x && a.y === b.y;
 function sameSummary(a: TurnSummary, b: TurnSummary): boolean {
   return a.turnKey === b.turnKey && a.promptSummary === b.promptSummary && a.nodeCount === b.nodeCount
     && a.toolCount === b.toolCount && a.failedCount === b.failedCount && a.running === b.running
-    && a.startedAt === b.startedAt && a.durationMs === b.durationMs && a.activity === b.activity;
+    && a.startedAt === b.startedAt && a.durationMs === b.durationMs && a.activity === b.activity
+    && a.backgroundRunning === b.backgroundRunning;
 }
 
 /** `next` when any element differs from `prev`, otherwise `prev` itself (so React Flow sees no change). */
@@ -124,6 +126,7 @@ function useFlowNodes(
   { view, positions, turnBoxes, containerBoxes, layoutMode }: FlowInputs,
   selectedId: string | null,
   chain: UpstreamChain,
+  progressing: Progressing,
 ): FlowNode[] {
   const cache = useRef(new Map<string, FlowNode>());
   const last = useRef<FlowNode[] | null>(null);
@@ -183,10 +186,14 @@ function useFlowNodes(
         const container = box !== undefined;
         const expandable = canExpand && vn.expandable;
         const d = old?.type === 'graphNode' ? old.data : undefined;
+        const ariaLabel = chainAriaLabel(
+          graphNodeAriaLabel(vn.node, container, !(isBackgroundStep(vn.node) ? progressing.background : progressing.main)),
+          highlight === 'chain',
+        );
         const runCount = vn.runCount ?? 0;
         const thinkingMs = vn.thinkingMs ?? 0;
         n = old && d && d.node === vn.node && d.innerCount === vn.innerCount && d.expanded === vn.expanded
-          && d.runCount === runCount && d.thinkingMs === thinkingMs
+          && d.runCount === runCount && d.thinkingMs === thinkingMs && old.ariaLabel === ariaLabel
           && d.expandable === expandable && d.container === container && d.causal === causal && d.replay === replay
           && d.highlight === highlight
           && old.zIndex === zIndex
@@ -194,7 +201,7 @@ function useFlowNodes(
           ? old
           : {
             id: vn.id, type: 'graphNode', position, width, height, selected, zIndex,
-            ariaLabel: chainAriaLabel(graphNodeAriaLabel(vn.node, container), highlight === 'chain'),
+            ariaLabel,
             // The wrapper of a container lets clicks on its body through to the pane; its head opts back in (see
             // canvas.css). Inline, because React Flow sets `pointer-events: all` inline on the wrapper and spreads
             // node.style after it.
@@ -207,13 +214,18 @@ function useFlowNodes(
             handles: container ? makeHandles(width, height) : handlesFor(width, height), draggable: false, connectable: false,
           };
       } else if (vn.type === 'turn_summary') {
+        const ariaLabel = chainAriaLabel(
+          summaryAriaLabel(vn.summary, outline, !(vn.summary.backgroundRunning ? progressing.background : progressing.main)),
+          highlight === 'chain',
+        );
         n = old && old.type === 'turnSummary' && sameSummary(old.data.summary, vn.summary) && old.data.highlight === highlight
+          && old.ariaLabel === ariaLabel
           && old.data.outline === outline && old.zIndex === zIndex
           && samePos(old.position, position) && old.selected === selected && old.width === width && old.height === height
           ? old
           : {
             id: vn.id, type: 'turnSummary', position, width, height, selected, zIndex,
-            ariaLabel: chainAriaLabel(summaryAriaLabel(vn.summary, outline), highlight === 'chain'),
+            ariaLabel,
             className: wrapperClass(false, highlight),
             data: { summary: vn.summary, highlight, outline },
             handles: handlesFor(width, height), draggable: false, connectable: false,
@@ -238,14 +250,14 @@ function useFlowNodes(
     }
     cache.current = next;
     return (last.current = sameElements(last.current, out));
-  }, [view, positions, turnBoxes, containerBoxes, layoutMode, selectedId, chain]);
+  }, [view, positions, turnBoxes, containerBoxes, layoutMode, selectedId, chain, progressing]);
 }
 
 /**
  * React Flow edges between drawn nodes. An edge out of a node with two or more outgoing edges is drawn in the fork
  * colour; an edge into a running or awaiting-permission node is animated.
  */
-function useFlowEdges({ view, positions }: Pick<FlowInputs, 'view' | 'positions'>, chain: UpstreamChain, progressing: boolean): Edge[] {
+function useFlowEdges({ view, positions }: Pick<FlowInputs, 'view' | 'positions'>, chain: UpstreamChain, progressing: Progressing): Edge[] {
   type Cached = { src: ViewEdge; animated: boolean; fork: boolean; zIndex: number; highlight: Highlight; edge: Edge };
   const cache = useRef(new Map<string, Cached>());
   const last = useRef<Edge[] | null>(null);
@@ -260,7 +272,8 @@ function useFlowEdges({ view, positions }: Pick<FlowInputs, 'view' | 'positions'
       if (!positions[e.from] || !positions[e.to]) continue;
       const target = view.nodes.get(e.to);
       // Not while the session is not progressing: nothing is flowing into an unfinished step.
-      const animated = progressing && target?.type === 'node' && isActive(target.node.status);
+      const animated = target?.type === 'node' && isActive(target.node.status)
+        && (isBackgroundStep(target.node) ? progressing.background : progressing.main);
       const fork = forks.has(e.from);
       const highlight: Highlight = !active ? 'none' : chain.edgeIds.has(e.id) ? 'chain' : 'dim';
       // Inside a container: above its background, below the nodes of the same group; chain edges above dimmed ones.
@@ -400,9 +413,9 @@ function useDeferredFocus(): (selector: string) => void {
 
 function CanvasInner({
   snapshot, selectedId, chain, onSelect, onToggleTurn, onShowFullTurn, onToggleAgent, onFollowingChange, stopFollowingSignal,
-  progressing = true,
+  progressing = ALL_PROGRESSING,
 }: CanvasProps) {
-  const nodes = useFlowNodes(snapshot, selectedId, chain);
+  const nodes = useFlowNodes(snapshot, selectedId, chain, progressing);
   const edges = useFlowEdges(snapshot, chain, progressing);
   const follow = useFollow(snapshot);
   const { following } = follow;
