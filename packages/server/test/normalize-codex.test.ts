@@ -303,7 +303,7 @@ describe('未识别与忽略', () => {
       [root.line('{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","exit_code":"x"},"started_at_ms":"y"}}'), undefined],
       [meta('{oops'), undefined],
       [meta('{"thread_name":7}'), undefined],
-      [{ source: 'hook', origin: 'codex', receivedAt: 'x', eventName: 'PreToolUse', sessionId: 'root1', payload: 'nope' }, undefined],
+      [{ source: 'hook', origin: 'codex', receivedAt: 'x', eventName: 'PreToolUse', sessionId: 'root1', payload: 'nope' }, 'hook:invalid'],
     ];
     for (const [ev, unknown] of cases) {
       const res = n.apply(ev, 'p1');

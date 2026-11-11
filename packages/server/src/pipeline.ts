@@ -4,6 +4,7 @@ import type { Config } from './config.js';
 import { NormalizerRegistry } from './normalize/registry.js';
 import { NORMALIZER_VERSION } from './normalize/version.js';
 import { ClaudeFileSource } from './sources/claude.js';
+import { encodeProjectId } from './sources/codex/source.js';
 import { isPromise, originOfKey, type FileClass, type FileSource, type MaybePromise } from './sources/source.js';
 import { readNewLines } from './sources/transcript/reader.js';
 import type { RawEvent, Store, StoredRawEvent } from './store/store.js';
@@ -208,11 +209,16 @@ export class Pipeline {
     payload: string,
     transcriptPath?: string | null,
     origin: Origin = 'claude',
+    from: { cwd: string | null; agentId: string | null } = { cwd: null, agentId: null },
   ): void {
     const receivedAt = new Date().toISOString();
     const source = this.sourceFor(origin);
     const projectId =
-      source !== null && typeof transcriptPath === 'string' && transcriptPath !== '' ? source.projectOfTranscript(transcriptPath) : null;
+      origin === 'codex'
+        ? this.codexHookProject(sessionId, transcriptPath ?? null, from)
+        : source !== null && typeof transcriptPath === 'string' && transcriptPath !== ''
+          ? source.projectOfTranscript(transcriptPath)
+          : null;
     const event: RawEvent = { source: 'hook', origin, receivedAt, eventName, sessionId, payload, projectId };
     this.seed();
     if (this.lastHook === null || receivedAt > this.lastHook) this.lastHook = receivedAt;
@@ -468,6 +474,33 @@ export class Pipeline {
 
   private sourceFor(origin: Origin): FileSource | null {
     return this.sources.find((s) => s.origin === origin) ?? null;
+  }
+
+  /**
+   * Project of a Codex hook, decided once on arrival and stored with the raw event (replay uses the stored value): the
+   * payload's cwd encoded the way the Codex file source does it (reusing a project id that differs only in letter
+   * case). A subagent's hook (its cwd may be a worktree) keeps the session's known project, and a hook without a cwd
+   * falls back to its transcript_path or the session's known project.
+   */
+  private codexHookProject(sessionId: string | null, transcriptPath: string | null, from: { cwd: string | null; agentId: string | null }): string | null {
+    const source = this.sourceFor('codex');
+    let known: string | null = null;
+    if (sessionId !== null) {
+      const stored = this.store.getSession(sessionId)?.projectId ?? null;
+      if (stored !== null && stored !== UNKNOWN_PROJECT) known = stored;
+    }
+    if (from.agentId !== null && known !== null) return known;
+    if (source?.projectOfHook) {
+      const p = source.projectOfHook(sessionId, from.cwd, from.agentId);
+      if (p !== null) return p;
+    } else if (from.cwd !== null) {
+      return encodeProjectId(from.cwd);
+    }
+    if (source !== null && transcriptPath !== null && transcriptPath !== '') {
+      const p = source.projectOfTranscript(transcriptPath);
+      if (p !== null) return p;
+    }
+    return known;
   }
 
   /** Classification of an absolute path by its source (a promise only from a source that classifies asynchronously). */

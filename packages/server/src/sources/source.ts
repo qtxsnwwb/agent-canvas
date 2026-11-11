@@ -84,6 +84,12 @@ export interface FileSource {
    */
   mainSessionOf(key: string): MaybePromise<string | null>;
   /**
+   * Optional. Project of a hook event of this origin from its payload, without reading anything: `cwd` encoded the way
+   * the source encodes a session's directory; for a subagent's hook (`agentId` set) the session's project when the
+   * source knows it. Null when it cannot tell.
+   */
+  projectOfHook?(sessionId: string | null, cwd: string | null, agentId: string | null): string | null;
+  /**
    * Optional. Absolute paths of index files (classified `index`), possibly outside rootDir: each is also watched
    * (its directory at depth 0), listed by listFiles when it exists, and checked by every rescan.
    */

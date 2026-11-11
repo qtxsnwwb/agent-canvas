@@ -122,6 +122,14 @@ export class CodexFileSource implements FileSource {
     return this.known(key)?.projectId ?? null;
   }
 
+  /** A hook's project: the session's (root's) for a subagent's hook when known, else the cwd encoded as for a file. */
+  projectOfHook(sessionId: string | null, cwd: string | null, agentId: string | null): string | null {
+    const root = sessionId === null ? undefined : this.roots.get(sessionId);
+    if (agentId !== null && root !== undefined) return root;
+    if (cwd !== null && cwd !== '') return this.projectFor(cwd);
+    return root ?? null;
+  }
+
   mainSessionOf(key: string): string | null {
     if (!this.isRolloutKey(key)) return null;
     const thread = this.known(key);

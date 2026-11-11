@@ -2,7 +2,16 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
-import { SettingsShapeError, hookUrl, planInstall, planUninstall } from './hooks-config.js';
+import {
+  SettingsShapeError,
+  claudeHookTarget,
+  codexForwardCommands,
+  codexHookTarget,
+  hookUrl,
+  planInstallFor,
+  planUninstallFor,
+  type HookTarget,
+} from './hooks-config.js';
 
 export interface HooksCliIo {
   out(line: string): void;
@@ -34,6 +43,83 @@ export function confirmOnStreams(question: string, input: NodeJS.ReadableStream,
 export function defaultSettingsFile(env: NodeJS.ProcessEnv): string {
   const fromEnv = env.CLAUDE_CANVAS_SETTINGS_FILE;
   return fromEnv !== undefined && fromEnv !== '' ? fromEnv : path.join(os.homedir(), '.claude', 'settings.json');
+}
+
+/** Codex's hooks file: `CLAUDE_CANVAS_CODEX_HOOKS_FILE`, else `~/.codex/hooks.json`. */
+export function defaultCodexHooksFile(env: NodeJS.ProcessEnv): string {
+  const fromEnv = env.CLAUDE_CANVAS_CODEX_HOOKS_FILE;
+  return fromEnv !== undefined && fromEnv !== '' ? fromEnv : path.join(os.homedir(), '.codex', 'hooks.json');
+}
+
+export interface CodexHooksCliOptions extends HooksCliOptions {
+  /** The node binary the hook commands run (process.execPath). */
+  nodePath: string;
+  /** This installation's cli.js. */
+  cliPath: string;
+}
+
+/** What differs between installing into Claude Code's settings.json and into Codex's hooks.json. */
+interface HooksProfile {
+  target: HookTarget;
+  /** Refuses (message) when the target file's directory must already exist and does not; null = go on. */
+  precheck(file: string, mode: Mode): string | null;
+  /** Lines describing what the hooks are, printed with the plan. */
+  describe(file: string): string[];
+  /** Printed when there is nothing to remove. */
+  nothingToRemove: string;
+  /** Printed when the file does not exist yet and will be created. */
+  willCreate(file: string): string | null;
+  /** Printed after a successful write. */
+  after(mode: Mode): string[];
+}
+
+function claudeProfile(port: number): HooksProfile {
+  const url = hookUrl(port);
+  return {
+    target: claudeHookTarget(port),
+    precheck: () => null,
+    describe: (file) => [`settings 文件：${file}`, `hook 地址：${url}`],
+    nothingToRemove: `没有找到指向 ${url} 的 hooks`,
+    willCreate: () => null,
+    after: () => ['新开的 Claude Code 会话才会使用这些 hooks'],
+  };
+}
+
+function isDirectory(p: string): boolean {
+  try {
+    return fs.statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function codexProfile(opts: CodexHooksCliOptions): HooksProfile {
+  const spec = { nodePath: opts.nodePath, cliPath: opts.cliPath, port: opts.port };
+  const { command, commandWindows } = codexForwardCommands(spec);
+  return {
+    target: codexHookTarget(spec),
+    // ~/.codex is Codex's own directory: never created here.
+    precheck: (file, mode) =>
+      mode === 'install' && !isDirectory(path.dirname(file))
+        ? `目录 ${path.dirname(file)} 不存在，Codex 似乎没有安装，未做任何改动`
+        : null,
+    describe: (file) => [
+      `Codex hooks 文件：${file}`,
+      `hook 命令（macOS / Linux）：${command}`,
+      `hook 命令（Windows）：${commandWindows}`,
+      `转发到：${hookUrl(opts.port)}?origin=codex`,
+    ],
+    nothingToRemove: `没有找到本安装（${opts.cliPath}，端口 ${opts.port}）的 Codex hooks`,
+    willCreate: (file) => `将新建 ${file}`,
+    after: (mode) =>
+      mode === 'install'
+        ? [
+            '注意：这些 hooks 需要在 Codex 里确认信任后才会运行——桌面应用：设置 → Hooks；CLI：输入 /hooks',
+            '移动或升级 claude-canvas 后命令路径会变，需要重新安装（hooks install --codex）并在 Codex 里重新确认信任',
+            '没确认信任时 claude-canvas 只靠会话文件工作',
+          ]
+        : ['已移除；Codex 不会再调用这些 hooks'],
+  };
 }
 
 interface Loaded {
@@ -299,24 +385,28 @@ const LOSSY_MESSAGE: Record<Lossy, string> = {
 
 const STALE_MESSAGE = '设置文件在确认期间被修改，未做任何改动，请重新运行';
 
-async function run(mode: Mode, opts: HooksCliOptions, io: HooksCliIo): Promise<number> {
+async function run(mode: Mode, opts: HooksCliOptions, io: HooksCliIo, profile: HooksProfile): Promise<number> {
   const file = resolveTarget(opts.settingsFile);
   if (file === null) {
     io.err(`设置文件是一个指向不存在目标的符号链接，未做任何改动：${opts.settingsFile}`);
     return 1;
   }
-  const url = hookUrl(opts.port);
+  const refused = profile.precheck(file, mode);
+  if (refused !== null) {
+    io.err(refused);
+    return 1;
+  }
   let loaded: Loaded;
   let events: string[];
   let next: Record<string, unknown>;
   try {
     loaded = loadSettings(file);
     if (mode === 'install') {
-      const plan = planInstall(loaded.settings, opts.port);
+      const plan = planInstallFor(profile.target, loaded.settings);
       events = plan.added;
       next = plan.next;
     } else {
-      const plan = planUninstall(loaded.settings, opts.port);
+      const plan = planUninstallFor(profile.target, loaded.settings);
       events = plan.removed;
       next = plan.next;
     }
@@ -326,7 +416,7 @@ async function run(mode: Mode, opts: HooksCliOptions, io: HooksCliIo): Promise<n
   }
 
   if (events.length === 0) {
-    io.out(mode === 'install' ? `hooks 已全部安装，无需改动（${file}）` : `没有找到指向 ${url} 的 hooks`);
+    io.out(mode === 'install' ? `hooks 已全部安装，无需改动（${file}）` : profile.nothingToRemove);
     return 0;
   }
 
@@ -339,10 +429,11 @@ async function run(mode: Mode, opts: HooksCliOptions, io: HooksCliIo): Promise<n
   if (isSymlink(opts.settingsFile)) {
     io.out(`（${opts.settingsFile} 是符号链接，实际写入 ${file}）`);
   }
-  io.out(`settings 文件：${file}`);
-  io.out(`hook 地址：${url}`);
+  for (const line of profile.describe(file)) io.out(line);
   io.out(`将${mode === 'install' ? '添加' : '移除'}的事件（${events.length}）：${events.join(', ')}`);
   io.out('不会改动已有的其他内容');
+  const creating = loaded.exists ? null : profile.willCreate(file);
+  if (creating !== null) io.out(creating);
   io.out(loaded.exists ? `备份文件：${nextBackupPath(file, io.now())}` : '原文件不存在，无需备份');
 
   if (!opts.yes) {
@@ -365,7 +456,7 @@ async function run(mode: Mode, opts: HooksCliOptions, io: HooksCliIo): Promise<n
     writeAtomically(file, next, loaded);
     io.out(`已写入 ${file}`);
     if (backup !== null) io.out(`备份：${backup}`);
-    io.out('新开的 Claude Code 会话才会使用这些 hooks');
+    for (const line of profile.after(mode)) io.out(line);
     return 0;
   } catch (err) {
     io.err(`写入失败：${err instanceof Error ? err.message : String(err)}`);
@@ -374,9 +465,18 @@ async function run(mode: Mode, opts: HooksCliOptions, io: HooksCliIo): Promise<n
 }
 
 export function runHooksInstall(opts: HooksCliOptions, io: HooksCliIo): Promise<number> {
-  return run('install', opts, io);
+  return run('install', opts, io, claudeProfile(opts.port));
 }
 
 export function runHooksUninstall(opts: HooksCliOptions, io: HooksCliIo): Promise<number> {
-  return run('uninstall', opts, io);
+  return run('uninstall', opts, io, claudeProfile(opts.port));
+}
+
+/** `hooks install --codex`: the same flow and protections, writing Codex's hooks.json (created when missing). */
+export function runCodexHooksInstall(opts: CodexHooksCliOptions, io: HooksCliIo): Promise<number> {
+  return run('install', opts, io, codexProfile(opts));
+}
+
+export function runCodexHooksUninstall(opts: CodexHooksCliOptions, io: HooksCliIo): Promise<number> {
+  return run('uninstall', opts, io, codexProfile(opts));
 }

@@ -6,7 +6,9 @@ import {
   type NodeDetail,
   type Session,
 } from '@claude-canvas/shared';
+import { isDeepStrictEqual } from 'node:util';
 import type { RawEvent } from '../store/store.js';
+import { SPAWN_TOOL_NAMES, parseCodexHook, type CodexHookEffect } from './codex-hooks.js';
 import { summarize } from './summary.js';
 import type { AgentNormalizer, NormalizeResult } from './types.js';
 
@@ -155,6 +157,15 @@ interface SessionState {
   /** child threads whose spawn edge was emitted. */
   spawned: Set<string>;
   firstPromptSeen: boolean;
+  /** Hook placeholders (PreToolUse before the call record) not yet confirmed by a call, in the order they were made. */
+  placeholders: { nodeId: string; threadId: string; toolName: string }[];
+  /** Tool nodes whose terminal status came from a PostToolUse hook: the call's output record still decides. */
+  hookSettled: Set<string>;
+  /**
+   * A call record and a hook have met under the same id (hook tool_use_id = call_id): from then on the name fallback
+   * that pairs calls with placeholders of other ids is off, so a lost hook cannot make a call take another's placeholder.
+   */
+  idsMatch: boolean;
 }
 
 type Transcript = Extract<RawEvent, { source: 'transcript' }>;
@@ -234,6 +245,16 @@ function itemName(type: string, item: Obj): string {
 
 const entryFailed = (e: FoldEntry): boolean => e.status === 'failed' || (e.exitCode !== null && e.exitCode !== 0);
 
+/**
+ * A hook's tool name names the same tool as a node's / call's: equal, the last part of a namespaced name
+ * (`docs.search` ~ `search`), or both are the subagent spawn call.
+ */
+function sameTool(hookName: string, toolName: string | null): boolean {
+  if (toolName === null) return false;
+  if (hookName === toolName || toolName.endsWith(`.${hookName}`)) return true;
+  return SPAWN_TOOL_NAMES.has(hookName) && SPAWN_TOOL_NAMES.has(toolName);
+}
+
 /** Text parts of a content list: `pick` maps one part to its text (null = skipped). */
 function joinParts(content: unknown, pick: (part: Obj) => string | null, sep: string): string {
   if (!Array.isArray(content)) return typeof content === 'string' ? content : '';
@@ -273,8 +294,12 @@ export class CodexNormalizer implements AgentNormalizer {
         const unknown = this.applyTranscript(event, projectId, changes);
         return unknown === undefined ? { changes } : { changes, unknownRecordType: unknown };
       }
-      if (event.source === 'meta') this.applyMeta(event, changes);
-      return { changes }; // hooks: not yet (a later task)
+      if (event.source === 'meta') {
+        this.applyMeta(event, changes);
+        return { changes };
+      }
+      const unknown = this.applyHook(event, projectId, changes);
+      return unknown === undefined ? { changes } : { changes, unknownRecordType: unknown };
     } catch {
       return { changes, unknownRecordType: 'normalizer-error' };
     }
@@ -372,6 +397,9 @@ export class CodexNormalizer implements AgentNormalizer {
         dispatchOf: new Map(),
         spawned: new Set(),
         firstPromptSeen: false,
+        placeholders: [],
+        hookSettled: new Set(),
+        idsMatch: false,
       };
       this.sessions.set(sessionId, state);
       this.preSessionRestored.delete(sessionId);
@@ -766,6 +794,7 @@ export class CodexNormalizer implements AgentNormalizer {
     const input = ptype === 'custom_tool_call' ? (payload.input ?? null) : parseArguments(payload.arguments);
     const isSpawn = ptype === 'function_call' && name === 'spawn_agent' && (namespace === null || namespace === 'collaboration');
     const taskName = isSpawn ? str(obj(input).task_name) : null;
+    const placeholder = this.placeholderFor(state, thread, callId, toolName, name);
     const id = this.addNode(
       ctx,
       {
@@ -779,6 +808,7 @@ export class CodexNormalizer implements AgentNormalizer {
         detail: { input },
       },
       true,
+      placeholder ?? undefined,
     );
     if (id === null) return;
     thread.callNodes.set(callId, id);
@@ -803,16 +833,176 @@ export class CodexNormalizer implements AgentNormalizer {
     for (const w of thread.callWindows) if (w.nodeId === id && endMs !== null) w.endMs = endMs;
     state.toolInputs.delete(id);
     const detail = { output: payload.output ?? null };
-    // A dispatch node follows its agent's thread, not the immediate answer to the spawn call.
-    if (node.kind === 'subagent' || (node.status !== null && TERMINAL_STATUSES.includes(node.status))) {
+    // A dispatch node follows its agent's thread, not the immediate answer to the spawn call. A status a PostToolUse
+    // hook set is not final: the output record decides (transcript wins).
+    const terminal = node.status !== null && TERMINAL_STATUSES.includes(node.status);
+    if (node.kind === 'subagent' || (terminal && !state.hookSettled.has(id))) {
       this.patch(state, id, {}, ctx.changes, detail);
       return;
     }
+    state.hookSettled.delete(id);
     const failed = (state.folded.get(id) ?? []).some(entryFailed);
     const patch: Partial<GraphNode> = { status: failed ? 'failed' : 'succeeded', endedAt: ctx.ts };
     const durationMs = elapsedMs(node.timestamp, ctx.ts);
     if (durationMs !== null) patch.durationMs = durationMs;
     this.patch(state, id, patch, ctx.changes, detail);
+  }
+
+  // ---- hooks (an overlay: the transcript's records decide whenever they say something) ----
+
+  /** Pushes the hook's changes; returns the unknown-record label, if any. */
+  private applyHook(event: Extract<RawEvent, { source: 'hook' }>, projectId: string, changes: Change[]): string | undefined {
+    const parsed = parseCodexHook(event.eventName, event.payload);
+    if (!parsed.ok) return parsed.unknownRecordType;
+    const hook = parsed.hook;
+    const at = event.receivedAt;
+    let state = this.sessions.get(hook.sessionId);
+    if (!state) {
+      // A live session whose file is not read yet shows up at once; an end / stop for a session never seen does not
+      // conjure an empty one.
+      if (!hook.createsSession) return undefined;
+      state = this.stateFor(hook.sessionId, at, projectId, changes);
+    }
+    const isRoot = hook.agentId === null;
+    this.touchSession(state, at, projectId, isRoot, changes);
+    // The root thread's own session_meta sets the cwd; until it is read, the hook's.
+    if (isRoot && hook.cwd !== null && state.session.cwd === null) this.commitSession(state, { ...state.session, cwd: hook.cwd }, changes);
+    // An ended session only comes back on SessionStart / UserPromptSubmit (or a new turn in the transcript).
+    const status = state.session.status === 'ended' && !hook.resumes ? null : hook.status;
+    if (status !== null) this.setStatus(state, status, at, changes);
+    const effect = hook.node;
+    if (effect === null) return undefined;
+    switch (effect.kind) {
+      case 'pre_tool':
+        this.hookPreTool(state, hook.agentId, effect, at, changes);
+        break;
+      case 'permission_request':
+        this.hookPermission(state, hook.agentId, effect, changes);
+        break;
+      case 'post_tool':
+        this.hookPostTool(state, effect, at, changes);
+        break;
+    }
+    return undefined;
+  }
+
+  /**
+   * PreToolUse: a running, unconfirmed tool node `tool:<tool_use_id>` in the hook's thread, shown before the call
+   * record is read; the call record confirms it (applyCall). When the record came first, only an earlier start.
+   */
+  private hookPreTool(
+    state: SessionState,
+    agentId: string | null,
+    effect: Extract<CodexHookEffect, { kind: 'pre_tool' }>,
+    at: string,
+    changes: Change[],
+  ): void {
+    const id = `tool:${effect.toolUseId}`;
+    const existing = state.nodes.get(id);
+    if (existing) {
+      if (existing.confirmed) state.idsMatch = true;
+      this.earlierStart(state, existing, at, changes);
+      return;
+    }
+    const node: GraphNode = {
+      id,
+      sessionId: state.session.id,
+      turnId: effect.turnId,
+      agentId,
+      childAgentId: null,
+      parentId: null,
+      kind: SPAWN_TOOL_NAMES.has(effect.toolName) ? 'subagent' : 'tool',
+      status: 'running',
+      timestamp: at,
+      confirmed: false,
+      title: effect.toolName,
+      summary: summarize(effect.input),
+      toolName: effect.toolName,
+      toolUseId: effect.toolUseId,
+      messageId: null,
+      durationMs: null,
+      endedAt: null,
+      usage: null,
+      systemSubtype: null,
+    };
+    state.nodes.set(id, node);
+    state.toolInputs.set(id, effect.input);
+    state.placeholders.push({ nodeId: id, threadId: agentId ?? state.session.id, toolName: effect.toolName });
+    changes.push({ type: 'node_added', node, detail: { input: effect.input } });
+  }
+
+  /** Moves a node's start back to `at` when that is earlier (a duration derived from the start moves with it). */
+  private earlierStart(state: SessionState, node: GraphNode, at: string, changes: Change[]): void {
+    const next = msOf(at);
+    const current = msOf(node.timestamp);
+    if (next === null || (current !== null && next >= current)) return;
+    const patch: Partial<GraphNode> = { timestamp: at };
+    if (node.endedAt !== null && node.durationMs !== null) {
+      const d = elapsedMs(at, node.endedAt);
+      if (d !== null) patch.durationMs = d;
+    }
+    this.patch(state, node.id, patch, changes);
+  }
+
+  /**
+   * PermissionRequest: the running tool node it names (`tool_use_id`), else the newest running node of that tool in
+   * the hook's thread, one with the same input first (the approach of the Claude normalizer).
+   */
+  private hookPermission(
+    state: SessionState,
+    agentId: string | null,
+    effect: Extract<CodexHookEffect, { kind: 'permission_request' }>,
+    changes: Change[],
+  ): void {
+    let target: GraphNode | undefined;
+    if (effect.toolUseId !== null) target = state.nodes.get(`tool:${effect.toolUseId}`);
+    else {
+      let newest: GraphNode | undefined;
+      let sameInput: GraphNode | undefined;
+      for (const node of state.nodes.values()) {
+        if (node.kind !== 'tool' || node.status !== 'running' || node.agentId !== agentId || !sameTool(effect.toolName, node.toolName)) continue;
+        if (newest === undefined || node.timestamp >= newest.timestamp) newest = node;
+        if (isDeepStrictEqual(state.toolInputs.get(node.id), effect.input) && (sameInput === undefined || node.timestamp >= sameInput.timestamp)) sameInput = node;
+      }
+      target = sameInput ?? newest;
+    }
+    if (target === undefined || target.kind !== 'tool' || target.status !== 'running') return;
+    this.patch(state, target.id, { status: 'awaiting_permission' }, changes);
+  }
+
+  /**
+   * PostToolUse: settles the node unless it is already settled (by its output record: the transcript wins; or by an
+   * earlier hook). A dispatch node is never settled here: its status follows the child thread.
+   */
+  private hookPostTool(state: SessionState, effect: Extract<CodexHookEffect, { kind: 'post_tool' }>, at: string, changes: Change[]): void {
+    const id = `tool:${effect.toolUseId}`;
+    const node = state.nodes.get(id);
+    if (!node || node.kind === 'subagent' || (effect.toolName !== null && SPAWN_TOOL_NAMES.has(effect.toolName))) return;
+    if (node.status !== null && TERMINAL_STATUSES.includes(node.status)) return;
+    const failed = effect.failed || (state.folded.get(id) ?? []).some(entryFailed);
+    const patch: Partial<GraphNode> = { status: failed ? 'failed' : 'succeeded', endedAt: at };
+    const durationMs = elapsedMs(node.timestamp, at);
+    if (durationMs !== null) patch.durationMs = durationMs;
+    state.hookSettled.add(id);
+    state.toolInputs.delete(id);
+    this.patch(state, id, patch, changes, { output: effect.output });
+  }
+
+  /**
+   * The unconfirmed placeholder a call record confirms: the one with the call's id; else, while no call and hook have
+   * met under the same id in this session, the oldest placeholder of the same thread and tool (the documentation does
+   * not promise tool_use_id = call_id). Null = none (a new node is made).
+   */
+  private placeholderFor(state: SessionState, thread: ThreadState, callId: string, toolName: string, name: string): GraphNode | null {
+    const exact = state.nodes.get(`tool:${callId}`);
+    if (exact !== undefined) {
+      if (exact.confirmed) return null; // a repeated record (addNode reports it)
+      state.idsMatch = true;
+      return exact;
+    }
+    if (state.idsMatch) return null;
+    const p = state.placeholders.find((x) => x.threadId === thread.id && (sameTool(x.toolName, toolName) || sameTool(x.toolName, name)));
+    return p === undefined ? null : (state.nodes.get(p.nodeId) ?? null);
   }
 
   // ---- nodes ----
@@ -861,10 +1051,11 @@ export class CodexNormalizer implements AgentNormalizer {
       systemSubtype?: string;
     },
     isCall = false,
+    confirm?: GraphNode,
   ): string | null {
     const { state, thread, changes } = ctx;
-    const id = spec.id ?? `${spec.kind}:${thread.id}@${ctx.event.offset}`;
-    if (state.nodes.has(id)) {
+    const id = confirm?.id ?? spec.id ?? `${spec.kind}:${thread.id}@${ctx.event.offset}`;
+    if (confirm === undefined && state.nodes.has(id)) {
       // The id is taken (by this or another thread): a repeated record. Nothing is placed; diagnostics show it.
       ctx.unknown = 'duplicate-node-id';
       return null;
@@ -888,7 +1079,7 @@ export class CodexNormalizer implements AgentNormalizer {
     }
     if (isCall && thread.batch === null) thread.batch = { group: thread.group, parentId, members: [id] };
 
-    const node: GraphNode = {
+    const placed: GraphNode = {
       id,
       sessionId: state.session.id,
       turnId: this.turnOf(ctx),
@@ -909,9 +1100,31 @@ export class CodexNormalizer implements AgentNormalizer {
       usage: null,
       systemSubtype: spec.systemSubtype ?? null,
     };
-    state.nodes.set(id, node);
-    changes.push({ type: 'node_added', node, detail: spec.detail });
     const sid = state.session.id;
+    if (confirm === undefined) {
+      state.nodes.set(id, placed);
+      changes.push({ type: 'node_added', node: placed, detail: spec.detail });
+    } else {
+      // A PreToolUse placeholder becomes this call's node: same id, placed and described by the record; it keeps the
+      // earlier start and what the hooks made of its status so far (the output record settles it).
+      const startMs = msOf(placed.timestamp);
+      const hookMs = msOf(confirm.timestamp);
+      const timestamp = hookMs !== null && (startMs === null || hookMs < startMs) ? confirm.timestamp : placed.timestamp;
+      const node: GraphNode = {
+        ...placed,
+        timestamp,
+        status: confirm.status,
+        endedAt: confirm.endedAt,
+        durationMs: confirm.endedAt !== null ? (elapsedMs(timestamp, confirm.endedAt) ?? confirm.durationMs) : confirm.durationMs,
+      };
+      state.nodes.set(id, node);
+      state.placeholders = state.placeholders.filter((p) => p.nodeId !== id);
+      const patch: Partial<GraphNode> = {};
+      for (const key of Object.keys(node) as (keyof GraphNode)[]) {
+        if (node[key] !== confirm[key]) (patch as Record<string, unknown>)[key] = node[key];
+      }
+      changes.push({ type: 'node_updated', sessionId: sid, id, patch, detail: spec.detail });
+    }
     if (parentId !== null) changes.push({ type: 'edge_added', edge: { id: `${parentId}->${id}`, sessionId: sid, from: parentId, to: id, kind: edgeKind } });
     if (forkFirst !== null && parentId !== null) {
       changes.push({ type: 'edge_added', edge: { id: `${parentId}->${forkFirst}:fork`, sessionId: sid, from: parentId, to: forkFirst, kind: 'fork' } });

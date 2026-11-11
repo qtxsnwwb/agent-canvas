@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import type { Diagnostics as DiagnosticsData, Origin } from '@claude-canvas/shared';
 import { api } from '../client';
 import {
-  createPoller, fileOrigin, formatAge, hookState, hooksByOrigin, summarizeDiagnostics, truncateSample, FILES_BEHIND_MAX,
+  codexDirLine, createPoller, fileOrigin, formatAge, hookState, hooksByOrigin, summarizeDiagnostics, truncateSample, FILES_BEHIND_MAX,
   type OriginHooks,
 } from '../diagnostics';
 import { OriginBadge } from '../OriginBadge';
@@ -30,10 +30,13 @@ function HookStatus({ origin, lastAt }: { origin: Origin; lastAt: string | null 
   );
 }
 
-function OriginHookSection({ hooks, lastAt, titled }: { hooks: OriginHooks; lastAt: string | null; titled: boolean }) {
+function OriginHookSection({ hooks, lastAt, titled, codex }: {
+  hooks: OriginHooks; lastAt: string | null; titled: boolean; codex: DiagnosticsData['codex'];
+}) {
   return (
     <div className="diag-origin">
       {titled && <h3><OriginBadge origin={hooks.origin} /></h3>}
+      {hooks.origin === 'codex' && <p>{codexDirLine(codex)}</p>}
       <HookStatus origin={hooks.origin} lastAt={lastAt} />
       {hooks.events.length > 0 && (
         <table>
@@ -103,7 +106,7 @@ export function Diagnostics() {
       <section>
         <h2>Hooks</h2>
         {hooks.map((h) => (
-          <OriginHookSection key={h.origin} hooks={h} titled={hooks.length > 1}
+          <OriginHookSection key={h.origin} hooks={h} titled={hooks.length > 1} codex={data.codex}
             lastAt={h.origin === 'claude' && onlyClaude ? data.lastHookAt : h.lastAt} />
         ))}
       </section>

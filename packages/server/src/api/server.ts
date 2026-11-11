@@ -8,6 +8,7 @@ import {
   type Change,
   type ClientMessage,
   type Diagnostics,
+  type Origin,
   type SearchHit,
   type SeqChange,
   type ServerMessage,
@@ -96,6 +97,16 @@ export function isAllowedRequest(headers: {
     }
   }
   return true;
+}
+
+/** Whether the path names an existing directory (only stat'ed, never read). */
+function isDirectory(dir: string | null): boolean {
+  if (dir === null || dir === '') return false;
+  try {
+    return fs.statSync(dir).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 function parseClientMessage(raw: string): ClientMessage | null {
@@ -246,6 +257,7 @@ export function buildServer(deps: { store: Store; pipeline: Pipeline; config: Co
       importing: pipeline.importing(),
       normalizerVersion: NORMALIZER_VERSION,
       dbEpoch: store.epoch(),
+      codex: { sessionsDir: config.codexSessionsDir, sessionsDirExists: isDirectory(config.codexSessionsDir) },
     }),
   );
 
@@ -256,8 +268,10 @@ export function buildServer(deps: { store: Store; pipeline: Pipeline; config: Co
     instance.setErrorHandler((_err, _req, reply) => {
       void reply.code(200).send();
     });
-    instance.post('/hooks', { bodyLimit: HOOK_BODY_LIMIT }, (req, reply) => {
+    instance.post<{ Querystring: { origin?: unknown } }>('/hooks', { bodyLimit: HOOK_BODY_LIMIT }, (req, reply) => {
       const text = typeof req.body === 'string' ? req.body : '';
+      // `?origin=codex` comes from `claude-canvas hook-forward`; anything else (none: Claude Code's http hooks) is Claude.
+      const origin: Origin = req.query.origin === 'codex' ? 'codex' : 'claude';
       void reply.code(200).send();
       setImmediate(() => {
         try {
@@ -271,7 +285,12 @@ export function buildServer(deps: { store: Store; pipeline: Pipeline; config: Co
           const eventName = typeof obj.hook_event_name === 'string' ? obj.hook_event_name : 'unknown';
           const sessionId = typeof obj.session_id === 'string' ? obj.session_id : null;
           const transcriptPath = typeof obj.transcript_path === 'string' ? obj.transcript_path : null;
-          pipeline.ingestHook(eventName, sessionId, text, transcriptPath);
+          if (origin === 'claude') pipeline.ingestHook(eventName, sessionId, text, transcriptPath);
+          else {
+            const cwd = typeof obj.cwd === 'string' && obj.cwd !== '' ? obj.cwd : null;
+            const agentId = typeof obj.agent_id === 'string' && obj.agent_id !== '' ? obj.agent_id : null;
+            pipeline.ingestHook(eventName, sessionId, text, transcriptPath, origin, { cwd, agentId });
+          }
         } catch (err) {
           // best effort: the hook has already been answered
           pipeline.reportFailure('hook', err);

@@ -18,6 +18,8 @@ export interface Diagnostics {
   importing: boolean;
   normalizerVersion: number;
   dbEpoch: string;
+  /** Codex's sessions directory as configured (null: Codex disabled) and whether it exists (stat only). */
+  codex: { sessionsDir: string | null; sessionsDirExists: boolean };
 }
 
 export type SearchField = 'title' | 'id' | 'branch' | 'cwd' | 'prompt';

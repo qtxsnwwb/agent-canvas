@@ -107,17 +107,28 @@ const KNOWN_HOOKS = new Set([
   'SessionEnd',
 ]);
 
-/** Parses a raw hook payload; unknown event names and broken payloads are reported, never thrown. */
-export function parseHook(eventName: string, payload: string): ParsedHook {
+/**
+ * The common part of a hook payload (Claude Code and Codex send the same base fields): the JSON object and its
+ * non-empty `session_id`, or null when the payload is not that (reported as `hook:invalid`).
+ */
+export function parseHookPayload(payload: string): { body: Record<string, unknown>; sessionId: string } | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(payload);
   } catch {
-    return { ok: false, unknownRecordType: 'hook:invalid' };
+    return null;
   }
-  if (!isObject(parsed)) return { ok: false, unknownRecordType: 'hook:invalid' };
+  if (!isObject(parsed)) return null;
   const sessionId = str(parsed.session_id);
-  if (sessionId === null || sessionId === '') return { ok: false, unknownRecordType: 'hook:invalid' };
+  if (sessionId === null || sessionId === '') return null;
+  return { body: parsed, sessionId };
+}
+
+/** Parses a raw hook payload; unknown event names and broken payloads are reported, never thrown. */
+export function parseHook(eventName: string, payload: string): ParsedHook {
+  const base = parseHookPayload(payload);
+  if (base === null) return { ok: false, unknownRecordType: 'hook:invalid' };
+  const { body: parsed, sessionId } = base;
   if (!KNOWN_HOOKS.has(eventName)) return { ok: false, unknownRecordType: `hook:${eventName}` };
   const agentId = str(parsed.agent_id);
   return {

@@ -81,14 +81,14 @@ export interface OriginHooks {
 
 /**
  * The hooks section, one entry per origin (ORIGINS order): Claude Code always (the page looks as before on a
- * Claude-only install), Codex once any Codex hook event or Codex file is known.
+ * Claude-only install), Codex once its sessions directory is configured, or any Codex hook event or file is known.
  */
 export function hooksByOrigin(d: Diagnostics): OriginHooks[] {
-  const hasCodexFiles = d.files.some((f) => fileOrigin(f.path) === 'codex');
+  const codexKnown = d.codex.sessionsDir !== null || d.files.some((f) => fileOrigin(f.path) === 'codex');
   const out: OriginHooks[] = [];
   for (const origin of ORIGINS) {
     const events = d.hookEvents.filter((e) => e.origin === origin);
-    if (origin !== 'claude' && events.length === 0 && !(origin === 'codex' && hasCodexFiles)) continue;
+    if (origin !== 'claude' && events.length === 0 && !(origin === 'codex' && codexKnown)) continue;
     const seen = new Set(events.map((e) => e.eventName));
     let lastAt: string | null = null;
     for (const e of events) {
@@ -100,6 +100,12 @@ export function hooksByOrigin(d: Diagnostics): OriginHooks[] {
     out.push({ origin, events, missing: EXPECTED_HOOK_EVENTS_BY_ORIGIN[origin].filter((e) => !seen.has(e)), lastAt });
   }
   return out;
+}
+
+/** The Codex block's line about the sessions directory. */
+export function codexDirLine(codex: Diagnostics['codex']): string {
+  if (codex.sessionsDir === null) return 'Codex 会话目录：未启用';
+  return `Codex 会话目录：${codex.sessionsDir}（${codex.sessionsDirExists ? '存在' : '不存在，Codex 似乎没有安装'}）`;
 }
 
 export function summarizeDiagnostics(d: Diagnostics, nowMs: number): DiagnosticsSummary {
