@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import { openLiveSession, type LiveSession } from '../client';
 import { Canvas } from '../canvas/Canvas';
@@ -10,7 +10,7 @@ import { useCanvas } from '../canvas/useCanvas';
 import { turnKeyOf, type ViewMode } from '../canvas/view';
 import { Waterfall } from '../canvas/WaterfallPanel';
 import { reasoningRow, type ReasoningRow } from '../canvas/reasoning';
-import { scopeKey, scopeOf, stepChain, type WaterfallScope } from '../canvas/waterfall';
+import { scopeKey, scopeOf, stepChain, waterfallClock, type WaterfallScope } from '../canvas/waterfall';
 import { sessionStatusView } from '../labels';
 import { sessionLoadState } from '../sessionLoad';
 import { useNow } from '../useNow';
@@ -62,6 +62,12 @@ function DensitySwitch({ compact, disabled, onChange }: { compact: boolean; disa
  */
 const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: LiveSession; toolbar: HTMLElement | null }) {
   const canvas = useCanvas(live);
+  // Whether the session is progressing; re-evaluated when its status changes (a change that brings no node change
+  // publishes no canvas snapshot) and every 30 s (a running session that went silent turns stale).
+  const getStatus = useCallback(() => live.getSession().status, [live]);
+  useSyncExternalStore(live.subscribe, getStatus);
+  const clock = useNow();
+  const progressing = waterfallClock(live.getSession(), clock).ticking;
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // Drop a selection whose node is no longer in the view (its turn was folded, it went into an "earlier" node, a
   // resync removed it): hidden at once, and cleared so the drawer cannot reopen by itself when the node comes back.
@@ -242,6 +248,7 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
           onToggleAgent={canvas.toggleAgent}
           onFollowingChange={canvas.setAutoFold}
           stopFollowingSignal={stopFollowingSignal}
+          progressing={progressing}
         />
         {selectedNode !== null && (
           <Drawer

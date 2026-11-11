@@ -42,15 +42,17 @@ const KNOWN_TYPES = new Set(['user', 'assistant', 'system', 'attachment']);
 /** The tool an agent's thread calls last when it hands its result back (desktop app; seen in real transcripts, 2026-11-11). */
 const HANDBACK_TOOL = 'SubagentHandback';
 
-/** A real end replaces a weak one; between two of the same strength: the earlier time, failed if either is. */
+/**
+ * How several end signals for one dispatch combine, whatever order they come in (commutative and associative): a real
+ * signal replaces a weak one; among signals of the same strength a failure wins over a success (the agent was resumed
+ * and then failed, or the notification knows better than the thread's last record), and otherwise the earlier time.
+ */
 function mergeEnd(a: AgentEnd, b: AgentEnd): AgentEnd {
-  if (a.weak === true && b.weak !== true) return b;
-  if (b.weak === true && a.weak !== true) return a;
-  return {
-    at: a.at <= b.at ? a.at : b.at,
-    status: a.status === 'failed' || b.status === 'failed' ? 'failed' : 'succeeded',
-    ...(a.weak === true ? { weak: true } : {}),
-  };
+  const aWeak = a.weak === true;
+  const bWeak = b.weak === true;
+  if (aWeak !== bWeak) return aWeak ? b : a;
+  if (a.status !== b.status) return a.status === 'failed' ? a : b;
+  return a.at <= b.at ? a : b;
 }
 
 /** `<status>` values of a task notification that mean the task is over, and how (anything else is not an end). */
@@ -90,17 +92,24 @@ interface SessionState {
   agentMetas: Map<string, AgentMeta>;
   /** agents whose spawn edge was already emitted. */
   spawned: Set<string>;
-  /**
-   * Dispatch node ids launched in the background: the launch's own tool_result does not settle them, the end of the
-   * agent does (see finishAgent).
-   */
+  /** Dispatch node ids known to be background launches (their launch answer was read). */
+  asyncIds: Set<string>;
+  /** Those of them still open (no end signal yet). */
   asyncDispatch: Set<string>;
-  /** agentId -> when and how its thread ended, as far as signals for the agent itself say (earliest time; failed sticks). */
-  finishedAgents: Map<string, AgentEnd>;
-  /** Dispatch node id -> the end this mechanism gave it (so a later signal can only move it earlier or to failed). */
-  agentEnded: Map<string, AgentEnd>;
+  /** agentId -> its background launches (dispatch node ids). */
+  launches: Map<string, string[]>;
+  /** agentId -> every end signal seen for the agent's thread. */
+  agentSignals: Map<string, AgentSignal[]>;
+  /**
+   * Dispatch node id -> the end signals that apply to it: `direct` name the dispatch itself (a task notification, the
+   * end of the session, the hook for a foreground agent); `routed` are the agent's thread signals falling in this
+   * launch's window (recomputed whenever the agent's signals or launches change).
+   */
+  dispatchSignals: Map<string, { direct: AgentEnd[]; routed: AgentEnd[] }>;
+  /** Dispatch nodes whose current end was written from those signals. */
+  agentEnded: Set<string>;
   /** toolUseId -> a task notification seen before its launch was known to be a background one. */
-  notified: Map<string, AgentEnd>;
+  notified: Map<string, AgentEnd[]>;
   /** The first main-thread prompt has been seen (whether or not it gave a title). */
   firstPromptSeen: boolean;
 }
@@ -110,6 +119,8 @@ interface SessionState {
  * signal, whenever it arrives, replaces a weak end entirely.
  */
 interface AgentEnd { at: string; status: 'succeeded' | 'failed'; weak?: boolean }
+/** An end signal for an agent's thread; `viaHook`: the SubagentStop hook (which also ends a foreground agent's dispatch). */
+interface AgentSignal extends AgentEnd { viaHook: boolean }
 
 interface Placement {
   node: GraphNode;
@@ -260,7 +271,12 @@ export class Normalizer {
     state.agentMetas.set(meta.toolUseId, meta);
     state.dispatchByAgent.set(meta.agentId, `tool:${meta.toolUseId}`);
     this.applyAgentMeta(state, meta, changes);
-    this.settleFinishedDispatch(state, meta.agentId, changes); // the agent may have ended before its meta was read
+    // A background launch read before its meta: now that the agent is known, its thread's signals apply.
+    const dispatch = `tool:${meta.toolUseId}`;
+    if (state.asyncIds.has(dispatch)) {
+      this.addLaunch(state, meta.agentId, dispatch);
+      this.routeAgentSignals(state, meta.agentId, changes);
+    }
   }
 
   /** Writes the meta onto the dispatch node (if it exists yet) and tries the spawn edge. */
@@ -388,11 +404,11 @@ export class Normalizer {
         break;
       case 'settle':
         // The launch answer of a background agent, arriving late or without its async marker, does not end the agent.
-        if (effect.status !== 'denied' && state.asyncDispatch.has(`tool:${effect.toolUseId}`)) break;
+        if (effect.status !== 'denied' && state.asyncIds.has(`tool:${effect.toolUseId}`)) break;
         this.settleTool(state, effect, at, changes);
         break;
       case 'subagent_stop':
-        this.finishAgent(state, effect.agentId, { at, status: 'succeeded' }, true, changes);
+        this.finishAgent(state, effect.agentId, { at, status: 'succeeded', viaHook: true }, changes);
         break;
       case 'compact': {
         const id = `compact:${state.session.id}:${at}`;
@@ -445,53 +461,104 @@ export class Normalizer {
   }
 
   /**
-   * A signal that the agent's thread has ended: the SubagentStop hook (`viaHook`), or in its transcript an end_turn
-   * record, the hand-back call, or an interrupt (failed). Several signals may arrive, in any order (live or replayed):
-   * the earliest time and a `failed` win, so the result does not depend on the order. A signal from the transcript only
-   * ends a dispatch known to be a background launch (a foreground agent's dispatch is ended by its own tool_result);
-   * the hook also ends a foreground one, as it always did. The dispatch may not be known yet (no meta, launch record
-   * not read): then it is ended when it becomes known (settleFinishedDispatch).
+   * A signal that the agent's thread has ended: the SubagentStop hook, or in its transcript an end_turn record, the
+   * hand-back call, or an interrupt (failed). Signals arrive in any order, live or replayed, and before or after the
+   * launch and the meta are known; the dispatch node's end is always recomputed from all of them (routeAgentSignals,
+   * applyEnd), so it does not depend on the order.
    */
-  private finishAgent(state: SessionState, agentId: string, end: AgentEnd, viaHook: boolean, changes: Change[]): void {
-    const prev = state.finishedAgents.get(agentId);
-    state.finishedAgents.set(agentId, prev === undefined ? end : mergeEnd(prev, end));
-    const dispatch = state.dispatchByAgent.get(agentId);
-    if (dispatch === undefined) return;
-    if (viaHook || state.asyncDispatch.has(dispatch) || state.agentEnded.has(dispatch)) this.endDispatch(state, dispatch, end, changes);
+  private finishAgent(state: SessionState, agentId: string, signal: AgentSignal, changes: Change[]): void {
+    const list = state.agentSignals.get(agentId) ?? [];
+    if (!list.some((x) => x.at === signal.at && x.status === signal.status && x.viaHook === signal.viaHook)) list.push(signal);
+    state.agentSignals.set(agentId, list);
+    this.routeAgentSignals(state, agentId, changes);
   }
 
-  private settleFinishedDispatch(state: SessionState, agentId: string, changes: Change[]): void {
-    const end = state.finishedAgents.get(agentId);
-    const dispatch = state.dispatchByAgent.get(agentId);
-    if (end === undefined || dispatch === undefined || !state.asyncDispatch.has(dispatch)) return;
-    this.endDispatch(state, dispatch, end, changes);
+  private addLaunch(state: SessionState, agentId: string, dispatch: string): void {
+    const list = state.launches.get(agentId) ?? [];
+    if (!list.includes(dispatch)) list.push(dispatch);
+    state.launches.set(agentId, list);
+  }
+
+  private signalsOf(state: SessionState, id: string): { direct: AgentEnd[]; routed: AgentEnd[] } {
+    let entry = state.dispatchSignals.get(id);
+    if (!entry) state.dispatchSignals.set(id, (entry = { direct: [], routed: [] }));
+    return entry;
   }
 
   /**
-   * Ends a dispatch node: the first signal settles it (unless it is already terminal, e.g. denied); a later one can
-   * only move its end earlier or turn succeeded into failed.
+   * Gives each of the agent's thread signals to the dispatch it belongs to. With background launches: the launch that
+   * was running at the signal's time (the latest one started at or before it; the first one for an earlier signal), so
+   * an agent launched twice ends each launch with its own signals. Without any: only the hook counts, and it ends the
+   * agent's (foreground) dispatch, as it always did; the thread's own records do not (its tool_result does).
    */
+  private routeAgentSignals(state: SessionState, agentId: string, changes: Change[]): void {
+    const signals = state.agentSignals.get(agentId) ?? [];
+    const launches = (state.launches.get(agentId) ?? [])
+      .map((id) => ({ id, at: state.nodes.get(id)?.timestamp ?? '' }))
+      .sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.id < b.id ? -1 : 1));
+    if (launches.length === 0) {
+      const dispatch = state.dispatchByAgent.get(agentId);
+      if (dispatch === undefined) return;
+      const entry = this.signalsOf(state, dispatch);
+      entry.routed = signals.filter((x) => x.viaHook);
+      this.applyEnd(state, dispatch, changes);
+      return;
+    }
+    for (const l of launches) this.signalsOf(state, l.id).routed = [];
+    for (const signal of signals) {
+      let owner = launches[0]!;
+      for (const l of launches) if (l.at <= signal.at) owner = l;
+      this.signalsOf(state, owner.id).routed.push(signal);
+    }
+    for (const l of launches) this.applyEnd(state, l.id, changes);
+  }
+
+  /** A signal that names the dispatch itself (a task notification, the end of the session). */
   private endDispatch(state: SessionState, id: string, end: AgentEnd, changes: Change[]): void {
     const node = state.nodes.get(id);
     if (!node || node.kind !== 'subagent') return;
-    state.asyncDispatch.delete(id);
-    const prev = state.agentEnded.get(id);
-    if (prev === undefined) {
-      state.agentEnded.set(id, end);
-      this.settleTool(state, { kind: 'settle', toolUseId: id.slice('tool:'.length), status: end.status, durationMs: null }, end.at, changes);
-      return;
-    }
-    const merged = mergeEnd(prev, end);
-    state.agentEnded.set(id, merged);
+    const { direct } = this.signalsOf(state, id);
+    if (!direct.some((x) => x.at === end.at && x.status === end.status && x.weak === end.weak)) direct.push(end);
+    this.applyEnd(state, id, changes);
+  }
+
+  /**
+   * Writes onto the dispatch node the end its signals add up to (mergeEnd). For a background launch the signals are the
+   * whole truth: the node follows them, back to running when none is left. A foreground dispatch keeps its first
+   * terminal event (its tool_result, a hook), as before; a denied node is never touched.
+   */
+  private applyEnd(state: SessionState, id: string, changes: Change[]): void {
+    const node = state.nodes.get(id);
+    if (!node || node.kind !== 'subagent' || node.status === 'denied') return;
+    const entry = state.dispatchSignals.get(id);
+    const all = entry ? [...entry.direct, ...entry.routed] : [];
+    const background = state.asyncIds.has(id);
+    const terminal = node.status !== null && TERMINAL_STATUSES.includes(node.status);
     const patch: Partial<GraphNode> = {};
-    // The node's end is ours to move only if this mechanism set it (not a tool_result or a denial).
-    const ours = node.endedAt === prev.at && !state.terminalFromContent.has(id) && node.status !== 'denied';
-    if (ours && merged.at !== prev.at && (merged.at < prev.at || prev.weak === true)) {
-      patch.endedAt = merged.at;
-      if (!state.durationFromHook.has(id)) patch.durationMs = elapsedMs(node.timestamp, merged.at);
+    if (all.length === 0) {
+      if (!background) return;
+      state.asyncDispatch.add(id);
+      if (node.status !== 'running') {
+        patch.status = 'running';
+        patch.endedAt = null;
+        patch.durationMs = null;
+      }
+    } else {
+      if (!background && terminal && !state.agentEnded.has(id)) return; // settled by something else first
+      if (!background && state.terminalFromContent.has(id)) return; // its tool_result is final
+      const end = all.reduce(mergeEnd);
+      state.asyncDispatch.delete(id);
+      state.agentEnded.add(id);
+      if (node.status !== end.status) patch.status = end.status;
+      if (node.endedAt !== end.at) {
+        patch.endedAt = end.at;
+        patch.durationMs = elapsedMs(node.timestamp, end.at);
+      }
     }
-    if (ours && node.status !== merged.status && (merged.status === 'failed' || prev.weak === true)) patch.status = merged.status;
     if (Object.keys(patch).length === 0) return;
+    state.toolInputs.delete(id);
+    state.durationFromHook.delete(id);
+    if (background) state.terminalFromContent.delete(id);
     state.nodes.set(id, { ...node, ...patch });
     changes.push({ type: 'node_updated', sessionId: state.session.id, id, patch });
   }
@@ -512,11 +579,10 @@ export class Normalizer {
     if (!state || toolUseId === undefined || status === undefined) return;
     const end: AgentEnd = { at: str(record.timestamp) ?? state.session.lastActivityAt, status };
     const id = `tool:${toolUseId}`;
-    if (state.asyncDispatch.has(id) || state.agentEnded.has(id)) this.endDispatch(state, id, end, changes);
+    if (state.asyncIds.has(id)) this.endDispatch(state, id, end, changes);
     else if (state.nodes.get(id)?.kind === 'subagent') {
       // Its launch is not known to be a background one yet; kept only for an agent dispatch (not a background shell task).
-      const prev = state.notified.get(toolUseId);
-      state.notified.set(toolUseId, prev === undefined ? end : mergeEnd(prev, end));
+      state.notified.set(toolUseId, [...(state.notified.get(toolUseId) ?? []), end]);
     }
   }
 
@@ -640,7 +706,7 @@ export class Normalizer {
         this.applyAssistant(state, record, agentId, classified, changes);
         break;
       case 'interrupt':
-        if (agentId !== null) this.finishAgent(state, agentId, { at: str(record.timestamp) ?? state.session.lastActivityAt, status: 'failed' }, false, changes);
+        if (agentId !== null) this.finishAgent(state, agentId, { at: str(record.timestamp) ?? state.session.lastActivityAt, status: 'failed', viaHook: false }, changes);
         this.addNode(state, record, agentId, changes, {
           kind: 'system',
           title: 'Interrupted',
@@ -677,7 +743,7 @@ export class Normalizer {
     let first = true;
     // An agent's thread ends with an end_turn message, or (desktop app) with its hand-back call.
     if (agentId !== null && (c.meta.endTurn || c.blocks.some((b) => b.kind === 'tool_use' && b.name === HANDBACK_TOOL))) {
-      this.finishAgent(state, agentId, { at: str(record.timestamp) ?? state.session.lastActivityAt, status: 'succeeded' }, false, changes);
+      this.finishAgent(state, agentId, { at: str(record.timestamp) ?? state.session.lastActivityAt, status: 'succeeded', viaHook: false }, changes);
     }
     for (const b of c.blocks) {
       const parentId = first ? this.resolveParent(state, record) : prev;
@@ -742,9 +808,12 @@ export class Normalizer {
         batches: new Map(),
         firstNodeByAgent: new Map(),
         dispatchByAgent: new Map(),
+        asyncIds: new Set(),
         asyncDispatch: new Set(),
-        finishedAgents: new Map(),
-        agentEnded: new Map(),
+        launches: new Map(),
+        agentSignals: new Map(),
+        dispatchSignals: new Map(),
+        agentEnded: new Set(),
         notified: new Map(),
         agentMetas: new Map(),
         spawned: new Set(),
@@ -1035,38 +1104,27 @@ export class Normalizer {
   }
 
   /**
-   * The immediate answer to a background Agent launch: the agent is still running, so the dispatch node stays (or goes
-   * back to) running and is settled by finishAgent. A hook may have settled it already from the same answer.
+   * The immediate answer to a background Agent launch: from here on the dispatch node follows the agent's end signals
+   * (applyEnd) — running while there is none, whatever a hook made of the launch answer before.
    */
   private applyAsyncLaunch(state: SessionState, node: GraphNode, agentId: string | null, output: unknown, changes: Change[]): void {
     const id = node.id;
-    state.toolInputs.delete(id);
-    state.asyncDispatch.add(id);
-    const patch: Partial<GraphNode> = {};
-    // Not when a signal has already ended it (a hook processed before this record): that end stands.
-    if (node.status !== 'denied' && node.status !== 'running' && !state.agentEnded.has(id)) {
-      patch.status = 'running';
-      patch.endedAt = null;
-      patch.durationMs = null;
-      state.durationFromHook.delete(id);
-      state.terminalFromContent.delete(id);
-    }
-    if (Object.keys(patch).length > 0) state.nodes.set(id, { ...node, ...patch });
-    changes.push({ type: 'node_updated', sessionId: state.session.id, id, patch, detail: { output } });
     const toolUseId = id.slice('tool:'.length);
+    state.toolInputs.delete(id);
+    state.asyncIds.add(id);
+    changes.push({ type: 'node_updated', sessionId: state.session.id, id, patch: {}, detail: { output } });
+    const { direct } = this.signalsOf(state, id);
+    for (const end of state.notified.get(toolUseId) ?? []) direct.push(end);
+    state.notified.delete(toolUseId);
+    // Launched (as far as we read it) after the session had already ended: nothing else will end it.
+    if (state.session.status === 'ended') direct.push({ at: state.statusAt, status: 'failed', weak: true });
     const known = agentId ?? state.agentMetas.get(toolUseId)?.agentId ?? null;
     if (known !== null) {
       if (!state.dispatchByAgent.has(known)) state.dispatchByAgent.set(known, id);
-      this.settleFinishedDispatch(state, known, changes); // its thread may already have ended
-    }
-    const notified = state.notified.get(toolUseId);
-    if (notified !== undefined) {
-      state.notified.delete(toolUseId);
-      this.endDispatch(state, id, notified, changes);
-    }
-    // Launched (as far as we read it) after the session had already ended: nothing will end it later.
-    if (state.session.status === 'ended' && state.asyncDispatch.has(id)) {
-      this.endDispatch(state, id, { at: state.statusAt, status: 'failed', weak: true }, changes);
+      this.addLaunch(state, known, id);
+      this.routeAgentSignals(state, known, changes);
+    } else {
+      this.applyEnd(state, id, changes);
     }
   }
 

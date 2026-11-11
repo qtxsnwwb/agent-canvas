@@ -27,7 +27,7 @@ import type { UpstreamChain } from './chain';
 import { chainAriaLabel, isActivationKey } from './format';
 import {
   CanvasActions, graphNodeAriaLabel, highlightClass, isActive, nodeColor, nodeTypes, summaryAriaLabel, summaryColor,
-  type FlowNode, type Highlight,
+  type FlowNode, type Highlight, SessionProgressing,
 } from './nodes';
 
 export interface CanvasProps {
@@ -45,6 +45,8 @@ export interface CanvasProps {
   onToggleAgent(agentId: string): void;
   /** Called with the follow state whenever it changes (and on mount). */
   onFollowingChange?(following: boolean): void;
+  /** False when the session is not progressing: active steps are shown as unfinished (see SessionProgressing). Default true. */
+  progressing?: boolean;
   /**
    * Changing this number stops following, as a canvas button does (for layout changes made outside the canvas, e.g.
    * the drawer's 展开). The caller turns auto-fold off itself before making the change.
@@ -397,6 +399,7 @@ function useDeferredFocus(): (selector: string) => void {
 
 function CanvasInner({
   snapshot, selectedId, chain, onSelect, onToggleTurn, onShowFullTurn, onToggleAgent, onFollowingChange, stopFollowingSignal,
+  progressing = true,
 }: CanvasProps) {
   const nodes = useFlowNodes(snapshot, selectedId, chain);
   const edges = useFlowEdges(snapshot, chain);
@@ -501,6 +504,7 @@ function CanvasInner({
 
   return (
     <CanvasActions.Provider value={actions}>
+      <SessionProgressing.Provider value={progressing}>
       <ReactFlow<FlowNode, Edge>
         onKeyDown={onKeyDown}
         nodes={nodes}
@@ -532,6 +536,7 @@ function CanvasInner({
         )}
         <MiniMap<FlowNode> nodeColor={miniMapColor} nodeClassName={miniMapClass} nodeStrokeWidth={0} pannable zoomable />
       </ReactFlow>
+      </SessionProgressing.Provider>
     </CanvasActions.Provider>
   );
 }

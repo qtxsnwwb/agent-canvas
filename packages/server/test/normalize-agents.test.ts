@@ -358,13 +358,13 @@ test('后台派出：没有任何线程内结束信号时，任务通知结算�
   expect(failed.graph.nodes['tool:tu1']!.status).toBe('failed');
 });
 
-test('后台派出：线程先以 end_turn 结束、通知随后报告失败，状态改为失败，结束时间仍是较早的那个', () => {
+test('后台派出：线程先以 end_turn 结束、通知随后报告失败，状态改为失败，结束时间是失败那一刻', () => {
   const { graph } = run(n, [
     ...launch(),
     assistantBlock('s1', null, { type: 'text', text: 'done' }, { agentId: 'ag1', stopReason: 'end_turn', timestamp: '2026-01-01T00:20:00.000Z' }),
     notification('tu1', 'failed', '2026-01-01T00:21:00.000Z'),
   ]);
-  expect(graph.nodes['tool:tu1']).toMatchObject({ status: 'failed', endedAt: '2026-01-01T00:20:00.000Z' });
+  expect(graph.nodes['tool:tu1']).toMatchObject({ status: 'failed', endedAt: '2026-01-01T00:21:00.000Z' });
 });
 
 test('后台派出：end_turn 与 SubagentStop 谁先到，结束时间都一样（取较早的）', () => {
@@ -449,4 +449,83 @@ test('任务通知：只有表示结束的状态才结算；引用通知文本�
     rawLine('queue-operation', { operation: 'enqueue', content: '看这个 <task-notification><tool-use-id>tu1</tool-use-id><status>failed</status></task-notification>' }),
   ]);
   expect(quoted.graph.nodes['tool:tu1']!.status).toBe('running');
+});
+
+function permutations<T>(items: T[]): T[][] {
+  if (items.length <= 1) return [items];
+  return items.flatMap((x, i) => permutations([...items.slice(0, i), ...items.slice(i + 1)]).map((rest) => [x, ...rest]));
+}
+const pickEnd = (g: Graph) => {
+  const node = g.nodes['tool:tu1']!;
+  return { status: node.status, endedAt: node.endedAt, durationMs: node.durationMs };
+};
+
+test('后台派出：派出记录、元数据和各种结束信号以任意先后到达，派发节点的最终状态都一样', () => {
+  const head = [
+    userPrompt('u1', null, 'x'),
+    assistantBlock('a1', 'u1', { type: 'tool_use', id: 'tu1', name: 'Agent', input: {} }, { timestamp: '2026-01-01T00:10:00.000Z' }),
+  ];
+  const rest = [
+    toolResult('u2', 'a1', 'tu1', 'launched', undefined, { toolUseResult: { status: 'async_launched', isAsync: true } }),
+    agentMeta('ag1', { toolUseId: 'tu1', agentType: 'Explore', description: 'd' }),
+    assistantBlock('s1', null, { type: 'text', text: 'done' }, { agentId: 'ag1', stopReason: 'end_turn', timestamp: '2026-01-01T00:20:00.000Z' }),
+    hook('SubagentStop', { agent_id: 'ag1' }, '2026-01-01T00:20:05.000Z'),
+    notification('tu1', 'completed', '2026-01-01T00:21:00.000Z'),
+    hook('PostToolUse', { tool_use_id: 'tu1', tool_name: 'Agent', duration_ms: 12, tool_response: 'ok' }, '2026-01-01T00:10:01.000Z'),
+    hook('SessionEnd', {}, '2026-01-01T05:00:00.000Z'),
+  ];
+  const outcomes = new Set(permutations(rest).map((order) => JSON.stringify(pickEnd(run(new Normalizer(), [...head, ...order]).graph))));
+  expect([...outcomes]).toEqual([JSON.stringify({ status: 'succeeded', endedAt: '2026-01-01T00:20:00.000Z', durationMs: 600_000 })]);
+});
+
+test('后台派出：只有会话结束这一个信号时，任意先后都记为失败', () => {
+  const head = [
+    userPrompt('u1', null, 'x'),
+    assistantBlock('a1', 'u1', { type: 'tool_use', id: 'tu1', name: 'Agent', input: {} }, { timestamp: '2026-01-01T00:10:00.000Z' }),
+  ];
+  const rest = [
+    toolResult('u2', 'a1', 'tu1', 'launched', undefined, ASYNC),
+    agentMeta('ag1', { toolUseId: 'tu1', agentType: 'Explore', description: 'd' }),
+    hook('SessionEnd', {}, '2026-01-01T05:00:00.000Z'),
+  ];
+  const statuses = new Set(permutations(rest).map((order) => run(new Normalizer(), [...head, ...order]).graph.nodes['tool:tu1']!.status));
+  expect([...statuses]).toEqual(['failed']);
+});
+
+test('前台子代理：SubagentStop hook 与线程里的 end_turn 谁先到，结束时间都取 hook 的', () => {
+  const head = [
+    userPrompt('u1', null, 'x'),
+    assistantBlock('a1', 'u1', { type: 'tool_use', id: 'tu1', name: 'Agent', input: {} }, { timestamp: '2026-01-01T00:10:00.000Z' }),
+    agentMeta('ag1', { toolUseId: 'tu1', agentType: 'Explore', description: 'd' }),
+  ];
+  const rest = [
+    assistantBlock('s1', null, { type: 'text', text: 'done' }, { agentId: 'ag1', stopReason: 'end_turn', timestamp: '2026-01-01T00:20:00.000Z' }),
+    hook('SubagentStop', { agent_id: 'ag1' }, '2026-01-01T00:20:05.000Z'),
+  ];
+  const outcomes = new Set(permutations(rest).map((order) => JSON.stringify(pickEnd(run(new Normalizer(), [...head, ...order]).graph))));
+  expect([...outcomes]).toEqual([JSON.stringify({ status: 'succeeded', endedAt: '2026-01-01T00:20:05.000Z', durationMs: 605_000 })]);
+});
+
+test('同一个子代理被后台派出两次：各自按自己时间窗口里的信号结束，先后顺序无关', () => {
+  const launchAt = (uuid: string, parent: string, id: string, at: string) => [
+    assistantBlock(uuid, parent, { type: 'tool_use', id, name: 'Agent', input: {} }, { timestamp: at }),
+    toolResult(`${uuid}r`, uuid, id, 'launched', undefined, ASYNC),
+  ];
+  const main = [
+    userPrompt('u1', null, 'x'),
+    ...launchAt('a1', 'u1', 'tu1', '2026-01-01T00:10:00.000Z'),
+    ...launchAt('a2', 'a1r', 'tu2', '2026-01-01T00:30:00.000Z'),
+  ];
+  const ends = [
+    assistantBlock('s1', null, { type: 'text', text: 'first done' }, { agentId: 'ag1', stopReason: 'end_turn', timestamp: '2026-01-01T00:20:00.000Z' }),
+    assistantBlock('s2', 's1', { type: 'text', text: 'second done' }, { agentId: 'ag1', stopReason: 'end_turn', timestamp: '2026-01-01T00:40:00.000Z' }),
+  ];
+  for (const events of [[...main, ...ends], [...ends, ...main], [main[0]!, main[1]!, main[2]!, ends[0]!, main[3]!, main[4]!, ends[1]!]]) {
+    const { graph } = run(new Normalizer(), events);
+    expect(graph.nodes['tool:tu1']).toMatchObject({ status: 'succeeded', endedAt: '2026-01-01T00:20:00.000Z' });
+    expect(graph.nodes['tool:tu2']).toMatchObject({ status: 'succeeded', endedAt: '2026-01-01T00:40:00.000Z' });
+  }
+  // While only the first run has ended, the second launch is still running.
+  const partial = run(new Normalizer(), [...main, ends[0]!]).graph;
+  expect(partial.nodes['tool:tu2']).toMatchObject({ status: 'running', endedAt: null });
 });

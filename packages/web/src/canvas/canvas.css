@@ -383,3 +383,6 @@ button.cc-reason:focus-visible, .cc-reason-current:focus-visible { outline: 2px 
   .cc-waterfall-open .cc-drawer { bottom: max(46%, 200px); }
   .cc-drawer-open .cc-waterfall { padding-right: 0; }
 }
+/* The session is not progressing: a step still marked running is shown as unfinished (dashed, no pulse). */
+.cc-node.cc-stalled { border-style: dashed; }
+.cc-stalled-label, .cc-stalled .cc-status { color: #b45309; }

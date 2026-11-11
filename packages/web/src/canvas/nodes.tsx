@@ -106,6 +106,15 @@ export interface CanvasActionsValue {
   /** Expands or collapses the agent (a subagent node's childAgentId). */
   toggleAgent(agentId: string): void;
 }
+/**
+ * Whether the session is progressing (running, or waiting for a permission). When it is not — idle, ended, or silent
+ * for too long — a step still marked running is not being worked on (the process went away, an agent was cut off):
+ * it is shown as "未结束" without the pulse, instead of claiming to be in progress.
+ */
+export const SessionProgressing = createContext(true);
+/** The label of an active status while the session is not progressing. */
+export const UNFINISHED_LABEL = '未结束';
+
 /** Callbacks for controls inside nodes; a context keeps them out of node data (which must stay stable). */
 export const CanvasActions = createContext<CanvasActionsValue>({ toggleTurn() {}, showFullTurn() {}, toggleAgent() {} });
 
@@ -134,9 +143,11 @@ function pulseClass(status: NodeStatus | null): string {
 
 function GraphNodeView({ data, width, height, selected }: NodeProps<GraphFlowNode>) {
   const { node } = data;
+  const progressing = useContext(SessionProgressing);
+  const stalled = !progressing && isActive(node.status);
   const duration = node.durationMs !== null ? formatDuration(node.durationMs) : '';
   const unconfirmed = node.confirmed === false;
-  const className = `cc-node cc-kind-${node.kind}${pulseClass(node.status)}${selected ? ' cc-selected' : ''}${unconfirmed ? ' cc-unconfirmed' : ''}`;
+  const className = `cc-node cc-kind-${node.kind}${stalled ? ' cc-stalled' : pulseClass(node.status)}${selected ? ' cc-selected' : ''}${unconfirmed ? ' cc-unconfirmed' : ''}`;
   const style = boxStyle(width, height, nodeColor(node));
   const kindLabel = KIND_LABEL[node.kind] ?? node.kind;
   const tag = unconfirmed ? <span className="cc-tag">未确认</span> : null;
@@ -187,7 +198,7 @@ function GraphNodeView({ data, width, height, selected }: NodeProps<GraphFlowNod
       <div className="cc-row">
         <span className="cc-kind">{kindLabel}</span>
         <span className="cc-title cc-ellipsis cc-grow">{showTitle ? node.title : ''}</span>
-        {node.status !== null && <span className="cc-status">{NODE_STATUS_LABEL[node.status] ?? node.status}</span>}
+        {node.status !== null && <span className="cc-status">{stalled ? UNFINISHED_LABEL : NODE_STATUS_LABEL[node.status] ?? node.status}</span>}
         {duration !== '' && <span className="cc-duration">{duration}</span>}
         {thought}
         {tag}
@@ -258,6 +269,7 @@ function SubagentView({ data, className, style, rows, overlayRow }: {
 
 function TurnSummaryView({ data, width, height, selected }: NodeProps<SummaryFlowNode>) {
   const { toggleTurn } = useContext(CanvasActions);
+  const progressing = useContext(SessionProgressing);
   const onExpand = (e: MouseEvent): void => {
     e.stopPropagation(); // the node click would expand it as well
     toggleTurn(data.summary.turnKey, e.detail === 0); // detail 0: a click synthesised from Enter / Space
@@ -265,10 +277,10 @@ function TurnSummaryView({ data, width, height, selected }: NodeProps<SummaryFlo
   const s = data.summary;
   const duration = s.durationMs > 0 ? formatDuration(s.durationMs) : '';
   const stats = [
-    data.outline && s.activity !== undefined ? `正在执行 ${s.activity}` : null,
+    data.outline && s.activity !== undefined ? `${progressing ? '正在执行' : '未结束：'} ${s.activity}` : null,
     data.outline ? null : `${s.nodeCount} 个节点`, `${s.toolCount} 次工具调用`, duration,
   ].filter(Boolean).join(' · ');
-  const className = `cc-node cc-turn-summary${s.running ? ' cc-pulse-running' : ''}${selected ? ' cc-selected' : ''}`;
+  const className = `cc-node cc-turn-summary${s.running ? (progressing ? ' cc-pulse-running' : ' cc-stalled') : ''}${selected ? ' cc-selected' : ''}`;
   return (
     <div className={className} style={boxStyle(width, height, summaryColor(s))}
       title={data.outline ? '点击查看这一轮的执行过程' : '点击展开该轮次'}>
@@ -276,7 +288,9 @@ function TurnSummaryView({ data, width, height, selected }: NodeProps<SummaryFlo
       <div className="cc-row">
         <span className="cc-kind">{data.outline ? '轮次' : '已折叠'}</span>
         <span className="cc-title cc-ellipsis cc-grow">{s.promptSummary || '（无提示）'}</span>
-        {s.running && <span className="cc-status cc-running-dot">运行中</span>}
+        {s.running && (progressing
+          ? <span className="cc-status cc-running-dot">运行中</span>
+          : <span className="cc-status cc-stalled-label">{UNFINISHED_LABEL}</span>)}
         {!data.outline && <button type="button" className="cc-expand nodrag nopan" onClick={onExpand}>展开</button>}
       </div>
       <div className="cc-row cc-summary">
