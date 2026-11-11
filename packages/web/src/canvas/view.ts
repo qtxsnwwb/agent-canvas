@@ -11,8 +11,11 @@ export const TURN_FOLD_THRESHOLD = 60;
  * 'causal': the same nodes, groups and edges as 'live'; only the node sizes differ (see sizeOf).
  * 'replay': the node set rules of 'live', applied to the graph as it was at the replay time (the model feeds buildView
  * graphAt(live graph, time)); tool, subagent and text nodes get an overlay row (see sizeOf).
+ * 'outline': the skeleton only — one summary node per turn (every turn counts as collapsed) and, hanging off it, one
+ * node per subagent dispatched in that turn, with the agents those dispatched below them. Nothing is expandable; the
+ * steps of a turn or an agent are read in the waterfall panel (see waterfall.ts).
  */
-export type ViewMode = 'live' | 'topology' | 'causal' | 'replay';
+export type ViewMode = 'live' | 'topology' | 'causal' | 'replay' | 'outline';
 
 /** Layout group of the inner nodes of an expanded agent. */
 export function agentGroupKey(agentId: string): string {
@@ -28,6 +31,8 @@ export interface TurnSummary {
   running: boolean;
   startedAt: string;
   durationMs: number;
+  /** The title of the turn's latest running / awaiting-permission main-thread node; absent when there is none. */
+  activity?: string;
 }
 /**
  * `groupKey`: the layout group — the turn key for main-thread nodes, summaries and `earlier` nodes;
@@ -131,6 +136,43 @@ export function forkSources(edges: readonly Pick<ViewEdge, 'from'>[], ignore?: (
 
 interface Entry { node: GraphNode; ms: number }
 
+/**
+ * Main-thread entries (sorted by time, then id) grouped into turns: a node with a turnId belongs to that turn; one
+ * without belongs to the latest turn that started at or before it, or to PRELUDE_TURN when there is none.
+ */
+function groupByTurn(main: Entry[]): { groups: Map<string, Entry[]>; turnOf: Map<string, string>; turnStart: Map<string, number> } {
+  const turnStart = new Map<string, number>();
+  for (const x of main) {
+    const key = x.node.turnId;
+    if (key !== null && !turnStart.has(key)) turnStart.set(key, x.ms); // sorted, so first seen = earliest
+  }
+  const anchors = [...turnStart].map(([key, ms]) => ({ key, ms })).sort((a, b) => a.ms - b.ms || (a.key < b.key ? -1 : 1));
+  const groups = new Map<string, Entry[]>();
+  const turnOf = new Map<string, string>();
+  for (const x of main) {
+    let key = x.node.turnId;
+    if (key === null) {
+      key = PRELUDE_TURN;
+      for (const a of anchors) {
+        if (a.ms <= x.ms) key = a.key; else break;
+      }
+    }
+    let list = groups.get(key);
+    if (!list) groups.set(key, (list = []));
+    list.push(x);
+    turnOf.set(x.node.id, key);
+  }
+  return { groups, turnOf, turnStart };
+}
+
+/** The main-thread nodes of turn `turnKey` (as buildView groups them), by time then id. */
+export function turnNodes(graph: Graph, turnKey: string): GraphNode[] {
+  const main: Entry[] = [];
+  for (const node of Object.values(graph.nodes)) if (node.agentId === null) main.push({ node, ms: parseMs(node.timestamp) });
+  main.sort(byTimeThenId);
+  return (groupByTurn(main).groups.get(turnKey) ?? []).map((x) => x.node);
+}
+
 function parseMs(ts: string): number {
   const ms = Date.parse(ts);
   return Number.isNaN(ms) ? 0 : ms;
@@ -152,12 +194,17 @@ function summarize(key: string, entries: Entry[], toolWeight: (node: GraphNode) 
   let toolCount = 0;
   let failedCount = 0;
   let running = false;
+  let activity: string | undefined;
   for (const { node } of entries) {
     toolCount += toolWeight(node);
     if (node.status === 'failed' || node.status === 'denied') failedCount++;
-    if (isActiveStatus(node)) running = true;
+    if (isActiveStatus(node)) {
+      running = true;
+      activity = node.title;
+    }
   }
   return {
+    ...(activity !== undefined ? { activity } : {}),
     turnKey: key,
     promptSummary: entries.find((x) => x.node.kind === 'prompt')?.node.summary ?? '',
     nodeCount: entries.length,
@@ -189,7 +236,10 @@ export function buildView(
   const keepVisible = options.keepVisible ?? null;
   const mode: ViewMode = options.mode ?? 'live';
   const topology = mode === 'topology';
-  const expandedAgents = topology ? NO_AGENTS : options.expandedAgents ?? NO_AGENTS;
+  const outline = mode === 'outline';
+  const expandedAgents = topology || outline ? NO_AGENTS : options.expandedAgents ?? NO_AGENTS;
+  /** Outline: agent id -> the dispatch nodes issued inside that agent. */
+  const nestedBy = new Map<string, Entry[]>();
   /** Main-thread nodes not drawn in this mode (they still count in turn summaries and edges are contracted through them). */
   const isHidden = (node: GraphNode): boolean => topology && hiddenInTopology(node);
   const runs = options.runs;
@@ -214,6 +264,11 @@ export function buildView(
       continue;
     }
     innerByAgent.set(node.agentId, (innerByAgent.get(node.agentId) ?? 0) + 1);
+    if (outline && node.kind === 'subagent') {
+      let list = nestedBy.get(node.agentId);
+      if (!list) nestedBy.set(node.agentId, (list = []));
+      list.push({ node, ms: parseMs(node.timestamp) });
+    }
     if (expandedAgents.has(node.agentId)) {
       let list = innerEntries.get(node.agentId);
       if (!list) innerEntries.set(node.agentId, (list = []));
@@ -232,34 +287,14 @@ export function buildView(
   /** Never folded into `earlier`: still running, or the selection (and its containers). */
   const mustShow = (node: GraphNode): boolean => isActiveStatus(node) || protectedIds.has(node.id);
 
-  // Turns with a turnId define the turn start times.
-  const turnStart = new Map<string, number>();
-  for (const x of main) {
-    const key = x.node.turnId;
-    if (key !== null && !turnStart.has(key)) turnStart.set(key, x.ms); // sorted, so first seen = earliest
-  }
-  const anchors = [...turnStart].map(([key, ms]) => ({ key, ms })).sort((a, b) => a.ms - b.ms || (a.key < b.key ? -1 : 1));
-
-  const groups = new Map<string, Entry[]>();
-  const turnOf = new Map<string, string>();
-  for (const x of main) {
-    let key = x.node.turnId;
-    if (key === null) {
-      key = PRELUDE_TURN;
-      for (const a of anchors) {
-        if (a.ms <= x.ms) key = a.key; else break;
-      }
-    }
-    let list = groups.get(key);
-    if (!list) groups.set(key, (list = []));
-    list.push(x);
-    turnOf.set(x.node.id, key);
-  }
+  const { groups, turnOf, turnStart } = groupByTurn(main);
 
   const ordered = [...groups].map(([key, entries]) => ({ key, entries, start: turnStart.get(key) ?? entries[0]!.ms }))
     .sort((a, b) => a.start - b.start || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
 
   const nodes = new Map<string, ViewNode>();
+  /** Outline: [parent view id, agent node id]. */
+  const outlineEdges: [string, string][] = [];
   const turns: TurnView[] = [];
   const collapsedKeys = new Set<string>();
   /** Hidden node id -> the id of the `earlier` node that stands for it. */
@@ -338,9 +373,9 @@ export function buildView(
     const entries = topology ? all.filter((x) => !isHidden(x.node)) : all;
     const expandedOverride = overrides.get(key);
     const holdsKept = protectedIds.size > 0 && entries.some((x) => protectedIds.has(x.node.id));
-    const collapsed = expandedOverride === undefined
+    const collapsed = outline || (expandedOverride === undefined
       ? i < ordered.length - EXPANDED_RECENT_TURNS && !holdsKept
-      : !expandedOverride;
+      : !expandedOverride);
     const summary = summarize(key, all, toolWeight);
     let nodeIds: string[];
     let foldedIds: string[] = [];
@@ -348,6 +383,27 @@ export function buildView(
       collapsedKeys.add(key);
       nodeIds = [`turn:${key}`];
       nodes.set(nodeIds[0]!, { type: 'turn_summary', id: nodeIds[0]!, turnKey: key, groupKey: key, summary });
+      if (outline) {
+        // The turn's agents hang off its summary node, and the agents those dispatched off them (breadth first).
+        const seen = new Set<string>();
+        const queue = all.filter((x) => x.node.kind === 'subagent').map((x) => ({ entry: x, parentId: nodeIds[0]! }));
+        for (let k = 0; k < queue.length; k++) {
+          const { entry, parentId } = queue[k]!;
+          const { node } = entry;
+          if (seen.has(node.id)) continue;
+          seen.add(node.id);
+          const child = node.childAgentId;
+          nodes.set(node.id, {
+            type: 'node', id: node.id, turnKey: key, groupKey: key, node, innerCount: child ? (innerByAgent.get(child) ?? 0) : 0,
+            expanded: false, expandable: false, runCount: 0, thinkingMs: 0,
+          });
+          nodeIds.push(node.id);
+          outlineEdges.push([parentId, node.id]);
+          if (child !== null) {
+            for (const inner of (nestedBy.get(child) ?? []).sort(byTimeThenId)) queue.push({ entry: inner, parentId: node.id });
+          }
+        }
+      }
     } else {
       // The length rule always shows a leading prompt.
       const first = entries[0]?.node;
@@ -428,6 +484,7 @@ export function buildView(
     const id = `${from}->${to}`;
     if (!edges.has(id)) edges.set(id, { id, from, to, kind: fromTurn === toTurn ? kind : 'sequence' });
   };
+  for (const [from, to] of outlineEdges) edges.set(`${from}->${to}`, { id: `${from}->${to}`, from, to, kind: 'fork' });
   const allEdges = Object.values(graph.edges);
   /** Topology mode: a hidden main-thread node is a member of turnOf whose kind is hidden. */
   const isHiddenId = (id: string): boolean => {

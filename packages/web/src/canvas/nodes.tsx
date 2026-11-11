@@ -50,8 +50,8 @@ export function graphNodeAriaLabel(node: GraphNode, expanded = false): string {
     expanded ? '已展开' : null,
   ]);
 }
-export function summaryAriaLabel(s: TurnSummary): string {
-  return nodeAriaLabel(['已折叠的轮次', s.promptSummary, `${s.nodeCount} 个节点`, s.running ? '运行中' : null]);
+export function summaryAriaLabel(s: TurnSummary, outline = false): string {
+  return nodeAriaLabel([outline ? '轮次' : '已折叠的轮次', s.promptSummary, `${s.nodeCount} 个节点`, s.running ? '运行中' : null]);
 }
 
 export function isActive(status: NodeStatus | null): boolean {
@@ -81,7 +81,8 @@ export type GraphNodeData = {
  */
 export type Highlight = 'chain' | 'dim' | 'none';
 export type GraphFlowNode = Node<GraphNodeData, 'graphNode'>;
-export type SummaryFlowNode = Node<{ summary: TurnSummary; highlight: Highlight }, 'turnSummary'>;
+/** `outline`: the outline view's turn card (a click selects it; there is nothing to expand). */
+export type SummaryFlowNode = Node<{ summary: TurnSummary; highlight: Highlight; outline: boolean }, 'turnSummary'>;
 export type HeaderFlowNode = Node<{ turnKey: string; startedAt: string; nodeCount: number; highlight: Highlight }, 'turnHeader'>;
 /** `groupKey`: the turn key, or the agent group key for the fold inside a long expanded agent (see ViewNode). */
 export type EarlierFlowNode = Node<{
@@ -263,16 +264,20 @@ function TurnSummaryView({ data, width, height, selected }: NodeProps<SummaryFlo
   };
   const s = data.summary;
   const duration = s.durationMs > 0 ? formatDuration(s.durationMs) : '';
-  const stats = [`${s.nodeCount} 个节点`, `${s.toolCount} 次工具调用`, duration].filter(Boolean).join(' · ');
+  const stats = [
+    data.outline && s.activity !== undefined ? `正在执行 ${s.activity}` : null,
+    data.outline ? null : `${s.nodeCount} 个节点`, `${s.toolCount} 次工具调用`, duration,
+  ].filter(Boolean).join(' · ');
   const className = `cc-node cc-turn-summary${s.running ? ' cc-pulse-running' : ''}${selected ? ' cc-selected' : ''}`;
   return (
-    <div className={className} style={boxStyle(width, height, summaryColor(s))} title="点击展开该轮次">
+    <div className={className} style={boxStyle(width, height, summaryColor(s))}
+      title={data.outline ? '点击查看这一轮的执行过程' : '点击展开该轮次'}>
       <Handles />
       <div className="cc-row">
-        <span className="cc-kind">已折叠</span>
+        <span className="cc-kind">{data.outline ? '轮次' : '已折叠'}</span>
         <span className="cc-title cc-ellipsis cc-grow">{s.promptSummary || '（无提示）'}</span>
         {s.running && <span className="cc-status cc-running-dot">运行中</span>}
-        <button type="button" className="cc-expand nodrag nopan" onClick={onExpand}>展开</button>
+        {!data.outline && <button type="button" className="cc-expand nodrag nopan" onClick={onExpand}>展开</button>}
       </div>
       <div className="cc-row cc-summary">
         <span className="cc-ellipsis cc-grow">

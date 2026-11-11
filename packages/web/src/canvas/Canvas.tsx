@@ -66,7 +66,7 @@ const samePos = (a: Pos, b: Pos): boolean => a.x === b.x && a.y === b.y;
 function sameSummary(a: TurnSummary, b: TurnSummary): boolean {
   return a.turnKey === b.turnKey && a.promptSummary === b.promptSummary && a.nodeCount === b.nodeCount
     && a.toolCount === b.toolCount && a.failedCount === b.failedCount && a.running === b.running
-    && a.startedAt === b.startedAt && a.durationMs === b.durationMs;
+    && a.startedAt === b.startedAt && a.durationMs === b.durationMs && a.activity === b.activity;
 }
 
 /** `next` when any element differs from `prev`, otherwise `prev` itself (so React Flow sees no change). */
@@ -165,6 +165,7 @@ function useFlowNodes(
     // for, so a mode switch never draws new sizes on old positions; both switch together when the new mode's round lands.
     const causal = layoutMode === 'causal';
     const replay = layoutMode === 'replay';
+    const outline = view.mode === 'outline';
     for (const vn of view.nodes.values()) {
       const position = positions[vn.id];
       if (!position) continue;
@@ -205,14 +206,14 @@ function useFlowNodes(
           };
       } else if (vn.type === 'turn_summary') {
         n = old && old.type === 'turnSummary' && sameSummary(old.data.summary, vn.summary) && old.data.highlight === highlight
-          && old.zIndex === zIndex
+          && old.data.outline === outline && old.zIndex === zIndex
           && samePos(old.position, position) && old.selected === selected && old.width === width && old.height === height
           ? old
           : {
             id: vn.id, type: 'turnSummary', position, width, height, selected, zIndex,
-            ariaLabel: chainAriaLabel(summaryAriaLabel(vn.summary), highlight === 'chain'),
+            ariaLabel: chainAriaLabel(summaryAriaLabel(vn.summary, outline), highlight === 'chain'),
             className: wrapperClass(false, highlight),
-            data: { summary: vn.summary, highlight },
+            data: { summary: vn.summary, highlight, outline },
             handles: handlesFor(width, height), draggable: false, connectable: false,
           };
       } else {
@@ -484,12 +485,15 @@ function CanvasInner({
     e.preventDefault();
     e.stopPropagation();
     if (e.repeat) return;
-    if (vn.type === 'node') onSelectRef.current(vn.id);
+    // Outline view: a turn card is selected (its steps open in the waterfall panel), not expanded.
+    if (vn.type === 'node' || viewRef.current.mode === 'outline') onSelectRef.current(vn.id);
     else actions.toggleTurn(vn.turnKey, true);
   }, [actions]);
   const onNodeClick = useCallback((_: unknown, n: FlowNode) => {
-    if (n.type === 'turnSummary') actions.toggleTurn(n.data.summary.turnKey);
-    else if (n.type === 'graphNode') onSelectRef.current(n.id);
+    if (n.type === 'turnSummary') {
+      if (n.data.outline) onSelectRef.current(n.id);
+      else actions.toggleTurn(n.data.summary.turnKey);
+    } else if (n.type === 'graphNode') onSelectRef.current(n.id);
   }, [actions]);
   const onPaneClick = useCallback(() => onSelectRef.current(null), []);
 

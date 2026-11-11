@@ -30,6 +30,11 @@ export type Compactor = (graph: Graph, options?: CompactOptions) => CompactResul
 
 const KEPT_SYSTEM = new Set(['compact', 'interrupt']);
 
+/** A node with nothing to read in it: a thinking node without text, or a system node other than compaction / interrupt. */
+export function isNoise(node: GraphNode): boolean {
+  return node.kind === 'thinking' ? node.summary === '' : node.kind === 'system' && !KEPT_SYSTEM.has(node.systemSubtype ?? '');
+}
+
 function parseMs(ts: string): number {
   const ms = Date.parse(ts);
   return Number.isNaN(ms) ? 0 : ms;

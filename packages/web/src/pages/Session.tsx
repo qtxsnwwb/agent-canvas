@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useReducer, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { openLiveSession, type LiveSession } from '../client';
 import { Canvas } from '../canvas/Canvas';
@@ -8,6 +8,8 @@ import { Drawer } from '../canvas/Drawer';
 import { Timeline } from '../canvas/Timeline';
 import { useCanvas } from '../canvas/useCanvas';
 import type { ViewMode } from '../canvas/view';
+import { Waterfall } from '../canvas/WaterfallPanel';
+import { scopeOf, type WaterfallScope } from '../canvas/waterfall';
 import { sessionStatusView } from '../labels';
 import { sessionLoadState } from '../sessionLoad';
 import { useNow } from '../useNow';
@@ -17,11 +19,12 @@ function hasKeys(obj: object): boolean {
   return false;
 }
 
-const VIEW_MODES: { mode: ViewMode; label: string }[] = [
-  { mode: 'live', label: '实时' },
-  { mode: 'topology', label: '拓扑' },
-  { mode: 'causal', label: '因果' },
-  { mode: 'replay', label: '复盘' },
+const VIEW_MODES: { mode: ViewMode; label: string; title: string }[] = [
+  { mode: 'outline', label: '概览', title: '画布只画轮次和子代理；点一个看它的执行过程（瀑布图）' },
+  { mode: 'live', label: '逐步', title: '每一步都画成画布节点' },
+  { mode: 'topology', label: '拓扑', title: '只画提示、工具调用和子代理' },
+  { mode: 'causal', label: '因果', title: '选中一步，高亮它之前的推理链' },
+  { mode: 'replay', label: '复盘', title: '按时间轴回放' },
 ];
 
 /** Segmented live / topology / causal / replay switch; the mode itself lives in the canvas model. */
@@ -30,7 +33,8 @@ function ViewSwitch({ mode, disabled, onChange }: { mode: ViewMode; disabled: bo
   return (
     <div className="view-switch" role="group" aria-label="视角">
       {VIEW_MODES.map((m) => (
-        <button key={m.mode} type="button" aria-pressed={mode === m.mode} disabled={disabled} onClick={() => onChange(m.mode)}>
+        <button key={m.mode} type="button" aria-pressed={mode === m.mode} disabled={disabled} title={m.title}
+          onClick={() => onChange(m.mode)}>
           {m.label}
         </button>
       ))}
@@ -71,10 +75,39 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
   const selectedView = selected !== null ? canvas.view.nodes.get(selected) : undefined;
   // The replay view draws nodes as they were at the replay time; the drawer shows the node's current content.
   const replaying = canvas.view.mode === 'replay';
-  const selectedNode = selectedView?.type === 'node'
-    ? (replaying ? live.getGraph().nodes[selectedView.id] : undefined) ?? selectedView.node
-    : null;
-  const closeDrawer = useCallback(() => setSelectedId(null), []);
+  // Outline view: the canvas selection picks what the waterfall panel lists; a row of the panel opens the drawer.
+  const outline = canvas.view.mode === 'outline';
+  const [panelClosed, setPanelClosed] = useState(false);
+  const [detailId, setDetailId] = useState<string | null>(null);
+  useEffect(() => { setDetailId(null); }, [outline, selected]);
+  const graphNow = live.getGraph();
+  const selectedNode = outline
+    ? (detailId !== null ? graphNow.nodes[detailId] ?? null : null)
+    : selectedView?.type === 'node'
+      ? (replaying ? graphNow.nodes[selectedView.id] : undefined) ?? selectedView.node
+      : null;
+  const closeDrawer = useCallback(() => {
+    setDetailId(null);
+    setSelectedId((id) => (outlineRef.current ? id : null));
+  }, []);
+  const outlineRef = useRef(outline);
+  outlineRef.current = outline;
+  // With nothing selected the panel follows the latest turn (until it is closed).
+  const explicitScope = outline ? scopeOf(selectedView) : null;
+  const latestTurn = canvas.view.turns[canvas.view.turns.length - 1];
+  const scope: WaterfallScope | null = !outline || panelClosed
+    ? null
+    : explicitScope ?? (selected === null && latestTurn !== undefined ? { type: 'turn', turnKey: latestTurn.key } : null);
+  const scopeNodeId = scope === null ? null : explicitScope !== null ? selected : `turn:${latestTurn!.key}`;
+  const scopeView = scopeNodeId !== null ? canvas.view.nodes.get(scopeNodeId) : undefined;
+  const scopeTitle = scopeView?.type === 'turn_summary'
+    ? scopeView.summary.promptSummary || '（无提示）'
+    : scopeView?.type === 'node' ? [scopeView.node.title, scopeView.node.summary].filter(Boolean).join(' · ') : '';
+  const closePanel = useCallback(() => {
+    setPanelClosed(true);
+    setSelectedId(null);
+  }, []);
+  const openAgent = useCallback((dispatchNodeId: string) => setSelectedId(dispatchNodeId), []);
   const [stopFollowingSignal, setStopFollowingSignal] = useState(0);
   // A run node has no content of its own: selecting it shows its calls instead (and, like any expand, stops following).
   const { expandRun } = canvas;
@@ -83,6 +116,7 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
       setStopFollowingSignal((n) => n + 1);
       expandRun(id);
     } else {
+      if (id !== null) setPanelClosed(false);
       setSelectedId(id);
     }
   }, [expandRun]);
@@ -120,10 +154,10 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
         toolbar,
       )}
       {canvas.layoutError !== null && <div className="canvas-error">布局失败，正在自动重试：{canvas.layoutError}</div>}
-      <div className={`canvas-area${selectedNode !== null ? ' cc-drawer-open' : ''}${canvas.replay !== null ? ' cc-replay' : ''}`}>
+      <div className={`canvas-area${selectedNode !== null ? ' cc-drawer-open' : ''}${canvas.replay !== null ? ' cc-replay' : ''}${scope !== null ? ' cc-waterfall-open' : ''}`}>
         <Canvas
           snapshot={canvas}
-          selectedId={selected}
+          selectedId={outline ? scopeNodeId : selected}
           chain={chain}
           onSelect={select}
           onToggleTurn={canvas.toggleTurn}
@@ -145,6 +179,18 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
           />
         )}
         {canvas.replay !== null && <Timeline replay={canvas.replay} onSeek={canvas.setReplayTime} />}
+        {scope !== null && (
+          <Waterfall
+            graph={graphNow}
+            scope={scope}
+            title={scopeTitle}
+            compact={canvas.compact}
+            selectedId={detailId}
+            onSelectRow={setDetailId}
+            onOpenAgent={openAgent}
+            onClose={closePanel}
+          />
+        )}
         {empty && <div className="canvas-empty muted">暂无节点</div>}
         {laying && <div className="canvas-empty muted">布局中…</div>}
       </div>

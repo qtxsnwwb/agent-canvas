@@ -196,7 +196,7 @@ function sameRecord<T>(a: Record<string, T>, b: Record<string, T>, same: (x: T, 
  * move the time.
  */
 export function createCanvasModel(
-  live: Pick<LiveSession, 'getGraph' | 'subscribe'>, layout: LayoutClient, initial: { compact?: boolean } = {},
+  live: Pick<LiveSession, 'getGraph' | 'subscribe'>, layout: LayoutClient, initial: { compact?: boolean; mode?: ViewMode } = {},
 ): CanvasModel {
   let compact = initial.compact ?? true;
   const compactor = createCompactor();
@@ -227,7 +227,7 @@ export function createCanvasModel(
   let keepVisible: string | null = null;
   /** Agent ids the user expanded (kept across mode switches). */
   const expandedAgents = new Set<string>();
-  let mode: ViewMode = 'live';
+  let mode: ViewMode = initial.mode ?? 'live';
   const listeners = new Set<() => void>();
   let snapshot: CanvasSnapshot = { ...EMPTY_SNAPSHOT, compact };
   let disposed = false;
@@ -404,7 +404,8 @@ export function createCanvasModel(
     builtGraph = graph;
     builtSource = source;
     cancelRetry(); // this rebuild is the retry
-    const reduced = compact ? reduce(graph) : null;
+    // The outline view counts every step in its turn cards, so it is built from the full graph.
+    const reduced = compact && mode !== 'outline' ? reduce(graph) : null;
     currentRuns = new Set(reduced?.runs.keys());
     const view = buildView(reduced?.graph ?? graph, effectiveOverrides(), fullTurns, {
       frozenHidden: frozen, keepVisible, expandedAgents, mode, runs: reduced?.runs, thinkingMs: reduced?.thinkingMs,
@@ -559,7 +560,7 @@ export function useCanvas(live: LiveSession): UseCanvasResult {
   const [model, setModel] = useState<CanvasModel | null>(null);
   useEffect(() => {
     const client = createLayoutClient(createBrowserLayoutWorker);
-    const m = createCanvasModel(live, client, { compact: readCompactPreference() });
+    const m = createCanvasModel(live, client, { compact: readCompactPreference(), mode: 'outline' });
     setModel(m);
     return () => {
       m.dispose();
