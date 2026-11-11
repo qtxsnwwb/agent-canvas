@@ -71,6 +71,8 @@ interface HooksProfile {
   willCreate(file: string): string | null;
   /** Printed after a successful write. */
   after(mode: Mode): string[];
+  /** The node binary the hook commands run (named when outdated handlers are replaced). */
+  nodePath?: string;
 }
 
 function claudeProfile(port: number): HooksProfile {
@@ -98,6 +100,7 @@ function codexProfile(opts: CodexHooksCliOptions): HooksProfile {
   const { command, commandWindows } = codexForwardCommands(spec);
   return {
     target: codexHookTarget(spec),
+    nodePath: opts.nodePath,
     // ~/.codex is Codex's own directory: never created here.
     precheck: (file, mode) =>
       mode === 'install' && !isDirectory(path.dirname(file))
@@ -398,12 +401,14 @@ async function run(mode: Mode, opts: HooksCliOptions, io: HooksCliIo, profile: H
   }
   let loaded: Loaded;
   let events: string[];
+  let replaced: string[] = [];
   let next: Record<string, unknown>;
   try {
     loaded = loadSettings(file);
     if (mode === 'install') {
       const plan = planInstallFor(profile.target, loaded.settings);
       events = plan.added;
+      replaced = plan.replaced;
       next = plan.next;
     } else {
       const plan = planUninstallFor(profile.target, loaded.settings);
@@ -415,7 +420,7 @@ async function run(mode: Mode, opts: HooksCliOptions, io: HooksCliIo, profile: H
     return 1;
   }
 
-  if (events.length === 0) {
+  if (events.length === 0 && replaced.length === 0) {
     io.out(mode === 'install' ? `hooks 已全部安装，无需改动（${file}）` : profile.nothingToRemove);
     return 0;
   }
@@ -430,7 +435,11 @@ async function run(mode: Mode, opts: HooksCliOptions, io: HooksCliIo, profile: H
     io.out(`（${opts.settingsFile} 是符号链接，实际写入 ${file}）`);
   }
   for (const line of profile.describe(file)) io.out(line);
-  io.out(`将${mode === 'install' ? '添加' : '移除'}的事件（${events.length}）：${events.join(', ')}`);
+  if (events.length > 0) io.out(`将${mode === 'install' ? '添加' : '移除'}的事件（${events.length}）：${events.join(', ')}`);
+  if (replaced.length > 0) {
+    io.out(`已安装但已过期的 hooks（命令里的 node 路径不是当前的 ${profile.nodePath ?? 'node'}）`);
+    io.out(`将替换的事件（${replaced.length}）：${replaced.join(', ')}`);
+  }
   io.out('不会改动已有的其他内容');
   const creating = loaded.exists ? null : profile.willCreate(file);
   if (creating !== null) io.out(creating);

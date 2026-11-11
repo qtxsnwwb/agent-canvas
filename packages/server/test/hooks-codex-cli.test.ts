@@ -22,8 +22,9 @@ beforeAll(() => {
 });
 afterAll(() => {
   vi.restoreAllMocks();
-  const real = path.resolve(REAL_DEFAULT).toLowerCase();
-  expect(touched.filter((p) => p.toLowerCase().startsWith(real))).toEqual([]);
+  // Neither Codex's real hooks file nor Claude Code's real settings file (one test also runs the Claude install).
+  const real = [REAL_DEFAULT, path.join(os.homedir(), '.claude', 'settings.json')].map((p) => path.resolve(p).toLowerCase());
+  expect(touched.filter((p) => real.some((r) => p.toLowerCase().startsWith(r)))).toEqual([]);
 });
 
 let dir: string;
@@ -120,6 +121,22 @@ test('重复安装：不写入、不备份', async () => {
   expect(io.outs.join('\n')).toContain('hooks 已全部安装，无需改动');
   expect(fs.readFileSync(file, 'utf8')).toBe(after);
   expect(listDir()).toEqual(['hooks.json']);
+});
+
+test('已安装但 node 路径过期：说明是过期条目、将替换，备份后在一次写入里换成当前 node 的命令', async () => {
+  seed('{}');
+  expect(await runCodexHooksInstall({ ...opts(), nodePath: '/old/nvm/node' }, fakeIo())).toBe(0);
+  const io = fakeIo();
+  expect(await runCodexHooksInstall(opts(), io)).toBe(0);
+  const text = io.outs.join('\n');
+  expect(text).not.toContain('无需改动');
+  expect(text).toContain('过期');
+  expect(text).toContain(`将替换的事件（${CODEX_HOOK_EVENTS.length}）`);
+  expect(text).toContain(`备份：`);
+  const { command, commandWindows } = codexForwardCommands({ nodePath: NODE, cliPath: CLI, port: 4317 });
+  expect(readJson().hooks.Stop).toEqual([{ hooks: [{ type: 'command', command, commandWindows, async: true, timeout: 5 }] }]);
+  expect(readJson().hooks.SessionEnd).toEqual([{ hooks: [{ type: 'command', command, commandWindows, async: true, timeout: 3 }] }]);
+  expect(fs.readFileSync(file, 'utf8')).not.toContain('/old/nvm/node');
 });
 
 test('确认：非交互且没有 --yes 返回 1；交互回答否不写；回答是写入', async () => {
