@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { afterEach, expect, test, vi } from 'vitest';
 import type { Diagnostics } from '@claude-canvas/shared';
-import { createPoller, EXPECTED_HOOK_EVENTS, formatAge, summarizeDiagnostics, truncateSample, SAMPLE_DISPLAY_MAX } from '../src/diagnostics';
+import { createPoller, EXPECTED_CODEX_HOOK_EVENTS, EXPECTED_HOOK_EVENTS, EXPECTED_HOOK_EVENTS_BY_ORIGIN, fileOrigin, formatAge, hooksByOrigin, hookState, summarizeDiagnostics, truncateSample, SAMPLE_DISPLAY_MAX } from '../src/diagnostics';
 
 const NOW = Date.parse('2026-01-01T12:00:00.000Z');
 const base: Diagnostics = {
@@ -153,4 +153,66 @@ test('createPoller：stop() 之后不再请求，迟到的结果被丢弃', asyn
   p2.stop();
   await vi.advanceTimersByTimeAsync(20_000);
   expect(load2).toHaveBeenCalledTimes(1);
+});
+
+// ---- per origin ----
+const ev = (origin: 'claude' | 'codex', eventName: string, lastAt = at(1)) => ({ origin, eventName, count: 1, lastAt });
+
+test('EXPECTED_CODEX_HOOK_EVENTS 是 11 个，EXPECTED_HOOK_EVENTS_BY_ORIGIN 按来源给出', () => {
+  expect([...EXPECTED_CODEX_HOOK_EVENTS]).toEqual([
+    'SessionStart', 'SessionEnd', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'PostToolUse',
+    'SubagentStart', 'SubagentStop', 'Stop', 'PostCompact', 'Interrupt',
+  ]);
+  expect(EXPECTED_HOOK_EVENTS_BY_ORIGIN.claude).toBe(EXPECTED_HOOK_EVENTS);
+  expect(EXPECTED_HOOK_EVENTS_BY_ORIGIN.codex).toBe(EXPECTED_CODEX_HOOK_EVENTS);
+});
+
+test('fileOrigin：codex: 前缀是 Codex，其余是 Claude Code', () => {
+  expect(fileOrigin('codex:2026/11/11/rollout-x.jsonl')).toBe('codex');
+  expect(fileOrigin('D--proj/abc.jsonl')).toBe('claude');
+  expect(fileOrigin('hook:abc')).toBe('claude');
+});
+
+test('hooksByOrigin：只有 Claude 的安装只有 claude 一节，和以前一样', () => {
+  const d = { ...base, lastHookAt: at(5), hookEvents: [ev('claude', 'Stop', at(5))] };
+  const h = hooksByOrigin(d);
+  expect(h.map((x) => x.origin)).toEqual(['claude']);
+  expect(h[0]!.events.map((e) => e.eventName)).toEqual(['Stop']);
+  expect(h[0]!.missing).toEqual(EXPECTED_HOOK_EVENTS.filter((e) => e !== 'Stop'));
+  expect(h[0]!.lastAt).toBe(at(5));
+  expect(hooksByOrigin(base)).toEqual([{ origin: 'claude', events: [], missing: [...EXPECTED_HOOK_EVENTS], lastAt: null }]);
+});
+
+test('hooksByOrigin：有 Codex 文件但没收到 Codex hook 时也列出 codex，缺失是全部 11 个', () => {
+  const d = { ...base, files: [{ path: 'codex:2026/11/11/r.jsonl', offset: 1, size: 1 }] };
+  const h = hooksByOrigin(d);
+  expect(h.map((x) => x.origin)).toEqual(['claude', 'codex']);
+  expect(h[1]).toEqual({ origin: 'codex', events: [], missing: [...EXPECTED_CODEX_HOOK_EVENTS], lastAt: null });
+});
+
+test('hooksByOrigin：事件按来源分开，缺失各按各的清单，最近时间取该来源事件里最晚的', () => {
+  const d = {
+    ...base,
+    lastHookAt: at(1),
+    hookEvents: [ev('claude', 'Notification', at(100)), ev('claude', 'Stop', at(50)), ev('codex', 'Interrupt', at(1)), ev('codex', 'Stop', at(20))],
+  };
+  const [claude, codex] = hooksByOrigin(d);
+  expect(claude!.events.map((e) => e.eventName)).toEqual(['Notification', 'Stop']);
+  expect(claude!.missing).not.toContain('Notification');
+  expect(claude!.missing).toContain('SessionStart');
+  expect(claude!.lastAt).toBe(at(50));
+  expect(codex!.events.map((e) => e.eventName)).toEqual(['Interrupt', 'Stop']);
+  expect(codex!.missing).toEqual(EXPECTED_CODEX_HOOK_EVENTS.filter((e) => e !== 'Interrupt' && e !== 'Stop'));
+  expect(codex!.missing).not.toContain('Notification');
+  expect(codex!.lastAt).toBe(at(1));
+  // Only Codex hooks so far: the Claude section still shows, with nothing received.
+  const onlyCodex = hooksByOrigin({ ...base, lastHookAt: at(1), hookEvents: [ev('codex', 'Stop', at(1))] });
+  expect(onlyCodex.map((x) => [x.origin, x.lastAt])).toEqual([['claude', null], ['codex', at(1)]]);
+});
+
+test('hookState：和 summarizeDiagnostics 的 hooks / hookAgeMs 同一规则', () => {
+  expect(hookState(null, NOW)).toEqual({ hooks: 'never', hookAgeMs: null });
+  expect(hookState(at(5_000), NOW)).toEqual({ hooks: 'recent', hookAgeMs: 5_000 });
+  expect(hookState(at(600_001), NOW)).toEqual({ hooks: 'quiet', hookAgeMs: 600_001 });
+  expect(hookState('garbage', NOW)).toEqual({ hooks: 'quiet', hookAgeMs: null });
 });

@@ -1,6 +1,6 @@
 # claude-canvas
 
-claude-canvas 是一个本地服务：它读取 Claude Code 的 transcript 文件并接收 hook 事件，在固定的本地网址上用网页展示每个 Claude Code 会话正在做什么。
+claude-canvas 是一个本地服务：它读取 Claude Code 的 transcript 文件和 OpenAI Codex 的会话文件，并接收 hook 事件，在固定的本地网址上用网页展示每个会话正在做什么。两种工具的会话用同一套页面展示（Codex 见下文“Codex”）。
 每个会话显示为一张实时更新的画布。默认的“概览”视角只画骨架（每个轮次一张卡片，下面挂它派出的子代理），选中一个轮次或子代理，它的执行过程在下方以瀑布图列出。另有逐步、拓扑、因果、复盘四个视角（见下文“画布”）。首页可以检索会话，诊断页给出服务和 hooks 的运行情况。
 
 ## 环境要求
@@ -106,6 +106,24 @@ claude-canvas listening on http://127.0.0.1:4317
 - 工具和子代理节点下方多一行耗时和 token（输入 / 输出），回复节点只显示 token；时间轴右侧是到该时刻为止的节点数和 token 合计，同一条消息拆成的多个节点只计一次。
 - 历史会话里工具的耗时由开始和结束时间推算（hook 提供了 `duration_ms` 时用 hook 的值）。
 
+## Codex
+
+- 服务启动时会自动读取 `~/.codex/sessions` 下的 Codex 会话文件（Codex 桌面应用和 CLI 写的都是这里），并持续监视。目录不存在时跳过，不报错。
+- 用环境变量 `CLAUDE_CANVAS_CODEX_DIR` 指定别的目录；设为空字符串表示不读取 Codex。
+- 会话标题取自 `~/.codex/session_index.jsonl`（Codex 给会话起的名字），没有时取第一条提示。
+- 同一个工作目录下的 Claude Code 会话和 Codex 会话属于同一个项目。
+- 首页会话卡片、检索结果和会话页信息栏上标明来源（Claude Code 或 Codex）。两种来源都有的项目，项目卡片上有两个小标记。
+- 有 Codex 会话时，首页项目列表上方出现“全部 / Claude Code / Codex”筛选，选择记在这个浏览器里。筛选后没有该来源会话的项目不显示；地址里指定的项目即使被筛掉也照常显示。服务给出的项目会话数不分来源，所以筛选时，同时有两种来源的项目不显示会话数，顶部只在数字准确时显示会话总数和进行中的数量。
+- Codex 的子代理是单独的线程，显示为派出它的那一步下面的子代理，展开后是它内部的步骤。
+
+已知限制：
+
+- 思考内容：Codex 的思考正文是加密的，只有摘要，而且摘要多数为空。Codex 会话的“因果”视角主要靠回复文本。
+- token：不显示 Codex 的 token 用量，复盘视角里 Codex 会话的 token 合计为 0。
+- 已归档会话（`~/.codex/archived_sessions`）不导入。归档一个会话后，它在这里显示为“源文件已删除”，已采集的内容仍可看。
+- Codex 的会话文件格式不是稳定接口，升级 Codex 后可能出现未识别的记录，可在诊断页查看。
+- Codex 自己发起的审批复核线程（不是由某次工具调用派出的）不显示。
+
 ## Hooks（可选）
 
 不装 hooks 也能用：服务只靠 transcript 就能工作。区别是：
@@ -152,10 +170,10 @@ claude-canvas 没有运行时，HTTP hook 连接失败会立刻报错，而 Clau
 页面右上角的“诊断”打开 `#/diagnostics`（<http://127.0.0.1:4317/#/diagnostics>），每 5 秒自动刷新，内容来自 `GET /api/diagnostics`：
 
 - 服务：是否正在导入、推导规则版本、数据库标识。
-- Hooks：是否收到过 hook、最近一次收到的时间（超过 10 分钟没有收到时提示）；每个事件收到的次数和最近一次的时间；以及 14 个事件中哪些从未收到过（装了 hooks 但某些事件一直没出现，通常只是还没有触发它的操作，例如 `PermissionDenied`）。
+- Hooks：是否收到过 hook、最近一次收到的时间（超过 10 分钟没有收到时提示）；每个事件收到的次数和最近一次的时间；以及 14 个事件中哪些从未收到过（装了 hooks 但某些事件一直没出现，通常只是还没有触发它的操作，例如 `PermissionDenied`）。有 Codex 数据时按来源分成 Claude Code 和 Codex 两部分，Codex 按它自己的 11 个事件计算从未收到的事件；一个 Codex hook 都没收到时提示 Codex hooks 尚未安装或尚未在 Codex 里确认信任。
 - 导入失败：读取或处理失败的文件、错误信息和时间。
 - 未识别的记录类型：每种类型的次数和一条样例（样例可能含对话内容，展开后才显示）。
-- 文件读取进度：已记录的文件总数和尚未读完的文件（已读 / 总字节）。
+- 文件读取进度：已记录的文件总数和尚未读完的文件（已读 / 总字节）。Codex 文件的路径以 `codex:` 开头，前面带 Codex 标记（导入失败一节同样）。
 
 ## 数据与环境变量
 
@@ -163,6 +181,7 @@ claude-canvas 没有运行时，HTTP hook 连接失败会立刻报错，而 Clau
 | --- | --- | --- |
 | `CLAUDE_CANVAS_PROJECTS_DIR` | `~/.claude/projects` | 读取 transcript 的目录 |
 | `CLAUDE_CANVAS_DATA_DIR` | `~/.claude-canvas` | 数据目录，数据库文件为 `data.db` |
+| `CLAUDE_CANVAS_CODEX_DIR` | `~/.codex/sessions` | 读取 Codex 会话文件的目录；空字符串表示不读取 |
 | `CLAUDE_CANVAS_SETTINGS_FILE` | `~/.claude/settings.json` | `hooks install` / `hooks uninstall` 修改的 settings 文件 |
 
 ## rebuild

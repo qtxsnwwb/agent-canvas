@@ -1,4 +1,4 @@
-import type { Diagnostics } from '@claude-canvas/shared';
+import { ORIGINS, type Diagnostics, type Origin } from '@claude-canvas/shared';
 
 /** The hook events `claude-canvas hooks install` registers. Kept in step with docs/hooks-snippet.json by a test. */
 export const EXPECTED_HOOK_EVENTS: readonly string[] = [
@@ -35,17 +35,81 @@ export interface DiagnosticsSummary {
   unknownTotal: number;
 }
 
-export function summarizeDiagnostics(d: Diagnostics, nowMs: number): DiagnosticsSummary {
-  const last = d.lastHookAt === null ? Number.NaN : Date.parse(d.lastHookAt);
+/** The hook events `claude-canvas hooks install --codex` registers in `~/.codex/hooks.json`. */
+export const EXPECTED_CODEX_HOOK_EVENTS: readonly string[] = [
+  'SessionStart',
+  'SessionEnd',
+  'UserPromptSubmit',
+  'PreToolUse',
+  'PermissionRequest',
+  'PostToolUse',
+  'SubagentStart',
+  'SubagentStop',
+  'Stop',
+  'PostCompact',
+  'Interrupt',
+];
+
+export const EXPECTED_HOOK_EVENTS_BY_ORIGIN: Record<Origin, readonly string[]> = {
+  claude: EXPECTED_HOOK_EVENTS,
+  codex: EXPECTED_CODEX_HOOK_EVENTS,
+};
+
+/** The origin of a file by its store key: Codex files are `codex:`-prefixed. */
+export function fileOrigin(path: string): Origin {
+  return path.startsWith('codex:') ? 'codex' : 'claude';
+}
+
+/** Whether hooks were received, and how long ago, from the time of the last one (null: never). */
+export function hookState(lastAt: string | null, nowMs: number): { hooks: DiagnosticsSummary['hooks']; hookAgeMs: number | null } {
+  const last = lastAt === null ? Number.NaN : Date.parse(lastAt);
   const hookAgeMs = Number.isNaN(last) ? null : Math.max(0, nowMs - last);
   // A present but unparseable timestamp is not "never received": hooks did arrive, we just cannot date them.
   const hooks: DiagnosticsSummary['hooks'] =
-    d.lastHookAt === null ? 'never' : hookAgeMs === null ? 'quiet' : hookAgeMs <= HOOK_QUIET_MS ? 'recent' : 'quiet';
-  const seen = new Set(d.hookEvents.map((e) => e.eventName));
+    lastAt === null ? 'never' : hookAgeMs === null ? 'quiet' : hookAgeMs <= HOOK_QUIET_MS ? 'recent' : 'quiet';
+  return { hooks, hookAgeMs };
+}
+
+export interface OriginHooks {
+  origin: Origin;
+  events: Diagnostics['hookEvents'];
+  /** That origin's expected events never received, in its list's order. */
+  missing: string[];
+  /** The latest `lastAt` among its events; null when none. */
+  lastAt: string | null;
+}
+
+/**
+ * The hooks section, one entry per origin (ORIGINS order): Claude Code always (the page looks as before on a
+ * Claude-only install), Codex once any Codex hook event or Codex file is known.
+ */
+export function hooksByOrigin(d: Diagnostics): OriginHooks[] {
+  const hasCodexFiles = d.files.some((f) => fileOrigin(f.path) === 'codex');
+  const out: OriginHooks[] = [];
+  for (const origin of ORIGINS) {
+    const events = d.hookEvents.filter((e) => e.origin === origin);
+    if (origin !== 'claude' && events.length === 0 && !(origin === 'codex' && hasCodexFiles)) continue;
+    const seen = new Set(events.map((e) => e.eventName));
+    let lastAt: string | null = null;
+    for (const e of events) {
+      if (lastAt === null) { lastAt = e.lastAt; continue; }
+      const t = Date.parse(e.lastAt);
+      const best = Date.parse(lastAt);
+      if (!Number.isNaN(t) && (Number.isNaN(best) || t > best)) lastAt = e.lastAt;
+    }
+    out.push({ origin, events, missing: EXPECTED_HOOK_EVENTS_BY_ORIGIN[origin].filter((e) => !seen.has(e)), lastAt });
+  }
+  return out;
+}
+
+export function summarizeDiagnostics(d: Diagnostics, nowMs: number): DiagnosticsSummary {
+  const { hooks, hookAgeMs } = hookState(d.lastHookAt, nowMs);
+  const seen = new Set(d.hookEvents.filter((e) => e.origin === 'claude').map((e) => e.eventName));
   const behind = d.files.filter((f) => f.offset < f.size);
   return {
     hooks,
     hookAgeMs,
+    /** Claude Code's events never received (hooksByOrigin gives every origin's). */
     missingHookEvents: EXPECTED_HOOK_EVENTS.filter((e) => !seen.has(e)),
     filesTotal: d.files.length,
     behindTotal: behind.length,

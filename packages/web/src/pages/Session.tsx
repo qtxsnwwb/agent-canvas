@@ -13,6 +13,7 @@ import { reasoningRow, type ReasoningRow } from '../canvas/reasoning';
 import { ALL_PROGRESSING, type Progressing } from '../canvas/nodes';
 import { scopeKey, scopeOf, stepChain, stepTicking, waterfallClock, type WaterfallScope } from '../canvas/waterfall';
 import { sessionStatusView } from '../labels';
+import { OriginBadge } from '../OriginBadge';
 import { sessionLoadState } from '../sessionLoad';
 import { useNow } from '../useNow';
 
@@ -346,6 +347,7 @@ export function SessionPage({ sessionId }: { sessionId: string }) {
         <a href={`#/p/${encodeURIComponent(session.projectId)}`}>← 返回项目</a>
         <h2 title={session.title ?? session.id}>{session.title ?? session.id.slice(0, 8)}</h2>
         <span className={`status status-${status.status}`}>{status.label}</span>
+        <OriginBadge origin={session.origin} />
         {session.gitBranch !== null && <span className="muted branch" title={session.gitBranch}>{session.gitBranch}</span>}
         {session.sourceDeleted && <span className="tag">源文件已删除</span>}
         <div className="session-bar-end" ref={setToolbar} />
