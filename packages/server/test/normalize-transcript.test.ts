@@ -1,8 +1,10 @@
 import { beforeEach, expect, test } from 'vitest';
 import type { Change } from '@claude-canvas/shared';
+import type { RawEvent } from '../src/store/store.js';
 import { Normalizer } from '../src/normalize/normalizer.js';
 import { summarize } from '../src/normalize/summary.js';
-import { assistantBlock, rawLine, run, toolResult, userPrompt } from './fixtures.js';
+import { openStore } from '../src/store/store.js';
+import { assistantBlock, customTitle, hook, rawLine, run, toolResult, userPrompt } from './fixtures.js';
 
 let n: Normalizer;
 beforeEach(() => {
@@ -127,8 +129,8 @@ test('hook 先到的 tool 节点被 JSONL 记录确认，不改 status', () => {
 test('会话变更：每次实际变化发一次，无变化不发', () => {
   const r1 = n.apply(userPrompt('u1', null, 'x'), 'p1');
   const sessions1 = r1.changes.filter((c) => c.type === 'session_upserted');
-  expect(sessions1).toHaveLength(2);
-  expect(r1.changes.slice(0, 2).every((c) => c.type === 'session_upserted')).toBe(true);
+  expect(sessions1).toHaveLength(3); // created, titled from the first prompt, status
+  expect(r1.changes.slice(0, 3).every((c) => c.type === 'session_upserted')).toBe(true);
   expect(n.hasSession('s1')).toBe(true);
   n.dropSession('s1');
   expect(n.hasSession('s1')).toBe(false);
@@ -358,6 +360,111 @@ test('未知类型的内容块被跳过；块 id 用内容数组下标', () => {
   expect(unknown).toEqual([]);
 });
 
+const toolUseAt = (timestamp: string) =>
+  assistantBlock('a1', 'u1', { type: 'tool_use', id: 'tu1', name: 'Bash', input: { command: 'ls' } }, { timestamp });
+
+test('tool_result 到达时记下 endedAt，并由起止时间推出耗时', () => {
+  const T0 = '2026-03-01T10:00:00.000Z';
+  const T4 = '2026-03-01T10:00:04.000Z';
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x'),
+    toolUseAt(T0),
+    toolResult('u2', 'a1', 'tu1', 'ok', undefined, { timestamp: T4 }),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ status: 'succeeded', endedAt: T4, durationMs: 4000 });
+});
+
+test('失败的 tool_result 也记 endedAt', () => {
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x'),
+    toolUseAt('2026-03-01T10:00:00.000Z'),
+    toolResult('u2', 'a1', 'tu1', 'boom', true, { timestamp: '2026-03-01T10:00:02.500Z' }),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ status: 'failed', endedAt: '2026-03-01T10:00:02.500Z', durationMs: 2500 });
+});
+
+test('仍在执行的工具 endedAt 为 null；非工具节点 endedAt 恒为 null', () => {
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x'),
+    assistantBlock('t1', 'u1', { type: 'thinking', thinking: 'hm' }),
+    assistantBlock('x1', 't1', { type: 'text', text: 'hi' }),
+    assistantBlock('a1', 'x1', { type: 'tool_use', id: 'tu1', name: 'Bash', input: {} }),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ status: 'running', endedAt: null, durationMs: null });
+  for (const id of ['u1', 't1', 'x1']) expect(graph.nodes[id]!.endedAt).toBeNull();
+});
+
+test('结束时间早于开始时间时耗时为 0', () => {
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x'),
+    toolUseAt('2026-03-01T10:00:10.000Z'),
+    toolResult('u2', 'a1', 'tu1', 'ok', undefined, { timestamp: '2026-03-01T10:00:05.000Z' }),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ endedAt: '2026-03-01T10:00:05.000Z', durationMs: 0 });
+});
+
+test('开始时间无法解析时 endedAt 照记，durationMs 保持为空', () => {
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x'),
+    toolUseAt('not-a-time'),
+    toolResult('u2', 'a1', 'tu1', 'ok', undefined, { timestamp: '2026-03-01T10:00:05.000Z' }),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ endedAt: '2026-03-01T10:00:05.000Z', durationMs: null });
+});
+
+test('重放：从库里取回的原始事件交给新的归一化器，得到相同的 endedAt 和 durationMs', () => {
+  const events = [
+    userPrompt('u1', null, 'x'),
+    assistantBlock('a1', 'u1', { type: 'tool_use', id: 'tu1', name: 'Bash', input: { command: 'ls' } }, { messageId: 'm1', timestamp: '2026-03-01T10:00:00.000Z' }),
+    assistantBlock('a2', 'a1', { type: 'tool_use', id: 'tu2', name: 'Read', input: { file_path: '/x' } }, { messageId: 'm1', timestamp: '2026-03-01T10:00:01.000Z' }),
+    assistantBlock('a3', 'a2', { type: 'tool_use', id: 'tu3', name: 'Bash', input: { command: 'pwd' } }, { messageId: 'm1', timestamp: '2026-03-01T10:00:01.500Z' }),
+    hook('PostToolUse', { tool_use_id: 'tu1', tool_response: 'ok', duration_ms: 777 }, '2026-03-01T10:00:02.000Z'),
+    toolResult('r1', 'a3', 'tu1', 'late', true, { timestamp: '2026-03-01T10:00:09.000Z' }),
+    toolResult('r2', 'r1', 'tu2', 'ok', undefined, { timestamp: '2026-03-01T10:00:04.000Z' }),
+    hook('PermissionDenied', { tool_use_id: 'tu3', reason: 'no' }, '2026-03-01T10:00:06.000Z'),
+  ];
+  // First pass: the live path (apply, then persist the raw event like the pipeline does).
+  const store = openStore(':memory:');
+  try {
+    const live = new Normalizer();
+    for (const ev of events) {
+      store.insertRaw(ev);
+      store.applyChanges(live.apply(ev, 'p1').changes);
+    }
+    // Second pass: a fresh normalizer replays the stored raw events in order (how an evicted session is hydrated).
+    const replayed = run(new Normalizer(), store.rawForSession('s1')).graph;
+    const stored = store.getGraph('s1')!;
+    expect(stored.nodes.filter((nd) => nd.kind === 'tool')).toHaveLength(3);
+    for (const node of stored.nodes) {
+      expect(replayed.nodes[node.id], node.id).toMatchObject({ endedAt: node.endedAt, durationMs: node.durationMs });
+    }
+    expect(replayed.nodes['tool:tu1']).toMatchObject({ endedAt: '2026-03-01T10:00:02.000Z', durationMs: 777, status: 'failed' });
+    expect(replayed.nodes['tool:tu2']).toMatchObject({ endedAt: '2026-03-01T10:00:04.000Z', durationMs: 3000 });
+    expect(replayed.nodes['tool:tu3']).toMatchObject({ endedAt: '2026-03-01T10:00:06.000Z', status: 'denied' });
+  } finally {
+    store.close();
+  }
+});
+
+test('等待权限的节点被 tool_result 推到终态时记下 endedAt', () => {
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x'),
+    toolUseAt('2026-03-01T10:00:00.000Z'),
+    hook('PermissionRequest', { tool_name: 'Bash', tool_input: { command: 'ls' } }, '2026-03-01T10:00:01.000Z'),
+    toolResult('u2', 'a1', 'tu1', 'ok', undefined, { timestamp: '2026-03-01T10:00:07.000Z' }),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ status: 'succeeded', endedAt: '2026-03-01T10:00:07.000Z', durationMs: 7000 });
+});
+
+test('子代理派发节点由 tool_result 结算时记下 endedAt 和推出的耗时', () => {
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x'),
+    assistantBlock('a1', 'u1', { type: 'tool_use', id: 'tu1', name: 'Agent', input: { prompt: 'p' } }, { timestamp: '2026-03-01T10:00:00.000Z' }),
+    toolResult('u2', 'a1', 'tu1', 'done', undefined, { timestamp: '2026-03-01T10:00:05.000Z' }),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ kind: 'subagent', status: 'succeeded', endedAt: '2026-03-01T10:00:05.000Z', durationMs: 5000 });
+});
+
 test('没有可识别内容块的 assistant 记录仍是 unknown 节点', () => {
   const { graph } = run(n, [userPrompt('u1', null, 'x'), multi('a1', 'u1', [{ type: 'server_tool_use' }, { type: 'thinking' }])]);
   expect(graph.nodes.a1).toMatchObject({ kind: 'unknown', parentId: 'u1' });
@@ -369,4 +476,79 @@ test('多块记录的 end_turn 把会话置为 idle', () => {
     multi('a1', 'u1', [{ type: 'thinking', thinking: '' }, { type: 'text', text: 'done' }], { stopReason: 'end_turn' }),
   ]);
   expect(statusesOf(changes).at(-1)).toBe('idle');
+});
+
+// ---- session titles by source ----
+const titleEvent = (source: string): RawEvent => {
+  switch (source) {
+    case 'custom': return rawLine('custom-title', { customTitle: 'T-custom' });
+    case 'agentName': return rawLine('agent-name', { agentName: 'T-agent' });
+    case 'hook': return hook('UserPromptSubmit', { prompt: 'p', session_title: 'T-hook' });
+    default: return userPrompt('u1', null, 'T-prompt');
+  }
+};
+const expectedTitle: Record<string, string> = { custom: 'T-custom', agentName: 'T-agent', hook: 'T-hook', prompt: 'T-prompt' };
+const finalTitle = (changes: Change[]) => {
+  const last = changes.filter((c) => c.type === 'session_upserted').at(-1);
+  return last?.type === 'session_upserted' ? last.session.title : undefined;
+};
+
+test.each([
+  [['prompt', 'hook', 'agentName', 'custom'], 'custom'],
+  [['custom', 'agentName', 'hook', 'prompt'], 'custom'],
+  [['prompt', 'agentName'], 'agentName'],
+  [['hook', 'prompt'], 'hook'],
+  [['prompt'], 'prompt'],
+])('标题来源按 %j 的顺序到达，最终取 %s', (order, winner) => {
+  const { changes } = run(n, order.map(titleEvent));
+  expect(finalTitle(changes)).toBe(expectedTitle[winner!]);
+});
+
+test('custom-title.json 文件与 transcript 记录同属 custom，后到的覆盖先到的', () => {
+  expect(finalTitle(run(n, [userPrompt('u1', null, 'x'), customTitle('文件标题'), rawLine('custom-title', { customTitle: '记录标题' })]).changes)).toBe('记录标题');
+  const n2 = new Normalizer();
+  expect(finalTitle(run(n2, [userPrompt('u1', null, 'x'), rawLine('custom-title', { customTitle: '记录标题' }), customTitle('文件标题')]).changes)).toBe('文件标题');
+  const n3 = new Normalizer();
+  expect(finalTitle(run(n3, [userPrompt('u1', null, 'x'), rawLine('custom-title', { customTitle: '记录标题' }), rawLine('custom-title', { customTitle: '' })]).changes)).toBe('记录标题');
+});
+
+test('同一来源后到的覆盖先到的；空值不覆盖', () => {
+  const { changes } = run(n, [
+    hook('UserPromptSubmit', { prompt: 'p', session_title: 'A' }),
+    hook('UserPromptSubmit', { prompt: 'p', session_title: 'B' }),
+    hook('UserPromptSubmit', { prompt: 'p', session_title: '' }),
+    hook('UserPromptSubmit', { prompt: 'p' }),
+  ]);
+  expect(finalTitle(changes)).toBe('B');
+});
+
+test('首条提示作标题：取前 60 个字符，换行换成空格；之后的提示不改标题', () => {
+  const long = '第一行\n第二行' + 'x'.repeat(100);
+  const { changes } = run(n, [userPrompt('u1', null, long), userPrompt('u2', 'u1', '另一条提示')]);
+  expect(finalTitle(changes)).toBe(('第一行 第二行' + 'x'.repeat(100)).slice(0, 60));
+  expect(finalTitle(changes)).toHaveLength(60);
+});
+
+test('子代理的提示不作标题', () => {
+  const { changes } = run(n, [userPrompt('u1', null, 'sub', { agentId: 'ag1' }), userPrompt('u2', null, '主线')]);
+  expect(finalTitle(changes)).toBe('主线');
+});
+
+test('custom-title 和 agent-name 记录不再计入未识别统计', () => {
+  const r1 = n.apply(rawLine('custom-title', { customTitle: 'x' }), 'p');
+  const r2 = n.apply(rawLine('agent-name', { agentName: 'y' }), 'p');
+  expect(r1.unknownRecordType).toBeUndefined();
+  expect(r2.unknownRecordType).toBeUndefined();
+});
+
+test('按原始事件顺序重放（含被淘汰后的新归一器）得到相同标题', () => {
+  const events = [titleEvent('prompt'), titleEvent('hook'), titleEvent('agentName')];
+  const a = run(n, events);
+  expect(finalTitle(a.changes)).toBe('T-agent');
+  n.dropSession('s1'); // eviction, or a rolled-back ingest: the session is rebuilt by replay
+  expect(finalTitle(run(n, events).changes)).toBe('T-agent');
+  n.dropSession('s1');
+  // A value only from a dropped, un-replayed event does not leak into the replayed session.
+  expect(finalTitle(run(n, [titleEvent('prompt'), titleEvent('hook')]).changes)).toBe('T-hook');
+  expect(finalTitle(run(new Normalizer(), events).changes)).toBe('T-agent');
 });

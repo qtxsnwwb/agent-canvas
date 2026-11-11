@@ -2,7 +2,16 @@ import fs from 'node:fs';
 import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyStatic from '@fastify/static';
 import fastifyWebsocket from '@fastify/websocket';
-import type { Change, ClientMessage, Diagnostics, SeqChange, ServerMessage } from '@claude-canvas/shared';
+import {
+  SEARCH_DEFAULT_LIMIT,
+  SEARCH_MAX_LIMIT,
+  type Change,
+  type ClientMessage,
+  type Diagnostics,
+  type SearchHit,
+  type SeqChange,
+  type ServerMessage,
+} from '@claude-canvas/shared';
 import type { Config } from '../config.js';
 import { NORMALIZER_VERSION } from '../normalize/version.js';
 import type { Pipeline } from '../pipeline.js';
@@ -145,8 +154,19 @@ export function buildServer(deps: { store: Store; pipeline: Pipeline; config: Co
       }
     }
   });
+  // A session re-derived from its raw events (after a failed hook): its open pages refetch the snapshot.
+  const unsubscribeResync = pipeline.onResync((sessionId) => {
+    for (const conn of [...connections]) {
+      try {
+        if (conn.sessionId === sessionId) conn.send({ type: 'resync', sessionId });
+      } catch {
+        connections.delete(conn);
+      }
+    }
+  });
   app.addHook('onClose', async () => {
     unsubscribe();
+    unsubscribeResync();
     connections.clear();
   });
 
@@ -196,8 +216,15 @@ export function buildServer(deps: { store: Store; pipeline: Pipeline; config: Co
     });
   });
 
-  app.get('/api/projects', async () => store.listProjects());
+  app.get('/api/projects', async () => store.listProjects(Date.now()));
   app.get<{ Params: { id: string } }>('/api/projects/:id/sessions', async (req) => store.listSessions(req.params.id));
+  app.get<{ Querystring: { q?: unknown; limit?: unknown } }>('/api/search', async (req): Promise<SearchHit[]> => {
+    const { q, limit } = req.query;
+    if (typeof q !== 'string') return [];
+    // An unparseable limit falls back to the default; an out-of-range one is clamped.
+    const parsed = typeof limit === 'string' && /^\s*-?\d+\s*$/.test(limit) ? Number(limit) : SEARCH_DEFAULT_LIMIT;
+    return store.searchSessions(q, Math.min(SEARCH_MAX_LIMIT, Math.max(1, parsed)));
+  });
   app.get<{ Params: { id: string } }>('/api/sessions/:id/graph', async (req, reply) => {
     // Built from the stored bodies and sent as-is: no parse/re-serialize of every node.
     const json = store.getGraphJson(req.params.id);
@@ -213,6 +240,7 @@ export function buildServer(deps: { store: Store; pipeline: Pipeline; config: Co
     '/api/diagnostics',
     async (): Promise<Diagnostics> => ({
       ...store.diagnostics(),
+      hookEvents: store.hookEventStats(),
       lastHookAt: pipeline.lastHookAt(),
       ingestFailures: pipeline.ingestFailures(),
       importing: pipeline.importing(),

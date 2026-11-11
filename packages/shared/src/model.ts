@@ -11,7 +11,8 @@ export interface GraphNode {
   id: string;
   sessionId: string;
   turnId: string | null;
-  agentId: string | null;        // 主线为 null
+  agentId: string | null;        // 节点所属的线程，主线为 null（派发节点也是）
+  childAgentId: string | null;   // 仅 subagent 节点：它派出的代理的 id，元数据到达前为 null；其余恒为 null
   parentId: string | null;
   kind: NodeKind;
   status: NodeStatus | null;     // 仅 tool、subagent 有值
@@ -23,6 +24,7 @@ export interface GraphNode {
   toolUseId: string | null;
   messageId: string | null;      // assistant 记录的 message.id
   durationMs: number | null;
+  endedAt: string | null;       // ISO 8601；仅 tool、subagent：第一次进入终态的事件的时间，之后的状态纠正不改；其余为 null
   usage: Usage | null;
   systemSubtype: string | null;
 }

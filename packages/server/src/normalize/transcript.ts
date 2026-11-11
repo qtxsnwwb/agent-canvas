@@ -20,7 +20,15 @@ export type Classified =
   | { kind: 'prompt'; text: string }
   /** Recognized blocks in content order (at least one); unknown block types are skipped. */
   | { kind: 'assistant'; blocks: AssistantBlock[]; meta: MessageMeta }
-  | { kind: 'tool_results'; results: { toolUseId: string; content: unknown; isError: boolean }[] }
+  /**
+   * `asyncAgent`: the record is the immediate answer to a background Agent launch (the agent goes on running); its
+   * `agentId` when the record names it.
+   */
+  | {
+    kind: 'tool_results';
+    results: { toolUseId: string; content: unknown; isError: boolean }[];
+    asyncAgent: { agentId: string | null } | null;
+  }
   | { kind: 'compact' }
   | { kind: 'interrupt'; text: string } // "[Request interrupted by user…]": a system node, ends the turn
   | { kind: 'silent' } // produces no node; only keeps the parent chain intact
@@ -106,6 +114,16 @@ function nonPrompt(record: TranscriptRecord, text: string): Classified | null {
   return null;
 }
 
+/**
+ * A background Agent launch answers at once with `{ status: 'async_launched', isAsync: true, agentId, ... }` (seen in
+ * real transcripts, 2026-11-11) while the agent keeps running. Null for anything else.
+ */
+export function asyncLaunch(result: unknown): { agentId: string | null } | null {
+  if (!isObject(result)) return null;
+  if (result.status !== 'async_launched' && result.isAsync !== true) return null;
+  return { agentId: typeof result.agentId === 'string' ? result.agentId : null };
+}
+
 function classifyUser(record: TranscriptRecord): Classified {
   const message = record.message;
   if (!isObject(message)) return { kind: 'malformed' };
@@ -121,7 +139,7 @@ function classifyUser(record: TranscriptRecord): Classified {
       results.push({ toolUseId: block.tool_use_id, content: block.content, isError: block.is_error === true });
     }
   }
-  if (results.length > 0) return { kind: 'tool_results', results };
+  if (results.length > 0) return { kind: 'tool_results', results, asyncAgent: asyncLaunch(record.toolUseResult) };
   if (record.isMeta === true) return { kind: 'silent' };
   const textOnly = (content as unknown[])
     .flatMap((b) => (isObject(b) && b.type === 'text' && typeof b.text === 'string' ? [b.text] : []))

@@ -9,7 +9,7 @@ export function mkNode(id: string, timestamp = '2026-01-01T00:00:00Z'): GraphNod
   return {
     id, sessionId: 's1', turnId: null, agentId: null, parentId: null, kind: 'text', status: null, timestamp,
     confirmed: true, title: 't', summary: 's', toolName: null, toolUseId: null, messageId: null,
-    durationMs: null, usage: null, systemSubtype: null,
+    durationMs: null, usage: null, systemSubtype: null, childAgentId: null, endedAt: null,
   };
 }
 

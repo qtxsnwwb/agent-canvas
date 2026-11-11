@@ -30,6 +30,11 @@ export const REBUILD_FLAG = 'rebuild_in_progress';
 export const NORMALIZER_VERSION_KEY = 'normalizer_version';
 
 type Listener = (changes: SeqChange[]) => void;
+type ResyncListener = (sessionId: string) => void;
+/** Failure key of a session whose re-derive failed (shown as is in ingestFailures). */
+const sessionKey = (sessionId: string): string => `session:${sessionId}`;
+/** Failure keys that are not file paths. */
+const isNonFileKey = (key: string): boolean => key.startsWith('hook') || key.startsWith('session:');
 interface FileLock {
   running: Promise<void> | null;
   queued: Promise<void> | null;
@@ -53,6 +58,12 @@ function topLevelType(text: string): string {
 export class Pipeline {
   private normalizer = new Normalizer();
   private readonly listeners = new Set<Listener>();
+  private readonly resyncListeners = new Set<ResyncListener>();
+  /**
+   * Sessions whose committed raw events are ahead of their derived rows (mirror of the store's dirty_session, loaded
+   * once): re-derived from their raw events on the next touch. Empty on the normal path.
+   */
+  private readonly dirty: Set<string>;
   private readonly locks = new Map<string, FileLock>();
   /** sessionId -> tail of that session's work chain; events for one session are applied strictly in order. */
   private readonly tails = new Map<string, Promise<void>>();
@@ -84,6 +95,7 @@ export class Pipeline {
     options: PipelineOptions = {},
   ) {
     this.log = options.log ?? (() => {});
+    this.dirty = new Set(store.dirtySessionIds());
   }
 
   /** True while the initial full scan or a rebuild is running. */
@@ -102,7 +114,7 @@ export class Pipeline {
     const last = this.lastLogged.get(key);
     if (last !== undefined && now - last < LOG_EVERY_MS) return;
     this.lastLogged.set(key, now);
-    const what = key.startsWith('hook') ? key : this.rel(key);
+    const what = isNonFileKey(key) ? key : this.rel(key);
     this.log(`claude-canvas: ingest failed: ${what}: ${error}`);
   }
 
@@ -110,6 +122,14 @@ export class Pipeline {
     this.listeners.add(listener);
     return () => {
       this.listeners.delete(listener);
+    };
+  }
+
+  /** Called with a session id after that session was re-derived: subscribers of it should refetch its snapshot. */
+  onResync(listener: ResyncListener): () => void {
+    this.resyncListeners.add(listener);
+    return () => {
+      this.resyncListeners.delete(listener);
     };
   }
 
@@ -125,7 +145,7 @@ export class Pipeline {
 
   /** Files whose last ingest attempt failed (unreadable, locked, ...). */
   ingestFailures(): { file: string; error: string; at: string }[] {
-    return [...this.failures].map(([key, f]) => ({ file: key.startsWith('hook:') ? key : this.rel(key), error: f.error, at: f.at }));
+    return [...this.failures].map(([key, f]) => ({ file: isNonFileKey(key) ? key : this.rel(key), error: f.error, at: f.at }));
   }
 
   /** Resolves when no ingest or hydration work is pending. */
@@ -173,11 +193,16 @@ export class Pipeline {
     const key = `hook:${sessionId}`;
     const onError = (err: unknown): void => {
       this.reportFailure(key, err);
-      // The slice rolled back; keep the raw event alone so the next hydration or rebuild applies it.
+      // The slice rolled back; keep the raw event alone (it must not be lost) and, in the same transaction, mark the
+      // session dirty: its derived rows now lag behind its raw events until the next touch re-derives it.
       if (!this.persistedHooks.has(event)) {
         try {
-          this.store.insertRaw(event);
+          this.store.transaction(() => {
+            this.store.insertRaw(event);
+            if (sessionId !== null) this.store.markDirty(sessionId);
+          });
           this.persistedHooks.add(event);
+          if (sessionId !== null) this.dirty.add(sessionId);
         } catch {
           // nothing more we can do
         }
@@ -185,7 +210,11 @@ export class Pipeline {
     };
     const needsQueue =
       sessionId !== null &&
-      (this.tails.has(sessionId) || (!this.normalizer.hasSession(sessionId) && this.store.getSession(sessionId) !== null));
+      (this.tails.has(sessionId) ||
+        this.dirty.has(sessionId) ||
+        (!this.normalizer.hasSession(sessionId) &&
+          (this.store.getSession(sessionId) !== null ||
+            (this.normalizer.needsPreSessionReplay(sessionId) && this.store.hasRawForSession(sessionId)))));
     if (!needsQueue) {
       try {
         this.applyHook(event);
@@ -216,6 +245,7 @@ export class Pipeline {
   }
 
   private async fullScan(): Promise<void> {
+    await this.touchDirty();
     const files = await this.listFiles();
     const groups = new Map<string, { sessionId: string; files: string[] }>();
     for (const file of files) {
@@ -243,13 +273,14 @@ export class Pipeline {
    * New files and deletions are left to chokidar and the full scan.
    */
   async rescan(): Promise<void> {
+    await this.touchDirty();
     const now = Date.now();
     const targets = new Set<string>();
     for (const [id, touched] of this.lastTouch) {
       if (now - touched > this.config.evictAfterMs) continue;
       for (const file of this.filesBySession.get(id) ?? []) targets.add(file);
     }
-    for (const key of this.failures.keys()) if (!key.startsWith('hook:')) targets.add(key);
+    for (const key of this.failures.keys()) if (!isNonFileKey(key)) targets.add(key);
     for (const file of [...targets].sort()) {
       if (await this.unchanged(file)) continue;
       await this.safeIngest(file);
@@ -315,6 +346,10 @@ export class Pipeline {
       this.lastTouch.clear();
     }
     this.store.setMeta(NORMALIZER_VERSION_KEY, String(NORMALIZER_VERSION));
+    // Every session was just re-derived from its raw events: no session is behind any more.
+    this.store.clearAllDirty();
+    for (const id of this.dirty) this.failures.delete(sessionKey(id));
+    this.dirty.clear();
     this.store.deleteMeta(REBUILD_FLAG);
     // sourceDeleted flags were cleared with the derived tables; the next full scan's listing restores them.
     this.flagsChecked = false;
@@ -418,6 +453,7 @@ export class Pipeline {
    */
   private enqueue(sessionId: string, task: () => void): Promise<void> {
     const run = async (): Promise<void> => {
+      if (this.dirty.has(sessionId)) this.tryRederive(sessionId);
       await this.hydrate(sessionId);
       this.lastTouch.set(sessionId, Date.now());
       task();
@@ -549,7 +585,13 @@ export class Pipeline {
    */
   private async hydrate(sessionId: string): Promise<void> {
     const normalizer = this.normalizer;
-    if (normalizer.hasSession(sessionId) || this.store.getSession(sessionId) === null) return;
+    if (normalizer.hasSession(sessionId)) return;
+    if (this.store.getSession(sessionId) === null) {
+      // No session row yet, but committed raw events (a title record, an agent meta, a hook whose slice failed) may
+      // exist: restore what the Normalizer keeps before a session exists from them, as a rebuild would.
+      if (normalizer.needsPreSessionReplay(sessionId)) normalizer.restorePreSession(sessionId, this.rawPages(sessionId));
+      return;
+    }
     let after = 0;
     let done = false;
     try {
@@ -569,6 +611,67 @@ export class Pipeline {
     } catch (err) {
       normalizer.dropSession(sessionId); // never leave a half-replayed session behind
       throw err;
+    }
+  }
+
+  /** Scans touch dirty sessions even without new content, so a mark is resolved (or retried) at the scan cadence. */
+  private async touchDirty(): Promise<void> {
+    for (const id of [...this.dirty]) {
+      if (!this.tails.has(id)) await this.enqueue(id, () => {});
+    }
+  }
+
+  /** Re-derives a dirty session; a failure keeps the mark and is recorded (the next touch retries). */
+  private tryRederive(sessionId: string): void {
+    try {
+      this.rederive(sessionId);
+      this.failures.delete(sessionKey(sessionId));
+    } catch (err) {
+      this.reportFailure(sessionKey(sessionId), err);
+    }
+  }
+
+  /**
+   * One session of `rebuild`: replays the session's raw events in ingest order through the live Normalizer (whose
+   * state for it is discarded first), and in one transaction replaces its derived rows with the result and clears its
+   * dirty mark. Then sessions-list subscribers get the session row and the session's subscribers a resync.
+   */
+  private rederive(sessionId: string): void {
+    this.normalizer.dropSession(sessionId);
+    let applied: SeqChange[];
+    try {
+      const changes: Change[] = [];
+      for (const ev of this.rawPages(sessionId)) changes.push(...this.replayOne(ev));
+      applied = this.store.transaction(() => {
+        this.store.deleteDerivedForSession(sessionId);
+        const out = this.persist(changes);
+        this.store.clearDirty(sessionId);
+        return out;
+      });
+    } catch (err) {
+      this.normalizer.dropSession(sessionId); // never keep a state the database does not have
+      throw err;
+    }
+    this.dirty.delete(sessionId);
+    this.lastTouch.set(sessionId, Date.now());
+    this.notify(applied.filter((c) => c.type === 'session_upserted'));
+    for (const listener of [...this.resyncListeners]) {
+      try {
+        listener(sessionId);
+      } catch {
+        // a failing subscriber must not break ingestion
+      }
+    }
+  }
+
+  /** Every stored raw event of a session in ingest order, read page by page. */
+  private *rawPages(sessionId: string): Generator<StoredRawEvent> {
+    let after = 0;
+    for (;;) {
+      const page = this.store.rawForSessionAfter(sessionId, after, HYDRATE_PAGE_ROWS, HYDRATE_PAGE_BYTES);
+      if (page.length === 0) return;
+      yield* page;
+      after = page[page.length - 1]!.ingestId;
     }
   }
 

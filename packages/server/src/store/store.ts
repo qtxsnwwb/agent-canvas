@@ -5,12 +5,20 @@ import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import Database from 'better-sqlite3';
 import {
+  SEARCH_DEFAULT_LIMIT,
+  SEARCH_MAX_CHARS,
+  SEARCH_MAX_LIMIT,
+  SEARCH_MAX_MATCHES,
+  SEARCH_MIN_CHARS,
+  SEARCH_SNIPPET_CHARS,
   STALE_AFTER_MS,
   type Change,
   type Diagnostics,
   type GraphSnapshot,
   type NodeDetail,
   type Project,
+  type SearchHit,
+  type SearchMatch,
   type SeqChange,
   type Session,
 } from '@claude-canvas/shared';
@@ -45,6 +53,36 @@ export interface StoreOptions {
   walSizeLimitBytes?: number;
   /** Receives every SQL statement executed (tests). */
   verbose?: (sql: unknown) => void;
+  /** Receives notices about slow one-time work done while opening (start prints them); silent when omitted. */
+  log?: (line: string) => void;
+}
+
+/** `%x%` with `\`, `%` and `_` escaped (use with ESCAPE '\\'). */
+function likePattern(query: string): string {
+  return `%${query.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+}
+
+/** Lower-cases ASCII letters only (like SQLite LIKE), so string indexes stay aligned with the original. */
+function asciiLower(s: string): string {
+  return s.replace(/[A-Z]/g, (c) => c.toLowerCase());
+}
+
+/**
+ * At most SEARCH_SNIPPET_CHARS characters including the `…` marks on truncated sides, centred on the match. A match
+ * longer than the window is cut at the window's end.
+ */
+function snippetAround(text: string, atUnits: number, needle: string): string {
+  const max = SEARCH_SNIPPET_CHARS;
+  const cps = Array.from(text); // code points: a window edge never splits a surrogate pair
+  if (cps.length <= max) return text;
+  const at = Array.from(text.slice(0, atUnits)).length;
+  const matchLen = Array.from(needle).length;
+  const inner = max - 2;
+  let start = Math.max(0, Math.min(at - Math.floor((inner - Math.min(matchLen, inner)) / 2), cps.length - inner));
+  let end = Math.min(cps.length, start + inner);
+  if (start === 0) end = Math.min(cps.length, end + 1);
+  if (end === cps.length) start = Math.max(0, start - 1);
+  return `${start > 0 ? '…' : ''}${cps.slice(start, end).join('')}${end < cps.length ? '…' : ''}`;
 }
 
 export interface Store {
@@ -62,10 +100,23 @@ export interface Store {
    * is logged and returned. Logged and returned changes carry no node detail (node_added has `detail: {}`).
    */
   applyChanges(changes: Change[]): SeqChange[];
-  listProjects(): Project[];
+  /**
+   * `nowMs` decides which running sessions are stale (not counted active). A project's cwd is the session cwd that
+   * encodes to the project id (every non-alphanumeric character becomes `-`): the most frequent, ties to the
+   * lexicographically smallest; null when none does.
+   */
+  listProjects(nowMs: number): Project[];
   /** Ordered by lastActivityAt descending. */
   listSessions(projectId: string): Session[];
   getSession(sessionId: string): Session | null;
+  /**
+   * Case-insensitive (ASCII only, as SQLite LIKE) literal substring search over session title, id, git branch, cwd
+   * and the summaries of main-thread prompt nodes. Newest activity first; fewer than SEARCH_MIN_CHARS characters
+   * after trimming gives []. `limit` is clamped to 1..SEARCH_MAX_LIMIT.
+   */
+  searchSessions(query: string, limit: number): SearchHit[];
+  /** Query plans (EXPLAIN QUERY PLAN detail lines) of the two statements searchSessions runs; for tests. */
+  searchPlans(): { sessions: string[]; prompts: string[] };
   getGraph(sessionId: string): GraphSnapshot | null;
   /** The GraphSnapshot already serialized, built from the stored bodies without parsing them. */
   getGraphJson(sessionId: string): string | null;
@@ -86,22 +137,44 @@ export interface Store {
   allSessionIdsInRaw(): string[];
   /** Clears derived tables, the change log and unknown_stat; keeps raw_event, file_offset and meta. */
   clearDerived(): void;
+  /**
+   * Deletes one session's derived rows (session, nodes, details, edges, its change_log rows); for a per-session
+   * re-derive inside the caller's transaction.
+   */
+  deleteDerivedForSession(sessionId: string): void;
+  /** Marks a session whose stored raw events are ahead of its derived rows (see Pipeline); persistent. */
+  markDirty(sessionId: string): void;
+  clearDirty(sessionId: string): void;
+  clearAllDirty(): void;
+  dirtySessionIds(): string[];
   bumpUnknown(recordType: string, sample: string): void;
   getMeta(key: string): string | null;
   setMeta(key: string, value: string): void;
   deleteMeta(key: string): void;
+  /** True when raw_event holds at least one row of this session (served by the raw_event_session index). */
+  hasRawForSession(sessionId: string): boolean;
   /** True when raw_event holds at least one row. */
   hasRawEvents(): boolean;
   /** Random id generated when the database file was created; stable across restarts and rebuilds. */
   epoch(): string;
   /** Latest receivedAt of any stored hook event (kept in `meta`, no raw_event scan). */
   lastHookAt(): string | null;
+  /** Hook counts and latest receivedAt per event name (ascending), read from the hook_stat counters only. */
+  hookEventStats(): Diagnostics['hookEvents'];
   /** The stored part of Diagnostics; the API adds the pipeline's live fields. */
   diagnostics(): StoreDiagnostics;
   close(): void;
 }
 
 const SAMPLE_MAX = 500;
+/** meta key set once hook_stat holds every stored hook row (backfilled, or created empty with a new database). */
+const HOOK_STAT_READY = 'hook_stat_ready';
+/** The one-time hook_stat backfill query; served by the old raw_event_hook partial index when the database has it. */
+export const HOOK_STAT_BACKFILL_SELECT = `SELECT event_name, COUNT(*), MAX(received_at) FROM raw_event
+  WHERE source = 'hook' AND event_name IS NOT NULL AND received_at IS NOT NULL
+  GROUP BY event_name`;
+/** Printed (through StoreOptions.log) when opening a database runs that backfill. */
+export const HOOK_STAT_BACKFILL_NOTICE = 'claude-canvas counting stored hook events (one-time)…';
 
 interface RawRow {
   ingest_id: number;
@@ -237,11 +310,12 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
      ON CONFLICT(file) DO UPDATE SET "offset" = excluded."offset", size = excluded.size`,
   );
   const selectMeta = db.prepare(`SELECT value FROM meta WHERE key = ?`).pluck();
-  db.prepare(`INSERT OR IGNORE INTO meta (key, value) VALUES ('epoch', ?)`).run(randomUUID());
+  const created = db.prepare(`INSERT OR IGNORE INTO meta (key, value) VALUES ('epoch', ?)`).run(randomUUID()).changes === 1;
   const epoch = selectMeta.get('epoch') as string;
   const upsertMeta = db.prepare(`INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`);
   const deleteMeta = db.prepare(`DELETE FROM meta WHERE key = ?`);
   const selectAnyRaw = db.prepare(`SELECT 1 FROM raw_event LIMIT 1`).pluck();
+  const selectAnyRawForSession = db.prepare(`SELECT 1 FROM raw_event WHERE session_id = ? LIMIT 1`).pluck();
   const upsertLaterMeta = db.prepare(
     `INSERT INTO meta (key, value) VALUES (?, ?)
      ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE excluded.value > meta.value`,
@@ -268,15 +342,44 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
 
   // Active = effective status running/awaiting_*: a `running` session older than STALE_AFTER_MS is stale, not active.
   // strftime normalizes the stored ISO timestamp so it compares correctly with the cutoff's toISOString().
+  // The stale rule below (running and last activity older than STALE_AFTER_MS) must stay in sync with
+  // effectiveStatus in shared/status.ts. One divergence: an unparseable last_activity_at is not counted active
+  // here (strftime gives NULL, so the >= test is false), while effectiveStatus is never stale for it (a NaN
+  // comparison is false), i.e. it would count as active.
   const selectProjects = db.prepare(
-    `SELECT project_id AS id, MAX(json_extract(body, '$.cwd')) AS cwd, COUNT(*) AS sessionCount,
+    `SELECT project_id AS id, json_extract(body, '$.cwd') AS cwd, COUNT(*) AS sessionCount,
             SUM(CASE WHEN status IN ('awaiting_input', 'awaiting_permission') THEN 1
                      WHEN status = 'running' AND strftime('%Y-%m-%dT%H:%M:%fZ', last_activity_at) >= @cutoff THEN 1
                      ELSE 0 END) AS activeSessionCount
-     FROM session GROUP BY project_id ORDER BY project_id`,
+     FROM session GROUP BY project_id, cwd ORDER BY project_id`,
   );
   const selectSessions = db.prepare(`SELECT body FROM session WHERE project_id = ? ORDER BY last_activity_at DESC, id`);
   const selectSession = db.prepare(`SELECT body FROM session WHERE id = ?`).pluck();
+  // Query text is only ever a bound parameter (already LIKE-escaped by likePattern). The prompt condition repeats
+  // the node_main_prompt partial index predicate verbatim so the index is used. Cost per request, honestly: one pass
+  // over the session rows (the OR over title/id/branch/cwd cannot use an index) plus the main-thread prompt rows via
+  // the index; node bodies of other kinds (tools, text, ...) are never scanned.
+  const searchSessionsStmt = db.prepare(
+    `SELECT body FROM session
+     WHERE json_extract(body, '$.title') LIKE @pattern ESCAPE '\\'
+        OR id LIKE @pattern ESCAPE '\\'
+        OR json_extract(body, '$.gitBranch') LIKE @pattern ESCAPE '\\'
+        OR json_extract(body, '$.cwd') LIKE @pattern ESCAPE '\\'
+        OR EXISTS (SELECT 1 FROM node n WHERE n.session_id = session.id
+                     AND json_extract(n.body, '$.kind') = 'prompt'
+                     AND json_extract(n.body, '$.agentId') IS NULL
+                     AND json_extract(n.body, '$.summary') LIKE @pattern ESCAPE '\\')
+     ORDER BY last_activity_at DESC, id
+     LIMIT @limit`,
+  );
+  const searchPromptsStmt = db.prepare(
+    `SELECT id, json_extract(body, '$.summary') AS summary FROM node
+     WHERE session_id = @sessionId AND json_extract(body, '$.kind') = 'prompt'
+       AND json_extract(body, '$.agentId') IS NULL
+       AND json_extract(body, '$.summary') LIKE @pattern ESCAPE '\\'
+     ORDER BY json_extract(body, '$.timestamp'), rowid
+     LIMIT @limit`,
+  );
   const selectNodeBodies = db.prepare(`SELECT body FROM node WHERE session_id = ? ORDER BY rowid`).pluck();
   const selectEdgeBodies = db.prepare(`SELECT body FROM edge WHERE session_id = ? ORDER BY rowid`).pluck();
   const selectChanges = db.prepare(`SELECT seq, body FROM change_log WHERE seq > ? ORDER BY seq`);
@@ -306,6 +409,31 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     `INSERT INTO unknown_stat (record_type, count, sample) VALUES (?, 1, ?)
      ON CONFLICT(record_type) DO UPDATE SET count = count + 1`,
   );
+  const selectHookStats = db.prepare(
+    `SELECT event_name AS eventName, count, last_at AS lastAt FROM hook_stat ORDER BY event_name`,
+  );
+  const bumpHookStat = db.prepare(
+    `INSERT INTO hook_stat (event_name, count, last_at) VALUES (?, 1, ?)
+     ON CONFLICT(event_name) DO UPDATE SET count = count + 1, last_at = MAX(last_at, excluded.last_at)`,
+  );
+  const insertHookTx = db.transaction((event: Extract<RawEvent, { source: 'hook' }>): number => {
+    const id = Number(insertRawHook.run({ ...event, projectId: event.projectId ?? null }).lastInsertRowid);
+    upsertLaterMeta.run('last_hook_at', event.receivedAt);
+    bumpHookStat.run(event.eventName, event.receivedAt);
+    return id;
+  });
+  // Databases from before hook_stat existed: backfill it once (one transaction), then never again. It runs before the
+  // old raw_event_hook index is dropped, so on such a database it reads that index instead of scanning raw_event
+  // bodies. A database created just now has nothing to backfill.
+  db.transaction(() => {
+    if (selectMeta.get(HOOK_STAT_READY) !== undefined) return;
+    if (!created && db.prepare(`SELECT 1 FROM hook_stat LIMIT 1`).get() === undefined) {
+      options.log?.(HOOK_STAT_BACKFILL_NOTICE);
+      db.exec(`INSERT INTO hook_stat (event_name, count, last_at) ${HOOK_STAT_BACKFILL_SELECT}`);
+    }
+    upsertMeta.run(HOOK_STAT_READY, '1');
+  })();
+  db.exec(`DROP INDEX IF EXISTS raw_event_hook`);
   const selectUnknown = db.prepare(`SELECT record_type, count, sample FROM unknown_stat ORDER BY record_type`);
   const selectFiles = db.prepare(`SELECT file, "offset", size FROM file_offset ORDER BY file`);
 
@@ -370,6 +498,17 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     return out;
   });
 
+  const deleteSessionDerived = [
+    db.prepare(`DELETE FROM session WHERE id = ?`),
+    db.prepare(`DELETE FROM node WHERE session_id = ?`),
+    db.prepare(`DELETE FROM node_detail WHERE session_id = ?`),
+    db.prepare(`DELETE FROM edge WHERE session_id = ?`),
+    db.prepare(`DELETE FROM change_log WHERE session_id = ?`),
+  ];
+  const insertDirty = db.prepare(`INSERT OR IGNORE INTO dirty_session (session_id) VALUES (?)`);
+  const deleteDirty = db.prepare(`DELETE FROM dirty_session WHERE session_id = ?`);
+  const selectDirty = db.prepare(`SELECT session_id FROM dirty_session ORDER BY session_id`).pluck();
+
   const clearDerivedTx = db.transaction(() => {
     for (const t of DERIVED_TABLES) db.exec(`DELETE FROM ${t}`);
     // seq (AUTOINCREMENT) is deliberately NOT reset: it must stay monotonic so clients
@@ -414,11 +553,7 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
         const res = insertRawTranscript.run({ ...event, lineHash });
         return res.changes === 0 ? null : Number(res.lastInsertRowid);
       }
-      if (event.source === 'hook') {
-        const id = Number(insertRawHook.run({ ...event, projectId: event.projectId ?? null }).lastInsertRowid);
-        upsertLaterMeta.run('last_hook_at', event.receivedAt);
-        return id;
-      }
+      if (event.source === 'hook') return insertHookTx(event);
       return Number(insertRawMeta.run(event).lastInsertRowid);
     },
     getOffset(file) {
@@ -432,19 +567,70 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     applyChanges(changes) {
       return applyChangesTx(changes);
     },
-    listProjects() {
-      const cutoff = new Date(Date.now() - STALE_AFTER_MS).toISOString();
-      return (selectProjects.all({ cutoff }) as Project[]).map((p) => ({
-        id: p.id,
-        cwd: p.cwd ?? null,
-        sessionCount: p.sessionCount,
-        activeSessionCount: p.activeSessionCount,
-      }));
+    listProjects(nowMs) {
+      const cutoff = new Date(nowMs - STALE_AFTER_MS).toISOString();
+      const rows = selectProjects.all({ cutoff }) as { id: string; cwd: string | null; sessionCount: number; activeSessionCount: number }[];
+      const byId = new Map<string, { project: Project; best: { cwd: string; n: number } | null }>();
+      for (const r of rows) {
+        let entry = byId.get(r.id);
+        if (!entry) {
+          entry = { project: { id: r.id, cwd: null, sessionCount: 0, activeSessionCount: 0 }, best: null };
+          byId.set(r.id, entry);
+        }
+        entry.project.sessionCount += r.sessionCount;
+        entry.project.activeSessionCount += r.activeSessionCount;
+        if (r.cwd !== null && r.cwd.replace(/[^A-Za-z0-9]/g, '-') === r.id) {
+          const b = entry.best;
+          if (b === null || r.sessionCount > b.n || (r.sessionCount === b.n && r.cwd < b.cwd)) entry.best = { cwd: r.cwd, n: r.sessionCount };
+        }
+      }
+      return [...byId.values()].map(({ project, best }) => ({ ...project, cwd: best?.cwd ?? null }));
     },
     listSessions(projectId) {
       return (selectSessions.all(projectId) as { body: string }[]).map((r) => JSON.parse(r.body) as Session);
     },
     getSession,
+    searchSessions(rawQuery, rawLimit) {
+      const query = Array.from(rawQuery.trim()).slice(0, SEARCH_MAX_CHARS).join('').trim();
+      if ([...query].length < SEARCH_MIN_CHARS) return [];
+      const limit = Number.isFinite(rawLimit) ? Math.min(SEARCH_MAX_LIMIT, Math.max(1, Math.trunc(rawLimit))) : SEARCH_DEFAULT_LIMIT;
+      const pattern = likePattern(query);
+      const needle = asciiLower(query);
+      const hits: SearchHit[] = [];
+      for (const row of searchSessionsStmt.all({ pattern, limit }) as { body: string }[]) {
+        const session = JSON.parse(row.body) as Session;
+        const matches: SearchMatch[] = [];
+        const fields: [SearchMatch['field'], string | null][] = [
+          ['title', session.title],
+          ['id', session.id],
+          ['branch', session.gitBranch],
+          ['cwd', session.cwd],
+        ];
+        for (const [field, text] of fields) {
+          if (text === null || matches.length >= SEARCH_MAX_MATCHES) continue;
+          const at = asciiLower(text).indexOf(needle);
+          if (at >= 0) matches.push({ field, nodeId: null, snippet: snippetAround(text, at, needle) });
+        }
+        if (matches.length < SEARCH_MAX_MATCHES) {
+          const prompts = searchPromptsStmt.all({ sessionId: session.id, pattern, limit: SEARCH_MAX_MATCHES - matches.length }) as {
+            id: string;
+            summary: string;
+          }[];
+          for (const p of prompts) {
+            const at = asciiLower(p.summary).indexOf(needle);
+            if (at >= 0) matches.push({ field: 'prompt', nodeId: p.id, snippet: snippetAround(p.summary, at, needle) });
+          }
+        }
+        hits.push({ session, matches });
+      }
+      return hits;
+    },
+    searchPlans() {
+      const params = { pattern: '%x%', limit: 1, sessionId: 's' };
+      const plan = (stmt: { source: string }) =>
+        (db.prepare(`EXPLAIN QUERY PLAN ${stmt.source}`).all(params) as { detail: string }[]).map((r) => r.detail);
+      return { sessions: plan(searchSessionsStmt), prompts: plan(searchPromptsStmt) };
+    },
     getGraph(sessionId) {
       const json = getGraphJson(sessionId);
       return json === null ? null : (JSON.parse(json) as GraphSnapshot);
@@ -491,6 +677,19 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     clearDerived() {
       clearDerivedTx();
     },
+    deleteDerivedForSession(sessionId) {
+      for (const stmt of deleteSessionDerived) stmt.run(sessionId);
+    },
+    markDirty(sessionId) {
+      insertDirty.run(sessionId);
+    },
+    clearDirty(sessionId) {
+      deleteDirty.run(sessionId);
+    },
+    clearAllDirty() {
+      db.exec(`DELETE FROM dirty_session`);
+    },
+    dirtySessionIds: () => selectDirty.all() as string[],
     bumpUnknown(recordType, sample) {
       upsertUnknown.run(recordType, sample.slice(0, SAMPLE_MAX));
     },
@@ -503,7 +702,9 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     deleteMeta(key) {
       deleteMeta.run(key);
     },
+    hookEventStats: () => selectHookStats.all() as Diagnostics['hookEvents'],
     hasRawEvents: () => selectAnyRaw.get() !== undefined,
+    hasRawForSession: (sessionId) => selectAnyRawForSession.get(sessionId) !== undefined,
     diagnostics() {
       return {
         unknownRecords: (selectUnknown.all() as { record_type: string; count: number; sample: string }[]).map((r) => ({

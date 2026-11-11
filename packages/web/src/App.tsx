@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react';
+import { Diagnostics } from './pages/Diagnostics';
 import { Home } from './pages/Home';
 import { SessionPage } from './pages/Session';
 
 export type Route =
   | { page: 'home'; projectId: string | null }
-  | { page: 'session'; sessionId: string };
+  | { page: 'session'; sessionId: string }
+  | { page: 'diagnostics' };
 
 export function parseHash(hash: string): Route {
   const h = hash.replace(/^#/, '');
@@ -15,6 +17,7 @@ export function parseHash(hash: string): Route {
       return null;
     }
   };
+  if (h === '/diagnostics') return { page: 'diagnostics' };
   if (h.startsWith('/s/')) {
     const id = decode(h.slice(3));
     if (id) return { page: 'session', sessionId: id };
@@ -38,9 +41,12 @@ export function App() {
     <div className="app">
       <header>
         <a href="#/">Claude Canvas</a>
+        <a className="header-link" href="#/diagnostics">诊断</a>
       </header>
       {route.page === 'session' ? (
         <SessionPage key={route.sessionId} sessionId={route.sessionId} />
+      ) : route.page === 'diagnostics' ? (
+        <Diagnostics />
       ) : (
         <Home projectId={route.projectId} />
       )}

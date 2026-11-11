@@ -5,6 +5,8 @@ export interface GraphSnapshot { session: Session; nodes: GraphNode[]; edges: Gr
 export interface Diagnostics {
   unknownRecords: { recordType: string; count: number; sample: string }[];
   lastHookAt: string | null;
+  /** Hook events received, by event name ascending; an event never received does not appear. */
+  hookEvents: { eventName: string; count: number; lastAt: string }[];
   /** path is relative to the projects directory, `/` separators. */
   files: { path: string; offset: number; size: number }[];
   /** Files (relative path) and hook sessions (`hook:<sessionId>`) whose last ingest attempt failed. */
@@ -14,6 +16,18 @@ export interface Diagnostics {
   normalizerVersion: number;
   dbEpoch: string;
 }
+
+export type SearchField = 'title' | 'id' | 'branch' | 'cwd' | 'prompt';
+/** nodeId is set only for `prompt` matches. */
+export interface SearchMatch { field: SearchField; nodeId: string | null; snippet: string }
+/** At most 3 matches per session: session fields first (title, id, branch, cwd), then prompts in time order. */
+export interface SearchHit { session: Session; matches: SearchMatch[] }
+export const SEARCH_MIN_CHARS = 2;
+export const SEARCH_MAX_CHARS = 200;
+export const SEARCH_SNIPPET_CHARS = 80;
+export const SEARCH_MAX_MATCHES = 3;
+export const SEARCH_DEFAULT_LIMIT = 30;
+export const SEARCH_MAX_LIMIT = 100;
 export type ClientMessage =
   | { type: 'subscribe'; scope: 'sessions' }
   | { type: 'subscribe'; scope: 'session'; sessionId: string; sinceSeq: number };

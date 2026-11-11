@@ -1,4 +1,5 @@
 import type { NodeStatus, SessionStatus } from '@claude-canvas/shared';
+import { asyncLaunch } from './transcript.js';
 
 /** What a hook means for a node, independent of any session state. */
 export type HookNodeEffect =
@@ -25,6 +26,8 @@ export interface HookDescription {
   /** True for the events that may bring an `ended` session back (SessionStart, UserPromptSubmit). */
   resumes: boolean;
   node: HookNodeEffect | null;
+  /** `session_title` of a UserPromptSubmit payload; null when absent or empty. */
+  title: string | null;
 }
 
 export type ParsedHook = { ok: true; hook: HookDescription } | { ok: false; unknownRecordType: string };
@@ -44,6 +47,8 @@ function nodeEffect(eventName: string, p: Record<string, unknown>, agentId: stri
     case 'PermissionDenied':
       return toolUseId !== null ? { kind: 'settle', toolUseId, status: 'denied', durationMs: null } : null;
     case 'PostToolUse':
+      // A background Agent launch returns at once; the dispatch is settled when the agent ends (see the normalizer).
+      if ((toolName === 'Agent' || toolName === 'Task') && asyncLaunch(p.tool_response) !== null) return null;
       return toolUseId !== null
         ? { kind: 'settle', toolUseId, status: 'succeeded', durationMs: num(p.duration_ms), output: p.tool_response }
         : null;
@@ -124,6 +129,7 @@ export function parseHook(eventName: string, payload: string): ParsedHook {
       status: sessionStatus(eventName, parsed),
       resumes: eventName === 'SessionStart' || eventName === 'UserPromptSubmit',
       node: nodeEffect(eventName, parsed, agentId),
+      title: eventName === 'UserPromptSubmit' && agentId === null ? (str(parsed.session_title) || null) : null,
     },
   };
 }

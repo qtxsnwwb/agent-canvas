@@ -54,7 +54,7 @@ test('PreToolUse 带 agent_id 和 Agent 工具名', () => {
   const { graph } = run(n, [
     hook('PreToolUse', { tool_name: 'Task', tool_input: { description: 'd' }, tool_use_id: 'tu9', agent_id: 'ag1' }),
   ]);
-  expect(graph.nodes['tool:tu9']).toMatchObject({ kind: 'subagent', agentId: 'ag1' });
+  expect(graph.nodes['tool:tu9']).toMatchObject({ kind: 'subagent', agentId: 'ag1', childAgentId: null });
 });
 
 test('JSONL 先到：PreToolUse 不产生节点变更', () => {
@@ -139,14 +139,24 @@ test('终态不回退', () => {
   expect(graph.nodes['tool:tu1']!.status).toBe('denied');
 });
 
-test('终态节点仍可补上 durationMs', () => {
+test('终态节点仍可补上 durationMs（起止时间推不出耗时时）', () => {
   const { graph } = run(n, [
     userPrompt('u1', null, 'x'),
-    use(),
+    assistantBlock('a1', 'u1', { type: 'tool_use', id: 'tu1', name: 'Bash', input: { command: 'ls' } }, { timestamp: 'not-a-time' }),
     toolResult('u2', 'a1', 'tu1', 'ok'),
     hook('PostToolUse', { tool_use_id: 'tu1', tool_response: 'ok', duration_ms: 7 }),
   ]);
   expect(graph.nodes['tool:tu1']).toMatchObject({ status: 'succeeded', durationMs: 7 });
+});
+
+test('tool_result 先到并已推出耗时：之后 hook 的 duration_ms 不覆盖（先到先得）', () => {
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x'),
+    assistantBlock('a1', 'u1', { type: 'tool_use', id: 'tu1', name: 'Bash', input: {} }, { timestamp: '2026-03-01T10:00:00.000Z' }),
+    toolResult('u2', 'a1', 'tu1', 'ok', undefined, { timestamp: '2026-03-01T10:00:02.000Z' }),
+    hook('PostToolUse', { tool_use_id: 'tu1', tool_response: 'ok', duration_ms: 7 }),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ durationMs: 2000, endedAt: '2026-03-01T10:00:02.000Z' });
 });
 
 test('PostToolUseFailure 标记 failed', () => {
@@ -413,4 +423,146 @@ test('hook 终态之后到达的 tool_use 不再记住入参', () => {
   run(n, [use()]);
   expect(n.toolInputCount('s1')).toBe(0);
   expect(n.toolInputCount('missing')).toBe(0);
+});
+
+test('PostToolUse 先到：endedAt 是 hook 的接收时间，耗时用 hook 的 duration_ms；之后的 tool_result 不改这两项', () => {
+  const HOOK_AT = '2026-03-01T10:00:02.000Z';
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x'),
+    use(),
+    hook('PostToolUse', { tool_use_id: 'tu1', tool_response: 'ok', duration_ms: 1234 }, HOOK_AT),
+    toolResult('u2', 'a1', 'tu1', 'ok', true, { timestamp: '2026-03-01T10:00:30.000Z' }),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ status: 'failed', endedAt: HOOK_AT, durationMs: 1234 });
+});
+
+test('hook 没带 duration_ms 时由起止时间推出耗时', () => {
+  const { graph } = run(n, [
+    hook('PreToolUse', { tool_name: 'Bash', tool_input: {}, tool_use_id: 'tu1' }, '2026-03-01T10:00:00.000Z'),
+    hook('PostToolUse', { tool_use_id: 'tu1', tool_response: 'ok' }, '2026-03-01T10:00:02.000Z'),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ endedAt: '2026-03-01T10:00:02.000Z', durationMs: 2000 });
+});
+
+test('被拒绝（PermissionDenied）也记 endedAt', () => {
+  const AT = '2026-03-01T10:00:05.000Z';
+  const { graph } = run(n, [pre(), hook('PermissionDenied', { tool_use_id: 'tu1', reason: 'no' }, AT)]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ status: 'denied', endedAt: AT });
+});
+
+test('PostToolUseFailure 与 SubagentStop 也记 endedAt', () => {
+  const FAIL_AT = '2026-03-01T10:00:05.000Z';
+  const STOP_AT = '2026-03-01T10:00:09.000Z';
+  const { graph } = run(n, [
+    pre('tu1'),
+    hook('PostToolUseFailure', { tool_use_id: 'tu1', error: 'x' }, FAIL_AT),
+    agentMeta('ag1', { toolUseId: 'tu2', agentType: 'Explore', description: 'd' }),
+    hook('PreToolUse', { tool_name: 'Agent', tool_input: { prompt: 'p' }, tool_use_id: 'tu2' }),
+    hook('SubagentStop', { agent_id: 'ag1' }, STOP_AT),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ status: 'failed', endedAt: FAIL_AT });
+  expect(graph.nodes['tool:tu2']).toMatchObject({ kind: 'subagent', status: 'succeeded', endedAt: STOP_AT });
+});
+
+const AT = (s: number) => new Date(Date.parse('2026-04-01T10:00:00.000Z') + s * 1000).toISOString();
+const useAt = (at: string) => assistantBlock('a1', 'u1', { type: 'tool_use', id: 'tu1', name: 'Bash', input: { command: 'ls' } }, { timestamp: at });
+const preAt = (at: string) => hook('PreToolUse', { tool_name: 'Bash', tool_input: { command: 'ls' }, tool_use_id: 'tu1' }, at);
+
+test('hook 先到再由 JSONL 确认：usage 取自消息，timestamp 改为 JSONL 的时间，id 不变', () => {
+  const prompt = userPrompt('u1', null, 'x', { timestamp: AT(0) });
+  const { graph } = run(n, [prompt, preAt(AT(10)), useAt(AT(5))]);
+  const transcriptOnly = run(new Normalizer(), [prompt, useAt(AT(5))]).graph.nodes['tool:tu1']!;
+  expect(Object.keys(graph.nodes)).toEqual(['u1', 'tool:tu1']);
+  expect(transcriptOnly.usage).not.toBeNull();
+  expect(graph.nodes['tool:tu1']).toMatchObject({ usage: transcriptOnly.usage, timestamp: AT(5), confirmed: true });
+});
+
+test('hook 先到且 PostToolUse 带 duration_ms，之后 JSONL 确认：耗时仍是 hook 的', () => {
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x', { timestamp: AT(0) }),
+    preAt(AT(10)),
+    hook('PostToolUse', { tool_use_id: 'tu1', tool_response: 'ok', duration_ms: 40 }, AT(20)),
+    useAt(AT(5)),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ timestamp: AT(5), endedAt: AT(20), durationMs: 40 });
+});
+
+test('hook 先到且耗时由 hook 起止推出，之后 JSONL 确认：耗时按 JSONL 起点重算', () => {
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x', { timestamp: AT(0) }),
+    preAt(AT(10)),
+    hook('PostToolUse', { tool_use_id: 'tu1', tool_response: 'ok' }, AT(20)),
+    useAt(AT(5)),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ timestamp: AT(5), endedAt: AT(20), durationMs: 15_000 });
+});
+
+test('PreToolUse、JSONL tool_use、tool_result：推出的耗时从 JSONL 起点算', () => {
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x', { timestamp: AT(0) }),
+    preAt(AT(10)),
+    useAt(AT(5)),
+    toolResult('u2', 'a1', 'tu1', 'ok', false, { timestamp: AT(30) }),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ timestamp: AT(5), endedAt: AT(30), durationMs: 25_000 });
+});
+
+test('hook 先到的工具节点：重放同一批原始事件得到相同节点', () => {
+  const events = [
+    userPrompt('u1', null, 'x', { timestamp: AT(0) }),
+    preAt(AT(10)),
+    hook('PostToolUse', { tool_use_id: 'tu1', tool_response: 'ok' }, AT(20)),
+    useAt(AT(5)),
+    toolResult('u2', 'a1', 'tu1', 'ok', false, { timestamp: AT(30) }),
+  ];
+  const first = run(n, events).graph;
+  const second = run(new Normalizer(), events).graph;
+  expect(second.nodes).toEqual(first.nodes);
+  expect(first.nodes['tool:tu1']).toMatchObject({ durationMs: 15_000 });
+});
+
+test('JSONL 的 tool_use 写得比工具实际执行晚：确认后起点取较早的 hook 时间，耗时不为 0、起点不晚于结束', () => {
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x', { timestamp: AT(0) }),
+    preAt(AT(1)),
+    hook('PostToolUse', { tool_use_id: 'tu1', tool_response: 'ok' }, AT(3)),
+    useAt(AT(5)),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ timestamp: AT(1), endedAt: AT(3), durationMs: 2000 });
+});
+
+test('PreToolUse 晚于 JSONL tool_use 到达但接收时间更早：同样把起点降到较早的时间；两种到达顺序得到相同节点', () => {
+  const prompt = userPrompt('u1', null, 'x', { timestamp: AT(0) });
+  const result = toolResult('u2', 'a1', 'tu1', 'ok', false, { timestamp: AT(9) });
+  const hookFirst = run(new Normalizer(), [prompt, preAt(AT(1)), useAt(AT(5)), result]).graph.nodes['tool:tu1'];
+  const transcriptFirst = run(n, [prompt, useAt(AT(5)), preAt(AT(1)), result]).graph.nodes['tool:tu1'];
+  expect(transcriptFirst).toMatchObject({ timestamp: AT(1), endedAt: AT(9), durationMs: 8000 });
+  expect(transcriptFirst).toEqual(hookFirst);
+});
+
+test('PreToolUse 在 tool_result 之后到达且接收时间更早：推出的耗时按新起点重算；hook 给的耗时不变', () => {
+  const prompt = userPrompt('u1', null, 'x', { timestamp: AT(0) });
+  const derived = run(n, [prompt, useAt(AT(5)), toolResult('u2', 'a1', 'tu1', 'ok', false, { timestamp: AT(9) }), preAt(AT(1))]);
+  expect(derived.graph.nodes['tool:tu1']).toMatchObject({ timestamp: AT(1), endedAt: AT(9), durationMs: 8000 });
+  const fromHook = run(new Normalizer(), [
+    prompt,
+    useAt(AT(5)),
+    hook('PostToolUse', { tool_use_id: 'tu1', tool_response: 'ok', duration_ms: 1234 }, AT(9)),
+    preAt(AT(1)),
+  ]);
+  expect(fromHook.graph.nodes['tool:tu1']).toMatchObject({ timestamp: AT(1), durationMs: 1234 });
+});
+
+test('PreToolUse 晚于 JSONL 到达且接收时间更晚：起点保持 JSONL 的时间', () => {
+  const { graph } = run(n, [userPrompt('u1', null, 'x', { timestamp: AT(0) }), useAt(AT(5)), preAt(AT(6))]);
+  expect(graph.nodes['tool:tu1']!.timestamp).toBe(AT(5));
+});
+
+test('较早起点规则下重放同一批原始事件得到相同节点（两种到达顺序）', () => {
+  for (const order of ['hook', 'transcript'] as const) {
+    const prompt = userPrompt('u1', null, 'x', { timestamp: AT(0) });
+    const post = hook('PostToolUse', { tool_use_id: 'tu1', tool_response: 'ok' }, AT(3));
+    const events = order === 'hook' ? [prompt, preAt(AT(1)), post, useAt(AT(5))] : [prompt, useAt(AT(5)), preAt(AT(1)), post];
+    expect(run(new Normalizer(), events).graph.nodes).toEqual(run(new Normalizer(), events).graph.nodes);
+  }
 });

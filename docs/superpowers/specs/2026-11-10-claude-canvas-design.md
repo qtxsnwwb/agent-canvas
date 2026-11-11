@@ -144,6 +144,8 @@ hooks 里没有"权限已批准、开始执行"的独立事件：`PreToolUse` �
          └─ 子代理（agent_id，内部是又一串节点）
 ```
 
+项目显示的目录（`Project.cwd`）：该项目各会话的 `cwd` 中，把每个非字母数字字符换成 `-` 后等于项目 id 的那个（Claude Code 就是这样由目录得到项目目录名的）；有多个不同写法时取出现次数最多的，并列取字典序最小的；一个都没有则为空，页面显示项目 id。在子目录里启动的会话因此不会改变项目的显示目录。
+
 轮次没有单独的表：节点上的 `turnId` 就是它所属轮次的 `promptId`（缺失时取 prompt 记录的 uuid）。
 
 ### 4.2 节点
@@ -159,6 +161,8 @@ hooks 里没有"权限已批准、开始执行"的独立事件：`PreToolUse` �
 | `unknown` | JSONL | 无法解析的对话记录，保留原始内容 |
 
 所有节点共有：`id`、`sessionId`、`turnId`、`agentId`（主线为空）、`parentId`、`timestamp`、`confirmed`、`usage`（token 用量，有则填）。
+subagent 节点另有 `childAgentId`：它派出的代理的 id（元数据到达前为空）；`agentId` 仍是它自己所属的线程。
+`tool`、`subagent` 节点另有 `endedAt`：节点第一次进入终态（成功、失败、被拒绝）的那个事件的时间——`tool_result` 记录的 `timestamp`，或 hook 的接收时间；之后的状态纠正（3.1 规则 4）不改它；仍在执行的节点和其余节点恒为空。进入终态时若 `durationMs` 仍为空，且 `endedAt` 与 `timestamp` 都能解析，则 `durationMs = max(0, endedAt − timestamp)`；hook 自带的 `duration_ms` 先到先得。
 
 ### 4.3 状态
 
@@ -178,6 +182,7 @@ hooks 里没有"权限已批准、开始执行"的独立事件：`PreToolUse` �
 - transcript（只看主线，子代理记录不改会话状态）：用户 prompt → 运行中；`assistant` 记录的 `stop_reason` 为 `end_turn` → 空闲，其他值（含缺失）→ 运行中（“有活动即运行中”，轮次不一定以可识别的 prompt 开始）。
 - 不是用户输入的 `user` 记录：文本（字符串内容，或数组中各 `text` 块的拼接）去掉开头空白后以 `[Request interrupted by user` 开头的是中断标记，产生 `system`/`interrupt` 节点（标题 `Interrupted`），不开启新轮次，主线上把会话置为空闲；以 `<local-command-stdout>`、`<local-command-stderr>`、`<command-name>`、`<command-message>`、`<command-args>`、`<bash-input>`、`<bash-stdout>`、`<bash-stderr>`、`<task-notification>`、`<system-reminder>` 开头的，以及 `isCompactSummary` 为真的，不产生节点、不改状态，只保持父链。这份前缀清单待验收时用真实数据核对。
 - 时间顺序（`statusAt`）：会话记住最近一次状态观测的事件时间（transcript 的 `timestamp` 或 hook 的接收时间）；事件时间早于它的 transcript 记录不改变状态（迟到的记录不覆盖较新的状态）。
+- 会话标题按来源取优先级最高的非空值：`custom`（`custom-title.json` 文件，或 transcript 里 `type: "custom-title"` 记录的 `customTitle`）> `agentName`（`type: "agent-name"` 记录的 `agentName`）> `hook`（`UserPromptSubmit` 载荷的 `session_title`）> `prompt`（主线第一条用户提示的前 60 个字符，换行换成空格）。同一来源后到的覆盖先到的；低优先级来源不覆盖高优先级来源；之后的提示不改变 `prompt` 来源。各来源的当前值只记在归一器内存里，按原始事件顺序重放得到相同结果；`custom-title`、`agent-name` 记录不计入未识别统计。
 - `长时间无活动`（stale）是派生的显示状态，不存储：存储的状态为运行中且最近活动距今超过 15 分钟时显示为它。等待权限确认、等待输入不会降级（它们本来就在等用户）。首页的活跃会话数不计 stale 会话；页面至少每分钟重新计算一次。
 
 ### 4.4 边
@@ -224,6 +229,7 @@ REST：
 |---|---|
 | `GET /api/projects` | 项目列表，含各自的会话数和活跃会话数 |
 | `GET /api/projects/:id/sessions` | 会话列表，含状态、开始时间、最近活动时间、标题、分支 |
+| `GET /api/search?q=<文本>&limit=<1..100，默认 30>` | 会话检索：对会话标题、id、分支、目录和主线提示（`prompt` 节点摘要）做不区分大小写（仅 ASCII）的字面子串匹配；`q` 去首尾空白、最长 200 字符，少于 2 个字符返回 `[]`。返回 `{ session, matches[] }[]`，按最近活动时间降序；每个会话最多 3 条匹配（会话字段在前，提示按时间在后），每条带不超过 80 字符的片段。只读，与其他 `/api` 路由一样受回环校验保护 |
 | `GET /api/sessions/:id/graph` | 该会话的完整图快照和快照对应的 `seq` |
 | `GET /api/sessions/:id/nodes/:nodeId` | 节点完整内容（工具的完整入参和输出） |
 | `GET /api/diagnostics` | 未识别记录统计、最近一次 hook 时间、各文件读取进度、导入失败（文件、错误、时间）、是否正在导入、归一化版本、数据库 epoch |

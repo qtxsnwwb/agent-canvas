@@ -1,21 +1,27 @@
 import {
   applyChanges,
   type ClientMessage,
+  type Diagnostics,
   type Graph,
-  type GraphNode,
   type GraphSnapshot,
   type NodeDetail,
   type Project,
   type SeqChange,
+  type SearchHit,
   type ServerMessage,
   type Session,
 } from '@claude-canvas/shared';
 
 const RECONNECT_MS = 1000;
 
+/** An Error carrying the HTTP status of a failed request. */
+export type HttpError = Error & { status: number };
+
+const isNotFound = (e: unknown): boolean => typeof e === 'object' && e !== null && (e as { status?: unknown }).status === 404;
+
 async function getJson<T>(path: string): Promise<T> {
   const res = await fetch(path);
-  if (!res.ok) throw new Error(`${path}: HTTP ${res.status}`);
+  if (!res.ok) throw Object.assign(new Error(`${path}: HTTP ${res.status}`), { status: res.status }) as HttpError;
   return (await res.json()) as T;
 }
 
@@ -27,6 +33,8 @@ export const api = {
   graph: (sessionId: string) => getJson<GraphSnapshot>(`/api/sessions/${enc(sessionId)}/graph`),
   nodeDetail: (sessionId: string, nodeId: string) =>
     getJson<NodeDetail>(`/api/sessions/${enc(sessionId)}/nodes/${enc(nodeId)}`),
+  diagnostics: () => getJson<Diagnostics>('/api/diagnostics'),
+  search: (q: string) => getJson<SearchHit[]>(`/api/search?q=${enc(q)}`),
 };
 
 export interface WebSocketLike {
@@ -101,6 +109,8 @@ function connect(
 export interface LiveSession {
   getGraph(): Graph;
   getSession(): Session;
+  /** True once the server answered 404 to a resync: the session no longer exists and is not refetched. */
+  isGone(): boolean;
   subscribe(fn: () => void): () => void;
   close(): void;
 }
@@ -121,6 +131,7 @@ export async function openLiveSession(
   let seq = snap.seq;
   let epoch: string | null = null;
   let closed = false;
+  let gone = false;
   /** Non-null while a snapshot refetch is in flight: changes received meanwhile, applied once it lands. */
   let buffered: SeqChange[] | null = null;
   const listeners = new Set<() => void>();
@@ -140,7 +151,7 @@ export async function openLiveSession(
 
   /** Replaces the graph with a fresh snapshot; changes arriving meanwhile are kept and replayed on top of it. */
   const resync = (): void => {
-    if (buffered !== null || closed) return; // already refetching
+    if (buffered !== null || closed || gone) return; // already refetching, or the session no longer exists
     buffered = [];
     fetchGraph(sessionId).then(
       (fresh) => {
@@ -153,10 +164,16 @@ export async function openLiveSession(
         apply(pending);
         notify();
       },
-      () => {
+      (err: unknown) => {
         const pending = buffered ?? [];
         buffered = null;
         if (closed) return;
+        if (isNotFound(err)) {
+          gone = true; // the session was deleted: stop refetching and stop listening
+          close();
+          notify();
+          return;
+        }
         if (apply(pending)) notify();
         setTimeout(resync, RECONNECT_MS); // the server still expects us to refetch
       },
@@ -184,6 +201,7 @@ export async function openLiveSession(
   return {
     getGraph: () => graph,
     getSession: () => session,
+    isGone: () => gone,
     subscribe(fn) {
       listeners.add(fn);
       return () => void listeners.delete(fn);
@@ -210,11 +228,4 @@ export function openLiveSessions(
     deps.onReconnect,
   );
   return { close };
-}
-
-/** Ascending by timestamp, ties broken by id. */
-export function orderNodes(graph: Graph): GraphNode[] {
-  return Object.values(graph.nodes).sort((a, b) =>
-    a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
-  );
 }

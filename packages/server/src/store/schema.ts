@@ -19,7 +19,24 @@ CREATE TABLE IF NOT EXISTS raw_event (
 CREATE UNIQUE INDEX IF NOT EXISTS raw_event_transcript_dedupe
   ON raw_event (file, line_hash) WHERE source = 'transcript';
 CREATE INDEX IF NOT EXISTS raw_event_session ON raw_event (session_id, ingest_id);
+-- raw_event_hook (event_name, received_at) WHERE source = 'hook' served the old hook-stats aggregation; openStore drops
+-- it after the one-time hook_stat backfill, which still uses it on databases that have it.
 CREATE INDEX IF NOT EXISTS raw_event_meta ON raw_event (file, ingest_id) WHERE source = 'meta';
+
+-- Per-event-name hook counters, bumped in the transaction that inserts the raw hook row. Not derived graph data:
+-- rebuild (clearDerived) leaves it alone. Backfilled once from the raw log when empty (databases from before it existed).
+CREATE TABLE IF NOT EXISTS hook_stat (
+  event_name TEXT PRIMARY KEY,
+  count      INTEGER NOT NULL,
+  last_at    TEXT NOT NULL
+);
+
+-- Sessions whose committed raw events are ahead of their derived rows (a hook whose processing failed was stored
+-- alone). The pipeline re-derives such a session from its raw events on the next touch and removes the row in the same
+-- transaction. Not derived data: clearDerived leaves it alone (a full rebuild clears it explicitly).
+CREATE TABLE IF NOT EXISTS dirty_session (
+  session_id TEXT PRIMARY KEY
+);
 
 CREATE TABLE IF NOT EXISTS file_offset (
   file     TEXT PRIMARY KEY,   -- relative to projectsDir, '/' separators
@@ -43,6 +60,12 @@ CREATE TABLE IF NOT EXISTS node (
   body       TEXT NOT NULL,
   PRIMARY KEY (session_id, id)
 );
+
+-- Search over main-thread prompts: the search statements repeat this exact predicate so SQLite can use the index.
+-- node_prompt was an earlier, broader version of it (it also covered subagent prompts).
+DROP INDEX IF EXISTS node_prompt;
+CREATE INDEX IF NOT EXISTS node_main_prompt ON node (session_id)
+  WHERE json_extract(body, '$.kind') = 'prompt' AND json_extract(body, '$.agentId') IS NULL;
 
 CREATE TABLE IF NOT EXISTS node_detail (
   session_id TEXT NOT NULL,
@@ -72,7 +95,7 @@ CREATE TABLE IF NOT EXISTS unknown_stat (
   sample      TEXT NOT NULL
 );
 
--- Small key/value table: epoch, last_hook_at, normalizer_version, rebuild_in_progress.
+-- Small key/value table: epoch, last_hook_at, normalizer_version, rebuild_in_progress, hook_stat_ready.
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
