@@ -145,6 +145,8 @@ export interface DrawerProps {
   view: CanvasView;
   /** Replay view: the header says the content is the node's current state, not the replayed one. */
   replay?: boolean;
+  /** Outline view: the "推理链" rows of the step (from stepChain), listed instead of the causal view's chain. */
+  reasoning?: ReasoningRow[];
   /** Selects another node (a row of the "推理链" list). */
   onSelect(id: string): void;
   /** Expands the folds that cut the chain short (chain.cutAt; see expandCut). */
@@ -152,7 +154,7 @@ export interface DrawerProps {
   onClose(): void;
 }
 
-export function Drawer({ sessionId, node, chain, view, replay = false, onSelect, onExpandCut, onClose }: DrawerProps) {
+export function Drawer({ sessionId, node, chain, view, replay = false, reasoning, onSelect, onExpandCut, onClose }: DrawerProps) {
   const closeRef = useRef<HTMLButtonElement>(null);
   // Focus the close button on open; give focus back to whatever had it when the drawer closes.
   useEffect(() => {
@@ -170,8 +172,11 @@ export function Drawer({ sessionId, node, chain, view, replay = false, onSelect,
 
   /** Set by a "推理链" row click; the next list render focuses the (new) current row. */
   const reasonFocus = useRef(false);
-  const causal = view.mode === 'causal';
-  const rows = useMemo(() => (causal ? reasoningRows(view, chain, node.id) : []), [causal, view, chain, node.id]);
+  const causal = view.mode === 'causal' || reasoning !== undefined;
+  const rows = useMemo(
+    () => reasoning ?? (view.mode === 'causal' ? reasoningRows(view, chain, node.id) : []),
+    [reasoning, view, chain, node.id],
+  );
   const duration = node.durationMs !== null ? formatDuration(node.durationMs) : '';
   return (
     <aside className="cc-drawer" aria-label="节点详情" style={{ ['--cc-color' as string]: nodeColor(node) }}>

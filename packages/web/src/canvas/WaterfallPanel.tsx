@@ -15,6 +15,8 @@ export interface WaterfallProps {
   compact: boolean;
   /** The row whose detail is open in the drawer. */
   selectedId: string | null;
+  /** The steps that led to the selected row (see stepChain); the other rows are dimmed. Null: no highlighting. */
+  chainIds: ReadonlySet<string> | null;
   onSelectRow(id: string): void;
   /** A subagent row's "内部步骤": show that agent's steps instead (takes the dispatch node's id). */
   onOpenAgent(dispatchNodeId: string): void;
@@ -32,8 +34,10 @@ function formatClock(ms: number): string {
 }
 const pct = (f: number): string => `${(f * 100).toFixed(3)}%`;
 
-const Row = memo(function Row({ row, left, width, selected, onSelectRow, onOpenAgent }: {
+const Row = memo(function Row({ row, left, width, selected, chain, onSelectRow, onOpenAgent }: {
   row: WaterfallRow; left: number; width: number; selected: boolean;
+  /** 'on': led to the selected row; 'off': did not (dimmed); null: nothing is selected. */
+  chain: 'on' | 'off' | null;
   onSelectRow(id: string): void; onOpenAgent(id: string): void;
 }) {
   const { node } = row;
@@ -47,7 +51,8 @@ const Row = memo(function Row({ row, left, width, selected, onSelectRow, onOpenA
   // The duration is written after the bar, or before it when the bar ends in the right-hand third of the track.
   const after = left + width < 0.7;
   return (
-    <div className={`cc-wf-row${selected ? ' cc-wf-selected' : ''}`} onClick={() => onSelectRow(row.id)}>
+    <div className={`cc-wf-row${selected ? ' cc-wf-selected' : ''}${chain === 'on' ? ' cc-wf-chain' : chain === 'off' ? ' cc-wf-dim' : ''}`}
+      onClick={() => onSelectRow(row.id)}>
       <div className="cc-wf-label">
         <span className="cc-wf-dot" style={{ background: color }} />
         <button type="button" className="cc-wf-name" title={node.summary || undefined}>
@@ -79,7 +84,7 @@ const Row = memo(function Row({ row, left, width, selected, onSelectRow, onOpenA
  * the panel re-renders every second and, if the reader is at the bottom of the list, keeps up with new rows.
  */
 export const Waterfall = memo(function Waterfall({
-  graph, scope, title, compact, selectedId, onSelectRow, onOpenAgent, onClose,
+  graph, scope, title, compact, selectedId, chainIds, onSelectRow, onOpenAgent, onClose,
 }: WaterfallProps) {
   const now = useNow(1000);
   const scopeKey = scope.type === 'turn' ? `turn:${scope.turnKey}` : `agent:${scope.agentId}`;
@@ -136,6 +141,7 @@ export const Waterfall = memo(function Waterfall({
           const { left, width } = barOf(wf, row);
           return (
             <Row key={row.id} row={row} left={left} width={width} selected={row.id === selectedId}
+              chain={chainIds === null ? null : chainIds.has(row.id) ? 'on' : 'off'}
               onSelectRow={onSelectRow} onOpenAgent={onOpenAgent} />
           );
         })}

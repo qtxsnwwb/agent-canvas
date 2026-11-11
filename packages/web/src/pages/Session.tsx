@@ -9,7 +9,8 @@ import { Timeline } from '../canvas/Timeline';
 import { useCanvas } from '../canvas/useCanvas';
 import type { ViewMode } from '../canvas/view';
 import { Waterfall } from '../canvas/WaterfallPanel';
-import { scopeOf, type WaterfallScope } from '../canvas/waterfall';
+import { reasoningRow, type ReasoningRow } from '../canvas/reasoning';
+import { scopeOf, stepChain, type WaterfallScope } from '../canvas/waterfall';
 import { sessionStatusView } from '../labels';
 import { sessionLoadState } from '../sessionLoad';
 import { useNow } from '../useNow';
@@ -108,6 +109,19 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
     setSelectedId(null);
   }, []);
   const openAgent = useCallback((dispatchNodeId: string) => setSelectedId(dispatchNodeId), []);
+  // Outline view: the steps that led to the open step, highlighted in the waterfall and listed in the drawer ("精简"
+  // leaves out thinking steps whose content was not recorded).
+  const steps = useMemo(() => (outline && detailId !== null ? stepChain(graphNow, detailId) : null), [outline, graphNow, detailId]);
+  const compactNow = canvas.compact;
+  const stepReasoning = useMemo(() => {
+    if (steps === null) return undefined;
+    const rows: ReasoningRow[] = [];
+    for (const n of steps.reasoning) {
+      const row = reasoningRow(n, detailId);
+      if (row !== null && !(compactNow && row.missing && !row.current)) rows.push(row);
+    }
+    return rows;
+  }, [steps, detailId, compactNow]);
   const [stopFollowingSignal, setStopFollowingSignal] = useState(0);
   // A run node has no content of its own: selecting it shows its calls instead (and, like any expand, stops following).
   const { expandRun } = canvas;
@@ -173,7 +187,8 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
             chain={chain}
             view={view}
             replay={replaying}
-            onSelect={setSelectedId}
+            reasoning={stepReasoning}
+            onSelect={outline ? setDetailId : setSelectedId}
             onExpandCut={expandChainCut}
             onClose={closeDrawer}
           />
@@ -186,6 +201,7 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
             title={scopeTitle}
             compact={canvas.compact}
             selectedId={detailId}
+            chainIds={steps !== null ? steps.ids : null}
             onSelectRow={setDetailId}
             onOpenAgent={openAgent}
             onClose={closePanel}

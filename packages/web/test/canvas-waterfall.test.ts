@@ -1,7 +1,7 @@
 import { expect, test } from 'vitest';
 import type { Graph, GraphEdge, GraphNode, NodeKind } from '@claude-canvas/shared';
 import { buildView } from '../src/canvas/view';
-import { barOf, buildWaterfall, scopeOf } from '../src/canvas/waterfall';
+import { barOf, buildWaterfall, scopeOf, stepChain } from '../src/canvas/waterfall';
 
 const EPOCH = Date.parse('2026-01-01T00:00:00Z');
 const iso = (t: number) => new Date(EPOCH + t).toISOString();
@@ -116,4 +116,32 @@ test('an unknown scope is empty with a usable range; barOf gives fractions of th
   expect(barOf({ startMs: 0, endMs: 100 }, { startMs: 25, endMs: 75 })).toEqual({ left: 0.25, width: 0.5 });
   expect(barOf({ startMs: 0, endMs: 100 }, { startMs: 50, endMs: 50 })).toEqual({ left: 0.5, width: 0 });
   expect(barOf({ startMs: 0, endMs: 100 }, { startMs: -10, endMs: 500 })).toEqual({ left: 0, width: 1 });
+});
+
+test('stepChain walks back to the turn prompt, skips parallel siblings, and stops at the prompt', () => {
+  const g = graph(
+    [
+      node('p0', 'prompt', 't0', null, 0), node('y0', 'text', 't0', null, 1),
+      node('p1', 'prompt', 't1', null, 10), node('th', 'thinking', 't1', null, 11), node('x1', 'text', 't1', null, 12),
+      node('a', 'tool', 't1', null, 13), node('b', 'tool', 't1', null, 13), node('x2', 'text', 't1', null, 14),
+      node('c', 'tool', 't1', null, 15),
+    ],
+    [e('p0', 'y0'), e('y0', 'p1'), e('p1', 'th'), e('th', 'x1'), e('x1', 'a', 'fork'), e('x1', 'b', 'fork'), e('a', 'x2'), e('b', 'x2'), e('x2', 'c')],
+  );
+  const viaA = stepChain(g, 'a');
+  expect([...viaA.ids].sort()).toEqual(['a', 'p1', 'th', 'x1']);
+  expect(viaA.reasoning.map((n) => n.id)).toEqual(['th', 'x1']);
+  const viaC = stepChain(g, 'c');
+  expect([...viaC.ids].sort()).toEqual(['a', 'b', 'c', 'p1', 'th', 'x1', 'x2']);
+  expect(viaC.reasoning.map((n) => n.id)).toEqual(['th', 'x1', 'x2']);
+  expect([...stepChain(g, 'p1').ids]).toEqual(['p1']);
+  expect(stepChain(g, null).ids.size).toBe(0);
+  expect(stepChain(g, 'nope').ids.size).toBe(0);
+});
+
+test('stepChain continues from an agent step through its dispatch node into the main thread', () => {
+  const g = twoTurnsWithAgents();
+  const chain = stepChain(g, 'i2');
+  expect([...chain.ids].sort()).toEqual(['a', 'd1', 'd2', 'i1', 'i2', 'p1']);
+  expect(chain.reasoning.map((n) => n.id)).toEqual(['i2']);
 });

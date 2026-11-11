@@ -366,3 +366,6 @@ button.cc-reason:focus-visible, .cc-reason-current:focus-visible { outline: 2px 
 @media (prefers-reduced-motion: reduce) { .cc-wf-bar.cc-wf-open { animation: none; } }
 .cc-wf-mark { position: absolute; top: 9px; width: 8px; height: 8px; margin-left: -4px; border-radius: 2px; transform: rotate(45deg); }
 .cc-wf-dur { position: absolute; top: 5px; padding: 0 5px; color: #64748b; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* A step is open in the drawer: the steps that led to it keep their colour and get a left accent, the rest are dimmed. */
+.cc-wf-row.cc-wf-dim { opacity: 0.38; }
+.cc-wf-row.cc-wf-chain { box-shadow: inset 3px 0 0 #f59e0b; }

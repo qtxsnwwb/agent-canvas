@@ -1,3 +1,4 @@
+import type { GraphNode } from '@claude-canvas/shared';
 import type { UpstreamChain } from './chain';
 import type { CanvasView } from './view';
 
@@ -28,20 +29,25 @@ export function reasoningRows(view: CanvasView, chain: UpstreamChain, selectedId
   for (const id of chain.reasoning) {
     const vn = view.nodes.get(id);
     if (vn?.type !== 'node') continue;
-    const { node } = vn;
-    if (node.kind !== 'thinking' && node.kind !== 'text') continue;
-    const thinking = node.kind === 'thinking';
-    const missing = thinking && node.summary === '';
-    rows.push({
-      id,
-      kind: node.kind,
-      label: thinking ? '思考' : '回复',
-      time: node.timestamp,
-      text: missing ? THINKING_NOT_RECORDED : node.summary,
-      missing,
-      durationMs: missing ? node.durationMs : null,
-      current: id === selectedId,
-    });
+    const row = reasoningRow(vn.node, selectedId);
+    if (row !== null) rows.push(row);
   }
   return rows;
+}
+
+/** The row for a thinking / text node; null for any other kind. */
+export function reasoningRow(node: GraphNode, selectedId: string | null): ReasoningRow | null {
+  if (node.kind !== 'thinking' && node.kind !== 'text') return null;
+  const thinking = node.kind === 'thinking';
+  const missing = thinking && node.summary === '';
+  return {
+    id: node.id,
+    kind: node.kind,
+    label: thinking ? '思考' : '回复',
+    time: node.timestamp,
+    text: missing ? THINKING_NOT_RECORDED : node.summary,
+    missing,
+    durationMs: missing ? node.durationMs : null,
+    current: node.id === selectedId,
+  };
 }

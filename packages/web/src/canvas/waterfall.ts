@@ -89,3 +89,48 @@ export function barOf(w: Pick<Waterfall, 'startMs' | 'endMs'>, row: Pick<Waterfa
   const right = Math.min(1, Math.max(left, (row.endMs - w.startMs) / span));
   return { left, width: right - left };
 }
+
+const incomingIndex = new WeakMap<Graph, Map<string, string[]>>();
+/** Node id -> the nodes with an edge into it (any kind); built once per graph object. */
+function incomingOf(graph: Graph): Map<string, string[]> {
+  const known = incomingIndex.get(graph);
+  if (known) return known;
+  const incoming = new Map<string, string[]>();
+  for (const e of Object.values(graph.edges)) {
+    let list = incoming.get(e.to);
+    if (!list) incoming.set(e.to, (list = []));
+    list.push(e.from);
+  }
+  incomingIndex.set(graph, incoming);
+  return incoming;
+}
+
+/**
+ * The steps that led to `stepId`: the graph's edges walked backwards from it (breadth first, each node once), through
+ * an agent's first step into the node that dispatched it, up to and including the main-thread prompt of the turn (where
+ * the walk ends). `ids` includes the start; `reasoning`: the thinking / text nodes among them, by time then id. Empty
+ * for null or an unknown id.
+ */
+export function stepChain(graph: Graph, stepId: string | null): { ids: ReadonlySet<string>; reasoning: GraphNode[] } {
+  const ids = new Set<string>();
+  const reasoning: GraphNode[] = [];
+  if (stepId === null || graph.nodes[stepId] === undefined) return { ids, reasoning };
+  const incoming = incomingOf(graph);
+  const queue = [stepId];
+  ids.add(stepId);
+  for (let head = 0; head < queue.length; head++) {
+    const node = graph.nodes[queue[head]!];
+    if (node === undefined) continue;
+    if (node.kind === 'thinking' || node.kind === 'text') reasoning.push(node);
+    if (node.kind === 'prompt' && node.agentId === null) continue; // the turn's prompt ends the walk
+    for (const from of incoming.get(node.id) ?? []) {
+      if (!ids.has(from) && graph.nodes[from] !== undefined) {
+        ids.add(from);
+        queue.push(from);
+      }
+    }
+  }
+  const ms = (n: GraphNode): number => parseMs(n.timestamp) ?? 0;
+  reasoning.sort((a, b) => ms(a) - ms(b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return { ids, reasoning };
+}
