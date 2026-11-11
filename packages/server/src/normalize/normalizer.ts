@@ -39,6 +39,8 @@ function promptTitle(text: string): string | null {
 }
 
 const KNOWN_TYPES = new Set(['user', 'assistant', 'system', 'attachment']);
+/** The tool an agent's thread calls last when it hands its result back (desktop app; seen in real transcripts, 2026-11-11). */
+const HANDBACK_TOOL = 'SubagentHandback';
 
 /** In-memory state for one session; later tasks extend this with batch/subagent bookkeeping. */
 interface SessionState {
@@ -71,6 +73,13 @@ interface SessionState {
   agentMetas: Map<string, AgentMeta>;
   /** agents whose spawn edge was already emitted. */
   spawned: Set<string>;
+  /**
+   * Dispatch node ids launched in the background: the launch's own tool_result does not settle them, the end of the
+   * agent does (see finishAgent).
+   */
+  asyncDispatch: Set<string>;
+  /** agentId -> time its thread ended (first signal: SubagentStop hook, end_turn, or its hand-back call). */
+  finishedAgents: Map<string, string>;
   /** The first main-thread prompt has been seen (whether or not it gave a title). */
   firstPromptSeen: boolean;
 }
@@ -224,6 +233,7 @@ export class Normalizer {
     state.agentMetas.set(meta.toolUseId, meta);
     state.dispatchByAgent.set(meta.agentId, `tool:${meta.toolUseId}`);
     this.applyAgentMeta(state, meta, changes);
+    this.settleFinishedDispatch(state, meta.agentId, changes); // the agent may have ended before its meta was read
   }
 
   /** Writes the meta onto the dispatch node (if it exists yet) and tries the spawn edge. */
@@ -349,11 +359,9 @@ export class Normalizer {
       case 'settle':
         this.settleTool(state, effect, at, changes);
         break;
-      case 'subagent_stop': {
-        const dispatch = state.dispatchByAgent.get(effect.agentId);
-        if (dispatch !== undefined) this.settleTool(state, { kind: 'settle', toolUseId: dispatch.slice('tool:'.length), status: 'succeeded', durationMs: null }, at, changes);
+      case 'subagent_stop':
+        this.finishAgent(state, effect.agentId, at, changes);
         break;
-      }
       case 'compact': {
         const id = `compact:${state.session.id}:${at}`;
         if (state.nodes.has(id)) break;
@@ -402,6 +410,25 @@ export class Normalizer {
     const patch: Partial<GraphNode> = { status: 'awaiting_permission' };
     state.nodes.set(match.id, { ...match, ...patch });
     changes.push({ type: 'node_updated', sessionId: state.session.id, id: match.id, patch });
+  }
+
+  /**
+   * The agent's thread has ended (SubagentStop hook, an end_turn record or the hand-back call in its transcript): its
+   * dispatch node, if still open, succeeds now. Only the first signal counts. The dispatch may not be known yet (no
+   * meta, launch record not read): then it is settled when it becomes known (settleFinishedDispatch).
+   */
+  private finishAgent(state: SessionState, agentId: string, at: string, changes: Change[]): void {
+    if (state.finishedAgents.has(agentId)) return;
+    state.finishedAgents.set(agentId, at);
+    this.settleFinishedDispatch(state, agentId, changes);
+  }
+
+  private settleFinishedDispatch(state: SessionState, agentId: string, changes: Change[]): void {
+    const at = state.finishedAgents.get(agentId);
+    const dispatch = state.dispatchByAgent.get(agentId);
+    if (at === undefined || dispatch === undefined) return;
+    state.asyncDispatch.delete(dispatch);
+    this.settleTool(state, { kind: 'settle', toolUseId: dispatch.slice('tool:'.length), status: 'succeeded', durationMs: null }, at, changes);
   }
 
   /** Moves a tool node to a terminal status unless it is already terminal (then only a missing duration is filled in). */
@@ -550,6 +577,10 @@ export class Normalizer {
   ): void {
     let prev: string | null = null;
     let first = true;
+    // An agent's thread ends with an end_turn message, or (desktop app) with its hand-back call.
+    if (agentId !== null && (c.meta.endTurn || c.blocks.some((b) => b.kind === 'tool_use' && b.name === HANDBACK_TOOL))) {
+      this.finishAgent(state, agentId, str(record.timestamp) ?? state.session.lastActivityAt, changes);
+    }
     for (const b of c.blocks) {
       const parentId = first ? this.resolveParent(state, record) : prev;
       first = false;
@@ -613,6 +644,8 @@ export class Normalizer {
         batches: new Map(),
         firstNodeByAgent: new Map(),
         dispatchByAgent: new Map(),
+        asyncDispatch: new Set(),
+        finishedAgents: new Map(),
         agentMetas: new Map(),
         spawned: new Set(),
         firstPromptSeen: false,
@@ -901,6 +934,31 @@ export class Normalizer {
     return id;
   }
 
+  /**
+   * The immediate answer to a background Agent launch: the agent is still running, so the dispatch node stays (or goes
+   * back to) running and is settled by finishAgent. A hook may have settled it already from the same answer.
+   */
+  private applyAsyncLaunch(state: SessionState, node: GraphNode, agentId: string | null, output: unknown, changes: Change[]): void {
+    const id = node.id;
+    state.toolInputs.delete(id);
+    state.asyncDispatch.add(id);
+    const patch: Partial<GraphNode> = {};
+    if (node.status !== 'denied' && node.status !== 'running') {
+      patch.status = 'running';
+      patch.endedAt = null;
+      patch.durationMs = null;
+      state.durationFromHook.delete(id);
+      state.terminalFromContent.delete(id);
+    }
+    if (Object.keys(patch).length > 0) state.nodes.set(id, { ...node, ...patch });
+    changes.push({ type: 'node_updated', sessionId: state.session.id, id, patch, detail: { output } });
+    const known = agentId ?? state.agentMetas.get(id.slice('tool:'.length))?.agentId ?? null;
+    if (known !== null) {
+      if (!state.dispatchByAgent.has(known)) state.dispatchByAgent.set(known, id);
+      this.settleFinishedDispatch(state, known, changes); // its thread may already have ended
+    }
+  }
+
   private applyToolResults(
     state: SessionState,
     c: Extract<Classified, { kind: 'tool_results' }>,
@@ -911,6 +969,10 @@ export class Normalizer {
       const id = `tool:${r.toolUseId}`;
       const node = state.nodes.get(id);
       if (!node) continue;
+      if (c.asyncAgent !== null && node.kind === 'subagent' && !r.isError) {
+        this.applyAsyncLaunch(state, node, c.asyncAgent.agentId, r.content, changes);
+        continue;
+      }
       const status: NodeStatus = r.isError ? 'failed' : 'succeeded';
       const terminal = node.status !== null && TERMINAL_STATUSES.includes(node.status);
       // Final: denied (never overridden) and a status that already came from a tool_result. A hook-derived

@@ -252,3 +252,96 @@ test('除派发边外，没有边连接不同线程的节点', () => {
     if (e.kind !== 'spawn') expect(graph.nodes[e.from]!.agentId).toBe(graph.nodes[e.to]!.agentId);
   }
 });
+
+// A background Agent launch answers at once with `async_launched`; the dispatch node follows the agent, not the launch.
+const ASYNC = { toolUseResult: { status: 'async_launched', isAsync: true, agentId: 'ag1', description: 'd' } };
+const launch = () => [
+  userPrompt('u1', null, 'x'),
+  assistantBlock('a1', 'u1', { type: 'tool_use', id: 'tu1', name: 'Agent', input: { description: 'd' } }),
+  toolResult('u2', 'a1', 'tu1', 'Async agent launched', undefined, ASYNC),
+];
+
+test('后台派出的子代理：派出动作返回后派发节点仍在运行，子代理 end_turn 时才结算', () => {
+  const started = run(n, launch());
+  expect(started.graph.nodes['tool:tu1']).toMatchObject({ kind: 'subagent', status: 'running', endedAt: null, durationMs: null });
+  const { graph } = run(n, [
+    userPrompt('s1', null, 'sub prompt', { agentId: 'ag1' }),
+    assistantBlock('s2', 's1', { type: 'text', text: 'working' }, { agentId: 'ag1' }),
+  ]);
+  let g = started.graph;
+  for (const [id, node] of Object.entries(graph.nodes)) g = { ...g, nodes: { ...g.nodes, [id]: node } };
+  expect(n.apply(assistantBlock('s3', 's2', { type: 'text', text: 'done' }, { agentId: 'ag1', stopReason: 'end_turn', timestamp: '2026-01-01T01:00:00.000Z' }), 'p1')
+    .changes.find((c) => c.type === 'node_updated' && c.id === 'tool:tu1')).toMatchObject({
+    patch: { status: 'succeeded', endedAt: '2026-01-01T01:00:00.000Z' },
+  });
+});
+
+test('后台派出：结算后的耗时是从派出到子代理结束', () => {
+  const events = [
+    userPrompt('u1', null, 'x'),
+    assistantBlock('a1', 'u1', { type: 'tool_use', id: 'tu1', name: 'Agent', input: {} }, { timestamp: '2026-01-01T00:10:00.000Z' }),
+    toolResult('u2', 'a1', 'tu1', 'launched', undefined, ASYNC),
+    assistantBlock('s1', null, { type: 'text', text: 'done' }, { agentId: 'ag1', stopReason: 'end_turn', timestamp: '2026-01-01T00:15:00.000Z' }),
+  ];
+  const { graph } = run(n, events);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ status: 'succeeded', endedAt: '2026-01-01T00:15:00.000Z', durationMs: 300_000 });
+});
+
+test('后台派出：PostToolUse hook 不结算派发节点，SubagentStop hook 结算', () => {
+  const { graph: g1 } = run(n, [
+    userPrompt('u1', null, 'x'),
+    assistantBlock('a1', 'u1', { type: 'tool_use', id: 'tu1', name: 'Agent', input: {} }),
+    hook('PostToolUse', { tool_use_id: 'tu1', tool_name: 'Agent', duration_ms: 12, tool_response: ASYNC.toolUseResult }),
+    toolResult('u2', 'a1', 'tu1', 'launched', undefined, ASYNC),
+  ]);
+  expect(g1.nodes['tool:tu1']).toMatchObject({ status: 'running', endedAt: null });
+  const stop = n.apply(hook('SubagentStop', { agent_id: 'ag1' }, '2026-01-01T02:00:00.000Z'), 'p1');
+  expect(stop.changes.find((c) => c.type === 'node_updated' && c.id === 'tool:tu1')).toMatchObject({
+    patch: { status: 'succeeded', endedAt: '2026-01-01T02:00:00.000Z' },
+  });
+  // A later end_turn of the same agent is not a second end.
+  const again = n.apply(assistantBlock('s9', null, { type: 'text', text: 'bye' }, { agentId: 'ag1', stopReason: 'end_turn' }), 'p1');
+  expect(again.changes.some((c) => c.type === 'node_updated' && c.id === 'tool:tu1')).toBe(false);
+});
+
+test('后台派出：子代理以交回工具调用结束时同样结算', () => {
+  const { graph } = run(n, [
+    ...launch(),
+    assistantBlock('s1', null, { type: 'tool_use', id: 'hb', name: 'SubagentHandback', input: {} }, { agentId: 'ag1', stopReason: 'tool_use' }),
+  ]);
+  expect(graph.nodes['tool:tu1']!.status).toBe('succeeded');
+});
+
+test('后台派出：子代理先结束、派出记录后到，派发节点按子代理结束的时间结算', () => {
+  const { graph } = run(n, [
+    assistantBlock('s1', null, { type: 'text', text: 'done' }, { agentId: 'ag1', stopReason: 'end_turn', timestamp: '2026-01-01T00:20:00.000Z' }),
+    ...launch(),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ status: 'succeeded', endedAt: '2026-01-01T00:20:00.000Z' });
+});
+
+test('后台派出：已被 hook 结算的派发节点在派出记录到达时回到运行中', () => {
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x'),
+    assistantBlock('a1', 'u1', { type: 'tool_use', id: 'tu1', name: 'Agent', input: {} }),
+    hook('PostToolUse', { tool_use_id: 'tu1', tool_name: 'Agent', duration_ms: 12, tool_response: 'ok' }),
+    toolResult('u2', 'a1', 'tu1', 'launched', undefined, ASYNC),
+  ]);
+  expect(graph.nodes['tool:tu1']).toMatchObject({ status: 'running', endedAt: null, durationMs: null });
+});
+
+test('前台子代理不受影响：派出动作的结果到达即结算', () => {
+  const { graph } = run(n, [
+    userPrompt('u1', null, 'x'),
+    assistantBlock('a1', 'u1', { type: 'tool_use', id: 'tu1', name: 'Agent', input: {} }),
+    toolResult('u2', 'a1', 'tu1', 'result'),
+  ]);
+  expect(graph.nodes['tool:tu1']!.status).toBe('succeeded');
+  // An ordinary tool whose result happens to say isAsync is not an agent launch.
+  const { graph: g2 } = run(new Normalizer(), [
+    userPrompt('u1', null, 'x'),
+    assistantBlock('a1', 'u1', { type: 'tool_use', id: 't1', name: 'Bash', input: {} }),
+    toolResult('u2', 'a1', 't1', 'started', undefined, { toolUseResult: { isAsync: true } }),
+  ]);
+  expect(g2.nodes['tool:t1']!.status).toBe('succeeded');
+});

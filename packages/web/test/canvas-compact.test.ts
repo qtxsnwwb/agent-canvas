@@ -251,3 +251,14 @@ test('exclude keeps the named calls out of every run; the calls after them can s
   expect(later.runs.get(runIdOf('d'))).toEqual(['d', 'f', 'h']);
   expect(later.graph.nodes.a).toBe(g.nodes.a);
 });
+
+test('a thought reaching a node through two later thoughts side by side is counted once, with both of theirs', () => {
+  const g = graph(
+    [
+      node('p', 'prompt', 0), node('th', 'thinking', 1, { durationMs: 3000 }),
+      node('t1', 'thinking', 2, { durationMs: 100 }), node('t2', 'thinking', 2, { durationMs: 200 }), node('x', 'text', 3),
+    ],
+    [e('p', 'th'), e('th', 't1'), e('th', 't2'), e('t1', 'x'), e('t2', 'x')],
+  );
+  expect(compactGraph(g).thinkingMs.get('x')).toBe(3300);
+});

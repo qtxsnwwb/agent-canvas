@@ -129,28 +129,38 @@ export function createCompactor(): Compactor {
     }
 
     // 2. Contract the edges through removed nodes, earliest first, carrying the thinking time forward.
-    /** Node -> removed node right in front of it -> the thinking time carried through that node. */
+    /**
+     * Node -> the removed thinking nodes whose time reaches it (thinking node id -> its duration). Keyed by the thinking
+     * node itself, so a thought that reaches a node along several paths (parallel calls, removed nodes side by side) is
+     * counted once.
+     */
     const carry = new Map<string, Map<string, number>>();
     if (removed.size > 0) {
       for (const n of all) {
         if (!removed.has(n.id)) continue;
         const own = n.kind === 'thinking' ? n.durationMs ?? 0 : 0;
-        const incomingTime = carry.get(n.id);
-        let carried = own;
-        for (const ms of incomingTime?.values() ?? []) carried += ms;
-        // A node that adds nothing passes a single source on under that source's own id, so two such nodes side by side
-        // behind one thought do not make it count twice further down.
-        const [passed] = own === 0 && incomingTime?.size === 1 ? incomingTime.keys() : [];
-        const sourceId = passed ?? n.id;
+        let carried = carry.get(n.id);
+        if (own > 0) {
+          if (!carried) carried = new Map();
+          carried.set(n.id, own);
+        }
         const out = succs.get(n.id);
         const inc = preds.get(n.id);
         if (out) {
+          // The first successor without times of its own takes the map itself (a long row of removed nodes then costs
+          // one entry per node, not a copy per node); the others get the entries.
+          let handedOver = false;
           for (const s of out.keys()) {
             preds.get(s)?.delete(n.id);
-            if (carried > 0) {
-              let from = carry.get(s);
-              if (!from) carry.set(s, (from = new Map()));
-              from.set(sourceId, carried);
+            if (!carried) continue;
+            const into = carry.get(s);
+            if (into) {
+              for (const [origin, ms] of carried) into.set(origin, ms);
+            } else if (!handedOver) {
+              carry.set(s, carried);
+              handedOver = true;
+            } else {
+              carry.set(s, new Map(carried));
             }
           }
         }
@@ -338,15 +348,18 @@ export function createCompactor(): Compactor {
     }
     cache = nextCache;
 
-    // A removed node in front of several members of one run (parallel calls behind one thought) counts once.
+    // A thought in front of several members of one run (parallel calls behind it) counts once on the run.
     const thinkingMs = new Map<string, number>();
     const counted = new Set<string>();
-    for (const [id, sources] of carry) {
+    for (const [id, origins] of carry) {
       const to = runOf.get(id) ?? id;
-      for (const [source, ms] of sources) {
-        const key = `${to}\n${source}`;
-        if (counted.has(key)) continue;
-        counted.add(key);
+      const inRun = to !== id;
+      for (const [origin, ms] of origins) {
+        if (inRun) {
+          const key = `${to}\n${origin}`;
+          if (counted.has(key)) continue;
+          counted.add(key);
+        }
         thinkingMs.set(to, (thinkingMs.get(to) ?? 0) + ms);
       }
     }

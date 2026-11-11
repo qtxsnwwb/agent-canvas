@@ -1,4 +1,5 @@
 import type { NodeStatus, SessionStatus } from '@claude-canvas/shared';
+import { asyncLaunch } from './transcript.js';
 
 /** What a hook means for a node, independent of any session state. */
 export type HookNodeEffect =
@@ -46,6 +47,8 @@ function nodeEffect(eventName: string, p: Record<string, unknown>, agentId: stri
     case 'PermissionDenied':
       return toolUseId !== null ? { kind: 'settle', toolUseId, status: 'denied', durationMs: null } : null;
     case 'PostToolUse':
+      // A background Agent launch returns at once; the dispatch is settled when the agent ends (see the normalizer).
+      if (asyncLaunch(p.tool_response) !== null) return null;
       return toolUseId !== null
         ? { kind: 'settle', toolUseId, status: 'succeeded', durationMs: num(p.duration_ms), output: p.tool_response }
         : null;
