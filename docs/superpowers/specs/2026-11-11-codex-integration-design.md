@@ -179,7 +179,7 @@ node <claude-canvas>/packages/server/dist/cli.js hook-forward --origin codex --p
 - `POST /hooks` 读查询参数 `origin`（缺省 `claude`，现有 Claude Code 的 hook 配置不用动）。
 - **第一版的 Codex hooks 不建、不确认、不结算任何节点**，节点只来自会话文件：有没有 hooks，节点、id、父子关系、边、开始时间和终态都完全一样。原因：嵌套命令（在 `exec` 里跑的命令）的 hook 载荷长什么样还没核对过（文档说 shell 命令的 hook 工具名是 `Bash`，id 很可能是嵌套命令自己的，和会话文件里 `exec` 调用的 `call_id` 对不上），而会话文件本身就会及时写下调用记录。录到真实载荷（第 11 节里程碑 5）后再重新考虑。
 - hooks 提供的是：
-  - **会话状态**，由当前状态算出（不比较 hook 的接收时间和记录时间，与两者到达的先后无关，重建结果相同）。hook 按 `turn_id` 留下轮次标记：开始（`UserPromptSubmit`，以及 `PreToolUse` / `PostToolUse` / `PermissionRequest`）、停止（`Stop`、`Interrupt`；不带 `turn_id` 时停止已标记的全部轮次）、等待权限（`PermissionRequest`，该轮次之后的任何 hook 清除）；会话级标记：结束（`SessionEnd`）、恢复（之后的 `SessionStart` / `UserPromptSubmit`；子代理的这几个事件不算）。规则：
+  - **会话状态**，由当前状态算出（不比较 hook 的接收时间和记录时间，与两者到达的先后无关，重建结果相同）。hook 按 `turn_id` 留下轮次标记：开始（`UserPromptSubmit`，以及 `PreToolUse` / `PostToolUse` / `PermissionRequest`）、停止（`Stop`、`Interrupt`；不带 `turn_id` 时停止已标记的全部轮次）、等待权限（`PermissionRequest`，该轮次之后的任何 hook 清除）；子代理（该轮次有 hook 带 `agent_id`：这是子代理的轮次，不计入会话状态；会话文件把它归到某个线程之前也不给任何节点加等待权限标记）；停止之后同一轮次又收到 `UserPromptSubmit` 或 `PermissionRequest` 时撤销停止（这一轮还在继续），迟到的工具 hook 不撤销；只在 hook 里出现、一直没有会话的标记最多保留 200 个会话，超出时丢掉最早的；会话级标记：结束（`SessionEnd`）、恢复（之后的 `SessionStart` / `UserPromptSubmit`；子代理的这几个事件不算）。规则：
     - 轮次属于哪个线程以会话文件为准（`task_started` / 轮次结束记录在哪个线程），否则算"还不知道"；属于子代理线程的轮次不影响会话状态（子代理的工具 hook 在主轮次结束后才到，也不会把会话改回运行中）。
     - 轮次"已结束"：会话文件里有它的 `task_complete` / `turn_aborted`，或有它的 `Stop` / `Interrupt` hook，或（主线程）主线程里已经开始了更新的轮次。
     - 最近一个会话级标记是结束 → 已结束；

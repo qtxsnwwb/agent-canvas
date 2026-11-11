@@ -134,14 +134,25 @@ interface ThreadState {
   lastTs: string | null;
 }
 
+/** How many sessions that exist only as hook marks (no transcript, no session yet) are remembered. */
+const MAX_UNSEEN_HOOK_SESSIONS = 200;
+
 /** What the hooks have said about one turn (keyed by the payload's turn_id; '' = a hook without one). */
 interface HookTurnMark {
   /** UserPromptSubmit, or a tool / permission hook: the turn is active. */
   started: boolean;
-  /** Stop / Interrupt: the turn is over (sticky: a late tool hook of the same turn does not reopen it). */
+  /**
+   * Stop / Interrupt: the turn is over. A late tool hook of the same turn does not reopen it; a later
+   * UserPromptSubmit or PermissionRequest of that turn does (the turn went on after a Stop hook asked it to).
+   */
   stopped: boolean;
   /** PermissionRequest, not yet followed by another hook of the turn. */
   permission: boolean;
+  /**
+   * A hook of this turn carried an agent_id: it is a subagent's turn. It never counts toward the session's status,
+   * also before (or without) the transcript placing the turn in a child thread.
+   */
+  child: boolean;
 }
 
 /**
@@ -538,9 +549,9 @@ export class CodexNormalizer implements AgentNormalizer {
       const tc = state.threads.get(ownerOf(turnId) ?? rootId)?.turnCalls.get(turnId);
       return tc !== undefined && tc.settled > 0 && tc.open.size === 0;
     };
-    const relevant = (turnId: string): boolean => {
+    const relevant = (turnId: string, mark: HookTurnMark): boolean => {
       const owner = ownerOf(turnId);
-      return owner === undefined || owner === rootId;
+      return owner === undefined ? !mark.child : owner === rootId;
     };
 
     const permissionTargets = new Set<string>();
@@ -548,9 +559,11 @@ export class CodexNormalizer implements AgentNormalizer {
     let hookRunning = false;
     for (const [turnId, mark] of marks?.turns ?? []) {
       if (finished(turnId, mark)) continue;
-      if (mark.started && relevant(turnId)) hookRunning = true;
+      if (mark.started && relevant(turnId, mark)) hookRunning = true;
       if (!mark.permission || settledInTranscript(turnId)) continue;
-      if (relevant(turnId)) awaiting = true;
+      if (relevant(turnId, mark)) awaiting = true;
+      // A subagent's turn the transcript has not placed yet has no thread to mark a node in.
+      if (mark.child && ownerOf(turnId) === undefined) continue;
       const target = this.permissionTarget(state, turnId);
       if (target !== undefined) permissionTargets.add(target);
     }
@@ -1045,6 +1058,7 @@ export class CodexNormalizer implements AgentNormalizer {
     if (!marks) {
       marks = { turns: new Map(), ended: false, firstAt: null, lastAt: null };
       this.hookMarks.set(hook.sessionId, marks);
+      this.pruneUnseenHookMarks();
     }
     if (marks.firstAt === null || at < marks.firstAt) marks.firstAt = at;
     if (marks.lastAt === null || at > marks.lastAt) marks.lastAt = at;
@@ -1063,9 +1077,10 @@ export class CodexNormalizer implements AgentNormalizer {
     const key = hook.turnId ?? '';
     let mark = marks.turns.get(key);
     if (!mark) {
-      mark = { started: false, stopped: false, permission: false };
+      mark = { started: false, stopped: false, permission: false, child: false };
       marks.turns.set(key, mark);
     }
+    if (hook.agentId !== null) mark.child = true;
     if (e === 'Stop' || e === 'Interrupt') {
       const stopped = hook.turnId === null ? [...marks.turns.values()] : [mark];
       for (const m of stopped) {
@@ -1076,6 +1091,17 @@ export class CodexNormalizer implements AgentNormalizer {
     }
     mark.started = true;
     mark.permission = e === 'PermissionRequest';
+    if (e === 'PermissionRequest' || e === 'UserPromptSubmit') mark.stopped = false;
+  }
+
+  /**
+   * Hook marks are kept for sessions not seen yet (a hook can precede its session's file). Hooks naming sessions that
+   * never appear must not pile up: beyond the limit the oldest marks of unseen sessions are dropped.
+   */
+  private pruneUnseenHookMarks(): void {
+    const unseen: string[] = [];
+    for (const id of this.hookMarks.keys()) if (!this.sessions.has(id)) unseen.push(id);
+    for (const id of unseen.slice(0, Math.max(0, unseen.length - MAX_UNSEEN_HOOK_SESSIONS))) this.hookMarks.delete(id);
   }
 
   // ---- nodes ----

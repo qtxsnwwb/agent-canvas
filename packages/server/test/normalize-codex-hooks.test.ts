@@ -78,7 +78,7 @@ beforeEach(() => {
 const nodeChanges = (r: RunResult) => r.changes.filter((c) => c.type !== 'session_upserted');
 
 test('NORMALIZER_VERSION 已升级', () => {
-  expect(NORMALIZER_VERSION).toBe(18);
+  expect(NORMALIZER_VERSION).toBe(19);
 });
 
 describe('parseCodexHook', () => {
@@ -192,7 +192,8 @@ describe('会话状态：状态的函数', () => {
   test('还不知道属于哪个线程的轮次：hook 开始它就算运行中，直到转录说它属于子线程', () => {
     const root = new CodexThread({ id: 'root1' });
     const sub = new CodexThread({ id: 'sub1', sessionId: 'root1', parent: 'root1', nickname: 'H', agentPath: '/root/h' });
-    step([root.meta(), root.started('t1'), root.complete(), pre('k1', 'st1', { agent_id: 'sub1' })]);
+    // No agent_id on the hook: nothing says whose turn it is yet, so it counts as the session's own.
+    step([root.meta(), root.started('t1'), root.complete(), pre('k1', 'st1')]);
     expect(statusNow()).toBe('running');
     step([sub.meta(), sub.started('st1')]);
     expect(statusNow()).toBe('idle');
@@ -402,5 +403,51 @@ describe('与转录的等价性、与到达顺序无关', () => {
     }
     // The run went through every status the hooks can cause.
     expect([...seen].sort()).toEqual(['awaiting_permission', 'ended', 'idle', 'running']);
+  });
+});
+
+describe('复查后的修正', () => {
+  test('带 agent_id 的 hook 属于子代理的轮次：转录还没告诉我们它是谁的，也不影响会话状态', () => {
+    const root = new CodexThread({ id: 'root1' });
+    step([root.meta(), root.started('t1'), root.user('u1', 'go'), root.complete('t1')]);
+    expect(statusNow()).toBe('idle');
+    // A child's tool hooks for a turn the transcript never places (its file is not read, or never names the turn).
+    step([hook('PreToolUse', { turn_id: 'child-turn', agent_id: 'child1', tool_name: 'Bash', tool_use_id: 'x1' })]);
+    expect(statusNow()).toBe('idle');
+    const r = step([hook('PermissionRequest', { turn_id: 'child-turn', agent_id: 'child1', tool_name: 'Bash' })]);
+    expect(statusNow()).toBe('idle');
+    expect(nodeChanges(r)).toEqual([]); // no root node is marked for it
+  });
+
+  test('没有 agent_id 的未知轮次仍然算主线程的', () => {
+    const root = new CodexThread({ id: 'root1' });
+    step([root.meta(), root.started('t1'), root.user('u1', 'go'), root.complete('t1')]);
+    step([pre('c9', 't2')]);
+    expect(statusNow()).toBe('running');
+  });
+
+  test('Stop 之后同一轮次又发来 PermissionRequest 或 UserPromptSubmit：这一轮还在继续', () => {
+    const root = new CodexThread({ id: 'root1' });
+    step([root.meta(), root.started('t1'), root.user('u1', 'go'), root.exec('c1', 'ls')]);
+    step([stop('t1')]);
+    expect(statusNow()).toBe('idle');
+    step([permission('t1')]);
+    expect(statusNow()).toBe('awaiting_permission');
+    step([stop('t1')]);
+    expect(statusNow()).toBe('idle');
+    step([prompt('t1')]);
+    expect(statusNow()).toBe('running');
+    // A late tool hook alone does not reopen a stopped turn.
+    step([stop('t1'), post('c1', 't1')]);
+    expect(statusNow()).toBe('idle');
+  });
+
+  test('只在 hook 里出现过、从未有转录的会话不会无限累积', () => {
+    const fresh = new CodexNormalizer();
+    for (let i = 0; i < 500; i++) apply([hook('Stop', { turn_id: 't' }, { session: `ghost-${i}` })], fresh);
+    const marks = (fresh as unknown as { hookMarks: Map<string, unknown> }).hookMarks;
+    expect(marks.size).toBeLessThanOrEqual(200);
+    expect(marks.has('ghost-499')).toBe(true);
+    expect(marks.has('ghost-0')).toBe(false);
   });
 });
