@@ -55,9 +55,9 @@ export interface CanvasProps {
   stopFollowingSignal?: number;
 }
 
-const EDGE_COLOR = { sequence: '#94a3b8', fork: '#6366f1' } as const;
+const EDGE_COLOR = { sequence: '#b3a8d6', fork: '#ff8fc0' } as const;
 /** Edges on the selection's upstream chain (causal view); the nodes get the same colour as an outline (canvas.css). */
-const CHAIN_COLOR = '#f59e0b';
+const CHAIN_COLOR = '#ffb703';
 /** Header strip height: the turn's reserved TURN_HEADER minus a small gap above its first node. */
 const HEADER_HEIGHT = TURN_HEADER - 6;
 const HEADER_MIN_WIDTH = 200;
@@ -291,8 +291,8 @@ function useFlowEdges({ view, positions }: Pick<FlowInputs, 'view' | 'positions'
           id: e.id, source: e.from, target: e.to, type: 'smoothstep', animated, zIndex,
           selectable: false, focusable: false,
           className: `cc-edge cc-edge-${fork ? 'fork' : 'sequence'}${hl !== '' ? ` ${hl}` : ''}`,
-          style: { stroke: color, strokeWidth: onChain ? 2.5 : 1.5 },
-          markerEnd: { type: MarkerType.ArrowClosed, color, width: 14, height: 14 },
+          style: { stroke: color, strokeWidth: onChain ? 4 : 2.25, strokeLinecap: 'round' },
+          markerEnd: { type: MarkerType.ArrowClosed, color, width: 13, height: 13 },
         };
       }
       next.set(e.id, { src: e, animated, fork, zIndex, highlight, edge });
@@ -306,7 +306,7 @@ function useFlowEdges({ view, positions }: Pick<FlowInputs, 'view' | 'positions'
 function miniMapColor(n: FlowNode): string {
   if (n.type === 'graphNode') return nodeColor(n.data.node);
   if (n.type === 'turnSummary') return summaryColor(n.data.summary);
-  if (n.type === 'earlier') return '#cbd5e1';
+  if (n.type === 'earlier') return '#ecdcb8';
   return 'transparent';
 }
 /** Containers are drawn see-through in the minimap so their inner nodes stay visible (see canvas.css). */
@@ -541,7 +541,7 @@ function CanvasInner({
         deleteKeyCode={null}
         proOptions={{ hideAttribution: false }}
       >
-        <Background variant={BackgroundVariant.Dots} gap={20} size={1.2} color="#cbd5e1" />
+        <Background variant={BackgroundVariant.Dots} gap={24} size={2} color="#e9dff5" />
         <Controls showInteractive={false} />
         {!follow.following && (
           <Panel position="bottom-right" className="cc-follow-panel">

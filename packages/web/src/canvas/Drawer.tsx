@@ -10,8 +10,8 @@ import { CHAIN_FOLDED, NO_REASONING, reasoningRows, type ReasoningRow } from './
 import type { CanvasView } from './view';
 
 /** Kind chip colours of the "推理链" rows (the canvas's thinking / text colours). */
-const THINKING_COLOR = '#94a3b8';
-const TEXT_COLOR = '#475569';
+const THINKING_COLOR = '#d9c8f2';
+const TEXT_COLOR = '#ffb38a';
 
 export { DETAIL_MAX_CHARS, detailSections, type DetailSection } from './detail';
 

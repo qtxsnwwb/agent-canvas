@@ -18,22 +18,23 @@ export const KIND_LABEL: Record<NodeKind, string> = {
   unknown: '未知',
 };
 
+/** Candy colours (the same as the tokens in styles.css); always used as a fill behind ink-coloured text or an ink outline. */
 export const STATUS_COLOR: Record<NodeStatus, string> = {
-  running: '#2563eb',
-  awaiting_permission: '#d97706',
-  succeeded: '#16a34a',
-  failed: '#dc2626',
-  denied: '#9f1239',
+  running: '#4cc9f0',
+  awaiting_permission: '#ffb703',
+  succeeded: '#7bd88f',
+  failed: '#ff6b6b',
+  denied: '#f15bb5',
 };
 const KIND_COLOR: Partial<Record<NodeKind, string>> = {
-  prompt: '#7c3aed',
-  text: '#475569',
-  thinking: '#94a3b8',
-  system: '#64748b',
-  unknown: '#a16207',
+  prompt: '#b892ff',
+  text: '#ffb38a',
+  thinking: '#d9c8f2',
+  system: '#d8d4c7',
+  unknown: '#ffe08a',
 };
-const FALLBACK_COLOR = '#64748b';
-const SUMMARY_COLOR = '#64748b';
+const FALLBACK_COLOR = '#d8d4c7';
+const SUMMARY_COLOR = '#a8d4ff';
 
 /** Border and side-bar colour: the status when the node has one, otherwise its kind. */
 export function nodeColor(node: GraphNode): string {
@@ -157,7 +158,7 @@ function GraphNodeView({ data, width, height, selected }: NodeProps<GraphFlowNod
   const tag = unconfirmed ? <span className="cc-tag">未确认</span> : null;
   // Shown from one second up: shorter pauses are not worth a label.
   const thought = data.thinkingMs >= THINKING_CHIP_MIN_MS
-    ? <span className="cc-thought" title="这一步之前的思考耗时">思考 {formatDuration(data.thinkingMs)}</span>
+    ? <span className="cc-thought" title="这一步之前的思考耗时" aria-label={`思考 ${formatDuration(data.thinkingMs)}`}>{formatDuration(data.thinkingMs)}</span>
     : null;
 
   // Causal view: thinking gets two rows, "思考 · 3.4s" and its text (or a grey placeholder when none was recorded).
@@ -200,7 +201,8 @@ function GraphNodeView({ data, width, height, selected }: NodeProps<GraphFlowNod
   const rows = (button: ReactNode) => (
     <>
       <div className="cc-row">
-        <span className="cc-kind">{kindLabel}</span>
+        {/* Tools and subagents show only the kind's picture (the label is kept for screen readers): the name needs the room. */}
+        <span className="cc-kind" title={kindLabel}><span className="cc-kind-label">{kindLabel}</span></span>
         <span className="cc-title cc-ellipsis cc-grow">{showTitle ? node.title : ''}</span>
         {node.status !== null && <span className="cc-status">{stalled ? UNFINISHED_LABEL : NODE_STATUS_LABEL[node.status] ?? node.status}</span>}
         {duration !== '' && <span className="cc-duration">{duration}</span>}
