@@ -11,6 +11,8 @@
 </p>
 
 <p align="center">
+  <a href="https://www.npmjs.com/package/@qtxsnwwb/agent-canvas"><img src="https://img.shields.io/npm/v/%40qtxsnwwb%2Fagent-canvas?logo=npm" alt="npm"/></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"/></a>
   <img src="https://img.shields.io/badge/Node-%E2%89%A5%2022-339933?logo=node.js&logoColor=white" alt="Node ≥ 22"/>
   <img src="https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript&logoColor=white" alt="TypeScript"/>
   <img src="https://img.shields.io/badge/Claude%20Code-%E2%9C%93-D97757" alt="Claude Code"/>
@@ -73,14 +75,10 @@ Claude Code、Codex 和 Cursor 的会话放在一起。同一个工作目录下�
 
 ## 🚀 快速开始
 
-需要 **Node ≥ 22**。没装 pnpm 的话，把下面的 `pnpm` 换成 `npx --yes pnpm@10` 即可。
+需要 **Node ≥ 22**。一条命令，不用克隆、不用构建：
 
 ```bash
-git clone https://github.com/qtxsnwwb/agent-canvas.git
-cd agent-canvas
-pnpm install
-pnpm build
-pnpm start
+npx @qtxsnwwb/agent-canvas
 ```
 
 终端打印出地址后，在浏览器打开：
@@ -92,13 +90,16 @@ agent-canvas listening on http://127.0.0.1:4317
 就这些。第一次启动会在后台导入已有的会话，历史多的话要等一会儿，期间页面已经可以用。
 
 <details>
-<summary><b>换端口、停止服务</b></summary>
+<summary><b>长期使用：全局安装</b></summary>
 
 ```bash
-pnpm start --port 4400     # 换端口
+npm install -g @qtxsnwwb/agent-canvas
+agent-canvas                 # 启动
+agent-canvas --port 4400     # 换端口
+agent-canvas --version
 ```
 
-按 `Ctrl+C` 停止。同一个数据目录同时只能运行一个服务。
+按 `Ctrl+C` 停止。同一个数据目录同时只能运行一个服务。想装 Codex 或 Cursor 的 hooks 的话，需要用这种方式安装（见下）。
 
 </details>
 
@@ -108,14 +109,16 @@ pnpm start --port 4400     # 换端口
 
 ```bash
 # Claude Code
-node packages/server/dist/cli.js hooks install
+agent-canvas hooks install
 
 # Codex（装完需要在 Codex 的 设置 → Hooks 里确认信任）
-node packages/server/dist/cli.js hooks install --codex
+agent-canvas hooks install --codex
 
 # Cursor（保存后自动生效）
-node packages/server/dist/cli.js hooks install --cursor
+agent-canvas hooks install --cursor
 ```
+
+没有全局安装时，把 `agent-canvas` 换成 `npx @qtxsnwwb/agent-canvas`。Codex 和 Cursor 的 hooks 里要写入程序的绝对路径，而 `npx` 的缓存位置不固定，所以这两种 hooks 只能在全局安装之后装；Claude Code 的不受影响。
 
 安装前会先列出要改的文件和内容并询问确认，改之前自动备份；`hooks uninstall`（加 `--codex` / `--cursor` 对应另外两个工具）可以原样移除。Cursor 的 hooks 只装观察类事件，不会拦住 Cursor 的任何操作，所以 Cursor 会话没有“等待权限确认”。细节见[使用手册 · Hooks](./docs/manual.md#hooks可选)。
 
@@ -196,9 +199,20 @@ flowchart LR
 ## 🛠️ 开发
 
 ```bash
+git clone https://github.com/qtxsnwwb/agent-canvas.git
+cd agent-canvas
+pnpm install                            # 没装 pnpm 时用 npx --yes pnpm@10 代替 pnpm
+pnpm build
+pnpm start                              # 从源码启动
+
 pnpm test                               # 单元测试（vitest）
 pnpm typecheck
 pnpm --filter @agent-canvas/web dev    # 网页开发服务器，需先启动服务
+pnpm release                            # 在 release/ 里生成要发布到 npm 的包
 ```
 
-项目是一个 pnpm workspace：`packages/server`（Fastify + better-sqlite3）、`packages/web`（React + React Flow）、`packages/shared`（共用的图模型）。
+项目是一个 pnpm workspace：`packages/server`（Fastify + better-sqlite3）、`packages/web`（React + React Flow）、`packages/shared`（共用的图模型）。发布到 npm 的是把三者合成的一个包 `@qtxsnwwb/agent-canvas`。
+
+## 📄 许可证
+
+[MIT](./LICENSE)
