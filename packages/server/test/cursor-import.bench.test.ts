@@ -201,18 +201,20 @@ function makeCursorDb(root: string, n: number): { dbPath: string; records: numbe
 }
 
 /** Longest gap between ticks of a 5 ms interval timer: how long the event loop was blocked at a stretch. */
-function stallMeter(): { stop: () => number } {
+function stallMeter(): { stop: () => { max: number; over100: number } } {
   let last = performance.now();
   let max = 0;
+  let over100 = 0;
   const t = setInterval(() => {
     const now = performance.now();
     max = Math.max(max, now - last);
+    if (now - last > 100) over100 += 1;
     last = now;
   }, 5);
   return {
     stop: () => {
       clearInterval(t);
-      return max;
+      return { max, over100 };
     },
   };
 }
@@ -246,6 +248,8 @@ function counts(dbPath: string): Record<string, number> {
 interface RunResult {
   ms: number;
   stallMs: number;
+  /** Gaps of the 5 ms timer longer than 100 ms. */
+  stallsOver100: number;
   maxRequestMs: number;
   walPeakMb: number;
   bubbleReads: number;
@@ -312,7 +316,8 @@ async function run(config: Config, cursorDb: string): Promise<RunResult> {
     await app.close();
     store.close();
   }
-  return { ms: performance.now() - t0, stallMs: meter.stop(), maxRequestMs, walPeakMb: walPeak / 1e6, bubbleReads };
+  const stalls = meter.stop();
+  return { ms: performance.now() - t0, stallMs: stalls.max, stallsOver100: stalls.over100, maxRequestMs, walPeakMb: walPeak / 1e6, bubbleReads };
 }
 
 describe.skipIf(!BENCH)('cursor import benchmark', () => {
@@ -359,6 +364,7 @@ describe.skipIf(!BENCH)('cursor import benchmark', () => {
             firstImportS: +(first.ms / 1000).toFixed(1),
             recordsPerS: Math.round(cursor.records / (first.ms / 1000)),
             firstStallMs: Math.round(first.stallMs),
+            firstStallsOver100ms: first.stallsOver100,
             firstMaxRequestMs: Math.round(first.maxRequestMs),
             walPeakMb: +first.walPeakMb.toFixed(1),
             dbMb: +dbMb.toFixed(1),
