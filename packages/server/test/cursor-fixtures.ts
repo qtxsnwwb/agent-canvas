@@ -29,7 +29,16 @@ export interface ComposerSpec {
   bubbles?: FixtureBubble[];
   /** false: no composerData row at all. */
   withData?: boolean;
+  /** Store the bubble list in `composerConvHeaders:<id>:<NNNNNN>` pages (inline list empty), as newer Cursor does. */
+  paged?: boolean;
+  /** Entries per page (default 256, like Cursor). */
+  pageSize?: number;
+  /** `composerData.subagentComposerIds`: the subagents this conversation dispatched. */
+  subagentComposerIds?: string[];
 }
+
+/** Key of one page of a conversation's paged header list. */
+export const pageKey = (composerId: string, page: number): string => `composerConvHeaders:${composerId}:${String(page).padStart(6, '0')}`;
 
 const T0 = Date.parse('2026-11-12T08:00:00.000Z');
 
@@ -97,17 +106,27 @@ export class CursorDbFixture {
         richText: '',
         text: '',
         context: { fileSelections: [], folderSelections: [] },
-        fullConversationHeadersOnly: bubbles.map((b) => ({
-          bubbleId: b.bubbleId,
-          type: b.type,
-          createdAt: b.createdAt,
-          startedAtMs: b.startedAtMs,
-          completedAtMs: b.completedAtMs,
-          grouping: { kind: 'none' },
-        })),
+        fullConversationHeadersOnly: [] as unknown[],
       };
+      const list = bubbles.map((b) => ({
+        bubbleId: b.bubbleId,
+        type: b.type,
+        createdAt: b.createdAt,
+        startedAtMs: b.startedAtMs,
+        completedAtMs: b.completedAtMs,
+        grouping: { kind: 'none' },
+      }));
+      this.clearPages(spec.id);
+      if (spec.paged) {
+        // Newer layout: inline list empty, pages composerConvHeaders:<id>:<NNNNNN> of up to pageSize entries.
+        const size = spec.pageSize ?? 256;
+        for (let p = 0; p * size < list.length; p += 1) this.setKv(pageKey(spec.id, p), JSON.stringify(list.slice(p * size, (p + 1) * size)));
+      } else {
+        data.fullConversationHeadersOnly = list;
+      }
       if (spec.dataFsPath !== undefined) data.workspaceIdentifier = { id: workspaceId, uri: { fsPath: spec.dataFsPath } };
       if (spec.subagentInfo !== undefined) data.subagentInfo = spec.subagentInfo;
+      if (spec.subagentComposerIds !== undefined) data.subagentComposerIds = spec.subagentComposerIds;
       this.setKv(`composerData:${spec.id}`, JSON.stringify(data));
     }
     for (const b of bubbles) this.setBubble(spec.id, b);
@@ -131,6 +150,10 @@ export class CursorDbFixture {
 
   setKv(key: string, value: string, asText = false): void {
     this.db.prepare(`INSERT OR REPLACE INTO cursorDiskKV (key, value) VALUES (?, ?)`).run(key, asText ? value : Buffer.from(value, 'utf8'));
+  }
+
+  clearPages(id: string): void {
+    this.db.prepare(`DELETE FROM cursorDiskKV WHERE key >= ? AND key < ?`).run(`composerConvHeaders:${id}:`, `composerConvHeaders:${id};`);
   }
 
   remove(id: string): void {

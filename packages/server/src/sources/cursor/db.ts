@@ -25,11 +25,18 @@ export interface CursorDbReader {
   composerData(composerId: string): DbResult<string | null>;
   /** The text of `cursorDiskKV['bubbleId:<composerId>:<bubbleId>']`, or null when the key is absent. */
   bubble(composerId: string, bubbleId: string): DbResult<string | null>;
+  /**
+   * The pages of a conversation's paged header list, `composerConvHeaders:<composerId>:<NNNNNN>`, in key (= page)
+   * order, as text: one range query on the key's unique index, never a scan. Empty when there are none.
+   */
+  headerPages(composerId: string): DbResult<string[]>;
   close(): void;
 }
 
 const HEADERS_SQL = `SELECT composerId, workspaceId, createdAt, lastUpdatedAt, isArchived, isSubagent, value FROM composerHeaders`;
 const KV_SQL = `SELECT value FROM cursorDiskKV WHERE key = ?`;
+/** `[from, to)` on the key: `composerConvHeaders:<id>:` up to `composerConvHeaders:<id>;` (`;` follows `:`). */
+const PAGES_SQL = `SELECT value FROM cursorDiskKV WHERE key >= ? AND key < ? ORDER BY key`;
 
 const toError = (err: unknown): Error => (err instanceof Error ? err : new Error(String(err)));
 
@@ -74,6 +81,7 @@ export function openCursorDb(dbPath: string): DbResult<CursorDbReader> {
     db.pragma('busy_timeout = 1000');
     const headers = db.prepare(HEADERS_SQL);
     const kv = db.prepare(KV_SQL).pluck();
+    const pages = db.prepare(PAGES_SQL).pluck();
     const lookup = (key: string): DbResult<string | null> => {
       try {
         return { ok: true, value: kvText(kv.get(key)) };
@@ -121,6 +129,14 @@ export function openCursorDb(dbPath: string): DbResult<CursorDbReader> {
         },
         composerData: (composerId) => lookup(`composerData:${composerId}`),
         bubble: (composerId, bubbleId) => lookup(`bubbleId:${composerId}:${bubbleId}`),
+        headerPages(composerId) {
+          try {
+            const rows = pages.all(`composerConvHeaders:${composerId}:`, `composerConvHeaders:${composerId};`) as unknown[];
+            return { ok: true, value: rows.map((v) => kvText(v) ?? '') };
+          } catch (err) {
+            return { ok: false, error: toError(err) };
+          }
+        },
         close() {
           try {
             db.close();

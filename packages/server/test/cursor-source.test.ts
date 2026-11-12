@@ -6,9 +6,9 @@ import type { PollBatch, PollSink } from '../src/sources/poll.js';
 import { openCursorDb, type CursorDbReader, type DbResult } from '../src/sources/cursor/db.js';
 import { fileUriToPath, normaliseCwd, workspaceStorageDir } from '../src/sources/cursor/project.js';
 import type { CursorBubbleRecord, CursorComposerRecord } from '../src/sources/cursor/records.js';
-import { CursorSource, RECENT_MS, type CursorSourceOptions, type PollTimers } from '../src/sources/cursor/source.js';
+import { CursorSource, ORPHAN_PROBES_PER_ROUND, RECENT_MS, type CursorSourceOptions, type PollTimers } from '../src/sources/cursor/source.js';
 import { bubbleRecord, capUtf8, trimBubble, trimComposer } from '../src/sources/cursor/trim.js';
-import { CursorDbFixture, T0, textBubble, thinkingBubble, toolBubble, userBubble } from './cursor-fixtures.js';
+import { CursorDbFixture, pageKey, T0, textBubble, thinkingBubble, toolBubble, userBubble, type ComposerSpec, type FixtureBubble } from './cursor-fixtures.js';
 
 // Temp dirs and a synthetic database only: the real Cursor database is never opened.
 
@@ -92,6 +92,10 @@ const tracingOpen = (dbPath: string): DbResult<CursorDbReader> => {
       bubble: (id, b) => {
         reads.push(`bubble:${id}:${b}`);
         return db.bubble(id, b);
+      },
+      headerPages: (id) => {
+        reads.push(`pages:${id}`);
+        return db.headerPages(id);
       },
       close: () => db.close(),
     },
@@ -341,7 +345,12 @@ describe('database problems', () => {
 
 describe('selection and records', () => {
   test('unarchived non-draft main conversations and the subagents of picked roots; composer first, then bubbles', async () => {
-    fx.put({ id: 'main', name: 'Main one', bubbles: [userBubble('m1', 'do it'), toolBubble('m2', 'task_v2', 'completed', T0 + 1, { toolCallId: 'tc-sub' }), textBubble('m3', 'done')] });
+    fx.put({
+      id: 'main',
+      name: 'Main one',
+      subagentComposerIds: ['sub'],
+      bubbles: [userBubble('m1', 'do it'), toolBubble('m2', 'task_v2', 'completed', T0 + 1, { toolCallId: 'tc-sub' }), textBubble('m3', 'done')],
+    });
     fx.put({ id: 'arch', isArchived: true, bubbles: [userBubble('x1', 'old')] });
     fx.put({ id: 'draft', isDraft: true, bubbles: [] });
     fx.put({
@@ -358,11 +367,11 @@ describe('selection and records', () => {
     });
     const s = await started();
     await s.pollOnce();
-    expect(sink.calls).toEqual(['ingest cursor:main composer,bubble,bubble,bubble', 'ingest cursor:sub composer,bubble,bubble']);
+    expect(sink.calls).toEqual(['ingest cursor:main composer,bubble,bubble,bubble', 'ingest cursor:main/sub composer,bubble,bubble']);
     const main = sink.batches[0]!;
     expect(main).toMatchObject({ key: 'cursor:main', sessionId: 'main', agentId: null, projectId: 'cursor-ws-1' });
     const sub = sink.batches[1]!;
-    expect(sub).toMatchObject({ key: 'cursor:sub', sessionId: 'main', agentId: 'sub', projectId: 'cursor-ws-1' });
+    expect(sub).toMatchObject({ key: 'cursor:main/sub', sessionId: 'main', agentId: 'sub', projectId: 'cursor-ws-1' });
     const composer = JSON.parse(main.records[0]!.line) as CursorComposerRecord;
     expect(composer).toMatchObject({ composerId: 'main', name: 'Main one', status: 'completed', modelName: 'synthetic-model', subagentInfo: null });
     expect(composer).not.toHaveProperty('bubbleIds');
@@ -394,17 +403,16 @@ describe('selection and records', () => {
     expect(sink.failures.size).toBe(0);
   });
 
-  test('a subagent without a root id is a failure of that conversation only', async () => {
+  test('a subagent no session reaches (no links at all) is not collected, is no failure, and is probed once', async () => {
     fx.put({ id: 'main', bubbles: [userBubble('m1', 'go')] });
     fx.put({ id: 'lost', isSubagent: true, bubbles: [userBubble('l1', 'x')] });
     const s = await started();
     await s.pollOnce();
     expect(sink.calls).toEqual(['ingest cursor:main composer,bubble']);
-    expect(sink.failures.get('cursor:lost')).toMatch(/root/);
+    expect(sink.failures.size).toBe(0);
     reads = [];
     await s.pollOnce();
-    expect(reads).toEqual([]); // not re-read until it changes
-    expect(sink.failures.get('cursor:lost')).toMatch(/root/);
+    expect(reads).toEqual([]); // not looked at again until it changes
   });
 });
 
@@ -603,7 +611,7 @@ describe('archive, disappearance, restart', () => {
     expect(reads).toEqual([]);
     fx.update('c', { isArchived: false, lastUpdatedAt: T0 + 20 });
     await s.pollOnce();
-    expect(sink.calls).toEqual(['deleted c', 'undeleted c', 'ingest cursor:c composer,bubble', 'ingest cursor:s composer,bubble']);
+    expect(sink.calls).toEqual(['deleted c', 'undeleted c', 'ingest cursor:c composer,bubble', 'ingest cursor:c/s composer,bubble']);
   });
 
   test('gone from composerHeaders: marked "source deleted"', async () => {
@@ -753,6 +761,7 @@ describe('robustness (fix round 2)', () => {
           headers: () => db.headers(),
           composerData: (id) => opts.composerData?.(id) ?? db.composerData(id),
           bubble: (id, b) => opts.bubble?.(id, b) ?? db.bubble(id, b),
+          headerPages: (id) => db.headerPages(id),
           close: () => {
             stats.closes += 1;
             stats.open -= 1;
@@ -882,7 +891,7 @@ describe('robustness (fix round 2)', () => {
     fx.put({ id: 'grand', isSubagent: true, lastUpdatedAt: T0 + 2, subagentInfo: { parentComposerId: 'child', toolCallId: 't2' }, bubbles: [userBubble('g1', 'y')] });
     const s = await started();
     await s.pollOnce();
-    expect(sink.batches.find((b) => b.key === 'cursor:grand')).toMatchObject({ sessionId: 'root', agentId: 'grand' });
+    expect(sink.batches.find((b) => b.key === 'cursor:root/grand')).toMatchObject({ sessionId: 'root', agentId: 'grand' });
     expect(sink.failures.size).toBe(0);
   });
 
@@ -902,7 +911,7 @@ describe('robustness (fix round 2)', () => {
       bubbles: [userBubble('m1', 'z')],
     });
     await s.pollOnce();
-    expect(sink.batches.find((b) => b.key === 'cursor:leaf')).toMatchObject({ sessionId: 'root', agentId: 'leaf' });
+    expect(sink.batches.find((b) => b.key === 'cursor:root/leaf')).toMatchObject({ sessionId: 'root', agentId: 'leaf' });
   });
 
   test('a root without composerData: nothing stored for it or its subagents, no failure', async () => {
@@ -964,5 +973,201 @@ describe('robustness (fix round 2)', () => {
     await s.pollOnce();
     expect(tickedBeforeB).toBe(true); // between conversations
     expect(firedMidConversation).toBe(true); // 12 lookups of 3 ms exceed the 10 ms budget
+  });
+});
+
+describe('paged header lists (fix round 3)', () => {
+  function many(prefix: string, n: number): FixtureBubble[] {
+    const out: FixtureBubble[] = [userBubble(`${prefix}0`, 'go')];
+    for (let i = 1; i < n; i += 1) out.push(textBubble(`${prefix}${i}`, `t${i}`, T0 + i));
+    return out;
+  }
+
+  test('an empty inline list uses the pages, concatenated in page order; order is the index in that list', async () => {
+    fx.put({ id: 'c', paged: true, pageSize: 4, bubbles: many('b', 10) }); // pages 000000..000002
+    const s = await started();
+    await s.pollOnce();
+    expect(reads.filter((r) => r.startsWith('pages:'))).toEqual(['pages:c']); // one range query
+    const bubbles = sink.records().filter((r) => r.recordType === 'bubble');
+    expect(bubbles.map((r) => [r.value.bubbleId, r.value.order])).toEqual(Array.from({ length: 10 }, (_, i) => [`b${i}`, i]));
+    expect(sink.records()[0]!.recordType).toBe('composer');
+  });
+
+  test('pages are read by key range: page order follows the key, another conversation sharing a prefix is not included', async () => {
+    fx.put({ id: 'c', paged: true, pageSize: 2, bubbles: many('b', 3) });
+    fx.put({ id: 'c2', paged: true, bubbles: many('z', 2) });
+    // a stray row under a neighbouring key family must not leak in
+    fx.setKv('composerConvHeaders:c;x', JSON.stringify([{ bubbleId: 'nope', type: 1 }]));
+    const s = await started();
+    await s.pollOnce();
+    const c = sink.records().filter((r) => r.key === 'cursor:c' && r.recordType === 'bubble');
+    expect(c.map((r) => r.value.bubbleId)).toEqual(['b0', 'b1', 'b2']);
+  });
+
+  test('a non-empty inline list wins over pages', async () => {
+    fx.put({ id: 'c', bubbles: [userBubble('i0', 'inline')] });
+    fx.setKv(pageKey('c', 0), JSON.stringify([{ bubbleId: 'p0', type: 1 }]));
+    fx.setBubble('c', userBubble('p0', 'paged'));
+    const s = await started();
+    await s.pollOnce();
+    expect(sink.records().filter((r) => r.recordType === 'bubble').map((r) => r.value.bubbleId)).toEqual(['i0']);
+    expect(reads).not.toContain('pages:c');
+  });
+
+  test('incremental reads on top of pages: unchanged and quiet = no page read; a new bubble on the last page = tail + new only', async () => {
+    const bubbles = many('b', 40);
+    fx.put({ id: 'c', paged: true, pageSize: 16, bubbles });
+    const s = await started();
+    await s.pollOnce();
+    reads = [];
+    sink.reset();
+    await s.pollOnce();
+    expect(reads).toEqual([]);
+    fx.update('c', { lastUpdatedAt: T0 + 100, bubbles: [...bubbles, textBubble('new', 'fresh', T0 + 100)] });
+    await s.pollOnce();
+    const bubbleReads = reads.filter((r) => r.startsWith('bubble:')).map((r) => r.split(':')[2]);
+    expect(bubbleReads).toEqual([...Array.from({ length: 19 }, (_, i) => `b${i + 21}`), 'new']);
+    expect(sink.records().map((r) => [r.value.bubbleId, r.value.order])).toEqual([['new', 40]]);
+  });
+
+  test('a page that is not JSON fails that conversation only', async () => {
+    fx.put({ id: 'c', paged: true, bubbles: many('b', 2) });
+    fx.put({ id: 'd', bubbles: [userBubble('d0', 'ok')] });
+    fx.setKv(pageKey('c', 0), '[{"bubbleId": broken');
+    const s = await started();
+    await s.pollOnce();
+    expect(sink.calls).toEqual(['ingest cursor:d composer,bubble']);
+    expect(sink.failures.get('cursor:c')).toMatch(/page/);
+  });
+});
+
+describe('empty conversations (fix round 3)', () => {
+  test('a conversation without any bubble produces nothing; its composer comes first once it has one', async () => {
+    fx.put({ id: 'e', bubbles: [] });
+    fx.put({ id: 'p', paged: true, bubbles: [] });
+    const s = await started();
+    await s.pollOnce();
+    expect(sink.calls).toEqual([]);
+    expect(sink.failures.size).toBe(0);
+    reads = [];
+    await s.pollOnce();
+    expect(reads).toEqual([]); // looked at again only when it changes
+    fx.update('e', { lastUpdatedAt: T0 + 5, bubbles: [userBubble('e0', 'finally')] });
+    await s.pollOnce();
+    expect(sink.calls).toEqual(['ingest cursor:e composer,bubble']);
+  });
+
+  test('a subagent without bubbles produces nothing yet', async () => {
+    fx.put({ id: 'm', subagentComposerIds: ['s'], bubbles: [userBubble('m0', 'go')] });
+    fx.put({ id: 's', isSubagent: true, subagentInfo: { parentComposerId: 'm', toolCallId: 't' }, bubbles: [] });
+    const s = await started();
+    await s.pollOnce();
+    expect(sink.calls).toEqual(['ingest cursor:m composer,bubble']);
+  });
+
+  test('an empty main conversation does not make its subagents a session', async () => {
+    fx.put({ id: 'm', subagentComposerIds: ['s'], bubbles: [] });
+    fx.put({ id: 's', isSubagent: true, subagentInfo: { parentComposerId: 'm', rootParentConversationId: 'm', toolCallId: 't' }, bubbles: [userBubble('s0', 'x')] });
+    const s = await started();
+    await s.pollOnce();
+    expect(sink.calls).toEqual([]);
+  });
+});
+
+describe('subagent ownership (fix round 3)', () => {
+  const sub = (id: string, info: Record<string, unknown>, extra: Partial<ComposerSpec> = {}): ComposerSpec => ({
+    id,
+    isSubagent: true,
+    subagentInfo: { toolCallId: `tc-${id}`, ...info },
+    bubbles: [userBubble(`${id}-0`, `task ${id}`)],
+    ...extra,
+  });
+
+  test('forks listing the same subagents: each subagent is stored once per owning session, under cursor:<session>/<subagent>', async () => {
+    fx.put({ id: 'A', lastUpdatedAt: T0 + 2, subagentComposerIds: ['s1', 's2'], bubbles: [userBubble('a0', 'go')] });
+    fx.put({ id: 'B', lastUpdatedAt: T0 + 1, subagentComposerIds: ['s1', 's2'], bubbles: [userBubble('b0', 'go')] });
+    // rootParentConversationId points elsewhere (unreliable); the parents' lists decide
+    fx.put(sub('s1', { parentComposerId: 'A', rootParentConversationId: 'X' }));
+    fx.put(sub('s2', { parentComposerId: 'B', rootParentConversationId: 'X' }));
+    fx.put({ id: 'X', bubbles: [userBubble('x0', 'unrelated')] });
+    const s = await started();
+    await s.pollOnce();
+    const keys = sink.batches.map((b) => [b.key, b.sessionId, b.agentId]);
+    expect(keys).toEqual(
+      expect.arrayContaining([
+        ['cursor:A/s1', 'A', 's1'],
+        ['cursor:A/s2', 'A', 's2'],
+        ['cursor:B/s1', 'B', 's1'],
+        ['cursor:B/s2', 'B', 's2'],
+      ]),
+    );
+    expect(keys.filter((k) => k[1] === 'X')).toEqual([['cursor:X', 'X', null]]);
+    // the shared conversation was looked up once per round, not once per owner
+    expect(reads.filter((r) => r === 'composerData:s1')).toHaveLength(1);
+    // dedupe state is per (session, conversation): a change reaches both owners
+    sink.reset();
+    fx.update('s1', { lastUpdatedAt: T0 + 50, bubbles: [userBubble('s1-0', 'task s1'), textBubble('s1-1', 'more', T0 + 50)] });
+    await s.pollOnce();
+    expect(sink.calls.filter((c) => c.includes('/s1'))).toEqual(['ingest cursor:A/s1 bubble', 'ingest cursor:B/s1 bubble']);
+  });
+
+  test('nested subagents are reached through the subagents own subagentComposerIds', async () => {
+    fx.put({ id: 'A', subagentComposerIds: ['s1'], bubbles: [userBubble('a0', 'go')] });
+    fx.put(sub('s1', { parentComposerId: 'A' }, { subagentComposerIds: ['s3'] }));
+    fx.put(sub('s3', { parentComposerId: 's1', rootParentConversationId: 'elsewhere' }));
+    const s = await started();
+    await s.pollOnce();
+    expect(sink.batches.find((b) => b.key === 'cursor:A/s3')).toMatchObject({ sessionId: 'A', agentId: 's3' });
+  });
+
+  test('links without a list: parentComposerId reaches a session; rootParentConversationId only when no link exists', async () => {
+    fx.put({ id: 'A', subagentComposerIds: ['s1'], bubbles: [userBubble('a0', 'go')] });
+    fx.put({ id: 'B', bubbles: [userBubble('b0', 'go')] });
+    fx.put(sub('s1', { parentComposerId: 'A' }));
+    fx.put(sub('p1', { parentComposerId: 's1', rootParentConversationId: 'B' })); // parent link wins over root
+    fx.put(sub('r1', { rootParentConversationId: 'B' })); // no link at all: root fallback
+    const s = await started();
+    await s.pollOnce();
+    const owners = Object.fromEntries(sink.batches.filter((b) => b.agentId !== null).map((b) => [b.agentId, b.sessionId]));
+    expect(owners).toEqual({ s1: 'A', p1: 'A', r1: 'B' });
+  });
+
+  test('the first round does not read the composerData of every unreachable subagent: probes are budgeted and done once', async () => {
+    fx.put({ id: 'A', bubbles: [userBubble('a0', 'go')] });
+    fx.put({ id: 'Z', isArchived: true, bubbles: [userBubble('z0', 'old')] });
+    for (let i = 0; i < 40; i += 1) fx.put(sub(`o${i}`, { parentComposerId: 'Z', rootParentConversationId: 'Z' }));
+    const s = await started();
+    await s.pollOnce();
+    const probes = () => reads.filter((r) => r.startsWith('composerData:o')).length;
+    expect(probes()).toBe(ORPHAN_PROBES_PER_ROUND);
+    for (let i = 0; i < 5; i += 1) await s.pollOnce();
+    expect(probes()).toBe(40); // each once
+    expect(sink.calls).toEqual(['ingest cursor:A composer,bubble']);
+  });
+
+  test('a subagent that disappears does not mark its session; archiving one fork leaves the other fork its subagents', async () => {
+    fx.put({ id: 'A', subagentComposerIds: ['s1', 'gone'], bubbles: [userBubble('a0', 'go')] });
+    fx.put({ id: 'B', subagentComposerIds: ['s1'], bubbles: [userBubble('b0', 'go')] });
+    fx.put(sub('s1', { parentComposerId: 'A' }));
+    fx.put(sub('gone', { parentComposerId: 'A' }));
+    const s = await started();
+    await s.pollOnce();
+    sink.reset();
+    fx.remove('gone');
+    await s.pollOnce();
+    expect(sink.calls).toEqual([]);
+    fx.update('A', { isArchived: true, lastUpdatedAt: T0 + 9 });
+    fx.update('s1', { lastUpdatedAt: T0 + 9, bubbles: [userBubble('s1-0', 'task s1'), textBubble('s1-1', 'later', T0 + 9)] });
+    await s.pollOnce();
+    expect(sink.calls).toEqual(['deleted A', 'ingest cursor:B/s1 bubble']);
+  });
+
+  test('restart: stored session ids come from both key forms; a subagent-only key never marks a session by itself', async () => {
+    fx.put({ id: 'A', subagentComposerIds: ['s1'], bubbles: [userBubble('a0', 'go')] });
+    fx.put(sub('s1', { parentComposerId: 'A' }));
+    sink.stored = ['A', 'old'];
+    const s = await started();
+    await s.pollOnce();
+    expect(sink.calls).toEqual(['deleted old', 'undeleted A', 'ingest cursor:A composer,bubble', 'ingest cursor:A/s1 composer,bubble']);
   });
 });

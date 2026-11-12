@@ -35,8 +35,24 @@ export function capUtf8(s: string, maxBytes: number = CURSOR_TEXT_CAP_BYTES): { 
  * (`order`). Entries without a bubble id are skipped (their index is not reused); a repeated id keeps its first index.
  */
 export function bubbleEntriesOf(composerData: unknown): { bubbleId: string; order: number }[] {
+  return entriesOfList(inlineHeaders(composerData));
+}
+
+/** `composerData.fullConversationHeadersOnly` (empty in the paged layout, where the list lives in pages). */
+export function inlineHeaders(composerData: unknown): unknown[] {
   const list = obj(composerData).fullConversationHeadersOnly;
+  return Array.isArray(list) ? list : [];
+}
+
+/** `composerData.subagentComposerIds`: the subagent conversations this conversation dispatched. */
+export function subagentComposerIdsOf(composerData: unknown): string[] {
+  const list = obj(composerData).subagentComposerIds;
   if (!Array.isArray(list)) return [];
+  return [...new Set(list.map(str).filter((id): id is string => id !== null))];
+}
+
+/** Header entries (inline or the concatenated pages) with their index as `order`; same rules as bubbleEntriesOf. */
+export function entriesOfList(list: readonly unknown[]): { bubbleId: string; order: number }[] {
   const seen = new Set<string>();
   const out: { bubbleId: string; order: number }[] = [];
   list.forEach((h, order) => {

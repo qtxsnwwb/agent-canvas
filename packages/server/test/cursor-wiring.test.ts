@@ -58,8 +58,8 @@ test('through a real pipeline: stored once as cursor raw events; a restarted sou
         ['cursor:c1', 'composer', null],
         ['cursor:c1', 'bubble', null],
         ['cursor:c1', 'bubble', null],
-        ['cursor:s1', 'composer', 's1'],
-        ['cursor:s1', 'bubble', 's1'],
+        ['cursor:c1/s1', 'composer', 's1'],
+        ['cursor:c1/s1', 'bubble', 's1'],
       ]);
       expect(raw.every((e) => e.origin === 'cursor')).toBe(true);
     }
