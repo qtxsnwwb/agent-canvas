@@ -27,7 +27,7 @@ describe('Codex token usage', () => {
       root.usage({ input: 120, output: 30 }),
       root.complete(),
     ]);
-    expect(withUsage(r)).toEqual({ 'thinking:rs1': { inputTokens: 120, outputTokens: 30 } });
+    expect(withUsage(r)).toEqual({ 'thinking:rs1': { inputTokens: 120, cachedInputTokens: 0, outputTokens: 30 } });
     expect(r.unknown).toEqual([]);
     expect(n.droppedUsageCount('root1')).toBe(0);
   });
@@ -41,7 +41,7 @@ describe('Codex token usage', () => {
       ...root.assistant('m1', 'done'), root.usage({ input: 70, output: 9 }),
       root.complete(),
     ]);
-    expect(withUsage(r)).toEqual({ 'tool:c1': { inputTokens: 50, outputTokens: 5 }, 'text:m1': { inputTokens: 70, outputTokens: 9 } });
+    expect(withUsage(r)).toEqual({ 'tool:c1': { inputTokens: 50, cachedInputTokens: 0, outputTokens: 5 }, 'text:m1': { inputTokens: 70, cachedInputTokens: 0, outputTokens: 9 } });
   });
 
   test('a response that produced no node: nearest earlier node of the same turn; usages add up', () => {
@@ -52,7 +52,7 @@ describe('Codex token usage', () => {
       root.usage({ input: 7, output: 3 }),
       root.complete(),
     ]);
-    expect(withUsage(r)).toEqual({ 'text:m1': { inputTokens: 107, outputTokens: 8 } });
+    expect(withUsage(r)).toEqual({ 'text:m1': { inputTokens: 107, cachedInputTokens: 0, outputTokens: 8 } });
   });
 
   test('fallback stays inside the turn: the prompt of the same turn, not a node of an earlier turn', () => {
@@ -61,7 +61,7 @@ describe('Codex token usage', () => {
       root.meta(), root.started('t1'), root.user('u1', 'one'), ...root.assistant('m1', 'a'), root.usage({ input: 1, output: 1 }), root.complete(),
       root.started('t2'), root.user('u2', 'two'), root.usage({ input: 4, output: 2 }), root.complete(),
     ]);
-    expect(withUsage(r)).toEqual({ 'text:m1': { inputTokens: 1, outputTokens: 1 }, 'prompt:u2': { inputTokens: 4, outputTokens: 2 } });
+    expect(withUsage(r)).toEqual({ 'text:m1': { inputTokens: 1, cachedInputTokens: 0, outputTokens: 1 }, 'prompt:u2': { inputTokens: 4, cachedInputTokens: 0, outputTokens: 2 } });
   });
 
   test('the response nodes of another turn are not this record\'s: it falls back within its own turn', () => {
@@ -97,7 +97,7 @@ describe('Codex token usage', () => {
       root.complete(),
     ]);
     // Each ignored record still ends its response: m5 is the next response's first node.
-    expect(withUsage(r)).toEqual({ 'text:m5': { inputTokens: 2, outputTokens: 3 } });
+    expect(withUsage(r)).toEqual({ 'text:m5': { inputTokens: 2, cachedInputTokens: 0, outputTokens: 3 } });
     expect(r.unknown).toEqual([]);
     expect(n.droppedUsageCount('root1')).toBe(0);
   });
@@ -110,7 +110,7 @@ describe('Codex token usage', () => {
       root.usage({ input: 10, output: 1 }, { responseId: 'resp_A' }),
       root.complete(),
     ]);
-    expect(withUsage(r)).toEqual({ 'text:m1': { inputTokens: 10, outputTokens: 1 } });
+    expect(withUsage(r)).toEqual({ 'text:m1': { inputTokens: 10, cachedInputTokens: 0, outputTokens: 1 } });
   });
 
   test('records without a response id are each counted', () => {
@@ -121,7 +121,7 @@ describe('Codex token usage', () => {
       root.usage({ input: 5, output: 1 }, { responseId: null }),
       root.complete(),
     ]);
-    expect(withUsage(r)).toEqual({ 'text:m1': { inputTokens: 15, outputTokens: 2 } });
+    expect(withUsage(r)).toEqual({ 'text:m1': { inputTokens: 15, cachedInputTokens: 0, outputTokens: 2 } });
   });
 
   test('the turn running total and event_msg/token_count are not used', () => {
@@ -134,7 +134,7 @@ describe('Codex token usage', () => {
     expect(withUsage(r)).toEqual({});
     // The record's turn_token_usage (999,999 in the fixture) is never what lands on a node.
     const r2 = run(n, [root.started('t2'), root.user('u2', 'go'), ...root.assistant('m2', 'b'), root.usage({ input: 1, output: 2 }), root.complete()]);
-    expect(withUsage(r2)).toEqual({ 'text:m2': { inputTokens: 1, outputTokens: 2 } });
+    expect(withUsage(r2)).toEqual({ 'text:m2': { inputTokens: 1, cachedInputTokens: 0, outputTokens: 2 } });
   });
 
   function subagentSession() {
@@ -160,10 +160,10 @@ describe('Codex token usage', () => {
   test('a subagent thread keeps its usage on its own nodes; arrival order across threads does not matter', () => {
     const { rootEvents, subEvents } = subagentSession();
     const expected = {
-      'tool:sp1': { inputTokens: 40, outputTokens: 4 },
-      'text:m1': { inputTokens: 60, outputTokens: 6 },
-      'thinking:srs1': { inputTokens: 11, outputTokens: 2 },
-      'text:sm1': { inputTokens: 14, outputTokens: 4 },
+      'tool:sp1': { inputTokens: 40, cachedInputTokens: 0, outputTokens: 4 },
+      'text:m1': { inputTokens: 60, cachedInputTokens: 0, outputTokens: 6 },
+      'thinking:srs1': { inputTokens: 11, cachedInputTokens: 0, outputTokens: 2 },
+      'text:sm1': { inputTokens: 14, cachedInputTokens: 0, outputTokens: 4 },
     };
     expect(withUsage(run(new CodexNormalizer(), [...rootEvents, ...subEvents]))).toEqual(expected);
     expect(withUsage(run(new CodexNormalizer(), [...subEvents, ...rootEvents]))).toEqual(expected);
@@ -193,6 +193,6 @@ describe('Codex token usage', () => {
       ...root.assistant('m1', 'a'), root.usage({ input: 100, output: 5 }), root.usage({ input: 7, output: 3 }),
     ]);
     const twice = applyChanges(r.graph, r.changes);
-    expect(twice.nodes['text:m1']?.usage).toEqual({ inputTokens: 107, outputTokens: 8 });
+    expect(twice.nodes['text:m1']?.usage).toEqual({ inputTokens: 107, cachedInputTokens: 0, outputTokens: 8 });
   });
 });

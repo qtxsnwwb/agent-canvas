@@ -68,7 +68,7 @@ test('groupTurns: an unparseable timestamp counts as 0 (as the canvas does)', ()
 
 // The session page's token rule (web replay.ts re-exports usageTotal from here); stats use countedUsageNodes.
 test('token rule: nodes in the given (snapshot) order; a non-empty messageId once, at its first node; none or empty: each', () => {
-  const u = (i: number, o: number) => ({ inputTokens: i, outputTokens: o });
+  const u = (i: number, o: number) => ({ inputTokens: i, cachedInputTokens: i * 10, outputTokens: o });
   const nodes = [
     mk('late', '2026-01-01T00:00:09Z', { messageId: 'm1', usage: u(100, 1) }), // first in order, later in time: this one counts
     mk('early', '2026-01-01T00:00:01Z', { messageId: 'm1', usage: u(999, 9) }),
@@ -80,6 +80,6 @@ test('token rule: nodes in the given (snapshot) order; a non-empty messageId onc
     mk('m2', '2026-01-01T00:00:07Z', { messageId: 'm2', usage: u(1, 1) }),
   ];
   expect(countedUsageNodes(nodes).map((n) => n.id)).toEqual(['late', 'e1', 'e2', 'n1', 'n2', 'm2']);
-  expect(usageTotal(nodes)).toEqual({ inputTokens: 131, outputTokens: 14 });
-  expect(usageTotal([])).toEqual({ inputTokens: 0, outputTokens: 0 });
+  expect(usageTotal(nodes)).toEqual({ inputTokens: 131, cachedInputTokens: 1310, outputTokens: 14 });
+  expect(usageTotal([])).toEqual({ inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 });
 });

@@ -9,7 +9,15 @@ export const ORIGINS: readonly Origin[] = ['claude', 'codex', 'cursor'];
 export const TERMINAL_STATUSES: readonly NodeStatus[] = ['succeeded', 'failed', 'denied'];
 export const SUMMARY_MAX = 200;
 
-export interface Usage { inputTokens: number; outputTokens: number }
+/**
+ * Token usage of one model response, the same categories for every origin:
+ * - inputTokens: input the model processed that was NOT read from cache ("新输入"; cache writes included).
+ *   Claude Code: input_tokens + cache_creation_input_tokens. Codex: input_tokens − cached_input_tokens (≥ 0).
+ * - cachedInputTokens: input read from cache ("缓存读取"). Claude Code: cache_read_input_tokens. Codex:
+ *   cached_input_tokens. Absent on nodes derived before it existed (and on Cursor's, which has no such count): 0.
+ * - outputTokens: output (Codex's output_tokens already include its reasoning tokens).
+ */
+export interface Usage { inputTokens: number; outputTokens: number; cachedInputTokens?: number }
 
 export interface GraphNode {
   id: string;

@@ -4,10 +4,14 @@ import { api } from '../client';
 import { NODE_STATUS_LABEL } from '../labels';
 import type { UpstreamChain } from './chain';
 import { formatDuration } from './format';
+import { usageLabel } from './replay';
 import { DETAIL_MAX_CHARS, detailSections } from './detail';
 import { KIND_LABEL, nodeColor, UNFINISHED_LABEL } from './nodes';
 import { CHAIN_FOLDED, NO_REASONING, reasoningRows, type ReasoningRow } from './reasoning';
 import type { CanvasView } from './view';
+
+/** The drawer has room for exact token counts. */
+const exactCount = (n: number): string => Math.round(n).toLocaleString('en-US');
 
 /** Kind chip colours of the "推理链" rows (the canvas's thinking / text colours). */
 const THINKING_COLOR = '#d9c8f2';
@@ -197,7 +201,7 @@ export function Drawer({ sessionId, node, chain, view, replay = false, stalled =
           )}
           <span>{formatTime(node.timestamp)}</span>
           {duration !== '' && <span>{duration}</span>}
-          {node.usage !== null && <span>输入 {node.usage.inputTokens} · 输出 {node.usage.outputTokens}</span>}
+          {node.usage !== null && <span>{usageLabel(node.usage, exactCount)}</span>}
           {!node.confirmed && <span className="cc-tag">未确认</span>}
         </div>
         {replay && <div className="cc-drawer-note">内容为当前状态，不随时间轴回退</div>}

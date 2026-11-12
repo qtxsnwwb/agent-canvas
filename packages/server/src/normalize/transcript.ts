@@ -36,12 +36,25 @@ export type Classified =
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 
+const tokenCount = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? Math.max(0, v) : null);
+
+/**
+ * A message's usage (see Usage): `input_tokens` excludes cached input, which Claude reports in two more fields: cache
+ * writes (`cache_creation_input_tokens`, processed afresh, so new input) and cache reads (`cache_read_input_tokens`).
+ * A missing or invalid count is 0; null when none of the four counts is there.
+ */
+function messageUsage(u: unknown): Usage | null {
+  if (!isObject(u)) return null;
+  const input = tokenCount(u.input_tokens);
+  const output = tokenCount(u.output_tokens);
+  const write = tokenCount(u.cache_creation_input_tokens);
+  const read = tokenCount(u.cache_read_input_tokens);
+  if (input === null && output === null && write === null && read === null) return null;
+  return { inputTokens: (input ?? 0) + (write ?? 0), cachedInputTokens: read ?? 0, outputTokens: output ?? 0 };
+}
+
 function messageMeta(message: Record<string, unknown>): MessageMeta {
-  const u = message.usage;
-  const usage =
-    isObject(u) && typeof u.input_tokens === 'number' && typeof u.output_tokens === 'number'
-      ? { inputTokens: u.input_tokens, outputTokens: u.output_tokens }
-      : null;
+  const usage = messageUsage(message.usage);
   return {
     messageId: typeof message.id === 'string' ? message.id : null,
     usage,

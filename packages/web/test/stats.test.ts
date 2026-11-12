@@ -2,7 +2,7 @@ import { describe, expect, test } from 'vitest';
 import type { Project, StatsResponse, StatsTool } from '@agent-canvas/shared';
 import {
   DEFAULT_STATS_FILTER, STATS_FILTER_KEY, availableOrigins, columnLayout, dayIndexAt, dayLabel, dayLong, durationTicks,
-  durationTickLabel, effectiveStatsFilter, formatAvg, formatCount, formatRate, formatSpan, formatTokenPair, formatTokenCount,
+  durationTickLabel, effectiveStatsFilter, formatAvg, formatCount, formatRate, formatSpan, formatTokenCount, formatTokenTriple, TOKEN_PARTS, tokenCells,
   isEmptyStats, labelEvery, labelIndices, parseStatsFilter, projectRowName, rangeLabel, roundedEndRect, serializeStatsFilter,
   sessionHref, shownNoTokenOrigins, splitTools, stackSegments, statsQueryString,
 } from '../src/stats';
@@ -50,8 +50,11 @@ describe('formatting', () => {
     expect(formatTokenCount(null)).toBe('—');
     expect(formatTokenCount(950)).toBe('950');
     expect(formatTokenCount(12_300)).toBe('12.3k');
-    expect(formatTokenPair(null)).toBe('—');
-    expect(formatTokenPair({ input: 1_500, output: 200.4 })).toBe('1.5k / 200');
+    expect(tokenCells(null)).toEqual(['—', '—', '—']);
+    expect(tokenCells({ input: 1_500, cachedInput: 2_400_000, output: 200.4 })).toEqual(['1.5k', '2.4M', '200']);
+    expect(TOKEN_PARTS.map((p) => p.label)).toEqual(['新输入', '缓存读取', '输出']);
+    expect(formatTokenTriple(null)).toBe('—');
+    expect(formatTokenTriple({ input: 1_500, cachedInput: 2_400_000, output: 200.4 })).toBe('新输入 1.5k · 缓存读取 2.4M · 输出 200');
   });
   test('day labels', () => {
     expect(dayLabel('2026-11-02')).toBe('11/2');

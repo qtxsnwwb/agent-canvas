@@ -211,11 +211,11 @@ describe('tool calls', () => {
   });
 
   test('without any main-thread turn, internal calls are kept as dated extras (not turns)', () => {
-    const s = summarizeSession(session(), [tool('i1', 10, null, { agentId: 'ag', usage: { inputTokens: 5, outputTokens: 1 } })]);
+    const s = summarizeSession(session(), [tool('i1', 10, null, { agentId: 'ag', usage: { inputTokens: 5, cachedInputTokens: 50, outputTokens: 1 } })]);
     expect(s.turns).toEqual([]);
     expect(s.calls.map((c) => c.turn)).toEqual([-1]);
     expect(s.extras).toEqual([
-      { atMs: T0 + 10_000, dated: true, toolCalls: 1, finished: 1, failed: 0, toolMs: 0, inputTokens: 5, outputTokens: 1 },
+      { atMs: T0 + 10_000, dated: true, toolCalls: 1, finished: 1, failed: 0, toolMs: 0, inputTokens: 5, cachedInputTokens: 50, outputTokens: 1 },
     ]);
   });
 });
@@ -224,14 +224,15 @@ describe('tokens', () => {
   test('usage summed per turn, internal usage in the dispatching turn, each messageId counted once', () => {
     const s = summarizeSession(session(), [
       prompt('p1', 0, 'T1'),
-      node('a', 1, { turnId: 'T1', messageId: 'm1', usage: { inputTokens: 100, outputTokens: 10 } }),
-      tool('b', 2, 'T1', { messageId: 'm1', usage: { inputTokens: 100, outputTokens: 10 } }), // same message
+      node('a', 1, { turnId: 'T1', messageId: 'm1', usage: { inputTokens: 100, cachedInputTokens: 1000, outputTokens: 10 } }),
+      tool('b', 2, 'T1', { messageId: 'm1', usage: { inputTokens: 100, cachedInputTokens: 1000, outputTokens: 10 } }), // same message
       node('c', 3, { turnId: 'T1', usage: { inputTokens: 1, outputTokens: 2 } }), // no messageId: counted
       node('d', 4, { turnId: 'T1', usage: { inputTokens: 1, outputTokens: 2 } }),
       node('d1', 5, { kind: 'subagent', turnId: 'T1', status: 'succeeded', childAgentId: 'ag' }),
-      node('i', 6, { agentId: 'ag', messageId: 'm2', usage: { inputTokens: 7, outputTokens: 3 } }),
+      node('i', 6, { agentId: 'ag', messageId: 'm2', usage: { inputTokens: 7, cachedInputTokens: 70, outputTokens: 3 } }),
     ]);
-    expect([s.turns[0]!.inputTokens, s.turns[0]!.outputTokens]).toEqual([109, 17]);
+    // Nodes c and d predate cachedInputTokens (absent): 0.
+    expect([s.turns[0]!.inputTokens, s.turns[0]!.cachedInputTokens, s.turns[0]!.outputTokens]).toEqual([109, 1070, 17]);
     expect(s.usageNodes).toBe(5);
   });
 
@@ -245,7 +246,7 @@ describe('tokens', () => {
     ];
     const s = summarizeSession(session(), nodes);
     expect([s.turns[0]!.inputTokens, s.turns[0]!.outputTokens]).toEqual([50, 7]);
-    expect(usageTotal(nodes)).toEqual({ inputTokens: 50, outputTokens: 7 });
+    expect(usageTotal(nodes)).toEqual({ inputTokens: 50, cachedInputTokens: 0, outputTokens: 7 });
   });
 
   test('an empty messageId is no id: each node counts (as on the session page)', () => {

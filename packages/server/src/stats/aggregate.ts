@@ -18,6 +18,7 @@ import {
   type StatsRange,
   type StatsResponse,
   type StatsSlowCall,
+  type StatsTokens,
   type StatsTool,
 } from '@agent-canvas/shared';
 import { turnDurationMs, type SessionSummary } from './summary.js';
@@ -80,12 +81,13 @@ interface Acc {
   failed: number;
   toolMs: number;
   input: number;
+  cachedInput: number;
   output: number;
   /** Origins that contributed activity. */
   origins: Set<Origin>;
 }
 const newAcc = (): Acc => ({
-  sessions: new Set(), turns: 0, activeMs: 0, toolCalls: 0, finished: 0, failed: 0, toolMs: 0, input: 0, output: 0, origins: new Set(),
+  sessions: new Set(), turns: 0, activeMs: 0, toolCalls: 0, finished: 0, failed: 0, toolMs: 0, input: 0, cachedInput: 0, output: 0, origins: new Set(),
 });
 
 interface Part {
@@ -96,6 +98,7 @@ interface Part {
   failed: number;
   toolMs: number;
   inputTokens: number;
+  cachedInputTokens: number;
   outputTokens: number;
 }
 
@@ -109,6 +112,7 @@ function add(acc: Acc, sessionId: string, origin: Origin, part: Part, turns: num
   acc.failed += part.failed;
   acc.toolMs += part.toolMs;
   acc.input += part.inputTokens;
+  acc.cachedInput += part.cachedInputTokens;
   acc.output += part.outputTokens;
 }
 function merge(into: Acc, from: Acc): void {
@@ -121,8 +125,11 @@ function merge(into: Acc, from: Acc): void {
   into.failed += from.failed;
   into.toolMs += from.toolMs;
   into.input += from.input;
+  into.cachedInput += from.cachedInput;
   into.output += from.output;
 }
+
+const tokensOf = (acc: Acc): StatsTokens => ({ input: acc.input, cachedInput: acc.cachedInput, output: acc.output });
 
 const rate = (failed: number, finished: number): number | null => (finished > 0 ? failed / finished : null);
 
@@ -137,7 +144,7 @@ function measures(acc: Acc, noData: ReadonlySet<Origin>): StatsMeasures {
     failed: acc.failed,
     failureRate: rate(acc.failed, acc.finished),
     toolMs: acc.toolMs,
-    tokens: hasData ? { input: acc.input, output: acc.output } : null,
+    tokens: hasData ? tokensOf(acc) : null,
   };
 }
 
@@ -267,13 +274,13 @@ export function aggregateStats(input: AggregateInput): StatsResponse {
         merge(all, acc);
         return {
           origin, turns: acc.turns, activeMs: acc.activeMs, toolCalls: acc.toolCalls, failed: acc.failed, toolMs: acc.toolMs,
-          tokens: noData.has(origin) ? null : { input: acc.input, output: acc.output },
+          tokens: noData.has(origin) ? null : tokensOf(acc),
         };
       });
       const hasData = origins.some((o) => !noData.has(o));
       days.push({
         day, turns: all.turns, activeMs: all.activeMs, toolCalls: all.toolCalls, failed: all.failed, toolMs: all.toolMs,
-        tokens: hasData ? { input: all.input, output: all.output } : null, byOrigin: parts,
+        tokens: hasData ? tokensOf(all) : null, byOrigin: parts,
       });
     }
   }
@@ -285,7 +292,9 @@ export function aggregateStats(input: AggregateInput): StatsResponse {
       origin, ...m,
       medianTurnMs: percentile(durations, 50),
       avgToolCallsPerTurn: m.turns > 0 ? m.toolCalls / m.turns : null,
-      avgTokensPerTurn: m.tokens !== null && m.turns > 0 ? { input: m.tokens.input / m.turns, output: m.tokens.output / m.turns } : null,
+      avgTokensPerTurn: m.tokens !== null && m.turns > 0
+        ? { input: m.tokens.input / m.turns, cachedInput: m.tokens.cachedInput / m.turns, output: m.tokens.output / m.turns }
+        : null,
     };
   });
 

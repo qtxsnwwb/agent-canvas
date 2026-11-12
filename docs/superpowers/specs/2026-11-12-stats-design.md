@@ -30,15 +30,29 @@
 
 | 来源 | token 数据 |
 |---|---|
-| Claude Code | 已有：节点上的 `usage { inputTokens, outputTokens }`，本机 29,500 个节点带用量 |
-| Codex | 原始记录里有，但还没用上：`token_usage_record`（每次模型响应一条，带 `response_id`、`turn_id`、`usage { input_tokens, cached_input_tokens, cache_write_input_tokens, output_tokens, reasoning_output_tokens, total_tokens }`），本机 6,000 条；另有 `event_msg/token_count`（累计值和最近一次的值），6,024 条 |
+| Claude Code | 已有：节点上的 `usage`，本机 29,500 个节点带用量。原始字段在助手消息的 `message.usage` 里：`input_tokens`（**不含**缓存）、`cache_creation_input_tokens`（写入缓存的输入）、`cache_read_input_tokens`（从缓存读的输入）、`output_tokens` |
+| Codex | 原始记录里有，但还没用上：`token_usage_record`（每次模型响应一条，带 `response_id`、`turn_id`、`usage { input_tokens, cached_input_tokens, cache_write_input_tokens, output_tokens, reasoning_output_tokens, total_tokens }`），本机 6,000 条；另有 `event_msg/token_count`（累计值和最近一次的值），6,024 条。`input_tokens` **包含**缓存部分（`cached_input_tokens`、`cache_write_input_tokens` 都是它的一部分），`output_tokens` 已包含推理部分：`total_tokens = input_tokens + output_tokens` |
 | Cursor | 没有：每个气泡的 `tokenCount` 全为 0 |
 
 ## 3. token 补齐（Codex）
 
 - 用 `token_usage_record`：它是“每次模型响应用了多少”，不是累计值，不需要做差。`event_msg/token_count` 不用（它是累计值，且和前者重复）。
 - 归属：一次响应的用量记到这次响应产生的**第一个节点**上（和 Claude Code 现在的做法一致：一条助手消息的用量只记一次，不重复计入它的每个内容块）。靠 `response_id` 对应；对不上的记到同一轮次里时间上最近的前一个节点；整轮都没有节点时丢弃并计数。
-- 字段映射：`inputTokens = input_tokens`，`outputTokens = output_tokens`。缓存命中等细分暂不进模型。
+- 字段映射见下面的“token 的三类”。
+
+### 3.1 token 的三类（所有来源同一个定义）
+
+两家的“输入”记法不同：Claude Code 的 `input_tokens` 不含缓存，Codex 的含缓存。直接把两者都当“输入”放在一起比会严重误导（本机 Claude Code 输入合计约 3.3 万，Codex 约 11.3 亿，差别几乎全是缓存读取）。所以节点 `usage` 统一成三类：
+
+| 类别 | 含义 | Claude Code | Codex |
+|---|---|---|---|
+| `inputTokens`（新输入） | 模型这次处理的、不是从缓存读来的输入（含写入缓存的部分） | `input_tokens + cache_creation_input_tokens` | `input_tokens − cached_input_tokens`（不小于 0） |
+| `cachedInputTokens`（缓存读取） | 从缓存读来的输入 | `cache_read_input_tokens` | `cached_input_tokens` |
+| `outputTokens`（输出） | 输出 | `output_tokens` | `output_tokens`（已含 `reasoning_output_tokens`） |
+
+- 缺的字段按 0 算。`cachedInputTokens` 在模型里是可选的：升级前推导的旧节点没有它，所有使用方都按 0 算（升级后的自动重建会重新推导出来）。Cursor 没有这些数据，不带它。
+- 会话页（节点详情、复盘视角每个节点下的一行、时间轴上的合计）和统计页都用这三类、同样的名字：新输入 / 缓存读取 / 输出。复盘视角节点下那一行只放得下两个数，显示新输入和输出，缓存读取在悬停提示里。
+- 合计规则（按 messageId 去重）只有一份（shared 的 `usageTotal`），统计和会话页对得上。
 - 子代理线程的用量记在子代理线程自己的节点上。
 - `NORMALIZER_VERSION` 递增，升级后自动重建（只读我们自己库里已存的原始记录）。
 - 这些记录目前被当成“已知但忽略”的类型；改成被消费后，诊断页的未识别记录计数不应因此变化。
@@ -55,7 +69,7 @@
 | 工具调用数 | 工具节点和子代理派发节点的数量，含子代理内部的 |
 | 失败率 | 状态为失败或已拒绝的工具调用数 ÷ 已结束的工具调用数。仍在执行的不计入分母 |
 | 工具耗时 | 各工具调用的耗时之和（并行的调用各算各的，所以它可以大于活跃时长；页面上注明） |
-| token | 节点 `usage` 的合计，分输入和输出。Cursor 没有数据，显示“—” |
+| token | 节点 `usage` 的合计，分新输入、缓存读取、输出三类（见 3.1）。Cursor 没有数据，显示“—” |
 
 按工具汇总时，工具名按来源各自的名字显示，不做跨来源的合并（`Bash`、`exec`、`run_terminal_command_v2` 不是同一个东西，合并会误导）；三家对比里用“每轮平均调用数”这类不依赖名字的指标。
 
@@ -69,9 +83,9 @@
 
 `GET /api/stats?range=7d|30d|all&origin=<来源>&projectId=<项目>`，后两个可省略。返回：
 
-- `totals`：会话数、轮次数、活跃时长、工具调用数、失败数、工具耗时、输入 / 输出 token（没有数据时为 `null`）。
+- `totals`：会话数、轮次数、活跃时长、工具调用数、失败数、工具耗时、token `{ input, cachedInput, output }`（新输入 / 缓存读取 / 输出，见 3.1；没有数据时整个为 `null`）。
 - `byDay`：范围内每一天一项（没有活动的日子也在，数值为 0），含轮次数、活跃时长、工具调用数、失败数、token，并按来源拆分。
-- `byOrigin`：每个来源一项，含上面的总量，以及每轮的中位时长、每轮平均工具调用数、失败率、每轮平均 token。
+- `byOrigin`：每个来源一项，含上面的总量，以及每轮的中位时长、每轮平均工具调用数、失败率、每轮平均 token（三类各自除以轮次数）。
 - `byProject`：每个项目一项（按活跃时长降序，最多 20 个，其余合成“其他”）。
 - `byTool`：每个（来源，工具名）一项：调用数、失败数、总耗时、中位耗时、P95 耗时；按总耗时降序，最多 30 个。
 - `slowest`：范围内耗时最长的 10 个工具调用：会话 id、节点 id、来源、工具名、耗时（用于跳转到那个会话）。
@@ -94,7 +108,7 @@
 布局自上而下：
 
 1. **筛选条**（一行）：时间范围（7 天 / 30 天 / 全部）、来源（全部 / Claude Code / Codex / Cursor）、项目（下拉，默认全部）。选择记在浏览器里。
-2. **总量**：一排数字卡片——会话、轮次、活跃时长、工具调用、失败率、token（输入 / 输出）。数字卡片不是图表，只放数字和单位。
+2. **总量**：一排数字卡片——会话、轮次、活跃时长、工具调用、失败率、token（新输入 / 缓存读取 / 输出）。数字卡片不是图表，只放数字和单位。
 3. **每天的活跃时长**：按天的柱状图，按来源堆叠。
 4. **三家对比**：一张表，每个来源一行，列是会话数、轮次数、每轮中位时长、每轮平均工具调用、失败率、每轮平均 token。没有数据的格子显示“—”。只有一个来源有数据时这一节不显示。
 5. **时间花在哪类工具上**：横向条形图，每个（来源，工具名）一条，长度是总耗时，旁边写调用数和中位耗时。

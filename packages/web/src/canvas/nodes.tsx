@@ -4,7 +4,7 @@ import type { GraphNode, NodeKind, NodeStatus } from '@agent-canvas/shared';
 import { NODE_STATUS_LABEL } from '../labels';
 import { formatDuration, nodeAriaLabel } from './format';
 import { THINKING_NOT_RECORDED } from './reasoning';
-import { replayOverlay } from './replay';
+import { replayOverlay, replayOverlayTitle } from './replay';
 import { isBackgroundStep } from './waterfall';
 import type { TurnSummary } from './view';
 
@@ -218,7 +218,7 @@ function GraphNodeView({ data, width, height, selected }: NodeProps<GraphFlowNod
     </>
   );
   const overlayRow = overlay !== null
-    ? <div className="cc-row cc-overlay"><span className="cc-ellipsis cc-grow">{overlay}</span></div>
+    ? <div className="cc-row cc-overlay" title={replayOverlayTitle(node)}><span className="cc-ellipsis cc-grow">{overlay}</span></div>
     : null;
   if (node.kind === 'subagent') {
     return <SubagentView data={data} className={className} style={style} rows={rows} overlayRow={overlayRow} />;

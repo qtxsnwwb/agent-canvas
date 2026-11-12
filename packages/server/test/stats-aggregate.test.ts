@@ -24,7 +24,7 @@ function n(ms: number, o: Partial<GraphNode> = {}): GraphNode {
   };
 }
 /** A closed turn: prompt at `startMs`, then the given calls (each `{ms after start, name, status, dur}`), ending at +durMs. */
-function turn(startMs: number, durMs: number, calls: { name?: string; status?: GraphNode['status']; dur?: number | null; agentId?: string }[] = [], usage?: [number, number]): GraphNode[] {
+function turn(startMs: number, durMs: number, calls: { name?: string; status?: GraphNode['status']; dur?: number | null; agentId?: string }[] = [], usage?: [number, number, number?]): GraphNode[] {
   const key = `T${seq++}`;
   const out: GraphNode[] = [n(startMs, { kind: 'prompt', turnId: key })];
   calls.forEach((c, i) => {
@@ -33,7 +33,7 @@ function turn(startMs: number, durMs: number, calls: { name?: string; status?: G
       durationMs: c.dur === undefined ? 1000 : c.dur,
     }));
   });
-  out.push(n(startMs + durMs, { turnId: key, usage: usage ? { inputTokens: usage[0], outputTokens: usage[1] } : null }));
+  out.push(n(startMs + durMs, { turnId: key, usage: usage ? { inputTokens: usage[0], cachedInputTokens: usage[2] ?? 0, outputTokens: usage[1] } : null }));
   return out;
 }
 
@@ -187,23 +187,25 @@ describe('definitions', () => {
 
   test('tokens: per origin; an origin with no usage anywhere in the dataset is null and listed', () => {
     const r = run([
-      entry(mkSession('c1'), turn(NOW - H, 1000, [], [100, 10])),
+      entry(mkSession('c1'), turn(NOW - H, 1000, [], [100, 10, 4000])),
       entry(mkSession('x1', { origin: 'cursor' }), turn(NOW - H, 1000, [{}])),
       // Codex has usage, but only outside the range: 0, not null.
       entry(mkSession('k1', { origin: 'codex' }), [...turn(NOW - 20 * 24 * H, 1000, [], [5, 5]), ...turn(NOW - H, 1000)]),
     ]);
     expect(r.coverage.noTokenData).toEqual(['cursor']);
-    expect(r.totals.tokens).toEqual({ input: 100, output: 10 });
+    expect(r.totals.tokens).toEqual({ input: 100, cachedInput: 4000, output: 10 });
     const by = Object.fromEntries(r.byOrigin.map((o) => [o.origin, o]));
-    expect(by.claude!.tokens).toEqual({ input: 100, output: 10 });
-    expect(by.claude!.avgTokensPerTurn).toEqual({ input: 100, output: 10 });
+    expect(by.claude!.tokens).toEqual({ input: 100, cachedInput: 4000, output: 10 });
+    expect(by.claude!.avgTokensPerTurn).toEqual({ input: 100, cachedInput: 4000, output: 10 });
     expect(by.cursor!.tokens).toBeNull();
     expect(by.cursor!.avgTokensPerTurn).toBeNull();
-    expect(by.codex!.tokens).toEqual({ input: 0, output: 0 });
+    expect(by.codex!.tokens).toEqual({ input: 0, cachedInput: 0, output: 0 });
     const today = r.byDay.find((d) => d.day === '2026-11-12')!;
     expect(today.byOrigin.map((o) => [o.origin, o.tokens])).toEqual([
-      ['claude', { input: 100, output: 10 }], ['codex', { input: 0, output: 0 }], ['cursor', null],
+      ['claude', { input: 100, cachedInput: 4000, output: 10 }], ['codex', { input: 0, cachedInput: 0, output: 0 }], ['cursor', null],
     ]);
+    expect(today.tokens).toEqual({ input: 100, cachedInput: 4000, output: 10 });
+    expect(r.byProject[0]!.tokens).toEqual({ input: 100, cachedInput: 4000, output: 10 });
   });
 
   test('only origins without token data in scope: tokens null everywhere', () => {

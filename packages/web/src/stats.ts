@@ -62,9 +62,26 @@ export function formatTokenCount(n: number | null): string {
   return n === null || !Number.isFinite(n) ? NONE : formatTokens(n);
 }
 
-/** "输入 / 输出" token pair, or "—". */
-export function formatTokenPair(t: StatsTokens | null): string {
-  return t === null ? NONE : `${formatTokenCount(t.input)} / ${formatTokenCount(t.output)}`;
+/** The three token categories, in the order every place shows them (the session page names them the same way). */
+export const TOKEN_PARTS: readonly { key: keyof StatsTokens; label: string; short: string }[] = [
+  { key: 'input', label: '新输入', short: '新' },
+  { key: 'cachedInput', label: '缓存读取', short: '缓存' },
+  { key: 'output', label: '输出', short: '出' },
+];
+
+/** One line under token tables: what the three categories mean, and that Cursor has none. */
+export const TOKEN_CAPTION =
+  'token 分三类：新输入 = 没从缓存读的输入（含写入缓存的），缓存读取 = 从缓存读的输入，输出含推理；Cursor 没有 token 数据，显示“—”。';
+
+/** One cell per category (TOKEN_PARTS order); "—" each when there is no data. */
+export function tokenCells(t: StatsTokens | null): string[] {
+  return TOKEN_PARTS.map((p) => (t === null ? NONE : formatTokenCount(t[p.key])));
+}
+
+/** "新输入 1.5k · 缓存读取 2.4M · 输出 200" (tooltips, screen readers), or "—". */
+export function formatTokenTriple(t: StatsTokens | null): string {
+  if (t === null) return NONE;
+  return TOKEN_PARTS.map((p) => `${p.label} ${formatTokenCount(t[p.key])}`).join(' · ');
 }
 
 function dayParts(day: string): [number, number, number] {

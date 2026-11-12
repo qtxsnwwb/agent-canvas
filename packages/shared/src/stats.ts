@@ -19,8 +19,13 @@ export const STATS_MOST_FAILING = 10;
 /** A (origin, tool) with fewer calls than this in the range is not listed in `mostFailing`. */
 export const STATS_MOST_FAILING_MIN_CALLS = 5;
 
-/** Token sums (from node `usage`). */
-export interface StatsTokens { input: number; output: number }
+/**
+ * Token sums (from node `usage`, see Usage), the same three categories for every origin:
+ * - input: new input, i.e. input the model processed that was not read from cache ("新输入"; cache writes included);
+ * - cachedInput: input read from cache ("缓存读取");
+ * - output: output ("输出"; Codex's reasoning tokens included).
+ */
+export interface StatsTokens { input: number; cachedInput: number; output: number }
 
 /**
  * The measures shared by totals, origins and projects, over the turns (and their tool calls) that started in the range.
@@ -76,7 +81,7 @@ export interface StatsDay {
 /**
  * One origin with at least one turn in the range (an origin without any is absent, never a row of zeros), in ORIGINS
  * order. medianTurnMs: nearest-rank median of the turn durations. avgToolCallsPerTurn = toolCalls / turns.
- * avgTokensPerTurn = tokens / turns per direction; null when tokens is null.
+ * avgTokensPerTurn = tokens / turns per category (fractional); null when tokens is null.
  */
 export interface StatsOrigin extends StatsMeasures {
   origin: Origin;
@@ -247,11 +252,15 @@ export function countedUsageNodes(nodes: Iterable<GraphNode>): GraphNode[] {
   return out;
 }
 
+/** A usage sum: every category present (a node without cachedInputTokens adds 0 to it). */
+export type UsageTotal = Required<Usage>;
+
 /** 按 messageId 去重求和；messageId 为空的节点各算一次；usage 为空的跳过（see countedUsageNodes）。 */
-export function usageTotal(nodes: Iterable<GraphNode>): Usage {
-  const total: Usage = { inputTokens: 0, outputTokens: 0 };
+export function usageTotal(nodes: Iterable<GraphNode>): UsageTotal {
+  const total: UsageTotal = { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 };
   for (const n of countedUsageNodes(nodes)) {
     total.inputTokens += n.usage!.inputTokens;
+    total.cachedInputTokens += n.usage!.cachedInputTokens ?? 0;
     total.outputTokens += n.usage!.outputTokens;
   }
   return total;

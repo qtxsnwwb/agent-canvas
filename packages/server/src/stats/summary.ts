@@ -40,6 +40,8 @@ export interface SummaryTurn {
   failed: number;
   toolMs: number;
   inputTokens: number;
+  /** Input read from cache (usage.cachedInputTokens; absent on old nodes: 0). */
+  cachedInputTokens: number;
   outputTokens: number;
 }
 
@@ -52,6 +54,8 @@ export interface SummaryExtra {
   failed: number;
   toolMs: number;
   inputTokens: number;
+  /** Input read from cache (usage.cachedInputTokens; absent on old nodes: 0). */
+  cachedInputTokens: number;
   outputTokens: number;
 }
 
@@ -138,7 +142,7 @@ export function summarizeSession(session: Session, nodes: readonly GraphNode[]):
     }
     return {
       key: g.key, startMs: g.startMs, dated: isDated(g.startMs), endMs, open, lastActivityMs,
-      toolCalls: 0, finished: 0, failed: 0, toolMs: 0, inputTokens: 0, outputTokens: 0,
+      toolCalls: 0, finished: 0, failed: 0, toolMs: 0, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0,
     };
   });
   const last = turns[turns.length - 1];
@@ -208,10 +212,12 @@ export function summarizeSession(session: Session, nodes: readonly GraphNode[]):
       turn >= 0
         ? turns[turn]!
         : (extras[extras.length] = {
-            atMs: ms ?? NaN, dated: ms !== null && isDated(ms), toolCalls: 0, finished: 0, failed: 0, toolMs: 0, inputTokens: 0, outputTokens: 0,
+            atMs: ms ?? NaN, dated: ms !== null && isDated(ms), toolCalls: 0, finished: 0, failed: 0, toolMs: 0, inputTokens: 0, cachedInputTokens: 0,
+            outputTokens: 0,
           });
     if (counts) {
       target.inputTokens += node.usage!.inputTokens;
+      target.cachedInputTokens += node.usage!.cachedInputTokens ?? 0;
       target.outputTokens += node.usage!.outputTokens;
     }
     if (!call) continue;

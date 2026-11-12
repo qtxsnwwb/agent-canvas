@@ -319,6 +319,9 @@ header .header-link[aria-current="page"] { background: var(--sun); }
 .stats-table th, .stats-table td { text-align: left; padding: 5px 14px 5px 0; border-bottom: 1.5px dashed var(--line); white-space: nowrap; }
 .stats-table th { font-weight: 700; color: var(--ink-soft); font-size: 12px; }
 .stats-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+.stats-table th[rowspan] { vertical-align: bottom; }
+.stats-table th.stats-th-group { text-align: center; padding: 5px 0 2px 14px; border-bottom: 1.5px solid var(--line); }
+.stats-table th.stats-th-sub { font-weight: 600; }
 .stats-table .wrap { white-space: normal; overflow-wrap: anywhere; min-width: 8em; }
 .stats-tool { display: inline-flex; align-items: center; white-space: nowrap; }
 .stats-table a { color: #3a5bd9; }

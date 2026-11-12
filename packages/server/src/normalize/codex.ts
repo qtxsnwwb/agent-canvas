@@ -1059,7 +1059,8 @@ export class CodexNormalizer implements AgentNormalizer {
    * the thread it is dropped and counted. A function of this thread's records only, so the order other threads' files
    * arrive in does not matter. A response id already applied in this thread changes nothing (a repeated record);
    * a record without one is identified by its place in the file. A record whose input or output count is not a
-   * non-negative number is ignored, but still ends its response.
+   * non-negative number is ignored, but still ends its response. Categories (see Usage): new input = input_tokens −
+   * cached_input_tokens (≥ 0), cached input = cached_input_tokens (missing or invalid: 0), output = output_tokens.
    */
   private applyUsage(ctx: Ctx): void {
     const { state, thread, payload } = ctx;
@@ -1083,8 +1084,16 @@ export class CodexNormalizer implements AgentNormalizer {
       state.droppedUsage += 1;
       return;
     }
+    // input_tokens includes the cached input (cached_input_tokens is a part of it, as are cache writes): new input is the
+    // rest. output_tokens already includes reasoning_output_tokens (total_tokens = input_tokens + output_tokens).
+    const rawCached = num(usage.cached_input_tokens);
+    const cached = rawCached === null || rawCached < 0 ? 0 : rawCached;
     const prev = node.usage;
-    const next = { inputTokens: (prev?.inputTokens ?? 0) + input, outputTokens: (prev?.outputTokens ?? 0) + output };
+    const next = {
+      inputTokens: (prev?.inputTokens ?? 0) + Math.max(0, input - cached),
+      cachedInputTokens: (prev?.cachedInputTokens ?? 0) + cached,
+      outputTokens: (prev?.outputTokens ?? 0) + output,
+    };
     // The total, not the increment: a replay writing the same patches again lands on the same value.
     this.writeNode(state, target, { usage: next }, ctx.changes);
   }

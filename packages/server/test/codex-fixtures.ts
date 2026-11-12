@@ -275,7 +275,7 @@ export class CodexThread {
    * legacy minimal record (`usage: { input_tokens: 10 }`, no output count: the normalizer ignores it). With `tokens`
    * it has every key the real records have; `responseId: null` leaves `response_id` out, `turnId` overrides the turn.
    */
-  usage(tokens?: { input: unknown; output: unknown }, over: { responseId?: string | null; turnId?: string | null } = {}): RawEvent {
+  usage(tokens?: { input: unknown; output: unknown; cached?: unknown; cacheWrite?: unknown; reasoning?: unknown }, over: { responseId?: string | null; turnId?: string | null } = {}): RawEvent {
     const responseId = over.responseId === undefined ? `resp_${this.ordinal}` : over.responseId;
     const turnId = over.turnId === undefined ? this.turn : over.turnId;
     if (tokens === undefined) {
@@ -283,10 +283,10 @@ export class CodexThread {
     }
     const usage = {
       input_tokens: tokens.input,
-      cached_input_tokens: 0,
-      cache_write_input_tokens: 0,
+      cached_input_tokens: tokens.cached ?? 0,
+      cache_write_input_tokens: tokens.cacheWrite ?? 0,
       output_tokens: tokens.output,
-      reasoning_output_tokens: 0,
+      reasoning_output_tokens: tokens.reasoning ?? 0,
       total_tokens: typeof tokens.input === 'number' && typeof tokens.output === 'number' ? tokens.input + tokens.output : 0,
     };
     const payload: Record<string, unknown> = {

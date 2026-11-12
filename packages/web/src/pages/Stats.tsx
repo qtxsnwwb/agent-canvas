@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode, type RefObject } from 'react';
-import type { Origin, Project, StatsDay, StatsResponse, StatsTool } from '@agent-canvas/shared';
+import type { Origin, Project, StatsDay, StatsResponse, StatsTokens, StatsTool } from '@agent-canvas/shared';
 import { api } from '../client';
 import { ORIGIN_LOOK, projectTitle, stripProjects } from '../home';
 import {
   DEFAULT_STATS_FILTER, STATS_FILTER_KEY, STATS_RANGE_OPTIONS, availableOrigins, columnLayout, dayIndexAt, dayLabel, dayLong,
   durationTickLabel, durationTicks, effectiveStatsFilter, formatAvg, formatCount, formatRate, formatSpan, formatTokenCount,
-  formatTokenPair, isEmptyStats, labelEvery, labelIndices, parseStatsFilter, projectRowName, rangeLabel, roundedEndRect,
+  formatTokenTriple, isEmptyStats, NONE, TOKEN_CAPTION, TOKEN_PARTS, tokenCells, labelEvery, labelIndices, parseStatsFilter, projectRowName, rangeLabel, roundedEndRect,
   serializeStatsFilter, sessionHref, shownNoTokenOrigins, splitTools, stackSegments, statsQueryString,
   type StatsFilter, type StatsOriginFilter,
 } from '../stats';
@@ -129,7 +129,7 @@ function Totals({ data }: { data: StatsResponse }) {
   return (
     <section aria-labelledby="stats-totals-h">
       <SectionHead id="stats-totals-h" title="总量"
-        caption="只算范围内开始的轮次；工具调用含子代理内部的调用，所以会比会话页轮次卡片上的数多。" />
+        caption="只算范围内开始的轮次（轮次 = 会话页上的轮次卡片）；工具调用含子代理内部的调用，所以比轮次卡片上的数多。token 和会话页一样分新输入、缓存读取、输出三类。" />
       <div className="stats-tiles">
         <Tile label="会话" value={formatCount(t.sessions)} />
         <Tile label="轮次" value={formatCount(t.turns)} />
@@ -138,10 +138,11 @@ function Totals({ data }: { data: StatsResponse }) {
         <Tile label="失败率" value={formatRate(t.failureRate)} sub={`${formatCount(t.failed)} / ${formatCount(t.finished)} 次已结束的调用`} />
         <Tile
           label="token"
-          value={t.tokens === null ? formatTokenPair(null) : (
+          value={t.tokens === null ? NONE : (
             <>
-              <span className="stats-tile-line">{formatTokenCount(t.tokens.input)}<small>输入</small></span>
-              <span className="stats-tile-line">{formatTokenCount(t.tokens.output)}<small>输出</small></span>
+              {TOKEN_PARTS.map((p) => (
+                <span key={p.key} className="stats-tile-line">{formatTokenCount(t.tokens![p.key])}<small>{p.label}</small></span>
+              ))}
             </>
           )}
           sub={tokenSub}
@@ -290,20 +291,39 @@ function DayChart({ days, origins, truncated }: { days: StatsDay[]; origins: Ori
   );
 }
 
+// ---- token columns (three categories, one sub-column each) ----
+
+/** The header row above the token sub-columns: the group name spanning them. */
+function TokenGroupHead({ title }: { title: string }) {
+  return <th className="num stats-th-group" colSpan={TOKEN_PARTS.length} scope="colgroup">{title}</th>;
+}
+
+function TokenSubHeads() {
+  return <>{TOKEN_PARTS.map((p) => <th key={p.key} className="num stats-th-sub" scope="col">{p.label}</th>)}</>;
+}
+
+function TokenCells({ tokens }: { tokens: StatsTokens | null }) {
+  const cells = tokenCells(tokens);
+  const title = formatTokenTriple(tokens);
+  return <>{cells.map((c, i) => <td key={TOKEN_PARTS[i]!.key} className="num" title={title}>{c}</td>)}</>;
+}
+
 // ---- three origins compared ----
 
 function OriginTable({ data }: { data: StatsResponse }) {
   return (
     <section aria-labelledby="stats-origins-h">
       <SectionHead id="stats-origins-h" title="三家对比"
-        caption="这些指标不依赖工具名，可以直接比。中位时长：一半的轮次比它短；每轮平均工具调用含子代理内部的调用。" />
+        caption="这些指标不依赖工具名，可以直接比。轮次 = 会话页上的轮次卡片；中位时长：一半的轮次比它短；每轮平均工具调用含子代理内部的调用。" />
       <div className="stats-table-wrap">
         <table className="stats-table">
           <thead>
             <tr>
-              <th>来源</th><th className="num">会话</th><th className="num">轮次</th><th className="num">每轮中位时长</th>
-              <th className="num">每轮平均工具调用</th><th className="num">失败率</th><th className="num">每轮平均 token（输入 / 输出）</th>
+              <th rowSpan={2}>来源</th><th rowSpan={2} className="num">会话</th><th rowSpan={2} className="num">轮次</th>
+              <th rowSpan={2} className="num">每轮中位时长</th><th rowSpan={2} className="num">每轮平均工具调用</th>
+              <th rowSpan={2} className="num">失败率</th><TokenGroupHead title="每轮平均 token" />
             </tr>
+            <tr><TokenSubHeads /></tr>
           </thead>
           <tbody>
             {data.byOrigin.map((o) => (
@@ -314,12 +334,13 @@ function OriginTable({ data }: { data: StatsResponse }) {
                 <td className="num">{formatSpan(o.medianTurnMs)}</td>
                 <td className="num">{formatAvg(o.avgToolCallsPerTurn)}</td>
                 <td className="num">{formatRate(o.failureRate)}</td>
-                <td className="num">{formatTokenPair(o.avgTokensPerTurn)}</td>
+                <TokenCells tokens={o.avgTokensPerTurn} />
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+      <p className="stats-note">{TOKEN_CAPTION}</p>
     </section>
   );
 }
@@ -473,9 +494,10 @@ function ByProject({ data }: { data: StatsResponse }) {
         <table className="stats-table">
           <thead>
             <tr>
-              <th>项目</th><th className="num">会话</th><th className="num">轮次</th><th className="num">活跃时长</th>
-              <th className="num">失败率</th><th className="num">token（输入 / 输出）</th>
+              <th rowSpan={2}>项目</th><th rowSpan={2} className="num">会话</th><th rowSpan={2} className="num">轮次</th>
+              <th rowSpan={2} className="num">活跃时长</th><th rowSpan={2} className="num">失败率</th><TokenGroupHead title="token" />
             </tr>
+            <tr><TokenSubHeads /></tr>
           </thead>
           <tbody>
             {data.byProject.map((p) => (
@@ -485,12 +507,13 @@ function ByProject({ data }: { data: StatsResponse }) {
                 <td className="num">{formatCount(p.turns)}</td>
                 <td className="num">{formatSpan(p.activeMs)}</td>
                 <td className="num">{formatRate(p.failureRate)}</td>
-                <td className="num">{formatTokenPair(p.tokens)}</td>
+                <TokenCells tokens={p.tokens} />
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+      <p className="stats-note">{TOKEN_CAPTION}</p>
     </section>
   );
 }
