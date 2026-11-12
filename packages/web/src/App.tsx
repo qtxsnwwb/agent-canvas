@@ -4,12 +4,14 @@ import { Diagnostics } from './pages/Diagnostics';
 import { Notifications } from './pages/Notifications';
 import { Home } from './pages/Home';
 import { SessionPage } from './pages/Session';
+import { Stats } from './pages/Stats';
 
 export type Route =
   | { page: 'home'; projectId: string | null }
   | { page: 'session'; sessionId: string }
   | { page: 'diagnostics' }
-  | { page: 'notifications' };
+  | { page: 'notifications' }
+  | { page: 'stats' };
 
 export function parseHash(hash: string): Route {
   const h = hash.replace(/^#/, '');
@@ -22,6 +24,7 @@ export function parseHash(hash: string): Route {
   };
   if (h === '/diagnostics') return { page: 'diagnostics' };
   if (h === '/notifications') return { page: 'notifications' };
+  if (h === '/stats') return { page: 'stats' };
   if (h.startsWith('/s/')) {
     const id = decode(h.slice(3));
     if (id) return { page: 'session', sessionId: id };
@@ -53,7 +56,8 @@ export function App() {
     <div className="app">
       <header>
         <a href="#/">Agent Canvas</a>
-        <a className="header-link" href="#/notifications" aria-current={route.page === 'notifications' ? 'page' : undefined}>
+        <a className="header-link" href="#/stats" aria-current={route.page === 'stats' ? 'page' : undefined}>统计</a>
+        <a className="header-link header-link-next" href="#/notifications" aria-current={route.page === 'notifications' ? 'page' : undefined}>
           通知{notifyOn && <span className="header-dot" role="img" aria-label="已开启" title="通知已开启" />}
         </a>
         <a className="header-link header-link-next" href="#/diagnostics">诊断</a>
@@ -62,6 +66,8 @@ export function App() {
         <SessionPage key={route.sessionId} sessionId={route.sessionId} />
       ) : route.page === 'diagnostics' ? (
         <Diagnostics />
+      ) : route.page === 'stats' ? (
+        <Stats />
       ) : route.page === 'notifications' ? (
         <Notifications onEnabledChange={setNotifyOn} />
       ) : (
