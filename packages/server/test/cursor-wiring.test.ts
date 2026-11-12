@@ -28,7 +28,7 @@ beforeEach(() => {
 afterEach(async () => {
   for (const app of apps.splice(0)) await app.close();
   fx.close();
-  fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 10 });
+  fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 });
 
 test('the test environment never points at the real Cursor database', () => {
@@ -100,7 +100,8 @@ test('start polls the configured database; rebuild does not need it', async () =
   ]);
   // rebuild replays the stored events with the Cursor database gone
   fx.close();
-  fs.rmSync(path.join(tmp, 'Cursor'), { recursive: true, force: true });
+  // A poll round may still hold the database file for a moment (Windows refuses to delete an open file).
+  fs.rmSync(path.join(tmp, 'Cursor'), { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   fx = { close: () => undefined } as unknown as CursorDbFixture;
   expect(() => rebuild({ projectsDir: path.join(tmp, 'projects'), dataDir, codexSessionsDir: null, cursorDbPath: path.join(tmp, 'Cursor', 'gone.vscdb') })).not.toThrow();
 }, 30_000);
