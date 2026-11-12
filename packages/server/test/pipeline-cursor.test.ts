@@ -130,13 +130,12 @@ describe('cursor origin', () => {
   });
 
   test('NORMALIZER_VERSION bumped for the cursor origin', () => {
-    expect(NORMALIZER_VERSION).toBe(20);
+    expect(NORMALIZER_VERSION).toBe(21);
   });
 
-  test('NORMALIZER_FACTORIES.cursor is null: a cursor raw event yields no changes', () => {
-    expect(NORMALIZER_FACTORIES.cursor).toBeNull();
+  test('without a cursor normalizer (factory null) a cursor raw event yields no changes', () => {
     const ev: RawEvent = { source: 'transcript', origin: 'cursor', file: 'cursor:c1', offset: 0, line: '{}', recordType: 'bubble', sessionId: 'c1', agentId: null, projectId: 'p' };
-    expect(new NormalizerRegistry().apply(ev, 'p')).toEqual({ changes: [] });
+    expect(new NormalizerRegistry({ ...NORMALIZER_FACTORIES, cursor: null }).apply(ev, 'p')).toEqual({ changes: [] });
   });
 });
 
@@ -158,6 +157,7 @@ describe('poll sources in the pipeline', () => {
   });
 
   test('ingestRecords stores each record once as a cursor transcript raw event, in order; nothing derived without a normalizer', async () => {
+    pipeline = makePipeline({ ...NORMALIZER_FACTORIES, cursor: null });
     const sink = await started();
     const records = [
       { recordType: 'composer', line: '{"composerId":"c1"}' },

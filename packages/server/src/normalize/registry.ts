@@ -1,6 +1,7 @@
 import { ORIGINS, type Origin } from '@claude-canvas/shared';
 import type { RawEvent } from '../store/store.js';
 import { CodexNormalizer } from './codex.js';
+import { CursorNormalizer } from './cursor.js';
 import { Normalizer } from './normalizer.js';
 import type { AgentNormalizer, NormalizeResult } from './types.js';
 
@@ -11,7 +12,7 @@ export type NormalizerFactories = Readonly<Record<Origin, (() => AgentNormalizer
 export const NORMALIZER_FACTORIES: NormalizerFactories = {
   claude: () => new Normalizer(),
   codex: () => new CodexNormalizer(),
-  cursor: null, // CursorNormalizer comes later: until then Cursor raw events are stored only
+  cursor: () => new CursorNormalizer(),
 };
 
 const originOf = (event: RawEvent): Origin => event.origin ?? 'claude';
