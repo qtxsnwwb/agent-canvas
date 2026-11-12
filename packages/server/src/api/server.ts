@@ -23,6 +23,7 @@ import type { NotificationService } from '../notify/service.js';
 import type { Pipeline } from '../pipeline.js';
 import { KEY_PREFIXES } from '../sources/source.js';
 import type { Store } from '../store/store.js';
+import { parseStatsQuery, StatsService, storeStatsSource } from '../stats/service.js';
 
 const HOOK_BODY_LIMIT = 64 * 1024 * 1024;
 /** More changes than this to catch up on: tell the client to refetch the snapshot instead. */
@@ -152,9 +153,18 @@ function parseClientMessage(raw: string): ClientMessage | null {
 /**
  * `notifications`: the desktop notification service (`start` only). With it come the /api/notifications routes and the
  * diagnostics' `notifications` block, and hook events are shown to it before they are ingested.
+ * `stats`: the service behind /api/stats (default: one reading `store`); it is told about every change the pipeline
+ * reports.
  */
-export function buildServer(deps: { store: Store; pipeline: Pipeline; config: Config; notifications?: NotificationService }): FastifyInstance {
+export function buildServer(deps: {
+  store: Store;
+  pipeline: Pipeline;
+  config: Config;
+  notifications?: NotificationService;
+  stats?: StatsService;
+}): FastifyInstance {
   const { store, pipeline, config, notifications } = deps;
+  const stats = deps.stats ?? new StatsService(storeStatsSource(store));
   const app = Fastify();
   const connections = new Set<Connection>();
 
@@ -197,9 +207,12 @@ export function buildServer(deps: { store: Store; pipeline: Pipeline; config: Co
       }
     }
   });
+  // Stats summaries of changed sessions are dropped here and recomputed only when /api/stats next needs them.
+  const unsubscribeStats = pipeline.onChanges((changes) => stats.noteChanges(changes));
   app.addHook('onClose', async () => {
     unsubscribe();
     unsubscribeResync();
+    unsubscribeStats();
     connections.clear();
   });
 
@@ -268,6 +281,12 @@ export function buildServer(deps: { store: Store; pipeline: Pipeline; config: Co
     const detail = store.getNodeDetail(req.params.id, req.params.nodeId);
     if (detail === null) return reply.code(404).send({ error: 'node not found' });
     return detail;
+  });
+  // Counts, durations, names and ids only (no conversation content). 400 for an unknown range / origin.
+  app.get<{ Querystring: Record<string, unknown> }>('/api/stats', async (req, reply) => {
+    const query = parseStatsQuery(req.query);
+    if ('error' in query) return reply.code(400).send({ error: query.error });
+    return stats.get(query);
   });
   app.get(
     '/api/diagnostics',
