@@ -72,6 +72,6 @@ test('diagnosticsNotificationLines：没有这个块就什么也不显示', () =
 });
 
 test('parseHash("#/notifications") 是通知设置页', async () => {
-  const { parseHash } = await import('../src/App');
+  const { parseHash } = await import('../src/route');
   expect(parseHash('#/notifications')).toEqual({ page: 'notifications' });
 });

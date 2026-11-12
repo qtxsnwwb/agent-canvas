@@ -44,7 +44,11 @@ export function assistantBlock(
   uuid: string,
   parentUuid: string | null,
   block: object,
-  over: { messageId?: string; stopReason?: string; agentId?: string; thinkingDurationMs?: number; timestamp?: string } = {},
+  over: {
+    messageId?: string; stopReason?: string; agentId?: string; thinkingDurationMs?: number; timestamp?: string;
+    /** The message's raw `usage` object (default `{ input_tokens: 10, output_tokens: 5 }`). */
+    usage?: Record<string, unknown>;
+  } = {},
 ): RawEvent {
   const record: Record<string, unknown> = {
     ...baseRecord('assistant', uuid, parentUuid),
@@ -53,7 +57,7 @@ export function assistantBlock(
       role: 'assistant',
       content: [block],
       stop_reason: over.stopReason ?? null,
-      usage: { input_tokens: 10, output_tokens: 5 },
+      usage: over.usage ?? { input_tokens: 10, output_tokens: 5 },
     },
   };
   if (over.timestamp !== undefined) record.timestamp = over.timestamp;

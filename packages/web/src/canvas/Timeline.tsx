@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { adjacentMark, advance, formatClock, formatTokens, turnIndexAt } from './replay';
+import { adjacentMark, advance, formatClock, turnIndexAt, usageLabel } from './replay';
 import type { CanvasSnapshot } from './useCanvas';
 
 /** Playback timer period; each tick advances the time by the real elapsed time × the speed (see advance). */
@@ -101,7 +101,7 @@ export function Timeline({ replay, onSeek }: { replay: NonNullable<CanvasSnapsho
         回到末尾
       </button>
       <div className="cc-tl-totals">
-        {totals.nodeCount} 个节点 · 输入 {formatTokens(totals.usage.inputTokens)} · 输出 {formatTokens(totals.usage.outputTokens)}
+        {totals.nodeCount} 个节点 · {usageLabel(totals.usage)}
       </div>
     </div>
   );

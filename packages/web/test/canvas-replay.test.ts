@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest';
 import type { Graph, GraphEdge, GraphNode, NodeKind, Usage } from '@agent-canvas/shared';
-import { adjacentMark, advance, formatClock, formatTokens, graphAt, replayOverlay, replayRange, turnIndexAt, turnMarks, usageTotal } from '../src/canvas/replay';
+import { adjacentMark, advance, formatClock, formatTokens, graphAt, replayOverlay, replayOverlayTitle, replayRange, turnIndexAt, turnMarks, usageLabel, usageTotal } from '../src/canvas/replay';
 
 const EPOCH = Date.parse('2026-01-01T00:00:00Z');
 const iso = (tMs: number) => new Date(EPOCH + tMs).toISOString();
@@ -101,7 +101,8 @@ function fiveNodesOneMessage(usage: Usage): GraphNode[] {
   return [1, 2, 3, 4, 5].map((i) => node(`n${i}`, 'text', i, { messageId: 'm1', usage }));
 }
 test('usageTotal 按 messageId 去重：五个节点共用一条消息只算一次', () => {
-  expect(usageTotal(fiveNodesOneMessage({ inputTokens: 1200, outputTokens: 340 }))).toEqual({ inputTokens: 1200, outputTokens: 340 });
+  expect(usageTotal(fiveNodesOneMessage({ inputTokens: 1200, cachedInputTokens: 9000, outputTokens: 340 })))
+    .toEqual({ inputTokens: 1200, cachedInputTokens: 9000, outputTokens: 340 });
 });
 
 test('usageTotal：无 messageId 各算一次，usage 为空跳过', () => {
@@ -111,8 +112,16 @@ test('usageTotal：无 messageId 各算一次，usage 为空跳过', () => {
     node('c', 'text', 0, { messageId: 'm', usage: u }), node('d', 'text', 0, { messageId: 'm', usage: u }),
     node('e', 'text', 0),
   ];
-  expect(usageTotal(nodes)).toEqual({ inputTokens: 30, outputTokens: 3 });
-  expect(usageTotal([])).toEqual({ inputTokens: 0, outputTokens: 0 });
+  expect(usageTotal(nodes)).toEqual({ inputTokens: 30, cachedInputTokens: 0, outputTokens: 3 });
+  expect(usageTotal([])).toEqual({ inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 });
+});
+
+test('usageTotal：缓存读取单独求和；旧节点没有 cachedInputTokens 按 0 算', () => {
+  const nodes = [
+    node('a', 'text', 0, { usage: { inputTokens: 5, cachedInputTokens: 700, outputTokens: 2 } }),
+    node('b', 'text', 0, { usage: { inputTokens: 3, outputTokens: 1 } }),
+  ];
+  expect(usageTotal(nodes)).toEqual({ inputTokens: 8, cachedInputTokens: 700, outputTokens: 3 });
 });
 
 test.each([[999, '999'], [1000, '1k'], [999_949, '999.9k'], [999_950, '1M'], [1200, '1.2k'], [15000, '15k'], [1250000, '1.3M'], [-5, '0'], [Number.NaN, '0'], [Infinity, '0']])('formatTokens(%s)', (n, s) => {
@@ -151,19 +160,26 @@ test('turnIndexAt：时刻之前（含）的轮次数，第一轮之前为 0', (
   expect(turnIndexAt([], 10_000)).toBe(0);
 });
 
-test('replayOverlay：工具 / 子代理显示耗时与 token，缺的省略，全缺为 —', () => {
-  const usage = { inputTokens: 1200, outputTokens: 340 };
-  expect(replayOverlay(node('a', 'tool', 0, { durationMs: 3400, usage }))).toBe('耗时 3.4s · 输入 1.2k · 输出 340');
+test('replayOverlay：工具 / 子代理显示耗时与 token（新输入、输出；缓存读取在提示里），缺的省略，全缺为 —', () => {
+  const usage = { inputTokens: 1200, cachedInputTokens: 45_000, outputTokens: 340 };
+  expect(replayOverlay(node('a', 'tool', 0, { durationMs: 3400, usage }))).toBe('耗时 3.4s · 新输入 1.2k · 输出 340');
   expect(replayOverlay(node('a', 'subagent', 0, { durationMs: 3400 }))).toBe('耗时 3.4s');
-  expect(replayOverlay(node('a', 'tool', 0, { usage }))).toBe('输入 1.2k · 输出 340');
+  expect(replayOverlay(node('a', 'tool', 0, { usage }))).toBe('新输入 1.2k · 输出 340');
   expect(replayOverlay(node('a', 'tool', 0))).toBe('—');
   expect(replayOverlay(node('a', 'tool', 0, { durationMs: -1 }))).toBe('—');
 });
 test('replayOverlay：回复只显示 token 两项；其他类型没有叠加行', () => {
   const usage = { inputTokens: 15000, outputTokens: 999 };
-  expect(replayOverlay(node('a', 'text', 0, { usage, durationMs: 100 }))).toBe('输入 15k · 输出 999');
+  expect(replayOverlay(node('a', 'text', 0, { usage, durationMs: 100 }))).toBe('新输入 15k · 输出 999');
   expect(replayOverlay(node('a', 'text', 0))).toBe('—');
   for (const k of ['prompt', 'thinking', 'system', 'unknown'] as const) expect(replayOverlay(node('a', k, 0, { usage }))).toBeNull();
+});
+
+test('usageLabel：三项都写全；旧节点缺缓存读取按 0；replayOverlayTitle 只在有 token 时给出', () => {
+  expect(usageLabel({ inputTokens: 1200, cachedInputTokens: 45_000, outputTokens: 340 })).toBe('新输入 1.2k · 缓存读取 45k · 输出 340');
+  expect(usageLabel({ inputTokens: 3, outputTokens: 1 })).toBe('新输入 3 · 缓存读取 0 · 输出 1');
+  expect(replayOverlayTitle(node('a', 'tool', 0, { usage: { inputTokens: 1, cachedInputTokens: 2, outputTokens: 3 } }))).toBe('新输入 1 · 缓存读取 2 · 输出 3');
+  expect(replayOverlayTitle(node('a', 'tool', 0, { durationMs: 5 }))).toBeUndefined();
 });
 
 test('adjacentMark：PageUp 跳到上一个轮次标记、PageDown 跳到下一个；正好在标记上时跳到相邻的那个；没有则 null', () => {

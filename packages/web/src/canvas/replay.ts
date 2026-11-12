@@ -73,21 +73,8 @@ export function turnMarks(graph: Graph): { turnId: string; ms: number }[] {
   return marks.sort((a, b) => a.ms - b.ms);
 }
 
-/** 按 messageId 去重求和；messageId 为空的节点各算一次；usage 为空的跳过。 */
-export function usageTotal(nodes: Iterable<GraphNode>): Usage {
-  const seen = new Set<string>();
-  const total: Usage = { inputTokens: 0, outputTokens: 0 };
-  for (const n of nodes) {
-    if (!n.usage) continue;
-    if (n.messageId) {
-      if (seen.has(n.messageId)) continue;
-      seen.add(n.messageId);
-    }
-    total.inputTokens += n.usage.inputTokens;
-    total.outputTokens += n.usage.outputTokens;
-  }
-  return total;
-}
+/** 按 messageId 去重求和；messageId 为空的节点各算一次；usage 为空的跳过。The rule lives in shared (the stats use it too). */
+export { usageTotal } from '@agent-canvas/shared';
 
 const trim = (x: number) => x.toFixed(1).replace(/\.0$/, '');
 
@@ -153,7 +140,7 @@ export function formatClock(ms: number, range: ReplayRange | null): string {
 }
 
 /**
- * The extra row a node gets in the replay view: tool / subagent "耗时 3.4s · 输入 1.2k · 输出 340", text the two token
+ * The extra row a node gets in the replay view: tool / subagent "耗时 3.4s · 新输入 1.2k · 输出 340", text the two token
  * parts; missing parts are left out, "—" when none is left. null for the other kinds (no extra row).
  */
 export function replayOverlay(node: Pick<GraphNode, 'kind' | 'durationMs' | 'usage'>): string | null {
@@ -164,6 +151,21 @@ export function replayOverlay(node: Pick<GraphNode, 'kind' | 'durationMs' | 'usa
     const d = formatDuration(node.durationMs);
     if (d !== '') parts.push(`耗时 ${d}`);
   }
-  if (node.usage) parts.push(`输入 ${formatTokens(node.usage.inputTokens)}`, `输出 ${formatTokens(node.usage.outputTokens)}`);
+  // One row has room for two token figures: new input and output; the cached input is in replayOverlayTitle.
+  if (node.usage) parts.push(`新输入 ${formatTokens(node.usage.inputTokens)}`, `输出 ${formatTokens(node.usage.outputTokens)}`);
   return parts.length > 0 ? parts.join(' · ') : '—';
+}
+
+/**
+ * The three token figures of a usage (or a usage total), as the session page and the stats page name them:
+ * "新输入 1.2k · 缓存读取 45k · 输出 340" (`format`: how each count is written, formatTokens by default). A node derived
+ * before cachedInputTokens existed reads 缓存读取 0.
+ */
+export function usageLabel(u: Usage, format: (n: number) => string = formatTokens): string {
+  return `新输入 ${format(u.inputTokens)} · 缓存读取 ${format(u.cachedInputTokens ?? 0)} · 输出 ${format(u.outputTokens)}`;
+}
+
+/** The replay row's tooltip: every token figure (the row itself leaves out the cached input); undefined without usage. */
+export function replayOverlayTitle(node: Pick<GraphNode, 'usage'>): string | undefined {
+  return node.usage ? usageLabel(node.usage) : undefined;
 }

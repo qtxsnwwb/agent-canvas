@@ -18,7 +18,8 @@ export default defineConfig({
   },
   test: {
     // Never the real Cursor database: a test that wants one passes a temp path (cursorDbPath override or stubbed env).
-    env: { AGENT_CANVAS_CURSOR_DB: '' },
+    // No stats warm-up in start() unless a test asks for it (StartOptions.statsWarmup).
+    env: { AGENT_CANVAS_CURSOR_DB: '', AGENT_CANVAS_STATS_WARMUP: '0' },
     projects: [
       ...readdirSync(packagesDir, { withFileTypes: true })
         .filter((d) => d.isDirectory())

@@ -13,6 +13,7 @@ import {
   type SearchHit,
   type ServerMessage,
   type Session,
+  type StatsResponse,
 } from '@agent-canvas/shared';
 
 const RECONNECT_MS = 1000;
@@ -60,6 +61,8 @@ export const api = {
     sendJson<NotificationSettingsResponse>('PUT', '/api/notifications/settings', settings),
   testNotification: () => sendJson<NotificationTestResponse>('POST', '/api/notifications/test'),
   search: (q: string) => getJson<SearchHit[]>(`/api/search?q=${enc(q)}`),
+  /** `query` is built by stats.ts `statsQueryString`. */
+  stats: (query: string) => getJson<StatsResponse>(`/api/stats?${query}`),
 };
 
 export interface WebSocketLike {

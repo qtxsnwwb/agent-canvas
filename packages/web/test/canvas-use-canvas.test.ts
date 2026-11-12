@@ -1015,7 +1015,7 @@ test('setMode("replay") 把时刻设为范围末尾；快照带 replay 信息，
     range: { startMs: EPOCH, endMs: EPOCH + 6000 },
     timeMs: EPOCH + 6000,
     marks: [{ turnId: 't1', ms: EPOCH }],
-    totals: { nodeCount: 3, usage: { inputTokens: 0, outputTokens: 0 } },
+    totals: { nodeCount: 3, usage: { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 } },
   });
   expect([...s.view.nodes.keys()].sort()).toEqual(['a', 'b', 'p1']);
   expect(model.getReplay()).toEqual(s.replay);
@@ -1126,15 +1126,15 @@ test('切回 live 后视图立即包含复盘期间新增的节点', async () =>
 });
 
 test('totals 按 messageId 去重并包含子代理内部节点', async () => {
-  const u = (inputTokens: number, outputTokens: number) => ({ inputTokens, outputTokens });
+  const u = (inputTokens: number, outputTokens: number, cachedInputTokens = 0) => ({ inputTokens, cachedInputTokens, outputTokens });
   const live = fakeLive(withEdges(
     [
       prompt('p1', 't1', 0),
       { ...node('x1', 't1', 1), messageId: 'm1', usage: u(100, 10) },
       { ...node('x2', 't1', 2), kind: 'tool', messageId: 'm1', usage: u(100, 10) },
       sub('s1', 't1', null, 3, 'a1'),
-      { ...inner('i1', 'a1', 4), messageId: 'm2', usage: u(50, 5) },
-      { ...inner('i2', 'a1', 10), messageId: 'm3', usage: u(7, 1) },
+      { ...inner('i1', 'a1', 4), messageId: 'm2', usage: u(50, 5, 20) },
+      { ...inner('i2', 'a1', 10), messageId: 'm3', usage: u(7, 1, 3) },
     ],
     [['p1', 'x1'], ['x1', 'x2'], ['x2', 's1'], ['s1', 'i1', 'spawn'], ['i1', 'i2']],
   ));
@@ -1142,10 +1142,10 @@ test('totals 按 messageId 去重并包含子代理内部节点', async () => {
   const model = createCanvasModel(live, layout.client);
   model.setMode('replay'); // the agent is collapsed: its inner nodes still count
   expect(model.getSnapshot().view.nodes.has('i1')).toBe(false);
-  expect(model.getSnapshot().replay!.totals).toEqual({ nodeCount: 6, usage: u(157, 16) });
+  expect(model.getSnapshot().replay!.totals).toEqual({ nodeCount: 6, usage: u(157, 16, 23) });
   model.setReplayTime(EPOCH + 5);
   await vi.advanceTimersByTimeAsync(60);
-  expect(model.getSnapshot().replay!.totals).toEqual({ nodeCount: 5, usage: u(150, 15) });
+  expect(model.getSnapshot().replay!.totals).toEqual({ nodeCount: 5, usage: u(150, 15, 20) });
   model.dispose();
 });
 

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
-import type { Graph, Usage } from '@agent-canvas/shared';
+import type { Graph, UsageTotal } from '@agent-canvas/shared';
 import type { LiveSession } from '../client';
 import { createThrottle } from '../throttle';
 import { groupInput, placeAgentGroups, wrapTurns, turnInput, type Box, type TurnLayout } from './layout';
@@ -17,7 +17,7 @@ export interface ReplayInfo {
   range: ReplayRange | null;
   timeMs: number;
   marks: { turnId: string; ms: number }[];
-  totals: { nodeCount: number; usage: Usage };
+  totals: { nodeCount: number; usage: UsageTotal };
 }
 
 export interface CanvasSnapshot {
@@ -112,7 +112,7 @@ const EMPTY_SNAPSHOT: CanvasSnapshot = {
   replay: null,
   compact: true,
 };
-const NO_REPLAY: ReplayInfo = { range: null, timeMs: 0, marks: [], totals: { nodeCount: 0, usage: { inputTokens: 0, outputTokens: 0 } } };
+const NO_REPLAY: ReplayInfo = { range: null, timeMs: 0, marks: [], totals: { nodeCount: 0, usage: { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 } } };
 
 /**
  * Whether two replayed graphs show the same thing: the same node ids, each the same object or both a "running" copy
@@ -145,7 +145,8 @@ const sameRange = (a: ReplayRange | null, b: ReplayRange | null): boolean =>
 const sameMarks = (a: ReplayInfo['marks'], b: ReplayInfo['marks']): boolean =>
   a.length === b.length && a.every((m, i) => m.turnId === b[i]!.turnId && m.ms === b[i]!.ms);
 const sameTotals = (a: ReplayInfo['totals'], b: ReplayInfo['totals']): boolean =>
-  a.nodeCount === b.nodeCount && a.usage.inputTokens === b.usage.inputTokens && a.usage.outputTokens === b.usage.outputTokens;
+  a.nodeCount === b.nodeCount && a.usage.inputTokens === b.usage.inputTokens
+  && a.usage.cachedInputTokens === b.usage.cachedInputTokens && a.usage.outputTokens === b.usage.outputTokens;
 
 /** Keeps only the entries whose key passes `keep`; returns `obj` itself when nothing is dropped. */
 function pick<T>(obj: Record<string, T>, keep: (key: string) => boolean): Record<string, T> {
