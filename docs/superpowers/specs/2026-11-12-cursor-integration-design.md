@@ -1,7 +1,7 @@
 # 接入 Cursor 设计规格
 
 - 日期：2026-11-12
-- 状态：待评审
+- 状态：已实现（2026-11-12）。实现过程中在真实数据上发现的事实和由此做的改动见文末“实现修订”，与正文冲突处以修订为准。
 - 前置：`2026-11-10-claude-canvas-design.md`（主规格）、`2026-11-11-codex-integration-design.md`（Codex 规格）。本文只写新增和改动的部分。
 
 ## 1. 目标
@@ -202,3 +202,53 @@ Cursor 的 hooks 是同步执行的，其中一类“权限 hooks”（`preToolU
 4. **页面**：来源标记、筛选、诊断。
 5. **hooks**：安装器、转发、服务端标记与催轮询。
 6. **验收**：在真实的库上只读试跑（独立数据目录），核对计数和几个会话的画布；用一个真实的 Cursor 会话核对第 6 节末尾的两点和 hooks；更新 README 和使用手册。
+
+## 12. 实现修订（2026-11-12）
+
+在真实数据库上只读试跑三次后，对正文做了以下修订。
+
+### 12.1 关于数据库的补充事实
+
+- **步骤清单有两种存放位置**。较早的会话放在 `composerData.fullConversationHeadersOnly`；较新的会话这个字段为空，清单分页存在 `composerConvHeaders:<composerId>:<六位页号>`，每页最多 256 项，项的形状相同。气泡本身的形状没有区别。本机 11 个有内容的未归档会话里 6 个是分页的。
+- **多数未归档会话是空的**（43 个里 28 个）：没有任何气泡，也没有名字。
+- **`rootParentConversationId` 不能用来判断子代理属于谁**。从同一个会话分叉出来的会话共用同一批子代理，这个字段只指向其中一个。可靠的是父会话的 `composerData.subagentComposerIds` 和子代理的 `subagentInfo.parentComposerId`。
+- **分叉出来的会话有时被标成子代理**，里面带着父会话的 `task_v2` 调用的副本（同样的 `toolCallId`）。
+- **约五分之一的“用户消息”其实是 Cursor 注入的系统通知**：文本以 `<timestamp>…</timestamp><system_notification>` 或 `<system_notification>` 开头，是后台任务结束时插入的。
+- 会话很长：最大的主会话 1.75 万步，连同子代理一个会话有 3.9 万个节点；全部 11 个会话共约 17 万个节点。
+
+### 12.2 记录格式（替代 5.3）
+
+- `composer` 记录只放变化慢的事实：`composerId`、`name`、`status`、`createdAt`、`modelName`、`unifiedMode`、`cwd`、`subagentInfo`。不带步骤清单，不带 `lastUpdatedAt`。
+- 每条 `bubble` 记录带 `order`：它在会话步骤清单里的序号。序号变了，这条记录重新存一次。
+- 存储键：主会话 `cursor:<composerId>`；子代理 `cursor:<所属会话 id>/<子代理 composerId>`，被多个会话共用的子代理每个会话各存一份。
+
+### 12.3 读取（修订 5.2、5.4）
+
+- 步骤清单：内嵌的非空就用内嵌的，否则用一次主键范围查询读分页清单。
+- 没有任何气泡的会话不产生任何记录，也不成为会话。
+- 子代理归属：从每个入选会话的 `subagentComposerIds` 出发，沿 `subagentComposerIds` / `parentComposerId` 逐层找；`rootParentConversationId` 只在两者都没有时兜底。
+- 重启：每个会话完整读完后，把当时的 `lastUpdatedAt` 记在 `meta` 表（`poll:<键>`）；重启后这个值没变的会话不再读。正文里“记在 `file_offset`”不再适用。
+- 出错：数据库级错误（被占用、损坏、表不存在）或连续 3 次查询失败，整轮放弃，下轮重试；读取过程中定期让出，不长时间占用服务。
+
+### 12.4 归一化（修订第 6 节）
+
+- 图的变更新增 `edge_removed`（三个来源共用的模型、存储和页面都支持）：一个气泡的新版本让之前推导出的连线不再成立时，旧连线被撤掉。
+- 系统通知气泡是系统节点（子类型 `task_notification`），不另起一轮；标题回退时跳过。
+- 终端命令：状态为完成但退出码不为 0 → 失败；结果里 `rejected: true` → 已拒绝。
+- 会话的 `status` 为 `aborted` 时，最后一轮里仍在执行的工具记为失败（已中止），这一轮算结束。
+- 并行判断用节点实际采用的结束时间（没有 `completedAtMs` 的已结束调用，结束于下一个气泡开始时）。
+- 派发节点：父轮次已结束而子代理无法表明自己结束时，取 `task_v2` 调用自己的状态。对同一个子代理的再次唤起不带 `childAgentId`（一个子代理只有一个容器）。
+- 另一个关联途径：`task_v2` 的结果里的 `agentId`，在 `toolCallId` 对不上时使用。
+
+### 12.5 hooks（修订第 7 节）
+
+- `sessionStart` 只表示“会话恢复”（清除已结束标记），不表示开始运行；`beforeSubmitPrompt` 才是开始运行。
+- 比所有气泡都新的 `stop` 标记使会话为空闲，即使记录看起来还没结束。
+- 存下来的 hook 内容去掉 `user_email`；载荷有大小上限。
+- 子代理会话的 hook 归到它所属的会话（分叉时每个所属会话都催一次轮询）。
+
+### 12.6 仍未用真实的 Cursor 确认的
+
+- 流式输出期间 Cursor 多久把内容写进数据库（决定不装 hooks 时的实际延迟）。
+- 正在生成时 `composerData.status` 的取值。
+- hooks：载荷字段、Windows 上 PowerShell 的调用方式、hook 命令本身失败时 Cursor 是否照常继续。
