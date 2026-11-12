@@ -334,7 +334,9 @@ export function buildServer(deps: { store: Store; pipeline: Pipeline; config: Co
           if (notifications !== undefined) {
             // Before ingesting: Claude Code's StopFailure must be known when the status change it causes arrives.
             const agentId = typeof obj.agent_id === 'string' && obj.agent_id !== '' ? obj.agent_id : null;
-            notifications.handleHook(origin, eventName, sessionId, agentId);
+            // Cursor's session id is the conversation id (as ingested below).
+            const hookSession = origin === 'cursor' ? cursorHookConversationId(obj) : sessionId;
+            notifications.handleHook(origin, eventName, hookSession, agentId, obj);
           }
           if (origin === 'claude') pipeline.ingestHook(eventName, sessionId, text, transcriptPath);
           else if (origin === 'cursor') {

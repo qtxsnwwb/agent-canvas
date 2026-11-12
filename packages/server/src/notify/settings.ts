@@ -22,7 +22,16 @@ export function loadNotificationSettings(store: Pick<Store, 'getMeta'>): { setti
   } catch {
     return { settings: { ...DEFAULT_NOTIFICATION_SETTINGS }, error: '保存的通知设置已损坏（不是合法的 JSON），已按默认值（关闭）处理' };
   }
-  const checked = validateNotificationSettings(parsed);
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return { settings: { ...DEFAULT_NOTIFICATION_SETTINGS }, error: '保存的通知设置不合法（设置必须是一个对象），已按默认值（关闭）处理' };
+  }
+  // Written by another version: unknown fields are ignored, missing ones take their default; wrong types or ranges
+  // still make the whole object unusable.
+  const known: Record<string, unknown> = { ...DEFAULT_NOTIFICATION_SETTINGS };
+  for (const key of Object.keys(DEFAULT_NOTIFICATION_SETTINGS)) {
+    if (Object.prototype.hasOwnProperty.call(parsed, key)) known[key] = (parsed as Record<string, unknown>)[key];
+  }
+  const checked = validateNotificationSettings(known);
   if (!checked.ok) return { settings: { ...DEFAULT_NOTIFICATION_SETTINGS }, error: `保存的通知设置不合法（${checked.error}），已按默认值（关闭）处理` };
   return { settings: checked.settings, error: null };
 }

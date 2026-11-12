@@ -139,6 +139,45 @@ describe('通知接口', () => {
   });
 });
 
+describe('hooks 里直接说明出错的事件（修复轮 1）', () => {
+  let store: Store;
+  let pipeline: Pipeline;
+  let notifier: FakeNotifier;
+  let service: NotificationService;
+  let app: FastifyInstance;
+  beforeEach(async () => {
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-notify-hooks-'));
+    const config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, cursorDbPath: null });
+    store = openStore(':memory:');
+    pipeline = new Pipeline(store, config);
+    notifier = new FakeNotifier();
+    service = new NotificationService({ store, pipeline, notifier, graceMs: 60_000 });
+    service.putSettings({ ...DEFAULT_NOTIFICATION_SETTINGS, enabled: true, finishedMinSeconds: 0 });
+    app = buildServer({ store, pipeline, config, notifications: service });
+    service.start('http://127.0.0.1:4999');
+  });
+  afterEach(async () => {
+    await service.close();
+    await app.close();
+    store.close();
+    await fs.rm(tmp, { recursive: true, force: true, maxRetries: 5 });
+  });
+
+  test('Codex 的 Interrupt：立即发出错中断（不等宽限期）', async () => {
+    const hook = (name: string, extra: object = {}) =>
+      app.inject({
+        method: 'POST',
+        url: '/hooks?origin=codex',
+        payload: { hook_event_name: name, session_id: 'cx1', cwd: '/w/tea-shop', turn_id: 't1', model: 'm', ...extra },
+      });
+    await hook('UserPromptSubmit', { prompt: 'hi' });
+    await vi.waitFor(() => expect(store.getSession('cx1')?.status).toBe('running'));
+    await hook('Interrupt');
+    await vi.waitFor(() => expect(notifier.sent).toHaveLength(1));
+    expect(notifier.sent[0]!.title).toMatch(/^出错中断 · /);
+  });
+});
+
 describe('start 接线', () => {
   const apps: Running[] = [];
   beforeEach(async () => {

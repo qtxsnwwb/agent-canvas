@@ -12,7 +12,7 @@ class FakeNotifier implements ServiceNotifier {
   sent: NotificationMessage[] = [];
   failWith: string | null = null;
   closed = false;
-  async notify(m: NotificationMessage): Promise<void> {
+  async notify(m: NotificationMessage, _options?: { force?: boolean }): Promise<void> {
     if (this.failWith !== null) throw new Error(this.failWith);
     this.sent.push(m);
   }
@@ -63,7 +63,22 @@ const timers: Timers = {
   clearInterval: (h) => {
     ticks = ticks.filter((t) => t !== h);
   },
+  setTimeout: (fn, ms) => {
+    const t = { fn, at: now + ms };
+    timeouts.push(t);
+    return t;
+  },
+  clearTimeout: (h) => {
+    timeouts = timeouts.filter((t) => t !== h);
+  },
 };
+let timeouts: { fn: () => void; at: number }[] = [];
+/** Runs the timeouts due by `now`. */
+function fireTimeouts(): void {
+  const due = timeouts.filter((t) => t.at <= now);
+  timeouts = timeouts.filter((t) => t.at > now);
+  for (const t of due) t.fn();
+}
 
 const session = (status: Session['status'], over: Partial<Session> = {}): Session => ({
   id: 's1',
@@ -88,6 +103,7 @@ beforeEach(() => {
   pipeline = new FakePipeline();
   notifier = new FakeNotifier();
   ticks = [];
+  timeouts = [];
   service = make();
 });
 afterEach(async () => {
@@ -199,6 +215,10 @@ describe('接线', () => {
     now += 61_000;
     pipeline.emit([k('idle')]);
     await flush();
+    expect(notifier.sent).toEqual([]); // held for the grace period
+    now += 3_000;
+    fireTimeouts();
+    await flush();
     expect(notifier.sent.map((m) => m.title)).toEqual(['跑完了 · tea-shop']);
   });
 
@@ -262,4 +282,113 @@ test('StopFailure hook：开始之前忽略，开始后交给引擎', async () =
   pipeline.emit([session('idle')]);
   await flush();
   expect(notifier.sent.map((m) => m.title)).toEqual(['出错中断 · tea-shop']);
+});
+
+describe('修复轮 1', () => {
+  beforeEach(() => {
+    service.putSettings({ ...DEFAULT_NOTIFICATION_SETTINGS, enabled: true });
+  });
+
+  test('启动时从存储里种入已在运行的会话：之后的跑完了用时从最近的主线提示算起', async () => {
+    const prompt = (ts: number, id: string, agentId: string | null = null) => ({
+      type: 'node_added' as const,
+      node: {
+        id,
+        sessionId: 's1',
+        turnId: null,
+        agentId,
+        childAgentId: null,
+        parentId: null,
+        kind: 'prompt' as const,
+        status: null,
+        timestamp: new Date(ts).toISOString(),
+        confirmed: true,
+        title: 'Prompt',
+        summary: 'x',
+        toolName: null,
+        toolUseId: null,
+        messageId: null,
+        durationMs: null,
+        endedAt: null,
+        usage: null,
+        systemSubtype: null,
+      },
+      detail: {},
+    });
+    store.applyChanges([
+      { type: 'session_upserted', session: session('running', { lastActivityAt: new Date(now - 60_000).toISOString() }) },
+      prompt(now - 20 * 60_000, 'p-old'),
+      prompt(now - 9 * 60_000, 'p-new'),
+      prompt(now - 1 * 60_000, 'p-sub', 'agent-1'),
+      { type: 'session_upserted', session: session('awaiting_permission', { id: 's2' }) },
+      { type: 'session_upserted', session: session('running', { id: 's3', sourceDeleted: true }) },
+      { type: 'session_upserted', session: session('idle', { id: 's4' }) },
+    ]);
+    expect(store.latestMainPromptAt('s1')).toBe(new Date(now - 9 * 60_000).toISOString());
+    expect(store.liveSessions().map((s) => s.id).sort()).toEqual(['s1', 's2', 's3']);
+    service.start('http://127.0.0.1:4999');
+    // s2 was already waiting at start: no "等你确认权限" for it.
+    pipeline.emit([session('awaiting_permission', { id: 's2' })]);
+    now += 60_000;
+    pipeline.emit([session('idle')]);
+    now += 3_000;
+    fireTimeouts();
+    await flush();
+    expect(notifier.sent.map((m) => m.body)).toEqual(['修登录页\n用时 10 分钟 · Claude Code']);
+  });
+
+  test('宽限期内到达的错误标记把跑完了换成出错中断（经由定时器）', async () => {
+    service.start('http://127.0.0.1:4999');
+    pipeline.emit([session('idle')]);
+    pipeline.emit([session('running')]);
+    now += 120_000;
+    pipeline.emit([session('idle')]);
+    expect(timeouts).toHaveLength(1);
+    now += 1_000;
+    service.handleHook('claude', 'StopFailure', 's1', null);
+    now += 2_000;
+    fireTimeouts();
+    await flush();
+    expect(notifier.sent.map((m) => m.title)).toEqual(['出错中断 · tea-shop']);
+    await service.close();
+    expect(timeouts).toHaveLength(0);
+  });
+
+  test('网址不是本服务的页面：去掉点击目标照常发，并记下原因', async () => {
+    service.start('http://127.0.0.1:4999');
+    const n = service as unknown as { deliver(m: { title: string; body: string; url: string }, k: string): Promise<void> };
+    await n.deliver({ title: 't', body: 'b', url: 'https://evil.example/' }, 'permission');
+    await n.deliver({ title: 't', body: 'b', url: 'http://127.0.0.1:4999/#/s/abc%20d' }, 'permission');
+    await n.deliver({ title: 't', body: 'b', url: 'http://127.0.0.1:49990/' }, 'permission');
+    expect(notifier.sent.map((m) => m.url)).toEqual(['', 'http://127.0.0.1:4999/#/s/abc%20d', '']);
+    expect(service.getSettings().status.lastError).toMatch(/网址/);
+  });
+
+  test('生成网址失败：那一条跳过，原因进状态', async () => {
+    service.start('http://127.0.0.1:4999');
+    const bad = (status: Session['status']): Session => session(status, { id: '\uD800x' });
+    pipeline.emit([bad('idle')]);
+    pipeline.emit([bad('running')]);
+    now += 1_000;
+    pipeline.emit([bad('awaiting_permission'), session('idle')]);
+    await flush();
+    expect(notifier.sent).toEqual([]);
+    expect(service.getSettings().status.lastError).toMatch(/通知未能生成/);
+  });
+
+  test('测试通知不受“不可用”的退避限制', async () => {
+    const forced: boolean[] = [];
+    notifier.notify = async (_m, options) => {
+      forced.push(options?.force === true);
+    };
+    service.start('http://127.0.0.1:4999');
+    await service.test();
+    expect(forced).toEqual([true]);
+  });
+
+  test('保存的设置来自别的版本：多余字段忽略，缺的字段取默认值', () => {
+    store.setMeta(NOTIFICATIONS_META_KEY, JSON.stringify({ enabled: true, stuckMinutes: 30, futureField: 1 }));
+    const loaded = loadNotificationSettings(store);
+    expect(loaded).toEqual({ settings: { ...DEFAULT_NOTIFICATION_SETTINGS, enabled: true, stuckMinutes: 30 }, error: null });
+  });
 });

@@ -152,6 +152,10 @@ export interface Store {
   /** Ordered by lastActivityAt descending. */
   listSessions(projectId: string): Session[];
   getSession(sessionId: string): Session | null;
+  /** Sessions whose stored status is running or awaiting_permission (one pass over the session rows). */
+  liveSessions(): Session[];
+  /** Timestamp of the session's latest main-thread prompt node (served by node_main_prompt), or null when none. */
+  latestMainPromptAt(sessionId: string): string | null;
   /**
    * Case-insensitive (ASCII only, as SQLite LIKE) literal substring search over session title, id, git branch, cwd
    * and the summaries of main-thread prompt nodes. Newest activity first; fewer than SEARCH_MIN_CHARS characters
@@ -513,6 +517,16 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   );
   const selectSessions = db.prepare(`SELECT body FROM session WHERE project_id = ? ORDER BY last_activity_at DESC, id`);
   const selectSession = db.prepare(`SELECT body FROM session WHERE id = ?`).pluck();
+  const selectLiveSessions = db
+    .prepare(`SELECT body FROM session WHERE status IN ('running', 'awaiting_permission') ORDER BY last_activity_at DESC, id`)
+    .pluck();
+  // Repeats the node_main_prompt partial index predicate verbatim so the index is used.
+  const selectLatestMainPrompt = db
+    .prepare(
+      `SELECT MAX(json_extract(body, '$.timestamp')) FROM node
+       WHERE session_id = ? AND json_extract(body, '$.kind') = 'prompt' AND json_extract(body, '$.agentId') IS NULL`,
+    )
+    .pluck();
   // Query text is only ever a bound parameter (already LIKE-escaped by likePattern). The prompt condition repeats
   // the node_main_prompt partial index predicate verbatim so the index is used. Cost per request, honestly: one pass
   // over the session rows (the OR over title/id/branch/cwd cannot use an index) plus the main-thread prompt rows via
@@ -791,6 +805,13 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
       return (selectSessions.all(projectId) as { body: string }[]).map((r) => JSON.parse(r.body) as Session);
     },
     getSession,
+    liveSessions() {
+      return (selectLiveSessions.all() as string[]).map((body) => JSON.parse(body) as Session);
+    },
+    latestMainPromptAt(sessionId) {
+      const v = selectLatestMainPrompt.get(sessionId) as string | null | undefined;
+      return typeof v === 'string' ? v : null;
+    },
     searchSessions(rawQuery, rawLimit) {
       const query = Array.from(rawQuery.trim()).slice(0, SEARCH_MAX_CHARS).join('').trim();
       if ([...query].length < SEARCH_MIN_CHARS) return [];

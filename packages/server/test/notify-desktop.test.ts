@@ -11,7 +11,94 @@ import {
   type CommandSpec,
   type NotificationMessage,
   type ProcessRunner,
+  osascriptPath,
+  spawnRunner,
+  windowsPowerShellPath,
 } from '../src/notify/desktop.js';
+
+describe('修复轮 1：程序路径、无网址、字符清理、强制重试、spawnRunner', () => {
+  test('Windows PowerShell 用绝对路径；文件不存在才用名字', () => {
+    const seen: string[] = [];
+    const exists = (p: string): boolean => {
+      seen.push(p);
+      return true;
+    };
+    expect(windowsPowerShellPath({ SystemRoot: 'D:\\Win' }, exists)).toBe('D:\\Win\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
+    expect(windowsPowerShellPath({}, exists)).toBe('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
+    expect(windowsPowerShellPath({ SystemRoot: 'D:\\Win' }, () => false)).toBe('powershell.exe');
+    expect(windowsCommand(msg, 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe').command).toBe(
+      'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    );
+    expect(osascriptPath(() => true)).toBe('/usr/bin/osascript');
+    expect(osascriptPath(() => false)).toBe('osascript');
+    expect(commandFor('win32', msg, { powershell: 'X:\\ps.exe' })?.command).toBe('X:\\ps.exe');
+    expect(commandFor('darwin', msg, { osascript: '/usr/bin/osascript' })?.command).toBe('/usr/bin/osascript');
+  });
+
+  test('Windows 脚本：先把输出编码设为 UTF-8；没有网址时不设点击目标', () => {
+    expect(WINDOWS_TOAST_SCRIPT.split('\r\n')[0]).toContain('[Console]::OutputEncoding = [System.Text.Encoding]::UTF8');
+    expect(WINDOWS_TOAST_SCRIPT).toMatch(/if \(\[string\]\$data\.url -ne ''\) \{\r\n {2}\$toast\.SetAttribute\('activationType', 'protocol'\)/);
+  });
+
+  test('没有网址：macOS / Linux 的正文不附网址', () => {
+    const m = { title: 't', body: 'b', url: '' };
+    expect(macCommand(m).args.at(-1)).toBe('b');
+    expect(linuxCommand(m).args.at(-1)).toBe('b');
+  });
+
+  test('落单的代理项被替换成 U+FFFD', async () => {
+    const calls: CommandSpec[] = [];
+    const n = new DesktopNotifier({ platform: 'linux', run: async (spec) => void calls.push(spec) });
+    await n.notify({ title: 'a\uD800b', body: '\uDC00', url: '' });
+    expect(calls[0]!.args.slice(2)).toEqual(['a\uFFFDb', '\uFFFD']);
+  });
+
+  test('force：不可用期间也会再试一次（测试通知）', async () => {
+    let attempts = 0;
+    let fail = true;
+    const n = new DesktopNotifier({
+      platform: 'linux',
+      run: async () => {
+        attempts += 1;
+        if (fail) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      },
+    });
+    await expect(n.notify(msg)).rejects.toThrow();
+    await expect(n.notify(msg)).rejects.toThrow();
+    expect(attempts).toBe(1);
+    fail = false;
+    await n.notify(msg, { force: true });
+    expect(attempts).toBe(2);
+    expect(n.status().available).toBe(true);
+  });
+
+  // spawnRunner with Node itself (never a notification command).
+  const node = (code: string): CommandSpec => ({ command: process.execPath, args: ['-e', code] });
+  test('spawnRunner：退出码 0 成功；非 0 失败并带 stderr；环境变量传入', async () => {
+    await expect(spawnRunner(node('process.exit(0)'), { signal: new AbortController().signal })).resolves.toBeUndefined();
+    await expect(spawnRunner(node("process.stderr.write('bad thing'); process.exit(3)"), { signal: new AbortController().signal })).rejects.toThrow(
+      /退出码 3：bad thing/,
+    );
+    await expect(
+      spawnRunner(
+        { ...node(`process.exit(process.env.${NOTIFY_ENV} === '{"a":"$x"}' ? 0 : 1)`), env: { [NOTIFY_ENV]: '{"a":"$x"}' } },
+        { signal: new AbortController().signal },
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  test('spawnRunner：程序不存在是 ENOENT；中止会结束子进程', async () => {
+    await expect(spawnRunner({ command: 'agent-canvas-no-such-program-xyz', args: [] }, { signal: new AbortController().signal })).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    const ac = new AbortController();
+    const started = Date.now();
+    const p = spawnRunner(node('setInterval(() => {}, 1000)'), { signal: ac.signal });
+    setTimeout(() => ac.abort(), 200);
+    await expect(p).rejects.toThrow();
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+});
 
 const NASTY = `a"b'c\`d$e $(calc) %PATH% ; & | <x> </text>]]> \r\n 第二行 -e --help`;
 const msg: NotificationMessage = { title: `等你确认权限 · ${NASTY}`, body: `${NASTY}\nClaude Code`, url: 'http://127.0.0.1:4999/#/s/a%22b' };

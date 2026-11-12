@@ -25,10 +25,56 @@ function feed(n: AgentNormalizer, events: RawEvent[]): NotificationKind[] {
   const kinds: NotificationKind[] = [];
   for (const ev of events) {
     if (ev.source === 'transcript') now = Date.parse((JSON.parse(ev.line) as { timestamp: string }).timestamp) + 500;
+    if (ev.source === 'hook') {
+      // As POST /hooks does: the engine sees the hook before it is ingested.
+      now = Date.parse(ev.receivedAt);
+      const body = JSON.parse(ev.payload) as Record<string, unknown>;
+      const agentId = typeof body.agent_id === 'string' ? body.agent_id : null;
+      kinds.push(...engine.handleHook(ev.origin ?? 'claude', ev.eventName, ev.sessionId, agentId, body).map((x) => x.kind));
+    }
     kinds.push(...engine.handleChanges(n.apply(ev, 'p1').changes).map((x) => x.kind));
   }
+  // The grace period of a held "finished" runs out.
+  now += 10_000;
+  kinds.push(...engine.flushDue().map((x) => x.kind));
   return kinds;
 }
+
+/** A Codex hook as POST /hooks?origin=codex stores it. */
+function codexHook(eventName: string, session: string, at: string, body: Record<string, unknown> = {}): RawEvent {
+  return {
+    source: 'hook',
+    origin: 'codex',
+    receivedAt: at,
+    eventName,
+    sessionId: session,
+    payload: JSON.stringify({ session_id: session, cwd: '/w', hook_event_name: eventName, model: 'gpt-x', ...body }),
+    projectId: 'p1',
+  };
+}
+const later = (ev: RawEvent, msLater: number): string =>
+  new Date(Date.parse((JSON.parse((ev as { line: string }).line) as { timestamp: string }).timestamp) + msLater).toISOString();
+
+test('Codex 复现（评审 I-1）：Interrupt hook 先让会话空闲，turn_aborted 随后才到 → 只发出错中断', () => {
+  const root = new CodexThread({ id: 'c-int' });
+  const user = root.user('u1', 'x');
+  const events = [root.meta(), root.started('t1'), user];
+  const interrupt = codexHook('Interrupt', 'c-int', later(user, 120_000), { turn_id: 't1' });
+  const aborted = root.record('event_msg', { type: 'turn_aborted', turn_id: 't1', root_turn_id: 't1', reason: 'interrupted' }, { timestamp: later(user, 121_000) });
+  expect(feed(new CodexNormalizer(), [...events, interrupt, aborted])).toEqual(['error']);
+});
+
+test('Codex：Stop hook 先让会话空闲，带 error 的 task_complete 在宽限期内到 → 只发出错中断', () => {
+  const root = new CodexThread({ id: 'c-stop' });
+  const user = root.user('u1', 'x');
+  const stop = codexHook('Stop', 'c-stop', later(user, 120_000), { turn_id: 't1' });
+  const failed = root.record(
+    'event_msg',
+    { type: 'task_complete', turn_id: 't1', root_turn_id: 't1', error: { message: 'boom' } },
+    { timestamp: later(user, 121_500) },
+  );
+  expect(feed(new CodexNormalizer(), [root.meta(), root.started('t1'), user, stop, failed])).toEqual(['error']);
+});
 
 test('Claude Code：用户中断一轮（interrupt 系统节点）→ 出错中断', () => {
   const kinds = feed(new Normalizer(), [

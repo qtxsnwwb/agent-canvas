@@ -68,19 +68,28 @@ function primeRunning(id = 's1', over: Partial<Session> = {}): void {
   engine.handleChanges([up(session(id, 'running', over))]);
 }
 
-beforeEach(() => {
-  now = T0;
-  settings = { ...DEFAULT_NOTIFICATION_SETTINGS, enabled: true };
-  suppressed = new Set();
-  aborted = new Set();
-  engine = new NotificationEngine({
+let errors: string[];
+function makeEngine(graceMs: number): NotificationEngine {
+  return new NotificationEngine({
     now: () => now,
     settings: () => settings,
     suppressed: (origin) => suppressed.has(origin),
     projectName: (s) => (s.cwd ?? s.projectId).split(/[\\/]/).pop()!,
     sessionUrl: (id) => `http://127.0.0.1:4999/#/s/${encodeURIComponent(id)}`,
     isAbortedCall: (sessionId, nodeId) => aborted.has(`${sessionId}/${nodeId}`),
+    reportError: (m) => errors.push(m),
+    graceMs,
   });
+}
+
+beforeEach(() => {
+  now = T0;
+  errors = [];
+  settings = { ...DEFAULT_NOTIFICATION_SETTINGS, enabled: true };
+  suppressed = new Set();
+  aborted = new Set();
+  // Without the grace period "finished" comes out at once; the grace period has its own tests below.
+  engine = makeEngine(0);
 });
 
 describe('等待权限确认', () => {
@@ -357,7 +366,8 @@ describe('不该弹的情况', () => {
     engine.handleChanges([up(session('s1', 'running'))]);
     now += 100_000;
     const old = added(node('s1', 'i9', { kind: 'system', systemSubtype: 'interrupt', timestamp: iso(now - 600_000) }));
-    expect(kinds(engine.handleChanges([old, up(session('s1', 'idle'))]))).toEqual(['finished']);
+    // A turn known to have failed sends nothing (not "finished") when its marker is too old to notify.
+    expect(kinds(engine.handleChanges([old, up(session('s1', 'idle'))]))).toEqual([]);
   });
 
   test('源文件已删除的会话不发', () => {
@@ -430,5 +440,235 @@ describe('健壮性', () => {
     now += 2 * 3_600_000;
     engine.tick();
     expect(engine.sessionCount()).toBe(0);
+  });
+});
+
+describe('跑完了的宽限期（先空闲、后出错标记）', () => {
+  beforeEach(() => {
+    engine = makeEngine(3_000);
+  });
+
+  test('宽限期内不发；到期后由 flushDue 发出', () => {
+    primeRunning();
+    now += 61_000;
+    expect(engine.handleChanges([up(session('s1', 'idle'))])).toEqual([]);
+    expect(engine.nextDueAt()).toBe(now + 3_000);
+    now += 2_999;
+    expect(engine.flushDue()).toEqual([]);
+    now += 1;
+    expect(kinds(engine.flushDue())).toEqual(['finished']);
+    expect(engine.nextDueAt()).toBeNull();
+    expect(engine.flushDue()).toEqual([]);
+  });
+
+  test('定时检查也会发出到期的', () => {
+    primeRunning();
+    now += 61_000;
+    engine.handleChanges([up(session('s1', 'idle'))]);
+    now += 30_000;
+    expect(kinds(engine.tick())).toEqual(['finished']);
+  });
+
+  test.each([
+    ['Claude interrupt 节点', 's1', 'claude' as const, (): Change[] => [added(node('s1', 'i1', { kind: 'system', systemSubtype: 'interrupt' }))]],
+    ['Codex 中止节点', 'c1', 'codex' as const, (): Change[] => [added(node('c1', 'system:c1@9', { kind: 'system', systemSubtype: 'interrupt', title: 'Interrupted' }))]],
+    [
+      'Cursor 中止的调用',
+      'k1',
+      'cursor' as const,
+      (): Change[] => {
+        aborted.add('k1/tool:a');
+        return [{ type: 'node_updated', sessionId: 'k1', id: 'tool:a', patch: { status: 'failed' } }];
+      },
+    ],
+  ])('%s在宽限期内到达：只发一条“出错中断”', (_name, id, origin, marker) => {
+    primeRunning(id, { origin });
+    now += 120_000;
+    expect(engine.handleChanges([up(session(id, 'idle', { origin }))])).toEqual([]);
+    now += 1_500;
+    expect(kinds(engine.handleChanges(marker()))).toEqual(['error']);
+    now += 10_000;
+    expect(engine.flushDue()).toEqual([]);
+    expect(engine.tick()).toEqual([]);
+  });
+
+  test('出错中断关掉时：这一轮什么都不发', () => {
+    settings = { ...settings, error: false };
+    primeRunning();
+    now += 120_000;
+    engine.handleChanges([up(session('s1', 'idle'))]);
+    now += 1_000;
+    expect(engine.handleChanges([added(node('s1', 'i1', { kind: 'system', systemSubtype: 'interrupt' }))])).toEqual([]);
+    now += 5_000;
+    expect(engine.flushDue()).toEqual([]);
+  });
+
+  test('宽限期过后才到的标记：跑完了已发，再发出错中断', () => {
+    primeRunning();
+    now += 120_000;
+    engine.handleChanges([up(session('s1', 'idle'))]);
+    now += 3_000;
+    expect(kinds(engine.flushDue())).toEqual(['finished']);
+    now += 1_000;
+    expect(kinds(engine.handleChanges([added(node('s1', 'i1', { kind: 'system', systemSubtype: 'interrupt' }))]))).toEqual(['error']);
+  });
+
+  test('宽限期内开始了新的一轮：上一轮的跑完了立即发出；新一轮的标记不会改写它', () => {
+    primeRunning();
+    now += 120_000;
+    engine.handleChanges([up(session('s1', 'idle'))]);
+    now += 1_000;
+    expect(kinds(engine.handleChanges([up(session('s1', 'running'))]))).toEqual(['finished']);
+    now += 1_000;
+    expect(engine.handleChanges([added(node('s1', 'i1', { kind: 'system', systemSubtype: 'interrupt' }))])).toEqual([]);
+    expect(engine.nextDueAt()).toBeNull();
+  });
+
+  test('被替换的跑完了不占 30 秒限流', () => {
+    settings = { ...settings, finishedMinSeconds: 0 };
+    primeRunning();
+    now += 5_000;
+    engine.handleChanges([up(session('s1', 'idle'))]);
+    now += 1_000;
+    engine.handleChanges([added(node('s1', 'i1', { kind: 'system', systemSubtype: 'interrupt' }))]);
+    now += 1_000;
+    engine.handleChanges([up(session('s1', 'running'))]);
+    now += 5_000;
+    engine.handleChanges([up(session('s1', 'idle'))]);
+    now += 3_000;
+    expect(kinds(engine.flushDue())).toEqual(['finished']);
+  });
+});
+
+describe('直接说明出错的 hook', () => {
+  test.each([
+    ['codex', 'Interrupt', {}],
+    ['cursor', 'stop', { status: 'aborted' }],
+    ['cursor', 'stop', { status: 'error' }],
+    ['claude', 'StopFailure', {}],
+  ] as const)('%s %s %j：随后变为空闲时只发出错中断', (origin, event, payload) => {
+    primeRunning('x1', { origin });
+    now += 120_000;
+    expect(engine.handleHook(origin, event, 'x1', null, payload)).toEqual([]);
+    expect(kinds(engine.handleChanges([up(session('x1', 'idle', { origin }))]))).toEqual(['error']);
+    // A marker arriving later from the transcript / poll does not add a second one (not even after 30 s).
+    now += 60_000;
+    expect(engine.handleChanges([added(node('x1', 'late', { kind: 'system', systemSubtype: 'interrupt' }))])).toEqual([]);
+  });
+
+  test.each([
+    ['codex', 'Stop', {}],
+    ['cursor', 'stop', { status: 'completed' }],
+    ['cursor', 'stop', {}],
+    ['claude', 'Stop', {}],
+  ] as const)('%s %s %j：不算出错', (origin, event, payload) => {
+    primeRunning('x1', { origin });
+    now += 120_000;
+    engine.handleHook(origin, event, 'x1', null, payload);
+    expect(kinds(engine.handleChanges([up(session('x1', 'idle', { origin }))]))).toEqual(['finished']);
+  });
+
+  test('子代理的 Interrupt、别的来源的同名会话：不算', () => {
+    primeRunning('x1', { origin: 'codex' });
+    now += 120_000;
+    engine.handleHook('codex', 'Interrupt', 'x1', 'sub1', {});
+    engine.handleHook('cursor', 'stop', 'x1', null, { status: 'aborted' });
+    expect(kinds(engine.handleChanges([up(session('x1', 'idle', { origin: 'codex' }))]))).toEqual(['finished']);
+  });
+});
+
+describe('启动时从存储里已在运行的会话开始', () => {
+  test('跑完了的用时从最近一条主线提示算起；启动时的状态本身不通知', () => {
+    engine.seed([
+      { session: session('s1', 'running', { lastActivityAt: iso(now - 60_000) }), lastPromptAt: iso(now - 9 * 60_000) },
+      { session: session('s2', 'awaiting_permission'), lastPromptAt: null },
+    ]);
+    expect(engine.sessionCount()).toBe(2);
+    now += 30_000;
+    engine.handleChanges([up(session('s1', 'running'))]);
+    now += 30_000;
+    const out = engine.handleChanges([up(session('s1', 'idle'))]);
+    expect(out.map((n) => n.body)).toEqual(['修一下登录页\n用时 10 分钟 · Claude Code']);
+    // s2 is still waiting: the same state again sends nothing
+    expect(engine.handleChanges([up(session('s2', 'awaiting_permission'))])).toEqual([]);
+  });
+
+  test('没有提示节点时从最近活动算起', () => {
+    engine.seed([{ session: session('s1', 'running', { lastActivityAt: iso(now - 120_000) }), lastPromptAt: null }]);
+    now += 1_000;
+    expect(engine.handleChanges([up(session('s1', 'idle'))])[0]!.body).toBe('修一下登录页\n用时 2 分 1 秒 · Claude Code');
+  });
+
+  test('卡住了：从“最近活动”和“启动”中较晚的那个算起，满阈值才发，且只发一次', () => {
+    engine.seed([
+      { session: session('old', 'running', { lastActivityAt: iso(now - 3_600_000) }), lastPromptAt: null },
+      { session: session('new', 'running', { lastActivityAt: iso(now - 10 * 60_000) }), lastPromptAt: null },
+    ]);
+    expect(engine.tick()).toEqual([]);
+    now += 5 * 60_000 + 1;
+    // new: 15 min after its last activity, but only 5 min after start
+    expect(engine.tick()).toEqual([]);
+    now += 10 * 60_000;
+    const out = engine.tick();
+    expect(out.map((n) => n.sessionId).sort()).toEqual(['new', 'old']);
+    expect(out.find((n) => n.sessionId === 'old')!.body).toBe('修一下登录页\n已 75 分钟没有动静 · Claude Code');
+    now += 60_000;
+    expect(engine.tick()).toEqual([]);
+  });
+
+  test('已删除源、已知的会话、不在运行的会话：不种入', () => {
+    engine.handleChanges([up(session('known', 'idle'))]);
+    engine.seed([
+      { session: session('gone', 'running', { sourceDeleted: true }), lastPromptAt: null },
+      { session: session('known', 'running'), lastPromptAt: null },
+      { session: session('idle', 'idle'), lastPromptAt: null },
+    ]);
+    expect(engine.sessionCount()).toBe(1);
+  });
+
+  test('等待权限超过一小时的会话不会被遗忘', () => {
+    primeRunning();
+    now += 1_000;
+    engine.handleChanges([up(session('s1', 'awaiting_permission'))]);
+    now += 2 * 3_600_000;
+    engine.tick();
+    expect(engine.sessionCount()).toBe(1);
+  });
+});
+
+describe('其它健壮性', () => {
+  test('生成网址抛错：只跳过这一条并记下原因，同批的其它通知照常', () => {
+    primeRunning('\uD800bad');
+    primeRunning('s2');
+    now += 1_000;
+    const out = engine.handleChanges([up(session('\uD800bad', 'awaiting_permission')), up(session('s2', 'awaiting_permission'))]);
+    expect(out.map((n) => n.sessionId)).toEqual(['s2']);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatch(/等你确认权限/);
+  });
+
+  test('Cursor：首批里就出现的子代理节点也被记住', () => {
+    engine.handleChanges([
+      added(node('k1', 'tool:sub', { kind: 'tool', status: 'running', agentId: 'sub1' })),
+      up(session('k1', 'idle', { origin: 'cursor' })),
+    ]);
+    engine.handleChanges([up(session('k1', 'running', { origin: 'cursor' }))]);
+    now += 120_000;
+    aborted.add('k1/tool:sub');
+    const out = engine.handleChanges([
+      { type: 'node_updated', sessionId: 'k1', id: 'tool:sub', patch: { status: 'failed' } },
+      up(session('k1', 'idle', { origin: 'cursor' })),
+    ]);
+    expect(kinds(out)).toEqual(['finished']);
+  });
+
+  test('时钟回拨：限流不被拉长', () => {
+    primeRunning();
+    now += 1_000;
+    expect(kinds(engine.handleChanges([up(session('s1', 'awaiting_permission'))]))).toEqual(['permission']);
+    now -= 60_000;
+    engine.handleChanges([up(session('s1', 'running'))]);
+    now += 1_000;
+    expect(kinds(engine.handleChanges([up(session('s1', 'awaiting_permission'))]))).toEqual(['permission']);
   });
 });
