@@ -5,36 +5,9 @@ import { Notifications } from './pages/Notifications';
 import { Home } from './pages/Home';
 import { SessionPage } from './pages/Session';
 import { Stats } from './pages/Stats';
+import { parseHash, type Route } from './route';
 
-export type Route =
-  | { page: 'home'; projectId: string | null }
-  | { page: 'session'; sessionId: string }
-  | { page: 'diagnostics' }
-  | { page: 'notifications' }
-  | { page: 'stats' };
-
-export function parseHash(hash: string): Route {
-  const h = hash.replace(/^#/, '');
-  const decode = (s: string): string | null => {
-    try {
-      return decodeURIComponent(s);
-    } catch {
-      return null;
-    }
-  };
-  if (h === '/diagnostics') return { page: 'diagnostics' };
-  if (h === '/notifications') return { page: 'notifications' };
-  if (h === '/stats') return { page: 'stats' };
-  if (h.startsWith('/s/')) {
-    const id = decode(h.slice(3));
-    if (id) return { page: 'session', sessionId: id };
-  }
-  if (h.startsWith('/p/')) {
-    const id = decode(h.slice(3));
-    if (id) return { page: 'home', projectId: id };
-  }
-  return { page: 'home', projectId: null };
-}
+export { parseHash, type Route } from './route';
 
 export function App() {
   const [route, setRoute] = useState<Route>(() => parseHash(location.hash));

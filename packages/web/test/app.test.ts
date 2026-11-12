@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import { parseHash } from '../src/App';
+import { parseHash } from '../src/route';
 
 test('parseHash("#/diagnostics") 是诊断页；未知路径仍回首页', () => {
   expect(parseHash('#/diagnostics')).toEqual({ page: 'diagnostics' });
