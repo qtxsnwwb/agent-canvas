@@ -30,15 +30,21 @@ export interface PollSink {
    * Stores each record as a `source: 'transcript'` raw event of the source's origin under `file = batch.key`, in order
    * (a record whose line is already stored under that key is skipped: unchanged records are no-ops), and applies the
    * new ones through the normalizer, serialised per session with every other ingestion. Rejects when the slice could
-   * not be committed (nothing of it is stored then; the failure is also reported under `batch.key`).
+   * not be committed (nothing of it is stored then; the failure is also reported under `batch.key`), and once the
+   * pipeline is closed (nothing stored, nothing reported). A successful batch clears no failure: see clearFailure.
    */
   ingestRecords(batch: PollBatch): Promise<void>;
-  /** Flags the session "source deleted" (data kept; the flag sticks to later changes). Idempotent. */
+  /** Flags the session "source deleted" (data kept; the flag sticks to later changes). Idempotent; no-op once closed. */
   markSourceDeleted(sessionId: string): Promise<void>;
-  /** Undoes markSourceDeleted, including a flag stored by an earlier run. Idempotent. */
+  /** Undoes markSourceDeleted, including a flag stored by an earlier run. Idempotent; no-op once closed. */
   clearSourceDeleted(sessionId: string): Promise<void>;
   /** Records a failure under `key` for diagnostics (ingestFailures) and logs one line, rate limited per key. */
   reportFailure(key: string, err: unknown): void;
+  /**
+   * Removes the failure recorded under `key` (by reportFailure or a failed ingestRecords), e.g. once the conversation
+   * reads and ingests cleanly again. No-op when there is none.
+   */
+  clearFailure(key: string): void;
 }
 
 /**

@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
-import { ORIGINS, type Session } from '@claude-canvas/shared';
+import { ORIGINS, type Origin, type Session } from '@claude-canvas/shared';
 import { loadConfig, type Config } from '../src/config.js';
 import { NORMALIZER_FACTORIES, NormalizerRegistry, type NormalizerFactories } from '../src/normalize/registry.js';
 import type { AgentNormalizer, NormalizeResult } from '../src/normalize/types.js';
@@ -17,7 +17,7 @@ import { openStore, type RawEvent, type Store } from '../src/store/store.js';
 
 /** A poll source that records what the pipeline asks of it and hands its sink to the test. */
 class FakePollSource implements PollSource {
-  readonly origin = 'cursor' as const;
+  constructor(readonly origin: Origin = 'cursor') {}
   sink: PollSink | null = null;
   started = 0;
   stopped = 0;
@@ -286,5 +286,83 @@ describe('poll sources in the pipeline', () => {
     fake.state = { lastPollAt: '2026-11-12T01:02:03.000Z', lastError: 'no such table: composerHeaders' };
     expect(pipeline.pollStatus('cursor')).toEqual(fake.state);
     expect(pipeline.pollStatus('codex')).toBeNull();
+  });
+});
+
+describe('poll sources: fix round 1', () => {
+  test('a successful batch keeps a failure the source reported under the same key; clearFailure clears it', async () => {
+    const sink = await started();
+    sink.reportFailure('cursor:c1', new Error('bubble b7: invalid JSON'));
+    await sink.ingestRecords(batch([{ recordType: 'bubble', line: '{"bubbleId":"b1"}' }]));
+    expect(pipeline.ingestFailures()).toEqual([expect.objectContaining({ file: 'cursor:c1', error: 'bubble b7: invalid JSON' })]);
+    sink.clearFailure('cursor:c1');
+    expect(pipeline.ingestFailures()).toEqual([]);
+    sink.clearFailure('cursor:never-failed'); // no-op
+  });
+
+  test('a stop() that throws (sync or async) neither rejects close() nor skips the other sources', async () => {
+    const syncThrow = new FakePollSource('cursor');
+    syncThrow.stop = () => {
+      throw new Error('sync stop');
+    };
+    const asyncThrow = new FakePollSource('codex');
+    asyncThrow.stop = async () => {
+      throw new Error('async stop');
+    };
+    const ok = new FakePollSource('claude');
+    pipeline = new Pipeline(store, config, { sources: [new ClaudeFileSource(config.projectsDir)], pollSources: [syncThrow, asyncThrow, ok] });
+    await pipeline.scanAll();
+    await expect(pipeline.close()).resolves.toBeUndefined();
+    expect(ok.stopped).toBe(1);
+    await expect(pipeline.close()).resolves.toBeUndefined(); // repeated close: same outcome
+    expect(ok.stopped).toBe(1);
+  });
+
+  test('a status() that throws gives lastError = its message', () => {
+    fake.status = () => {
+      throw new Error('status broke');
+    };
+    expect(pipeline.pollStatus('cursor')).toEqual({ lastPollAt: null, lastError: 'status broke' });
+  });
+
+  test('a start() that throws is reported under cursor:poll; the other sources still start', async () => {
+    const bad = new FakePollSource('cursor');
+    bad.start = () => {
+      throw new Error('cannot start');
+    };
+    const other = new FakePollSource('codex');
+    pipeline = new Pipeline(store, config, { sources: [new ClaudeFileSource(config.projectsDir)], pollSources: [bad, other] });
+    await pipeline.scanAll();
+    expect(other.started).toBe(1);
+    expect(pipeline.ingestFailures()).toEqual([expect.objectContaining({ file: 'cursor:poll', error: 'cannot start' })]);
+  });
+
+  test('two concurrent batches of one key keep ingest order; offsets have no gap or duplicate', async () => {
+    const live: string[] = [];
+    pipeline = makePipeline({ ...NORMALIZER_FACTORIES, cursor: () => new EchoNormalizer(live) });
+    const sink = await started();
+    await Promise.all([
+      sink.ingestRecords(batch([{ recordType: 'bubble', line: 'A' }, { recordType: 'bubble', line: 'B' }])),
+      sink.ingestRecords(batch([{ recordType: 'bubble', line: 'C' }, { recordType: 'bubble', line: 'B' }, { recordType: 'bubble', line: 'D' }])),
+    ]);
+    expect(live).toEqual(['A', 'B', 'C', 'D']);
+    expect(store.rawForSession('c1').map((e) => (e.source === 'transcript' ? [e.line, e.offset] : null))).toEqual([
+      ['A', 0],
+      ['B', 1],
+      ['C', 2],
+      ['D', 3],
+    ]);
+  });
+
+  test('after close: ingestRecords rejects and stores nothing; markSourceDeleted / clearSourceDeleted do nothing', async () => {
+    pipeline = makePipeline({ ...NORMALIZER_FACTORIES, cursor: () => new EchoNormalizer([]) });
+    const sink = await started();
+    await sink.ingestRecords(batch([{ recordType: 'composer', line: 'A' }]));
+    await pipeline.close();
+    await expect(sink.ingestRecords(batch([{ recordType: 'bubble', line: 'B' }]))).rejects.toThrow(/closed/);
+    await sink.markSourceDeleted('c1');
+    expect(store.rawForSession('c1')).toHaveLength(1);
+    expect(store.getSession('c1')?.sourceDeleted).toBe(false);
+    expect(pipeline.importing()).toBe(false);
   });
 });

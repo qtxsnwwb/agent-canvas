@@ -89,3 +89,14 @@ test('POST /hooks?origin=cursor：原样入库、来源为 cursor、按来源计
   expect(store.allHookEventStats().map((e) => [e.origin, e.eventName, e.count])).toEqual([['cursor', 'beforeSubmitPrompt', 1]]);
   expect(fake.pokes).toEqual(['cu1']);
 });
+
+test('/api/diagnostics cursor：轮询来源的 status() 抛错时仍返回 200，lastError 为错误信息', async () => {
+  const fake = new FakePollSource();
+  fake.status = () => {
+    throw new Error('status broke');
+  };
+  setup(null, [fake]);
+  const res = await app.inject({ method: 'GET', url: '/api/diagnostics' });
+  expect(res.statusCode).toBe(200);
+  expect((res.json() as Diagnostics).cursor).toEqual({ dbPath: null, dbExists: false, lastPollAt: null, lastError: 'status broke' });
+});

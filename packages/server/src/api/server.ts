@@ -260,22 +260,25 @@ export function buildServer(deps: { store: Store; pipeline: Pipeline; config: Co
   });
   app.get(
     '/api/diagnostics',
-    async (): Promise<Diagnostics> => ({
-      ...store.diagnostics(),
-      hookEvents: store.allHookEventStats(),
-      lastHookAt: pipeline.lastHookAt(),
-      ingestFailures: pipeline.ingestFailures(),
-      importing: pipeline.importing(),
-      normalizerVersion: NORMALIZER_VERSION,
-      dbEpoch: store.epoch(),
-      codex: { sessionsDir: config.codexSessionsDir, sessionsDirExists: isDirectory(config.codexSessionsDir) },
-      cursor: {
-        dbPath: config.cursorDbPath,
-        dbExists: isFile(config.cursorDbPath),
-        lastPollAt: pipeline.pollStatus('cursor')?.lastPollAt ?? null,
-        lastError: pipeline.pollStatus('cursor')?.lastError ?? null,
-      },
-    }),
+    async (): Promise<Diagnostics> => {
+      const cursorPoll = pipeline.pollStatus('cursor');
+      return {
+        ...store.diagnostics(),
+        hookEvents: store.allHookEventStats(),
+        lastHookAt: pipeline.lastHookAt(),
+        ingestFailures: pipeline.ingestFailures(),
+        importing: pipeline.importing(),
+        normalizerVersion: NORMALIZER_VERSION,
+        dbEpoch: store.epoch(),
+        codex: { sessionsDir: config.codexSessionsDir, sessionsDirExists: isDirectory(config.codexSessionsDir) },
+        cursor: {
+          dbPath: config.cursorDbPath,
+          dbExists: isFile(config.cursorDbPath),
+          lastPollAt: cursorPoll?.lastPollAt ?? null,
+          lastError: cursorPoll?.lastError ?? null,
+        },
+      };
+    },
   );
 
   // Encapsulated so its catch-all parser and error handler only affect /hooks: whatever arrives, the answer is an empty 200.

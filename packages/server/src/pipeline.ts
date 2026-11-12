@@ -79,6 +79,8 @@ export class Pipeline {
   private readonly polls: readonly PollSource[];
   private pollsStarted = false;
   private closed = false;
+  /** The first close()'s result, returned by every later call. */
+  private closing: Promise<void> | null = null;
   /** ingestRecords calls in flight (importing()). */
   private pollIngests = 0;
   /** Poll store key -> offset of its next transcript raw event (seeded from the store on first use). */
@@ -142,9 +144,16 @@ export class Pipeline {
     return this.polls;
   }
 
-  /** Status of the poll source of `origin`, or null when there is none. */
+  /** Status of the poll source of `origin`, or null when there is none; a throwing status() becomes its lastError. */
   pollStatus(origin: Origin): PollStatus | null {
-    return this.pollSourceFor(origin)?.status() ?? null;
+    const source = this.pollSourceFor(origin);
+    if (source === null) return null;
+    try {
+      const { lastPollAt, lastError } = source.status();
+      return { lastPollAt, lastError };
+    } catch (err) {
+      return { lastPollAt: null, lastError: err instanceof Error ? err.message : String(err) };
+    }
   }
 
   /** True while the initial full scan or a rebuild is running, or a poll source's records are being ingested. */
@@ -156,11 +165,15 @@ export class Pipeline {
    * Stops the poll sources (a pipeline closed before its initial scan never starts them). Pending ingestion is left to
    * idle().
    */
-  async close(): Promise<void> {
-    if (this.closed) return;
-    this.closed = true;
-    if (!this.pollsStarted) return;
-    await Promise.allSettled(this.polls.map((p) => p.stop()));
+  close(): Promise<void> {
+    if (this.closing === null) {
+      this.closed = true;
+      // Never rejects: a stop() that throws (synchronously too) or rejects does not keep the others from stopping.
+      this.closing = this.pollsStarted
+        ? Promise.allSettled(this.polls.map(async (p) => p.stop())).then(() => undefined)
+        : Promise.resolve();
+    }
+    return this.closing;
   }
 
   /**
@@ -500,6 +513,9 @@ export class Pipeline {
       markSourceDeleted: (sessionId) => this.markSourceDeleted(sessionId),
       clearSourceDeleted: (sessionId) => this.clearSourceDeleted(sessionId),
       reportFailure: (key, err) => this.reportFailure(key, err),
+      clearFailure: (key) => {
+        this.failures.delete(key);
+      },
     };
   }
 
@@ -509,6 +525,7 @@ export class Pipeline {
    * continuing after the highest one stored), so a key's offsets follow ingest order as a file's byte offsets do.
    */
   private async ingestPolled(origin: Origin, batch: PollBatch): Promise<void> {
+    if (this.closed) throw new Error('pipeline closed');
     if (batch.records.length === 0) return;
     const { key, sessionId, agentId, projectId } = batch;
     this.pollIngests += 1;
@@ -532,7 +549,7 @@ export class Pipeline {
           () => this.pollOffsets.set(key, next),
         );
       });
-      this.failures.delete(key);
+      // No failure is cleared here: the key's failures may come from the source itself (clearFailure clears them).
     } catch (err) {
       this.reportFailure(key, err);
       throw err;
@@ -543,6 +560,7 @@ export class Pipeline {
 
   /** PollSink.markSourceDeleted: the session is flagged, and stays flagged in every later change of it. */
   private async markSourceDeleted(sessionId: string): Promise<void> {
+    if (this.closed) return;
     this.deleted.add(sessionId);
     const session = this.store.getSession(sessionId);
     if (session && !session.sourceDeleted) this.commit([{ type: 'session_upserted', session: { ...session, sourceDeleted: true } }]);
@@ -550,6 +568,7 @@ export class Pipeline {
 
   /** PollSink.clearSourceDeleted: also clears a flag stored by an earlier run (no longer in `deleted`). */
   private async clearSourceDeleted(sessionId: string): Promise<void> {
+    if (this.closed) return;
     this.deleted.delete(sessionId);
     const session = this.store.getSession(sessionId);
     if (session?.sourceDeleted) this.commit([{ type: 'session_upserted', session: { ...session, sourceDeleted: false } }]);
