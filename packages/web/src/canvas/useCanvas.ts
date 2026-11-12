@@ -7,6 +7,7 @@ import { createBrowserLayoutWorker, createLayoutClient, type LayoutClient } from
 import { clampToRange, graphAt, replayRange, turnMarks, usageTotal, type ReplayRange } from './replay';
 import { createCompactor, type CompactResult } from './compact';
 import { containerSize } from './sizes';
+import { revealPlan } from './reveal';
 import { agentGroupKey, buildView, type AgentGroup, type CanvasView, type ViewMode } from './view';
 
 /**
@@ -62,6 +63,12 @@ export interface CanvasModel {
   setAutoFold(enabled: boolean): void;
   /** A node (the selection) that is never folded into `earlier` and whose turn is not auto-collapsed; null for none. */
   setKeepVisible(id: string | null): void;
+  /**
+   * Brings a node of the live graph into the view: keeps it visible (as setKeepVisible), expands its turn if collapsed
+   * and every agent it sits in (see revealPlan; the agents stay expanded); rebuilds at once. Returns whether the node is
+   * in the rebuilt view (it is not when the view cannot draw it, e.g. a replay time before it). Unknown node: false.
+   */
+  reveal(nodeId: string): boolean;
   /**
    * Expands the agent (a dispatch node's childAgentId) into a container of its inner nodes, or collapses it again
    * (which forgets its "show all" and frozen fold); rebuilds at once. The set of expanded agents is kept across setMode
@@ -517,6 +524,18 @@ export function createCanvasModel(
       keepVisible = id; // takes effect with the next rebuild: a selected node is already visible
       viewStale = true; // ... even when that rebuild brings no graph change
     },
+    reveal(nodeId) {
+      if (disposed) return false;
+      const plan = revealPlan(live.getGraph(), nodeId);
+      if (plan === null) return false;
+      keepVisible = nodeId;
+      if (plan.turnKey !== null && snapshot.view.turns.find((t) => t.key === plan.turnKey)?.collapsed === true) {
+        overrides.set(plan.turnKey, true);
+      }
+      for (const agentId of plan.agents) expandedAgents.add(agentId);
+      rebuildNow();
+      return snapshot.view.nodes.has(nodeId);
+    },
     toggleAgent(agentId) {
       if (disposed) return;
       if (expandedAgents.delete(agentId)) {
@@ -583,7 +602,7 @@ function readCompactPreference(): boolean {
 
 /** One model and one layout worker per live session; both are disposed when the page unmounts. */
 export type UseCanvasResult = CanvasSnapshot
-  & Pick<CanvasModel, 'toggleTurn' | 'expandTurn' | 'showFullTurn' | 'setAutoFold' | 'setKeepVisible' | 'toggleAgent' | 'setMode' | 'setReplayTime' | 'setCompact' | 'expandRun'>
+  & Pick<CanvasModel, 'toggleTurn' | 'expandTurn' | 'showFullTurn' | 'setAutoFold' | 'setKeepVisible' | 'reveal' | 'toggleAgent' | 'setMode' | 'setReplayTime' | 'setCompact' | 'expandRun'>
   & { /** False until the model exists (the snapshot is then an empty placeholder). */ ready: boolean };
 
 export function useCanvas(live: LiveSession): UseCanvasResult {
@@ -607,6 +626,7 @@ export function useCanvas(live: LiveSession): UseCanvasResult {
   const showFullTurn = useCallback((turnKey: string) => model?.showFullTurn(turnKey), [model]);
   const setAutoFold = useCallback((enabled: boolean) => model?.setAutoFold(enabled), [model]);
   const setKeepVisible = useCallback((id: string | null) => model?.setKeepVisible(id), [model]);
+  const reveal = useCallback((id: string) => model?.reveal(id) ?? false, [model]);
   const toggleAgent = useCallback((agentId: string) => model?.toggleAgent(agentId), [model]);
   const setMode = useCallback((mode: ViewMode) => model?.setMode(mode), [model]);
   const setReplayTime = useCallback((ms: number) => model?.setReplayTime(ms), [model]);
@@ -619,10 +639,10 @@ export function useCanvas(live: LiveSession): UseCanvasResult {
   const ready = model !== null;
   return useMemo(
     () => ({
-      ...snapshot, toggleTurn, expandTurn, showFullTurn, setAutoFold, setKeepVisible, toggleAgent, setMode, setReplayTime,
+      ...snapshot, toggleTurn, expandTurn, showFullTurn, setAutoFold, setKeepVisible, reveal, toggleAgent, setMode, setReplayTime,
       setCompact, expandRun, ready,
     }),
-    [snapshot, toggleTurn, expandTurn, showFullTurn, setAutoFold, setKeepVisible, toggleAgent, setMode, setReplayTime,
+    [snapshot, toggleTurn, expandTurn, showFullTurn, setAutoFold, setKeepVisible, reveal, toggleAgent, setMode, setReplayTime,
       setCompact, expandRun, ready],
   );
 }

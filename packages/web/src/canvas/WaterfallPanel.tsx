@@ -69,7 +69,7 @@ const Row = memo(function Row({ row, offset, place, selected, ticking, chain, on
   };
   const style = { ['--s' as string]: offset, ['--d' as string]: length } as CSSProperties;
   return (
-    <div className={`cc-wf-row${selected ? ' cc-wf-selected' : ''}${chain === 'direct' ? ' cc-wf-direct' : chain === 'on' ? ' cc-wf-chain' : chain === 'off' ? ' cc-wf-dim' : ''}`}
+    <div data-id={row.id} className={`cc-wf-row${selected ? ' cc-wf-selected' : ''}${chain === 'direct' ? ' cc-wf-direct' : chain === 'on' ? ' cc-wf-chain' : chain === 'off' ? ' cc-wf-dim' : ''}`}
       style={style} onClick={() => onSelectRow(row.id)}>
       <div className="cc-wf-label">
         <span className="cc-wf-dot" style={{ background: color }} />
@@ -134,6 +134,11 @@ export const Waterfall = memo(function Waterfall({
     const el = body.current;
     if (el && stick.current) el.scrollTop = el.scrollHeight;
   }, [count]);
+  // The selected row is kept in sight (it may be picked from outside the panel, e.g. the file panel).
+  useEffect(() => {
+    if (selectedId === null) return;
+    body.current?.querySelector(`[data-id="${CSS.escape(selectedId)}"]`)?.scrollIntoView({ block: 'nearest' });
+  }, [selectedId, key]);
   const onScroll = (): void => {
     const el = body.current;
     if (el) stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < STICK_PX;

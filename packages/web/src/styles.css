@@ -350,3 +350,64 @@ header .header-link[aria-current="page"] { background: var(--sun); }
   .stats-bar-svg { grid-column: 1 / -1; grid-row: 2; }
   .stats-pair { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* File views (session file panel and files page): one row per file, the directory muted and giving way first, the
+   file name emphasised; a row expands to its steps (panel) or its sessions (page). */
+.files-toggle {
+  margin: 0; padding: 3px 14px; border: 2px solid var(--edge); border-radius: 999px; background: var(--card); color: var(--ink);
+  font: 700 12px/18px var(--font); cursor: pointer; box-shadow: var(--shadow-sm);
+}
+.files-toggle:hover { background: var(--paper-deep); }
+.files-toggle[aria-pressed="true"] { background: var(--sun); }
+.files-toggle:focus-visible { outline: 3px solid var(--grape); outline-offset: 2px; }
+.file-list { margin: 0; padding: 0; list-style: none; }
+.file-item + .file-item { border-top: 1.5px dashed var(--line); }
+.file-row {
+  box-sizing: border-box; display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; margin: 0; padding: 6px 8px;
+  border: 0; border-radius: 10px; background: none; color: var(--ink); font: inherit; font-size: 12.5px; text-align: left; cursor: pointer;
+}
+.file-row:hover { background: var(--paper); }
+.file-row:focus-visible, .file-step:focus-visible, .files-session:focus-visible { outline: 3px solid var(--grape); outline-offset: -2px; }
+.file-item.is-open > .file-row { background: var(--paper-deep); }
+.file-caret { flex: none; width: 10px; color: var(--ink-soft); font-size: 10px; }
+/* The path takes the room left; the directory shrinks first (ellipsis at its end, so "src/can…/FilePanel.tsx"), the
+   name only once the directory is gone. */
+.file-path { flex: 1 1 auto; min-width: 0; display: flex; align-items: baseline; overflow: hidden; white-space: nowrap; font: 12.5px/18px var(--mono); }
+.file-dir { flex: 0 1000 auto; min-width: 2ch; overflow: hidden; text-overflow: ellipsis; color: var(--ink-faint); }
+.file-name { flex: 0 1 auto; min-width: 3ch; overflow: hidden; text-overflow: ellipsis; color: var(--ink); font-weight: 700; }
+.file-counts { flex: none; display: inline-flex; align-items: center; gap: 4px; }
+.file-count { padding: 0 7px; border-radius: 999px; background: var(--paper-deep); color: var(--ink-soft); font-size: 11px; font-weight: 700; line-height: 18px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.file-count-change { background: #fff1c7; color: #8a5a00; }
+.file-mark { padding: 0 6px; border-radius: 6px; font-size: 10.5px; font-weight: 700; line-height: 16px; white-space: nowrap; }
+.file-mark-write { background: #d9f5e0; color: #1f7a3d; }
+.file-mark-delete { background: #ffd3d3; color: #b3261e; }
+.file-when { flex: none; display: inline-flex; align-items: center; gap: 5px; min-width: 4.5em; justify-content: flex-end; color: var(--ink-soft); font-size: 11.5px; white-space: nowrap; }
+.file-switch { display: inline-flex; align-items: center; gap: 7px; font: 700 12px/18px var(--font); color: var(--ink); cursor: pointer; white-space: nowrap; }
+.file-switch .notify-switch { margin: 0; }
+.file-filter {
+  box-sizing: border-box; min-width: 0; padding: 3px 12px; border: 2px solid var(--edge); border-radius: 999px; background: var(--card);
+  color: var(--ink); font: 12px/18px var(--font); box-shadow: var(--shadow-sm);
+}
+.file-filter::placeholder { color: var(--ink-faint); }
+.file-filter:focus-visible { outline: none; border-color: var(--grape); }
+.file-note { margin: 4px 8px 6px 26px; color: var(--ink-soft); font-size: 12px; }
+.file-link-btn { margin: 0 0 0 8px; padding: 0 10px; border: 1.5px solid var(--edge); border-radius: 999px; background: var(--sun); color: var(--ink); font: 700 12px/20px var(--font); cursor: pointer; }
+.file-link-btn:focus-visible { outline: 3px solid var(--grape); outline-offset: 1px; }
+/* Files page */
+.files-filters .file-switch { padding: 0 4px; }
+.files-page-filter { width: 220px; }
+.files-caption { margin: -6px 0 12px; }
+.stats section.files-card { padding: 8px 10px 10px; }
+.files-row { padding: 7px 10px; font-size: 13px; }
+.files-sessions { margin: 2px 0 6px 26px; padding: 0; list-style: none; }
+.files-session { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 4px 8px; border-radius: 8px; color: var(--ink); font-size: 12.5px; }
+.files-session:hover { background: var(--paper); }
+.files-session:hover .files-session-title { color: #3a5bd9; text-decoration: underline; }
+.files-session-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 640px) {
+  .files-page-filter { width: 100%; }
+  .files-row { flex-wrap: wrap; }
+  .files-row .file-path { flex-basis: calc(100% - 24px); }
+  .files-session { flex-wrap: wrap; }
+  .files-session-title { order: -1; flex-basis: 100%; }
+}
