@@ -137,7 +137,7 @@ describe('pipeline 与来源', () => {
 
   beforeEach(async () => {
     tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-pipeline-origin-'));
-    config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null });
+    config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, cursorDbPath: null });
     codexDir = path.join(tmp, 'codex');
     await fs.mkdir(config.projectsDir, { recursive: true });
     await fs.mkdir(codexDir, { recursive: true });

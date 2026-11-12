@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import type { Diagnostics as DiagnosticsData, Origin } from '@claude-canvas/shared';
 import { api } from '../client';
 import {
-  codexDirLine, createPoller, cursorBlockVisible, cursorHooks, cursorPollLine, cursorUnknownRecords, fileOrigin, formatAge, hookState, hooksByOrigin, summarizeDiagnostics, truncateSample, FILES_BEHIND_MAX,
+  codexDirLine, createPoller, cursorBlockVisible, cursorDbLine, cursorHooks, cursorPollLine, cursorUnknownRecords, fileOrigin, formatAge, hookState, hooksByOrigin, summarizeDiagnostics, truncateSample, FILES_BEHIND_MAX,
   type OriginHooks,
 } from '../diagnostics';
 import { OriginBadge } from '../OriginBadge';
@@ -25,7 +25,7 @@ function HookStatus({ origin, lastAt }: { origin: Origin; lastAt: string | null 
       {st.hooks === 'never' && (origin === 'codex'
         ? <p className="diag-warn">尚未收到 Codex 的 hook：Codex hooks 还没有安装，或还没有在 Codex 里确认信任。不装也能用，只靠会话文件</p>
         : origin === 'cursor'
-        ? <p className="diag-warn">尚未收到 Cursor 的 hook。不装也能用，只靠 Cursor 的本地数据库</p>
+        ? <p className="diag-warn">尚未收到 Cursor 的 hook。运行 <code>claude-canvas hooks install --cursor</code> 安装；不装也能用，只靠 Cursor 的本地数据库</p>
         : <p className="diag-warn">尚未收到任何 hook。运行 <code>claude-canvas hooks install</code> 安装；新开的会话才会生效</p>)}
       {st.hooks === 'quiet' && <p className="diag-warn">超过 10 分钟没有收到 hook</p>}
     </>
@@ -81,8 +81,7 @@ function CursorSection({ data }: { data: DiagnosticsData }) {
   return (
     <section>
       <h2><OriginBadge origin="cursor" /></h2>
-      <p>数据库路径：{c.dbPath === null ? '未启用' : <code>{c.dbPath}</code>}</p>
-      <p>数据库{c.dbExists ? '存在' : '不存在，Cursor 似乎没有安装'}</p>
+      <p>{cursorDbLine(c)}</p>
       <CursorPoll lastPollAt={c.lastPollAt} />
       {c.lastError !== null && <p className="error">上次错误：{c.lastError}</p>}
       <h3>Hooks</h3>

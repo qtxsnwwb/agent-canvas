@@ -564,3 +564,16 @@ describe('fix wave M5: node notes are Simplified Chinese', () => {
     expect(detailOf(r, c.node('l2')).text).toBe('已中止：对话停止时工具仍在运行。');
   });
 });
+
+describe('fix wave M3: only shown threads count in the session times', () => {
+  test('a held subagent thread (no dispatch links it) does not move lastActivityAt; once linked it does', () => {
+    const c = new CursorConv({ id: ROOT });
+    const s = new CursorConv({ id: SUB, sessionId: ROOT });
+    const held = [s.subagentComposer('call-x', ROOT), s.user('su', 'task', 100), s.turnEnd('se', 101)];
+    const base = [c.composer({ status: 'completed' }), c.user('u', 'go', 1), c.text('a', 'ok', 2), c.turnEnd('e', 3)];
+    const r = go([...base, ...held]);
+    expect(r.sessions.get(ROOT)!.lastActivityAt).toBe(iso(at(3) + 100));
+    const linked = go([...base, ...held, c.task('d', 'call-x', 'completed', 4)]);
+    expect(linked.sessions.get(ROOT)!.lastActivityAt).toBe(iso(at(101) + 100));
+  });
+});

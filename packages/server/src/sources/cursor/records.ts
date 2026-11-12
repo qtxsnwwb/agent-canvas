@@ -1,8 +1,11 @@
 /**
  * The two raw record types CursorSource stores (spec 5.3): `composer` (one conversation's session-level facts) and
  * `bubble` (one message or step). Each is one JSON line, written by trim.ts with a fixed key order (equal content gives
- * equal lines), stored under the conversation's key `cursor:<composerId>`. Every field is always present; a value the
- * database did not have (or had with the wrong type) is null. Strings that were empty in the database are null.
+ * equal lines), stored under the key of the unit it was read for: `cursor:<sessionId>` for a main conversation (whose
+ * composer id is the session id), `cursor:<sessionId>/<subagentComposerId>` for a subagent conversation as stored for
+ * one owning session (forked conversations sharing a subagent store it once per fork). Every field is always present;
+ * a value the database did not have (or had with the wrong type) is null. Strings that were empty in the database are
+ * null.
  */
 
 export const CURSOR_RECORD_TYPES = { composer: 'composer', bubble: 'bubble' } as const;
@@ -65,9 +68,10 @@ export interface CursorToolFormerData {
 export interface CursorBubbleRecord {
   bubbleId: string;
   /**
-   * The bubble's 0-based index in the conversation's `fullConversationHeadersOnly` list when it was read. When the
-   * index changes (the list is not append-only), the bubble is stored again with the new one. A bubble that drops
-   * out of the list gets no new record (its last one stands).
+   * The bubble's 0-based index in the conversation's header list when it was read: the inline
+   * `fullConversationHeadersOnly`, or when that is empty (newer Cursor) the pages `composerConvHeaders:<id>:<NNNNNN>`
+   * concatenated in key order. When the index changes (the list is not append-only), the bubble is stored again with
+   * the new one. A bubble that drops out of the list gets no new record (its last one stands).
    */
   order: number;
   /** 1 user, 2 assistant. */

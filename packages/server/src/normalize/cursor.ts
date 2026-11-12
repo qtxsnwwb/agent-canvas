@@ -563,11 +563,18 @@ export class CursorNormalizer implements AgentNormalizer {
     if (old === undefined) this.pruneUnseenHookMarks();
   }
 
-  /** Hook marks of sessions that never appear must not pile up: beyond the limit the oldest are dropped. */
+  /**
+   * Hook marks of sessions that never appear must not pile up: beyond the limit the oldest are dropped from memory. A
+   * dropped mark is not lost: the session needs its pre-session replay again (needsPreSessionReplay), so the pipeline
+   * restores the mark from the stored hooks before the session's next event, as a rebuild would have it.
+   */
   private pruneUnseenHookMarks(): void {
     const unseen: string[] = [];
     for (const id of this.hookMarks.keys()) if (!this.sessions.has(id)) unseen.push(id);
-    for (const id of unseen.slice(0, Math.max(0, unseen.length - MAX_UNSEEN_HOOK_SESSIONS))) this.hookMarks.delete(id);
+    for (const id of unseen.slice(0, Math.max(0, unseen.length - MAX_UNSEEN_HOOK_SESSIONS))) {
+      this.hookMarks.delete(id);
+      this.preSessionRestored.delete(id);
+    }
   }
 
   // ---- session ----
@@ -575,10 +582,12 @@ export class CursorNormalizer implements AgentNormalizer {
   /**
    * The session as a function of the records and the hook mark: title = the root composer's name, else its first
    * prompt with text; cwd from the root composer; created = the root composer's createdAt, else the earliest bubble;
-   * last activity = the latest bubble time of any thread. Status (spec 6 and 7.3), whatever order records and hooks
-   * arrived in: the latest hook mark is `ended` → ended; else the root conversation's last turn is open in the records
-   * → running; else the latest mark is `started` and newer than the session's latest bubble (a prompt was submitted and
-   * nothing of it has been read from the database yet) → running; else idle.
+   * last activity = the latest bubble time of any shown thread (a held subagent thread, linked to no dispatch here,
+   * does not count). Status (spec 6 and 7.3), whatever order records and hooks arrived in: the latest hook mark is
+   * `ended` → ended; else it is `stopped` and newer than the session's latest bubble (Cursor says the turn ended; what
+   * the records still show open was not written yet) → idle; else the root conversation's last turn is open in the
+   * records → running; else the latest mark is `started` and newer than the session's latest bubble (a prompt was
+   * submitted and nothing of it has been read from the database yet) → running; else idle.
    */
   private deriveSession(state: SessionState): Session {
     const rootId = state.session.id;
@@ -586,7 +595,9 @@ export class CursorNormalizer implements AgentNormalizer {
     const ra = root === undefined ? null : analyze(root);
     let minMs: number | null = null;
     let maxMs: number | null = null;
-    for (const t of state.threads.values()) {
+    for (const id of state.links.keys()) {
+      const t = state.threads.get(id);
+      if (t === undefined) continue;
       const a = analyze(t);
       minMs = minOf(minMs, a.minMs);
       maxMs = maxOf(maxMs, a.maxMs);
@@ -594,8 +605,10 @@ export class CursorNormalizer implements AgentNormalizer {
     const startedMs = root?.composer?.createdAt ?? minMs;
     const startedAt = isoOf(startedMs) ?? EPOCH;
     const mark = this.hookMarks.get(rootId);
+    const newer = (m: HookMark): boolean => maxMs === null || m.atMs > maxMs;
     let status: Session['status'];
     if (mark?.kind === 'ended') status = 'ended';
+    else if (mark?.kind === 'stopped' && newer(mark)) status = 'idle';
     else if (ra?.open) status = 'running';
     else if (mark?.kind === 'started' && (maxMs === null || mark.atMs > maxMs)) status = 'running';
     else status = 'idle';

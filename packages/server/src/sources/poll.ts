@@ -7,7 +7,8 @@ export interface PollRecord {
 }
 
 /**
- * Records of one store key (e.g. one Cursor conversation, `cursor:<composerId>`), all belonging to one session (and
+ * Records of one store key (e.g. a Cursor conversation: `cursor:<sessionId>`, or a subagent conversation as stored for
+ * one session, `cursor:<sessionId>/<subagentComposerId>`), all belonging to one session (and
  * thread: `agentId` null for the main thread). `projectId` is stored with each raw event (replay uses it).
  */
 export interface PollBatch {

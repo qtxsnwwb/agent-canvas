@@ -235,6 +235,15 @@ describe('poll sources in the pipeline', () => {
     expect(store.rawForSession('c1')).toHaveLength(1);
   });
 
+  test('importing() counts only batches before the first completed round of the poll source (M10)', async () => {
+    const sink = await started();
+    fake.state = { lastPollAt: '2026-11-12T00:00:00.000Z', lastError: null };
+    const p = sink.ingestRecords(batch([{ recordType: 'composer', line: '{"later":true}' }]));
+    expect(pipeline.importing()).toBe(false);
+    await p;
+    expect(store.rawForSession('c1')).toHaveLength(1);
+  });
+
   test('markSourceDeleted / clearSourceDeleted flag the session; a later record keeps the flag', async () => {
     pipeline = makePipeline({ ...NORMALIZER_FACTORIES, cursor: () => new EchoNormalizer([]) });
     const sink = await started();

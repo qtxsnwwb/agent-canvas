@@ -220,28 +220,38 @@ test('hookState：和 summarizeDiagnostics 的 hooks / hookAgeMs 同一规则', 
 });
 
 // ---- Cursor block ----
-import { cursorBlockVisible, cursorHooks, cursorPollLine, cursorUnknownRecords } from '../src/diagnostics';
+import { cursorBlockVisible, cursorDbLine, cursorHooks, cursorPollLine, cursorUnknownRecords } from '../src/diagnostics';
 
 const cursorHook = { origin: 'cursor' as const, eventName: 'stop', count: 2, lastAt: at(1) };
 
-test('cursorBlockVisible：库存在，或有 Cursor 的 hook / 文件 / 未识别记录时显示，否则不显示', () => {
+test('cursorBlockVisible：库存在，或有 Cursor 的数据 / hook / 未识别记录时显示，否则不显示', () => {
   expect(cursorBlockVisible(base)).toBe(false);
   // A configured path alone says nothing (the default path is configured even where Cursor is not installed).
   expect(cursorBlockVisible({ ...base, cursor: { ...base.cursor, dbPath: '/x/state.vscdb' } })).toBe(false);
   expect(cursorBlockVisible({ ...base, cursor: { ...base.cursor, dbExists: true } })).toBe(true);
   expect(cursorBlockVisible({ ...base, hookEvents: [cursorHook] })).toBe(true);
-  expect(cursorBlockVisible({ ...base, files: [{ path: 'cursor:abc', offset: 1, size: 1 }] })).toBe(true);
+  // Stored Cursor records with the database gone (M7): the server says so; Cursor never has file offsets.
+  expect(cursorBlockVisible({ ...base, cursor: { ...base.cursor, hasData: true } })).toBe(true);
+  expect(cursorBlockVisible({ ...base, files: [{ path: 'cursor:abc', offset: 1, size: 1 }] })).toBe(false);
   expect(cursorBlockVisible({ ...base, unknownRecords: [{ recordType: 'bubble:type9/cap3', count: 1, sample: '' }] })).toBe(true);
   expect(cursorBlockVisible({ ...base, unknownRecords: [{ recordType: 'foo', count: 1, sample: '' }] })).toBe(false);
 });
 
-test('cursorUnknownRecords：只取 Cursor 气泡形状（bubble: 或 cursor: 开头）', () => {
+test('cursorUnknownRecords：只取 Cursor 的（bubble:、composer: 或 cursor: 开头）', () => {
   const u = [
     { recordType: 'bubble:type9/cap3', count: 2, sample: 's' },
+    { recordType: 'composer:invalid-json', count: 1, sample: '' },
     { recordType: 'cursor:composer', count: 1, sample: '' },
     { recordType: 'weird', count: 4, sample: '' },
+    { recordType: 'normalizer-error', count: 1, sample: '' },
   ];
-  expect(cursorUnknownRecords({ ...base, unknownRecords: u }).map((r) => r.recordType)).toEqual(['bubble:type9/cap3', 'cursor:composer']);
+  expect(cursorUnknownRecords({ ...base, unknownRecords: u }).map((r) => r.recordType)).toEqual(['bubble:type9/cap3', 'composer:invalid-json', 'cursor:composer']);
+});
+
+test('cursorDbLine：未启用 / 存在 / 不存在（M8）', () => {
+  expect(cursorDbLine({ ...base.cursor, dbPath: null })).toBe('Cursor 数据库：未启用');
+  expect(cursorDbLine({ ...base.cursor, dbPath: '/c/state.vscdb', dbExists: true })).toBe('Cursor 数据库：/c/state.vscdb（存在）');
+  expect(cursorDbLine({ ...base.cursor, dbPath: '/c/state.vscdb', dbExists: false })).toBe('Cursor 数据库：/c/state.vscdb（不存在，Cursor 似乎没有安装）');
 });
 
 test('cursorPollLine：相对时间，null 是“尚未轮询”', () => {

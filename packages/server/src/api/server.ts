@@ -18,6 +18,7 @@ import type { Config } from '../config.js';
 import { cursorHookConversationId, cursorHookWorkspaceRoot, sanitizeCursorHookPayload } from '../normalize/cursor-hooks.js';
 import { NORMALIZER_VERSION } from '../normalize/version.js';
 import type { Pipeline } from '../pipeline.js';
+import { KEY_PREFIXES } from '../sources/source.js';
 import type { Store } from '../store/store.js';
 
 const HOOK_BODY_LIMIT = 64 * 1024 * 1024;
@@ -279,6 +280,7 @@ export function buildServer(deps: { store: Store; pipeline: Pipeline; config: Co
           dbExists: isFile(config.cursorDbPath),
           lastPollAt: cursorPoll?.lastPollAt ?? null,
           lastError: cursorPoll?.lastError ?? null,
+          hasData: store.transcriptKeys(KEY_PREFIXES.cursor).length > 0,
         },
       };
     },

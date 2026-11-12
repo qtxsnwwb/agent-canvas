@@ -4,7 +4,7 @@ import { api, openLiveSessions } from '../client';
 import { sessionStatusView } from '../labels';
 import {
   effectiveOriginFilter, filterEmptyMessage, heroTotals, matchesOrigin, ORIGIN_FILTER_KEY, ORIGIN_FILTER_OPTIONS, originLook, parseOriginFilter,
-  projectCountsExact, projectLook, projectName, relativeTime, shownProjectId, showOriginFilter, stripProjects,
+  projectCountsExact, projectLook, projectName, projectTitle, relativeTime, shownProjectId, showOriginFilter, stripProjects,
   type OriginFilter,
 } from '../home';
 import { OriginBadge } from '../OriginBadge';
@@ -224,7 +224,7 @@ export function Home({ projectId }: { projectId: string | null }) {
               aria-current={p.id === shownId ? 'true' : undefined} style={{ ['--hue' as string]: look.hue } as CSSProperties}>
               <span className="project-avatar" aria-hidden="true">{look.emoji}</span>
               <span className="project-text">
-                <span className="project-name">{projectName(path)}</span>
+                <span className="project-name">{projectTitle(p)}</span>
                 <span className="project-path" title={path}>{path}</span>
               </span>
               <span className="project-counts">
@@ -243,7 +243,7 @@ export function Home({ projectId }: { projectId: string | null }) {
         })}
       </nav>
       <section className="sessions">
-        <h2>{shown !== undefined ? `${projectName(shown.cwd ?? shown.id)} 的会话` : '会话'}</h2>
+        <h2>{shown !== undefined ? `${projectTitle(shown)} 的会话` : '会话'}</h2>
         {shownId !== null && sessions.length === 0 && <p className="muted">这个项目还没有会话</p>}
         {sessions.length > 0 && shownSessions.length === 0 && filter !== 'all' && (
           <p className="muted">这个项目没有 {originLook(filter).label} 会话</p>

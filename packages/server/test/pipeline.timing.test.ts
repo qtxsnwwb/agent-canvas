@@ -49,7 +49,7 @@ describe('pipeline timing', () => {
 
   beforeEach(async () => {
     tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-timing-'));
-    config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), rescanMs: 200 });
+    config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), rescanMs: 200, cursorDbPath: null });
     await fs.mkdir(config.projectsDir, { recursive: true });
     await fs.mkdir(config.dataDir, { recursive: true });
     store = openStore(':memory:');

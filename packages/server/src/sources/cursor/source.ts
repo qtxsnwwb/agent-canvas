@@ -199,7 +199,8 @@ const byRecency = (a: HeaderRow, b: HeaderRow): number => (headerUpdatedAt(b) ??
  * conversation through `subagentComposerIds` (transitively, through the subagents' own lists) or through a subagent's
  * `parentComposerId`; `rootParentConversationId` only places a subagent that has neither link. One subagent
  * conversation can belong to several sessions (forked conversations list the same subagents): it is stored once per
- * owning session, under `cursor:<sessionId>/<subagentComposerId>`; a main conversation under `cursor:<composerId>`.
+ * owning session, under `cursor:<sessionId>/<subagentComposerId>`; a main conversation under `cursor:<sessionId>` (its
+ * composer id).
  * Only units that changed or were recently active are read, and of those only the bubbles that need reading; the
  * trimmed records (composer first, then bubbles) go through the sink. A conversation with no bubble yet produces
  * nothing. A session we hold data for that is archived or gone is marked "source deleted" and not read again (until it

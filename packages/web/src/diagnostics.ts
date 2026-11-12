@@ -90,7 +90,7 @@ export interface OriginHooks {
  */
 export function hooksByOrigin(d: Diagnostics): OriginHooks[] {
   const codexKnown = d.codex.sessionsDirExists || d.files.some((f) => fileOrigin(f.path) === 'codex');
-  const cursorKnown = d.cursor.dbExists || d.files.some((f) => fileOrigin(f.path) === 'cursor');
+  const cursorKnown = d.cursor.dbExists || d.cursor.hasData === true;
   const out: OriginHooks[] = [];
   for (const origin of ORIGINS) {
     const events = d.hookEvents.filter((e) => e.origin === origin);
@@ -108,17 +108,29 @@ export function hooksByOrigin(d: Diagnostics): OriginHooks[] {
   return out;
 }
 
-/** Whether the page shows the Cursor block: the database exists, or any Cursor data is known (a configured path alone says nothing). */
+/**
+ * Whether the page shows the Cursor block: the database exists, or any Cursor data is known — stored records (the
+ * server's `cursor.hasData`), hooks or unrecognised records (a configured path alone says nothing).
+ */
 export function cursorBlockVisible(d: Diagnostics): boolean {
   return d.cursor.dbExists
+    || d.cursor.hasData === true
     || d.hookEvents.some((e) => e.origin === 'cursor')
-    || d.files.some((f) => fileOrigin(f.path) === 'cursor')
     || cursorUnknownRecords(d).length > 0;
 }
 
-/** Unknown records that come from Cursor: bubble shapes the normalizer does not know (`bubble:...`) or `cursor:...` types. */
+/**
+ * Unknown records that come from Cursor: bubble shapes the normalizer does not know (`bubble:...`), records it could not
+ * read (`composer:...`, `bubble:...`) and unknown record types (`cursor:...`).
+ */
 export function cursorUnknownRecords(d: Diagnostics): Diagnostics['unknownRecords'] {
-  return d.unknownRecords.filter((r) => r.recordType.startsWith('bubble:') || r.recordType.startsWith('cursor:'));
+  return d.unknownRecords.filter((r) => r.recordType.startsWith('bubble:') || r.recordType.startsWith('composer:') || r.recordType.startsWith('cursor:'));
+}
+
+/** The Cursor block's line about the database: not enabled / exists / does not exist. */
+export function cursorDbLine(cursor: Diagnostics['cursor']): string {
+  if (cursor.dbPath === null) return 'Cursor 数据库：未启用';
+  return `Cursor 数据库：${cursor.dbPath}（${cursor.dbExists ? '存在' : '不存在，Cursor 似乎没有安装'}）`;
 }
 
 /** The Cursor block's "last poll" text. */

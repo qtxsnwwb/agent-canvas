@@ -9,6 +9,9 @@
  * which conversation it is about and which session-level mark it leaves (interpreted in cursor.ts).
  */
 
+import { CURSOR_TEXT_CAP_BYTES } from '../sources/cursor/records.js';
+import { capUtf8 } from '../sources/cursor/trim.js';
+
 /** The five events `hooks install --cursor` installs; the only ones a Cursor hook raw event is expected to have. */
 export const CURSOR_HOOK_EVENT_NAMES: ReadonlySet<string> = new Set(['sessionStart', 'sessionEnd', 'beforeSubmitPrompt', 'stop', 'subagentStop']);
 
@@ -59,12 +62,44 @@ export function parseCursorHook(eventName: string, payload: string): ParsedCurso
 
 /**
  * The payload as stored: Cursor puts the signed-in user's e-mail address in every hook (`user_email`); it is personal
- * data claude-canvas has no use for, so a payload that has it is stored re-serialised without it. Any other payload
- * (including one that is not a JSON object) is stored exactly as received, as for the other origins.
+ * data claude-canvas has no use for, so it is dropped. beforeSubmitPrompt carries the prompt and its attachments, which
+ * the normalizer never reads: like the records' texts (CURSOR_TEXT_CAP_BYTES) the prompt is cut to 64 KB at a code
+ * point, and attachments longer than that as JSON are dropped; either is then listed in `truncated`. A payload with
+ * none of this to change (including one that is not a JSON object) is stored exactly as received, as for the other
+ * origins; otherwise it is stored re-serialised.
  */
 export function sanitizeCursorHookPayload(payload: string): string {
   const body = parseObject(payload);
-  if (body === null || !Object.prototype.hasOwnProperty.call(body, 'user_email')) return payload;
-  const { user_email: _dropped, ...rest } = body;
-  return JSON.stringify(rest);
+  if (body === null) return payload;
+  const out: Record<string, unknown> = { ...body };
+  let changed = false;
+  if (Object.prototype.hasOwnProperty.call(out, 'user_email')) {
+    delete out.user_email;
+    changed = true;
+  }
+  const truncated: string[] = [];
+  if (typeof out.prompt === 'string') {
+    const { text, cut } = capUtf8(out.prompt, CURSOR_TEXT_CAP_BYTES);
+    if (cut) {
+      out.prompt = text;
+      truncated.push('prompt');
+    }
+  }
+  if (out.attachments !== undefined) {
+    let size = 0;
+    try {
+      size = Buffer.byteLength(JSON.stringify(out.attachments) ?? '', 'utf8');
+    } catch {
+      size = Number.POSITIVE_INFINITY;
+    }
+    if (size > CURSOR_TEXT_CAP_BYTES) {
+      delete out.attachments;
+      truncated.push('attachments');
+    }
+  }
+  if (truncated.length > 0) {
+    out.truncated = truncated;
+    changed = true;
+  }
+  return changed ? JSON.stringify(out) : payload;
 }

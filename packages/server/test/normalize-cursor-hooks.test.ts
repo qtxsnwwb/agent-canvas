@@ -9,8 +9,9 @@ import { at, CursorConv, iso } from './cursor-records.js';
 /*
  * Cursor hooks (spec 7.3) never create or change nodes and never create sessions. They leave session-level marks
  * (started / stopped / ended / resumed); the session status is a function of the records and the marks together:
- *   latest mark ended → ended; else the records show the last turn open → running; else the latest mark is `started`
- *   and newer than the session's latest bubble → running; else idle.
+ *   latest mark ended → ended; else the latest mark is `stopped` and newer than the session's latest bubble → idle;
+ *   else the records show the last turn open → running; else the latest mark is `started` and newer than the
+ *   session's latest bubble → running; else idle.
  * Synthetic payloads (fields as Cursor documents them, invented values).
  */
 
@@ -71,6 +72,14 @@ describe('parseCursorHook', () => {
     expect(sanitizeCursorHookPayload('not json')).toBe('not json');
     expect(JSON.parse(sanitizeCursorHookPayload('{"conversation_id":"c1","user_email":"a@b.c","prompt":"hi"}'))).toEqual({ conversation_id: 'c1', prompt: 'hi' });
   });
+
+  test('sanitizeCursorHookPayload: a prompt over 64 KB is cut at a code point, attachments over 64 KB dropped (M6)', () => {
+    const prompt = `${'x'.repeat(65_535)}好more`;
+    const stored = JSON.parse(sanitizeCursorHookPayload(JSON.stringify({ conversation_id: 'c1', prompt, attachments: [{ text: 'y'.repeat(70_000) }], user_email: 'a@b.c' })));
+    expect(stored).toEqual({ conversation_id: 'c1', prompt: 'x'.repeat(65_535), truncated: ['prompt', 'attachments'] });
+    const small = JSON.stringify({ conversation_id: 'c1', prompt: 'hi', attachments: [{ path: '/a' }] });
+    expect(sanitizeCursorHookPayload(small)).toBe(small);
+  });
 });
 
 describe('marks', () => {
@@ -95,11 +104,16 @@ describe('marks', () => {
     expect(statusOf(go([prompt(-1), ...finishedTurn(c)]))).toBe('idle');
   });
 
-  test('stop replaces a started mark; the records still decide (an open turn stays running)', () => {
+  test('stop replaces a started mark; a stop newer than every bubble → idle even while the records look open (M2)', () => {
     const c = new CursorConv({ id: ROOT });
     expect(statusOf(go([...finishedTurn(c), prompt(10), stop(11)]))).toBe('idle');
     const d = new CursorConv({ id: ROOT });
-    expect(statusOf(go([d.composer({ status: 'none' }), d.user('u1', 'go', 0), d.tool('t1', 'read_file', 'loading', 1), stop(2)]))).toBe('running');
+    const open = [d.composer({ status: 'none' }), d.user('u1', 'go', 0), d.tool('t1', 'read_file', 'loading', 1)];
+    expect(statusOf(go([...open, stop(2)]))).toBe('idle');
+    // A bubble newer than the stop: the records decide again.
+    expect(statusOf(go([...open, stop(2), d.text('a2', 'more', 3)]))).toBe('running');
+    // Any order of the same records and hooks gives the same status.
+    for (let seed = 1; seed <= 20; seed++) expect(statusOf(go(interleave([open, [stop(2)]], seed)))).toBe('idle');
   });
 
   test('sessionEnd → ended whatever the records; a later sessionStart / beforeSubmitPrompt resumes', () => {
@@ -179,13 +193,16 @@ describe('order independence and replay', () => {
     expect(statusOf(run(n, finishedTurn(new CursorConv({ id: ROOT }))))).toBe('idle');
   });
 
-  test('marks of sessions never seen are bounded: the oldest are dropped', () => {
+  test('marks of sessions never seen are bounded: the oldest are dropped from memory, and need a replay again (M1)', () => {
     const n = new CursorNormalizer();
     run(n, [end(1, { session: 'c-0' })]);
+    expect(n.needsPreSessionReplay('c-0')).toBe(true);
+    n.restorePreSession('c-0', [end(1, { session: 'c-0' })]);
+    expect(n.needsPreSessionReplay('c-0')).toBe(false);
     for (let i = 1; i <= 250; i++) run(n, [stop(2, { session: `c-${i}` })]);
-    expect(statusOf(run(n, finishedTurn(new CursorConv({ id: 'c-0' }))), 'c-0')).toBe('idle'); // its end mark was dropped
-    const m = new CursorNormalizer();
-    run(m, [end(1, { session: 'c-0' })]);
-    expect(statusOf(run(m, finishedTurn(new CursorConv({ id: 'c-0' }))), 'c-0')).toBe('ended');
+    // Dropped: the pipeline replays the stored hooks of c-0 before its next event (see pipeline-cursor-hooks).
+    expect(n.needsPreSessionReplay('c-0')).toBe(true);
+    n.restorePreSession('c-0', [end(1, { session: 'c-0' })]);
+    expect(statusOf(run(n, finishedTurn(new CursorConv({ id: 'c-0' }))), 'c-0')).toBe('ended');
   });
 });

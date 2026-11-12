@@ -53,7 +53,7 @@ describe('pipeline', () => {
 
   beforeEach(async () => {
     tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-pipeline-'));
-    config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), rescanMs: 200 });
+    config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), rescanMs: 200, cursorDbPath: null });
     await fs.mkdir(config.projectsDir, { recursive: true });
     store = openStore(':memory:');
     pipeline = new Pipeline(store, config);
@@ -1059,7 +1059,7 @@ describe('pipeline 与 Codex 文件源', () => {
   beforeEach(async () => {
     tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-pipeline-codex-'));
     codexDir = path.join(tmp, 'codex', 'sessions');
-    config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: codexDir });
+    config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: codexDir, cursorDbPath: null });
     await fs.mkdir(config.projectsDir, { recursive: true });
     await fs.mkdir(codexDir, { recursive: true });
     store = openStore(':memory:');

@@ -184,9 +184,12 @@ export class Pipeline {
     }
   }
 
-  /** True while the initial full scan or a rebuild is running, or a poll source's records are being ingested. */
+  /**
+   * True while the initial full scan or a rebuild is running, or while a poll source's records are being ingested before
+   * its first completed round (the first import; later rounds would make it flicker every few seconds).
+   */
   importing(): boolean {
-    return this.importDepth > 0 || this.pollIngests > 0;
+    return this.importDepth > 0 || (this.pollIngests > 0 && this.polls.some((p) => this.pollStatus(p.origin)?.lastPollAt === null));
   }
 
   /**

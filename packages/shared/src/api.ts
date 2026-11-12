@@ -8,13 +8,17 @@ export interface Diagnostics {
   /** Hook events received, by origin (ORIGINS order) then event name ascending; an event never received does not appear. */
   hookEvents: { origin: Origin; eventName: string; count: number; lastAt: string }[];
   /**
-   * path is the file's store key: relative to the projects directory with `/` separators (Codex files, later:
-   * `codex:` + the path relative to the Codex sessions directory; Cursor conversations: `cursor:<composerId>`).
+   * path is the file's store key: relative to the projects directory with `/` separators (Codex files: `codex:` + the
+   * path relative to the Codex sessions directory). Cursor conversations are never listed: they are read from a
+   * database, with no offsets (their keys, `cursor:<session>` / `cursor:<session>/<subagent>`, appear in ingestFailures).
    */
   files: { path: string; offset: number; size: number }[];
   /** Files (relative path) and hook sessions (`hook:<sessionId>`) whose last ingest attempt failed. */
   ingestFailures: { file: string; error: string; at: string }[];
-  /** True while the initial full scan or a rebuild is running. */
+  /**
+   * True while the initial full scan or a rebuild is running, or while a poll source (Cursor) stores records before its
+   * first completed round (its first import). Later polls do not count.
+   */
   importing: boolean;
   normalizerVersion: number;
   dbEpoch: string;
@@ -22,9 +26,10 @@ export interface Diagnostics {
   codex: { sessionsDir: string | null; sessionsDirExists: boolean };
   /**
    * Cursor's state database as configured (null: Cursor disabled) and whether it exists (stat only); lastPollAt /
-   * lastError: the Cursor poll source's last completed poll and last error (null when none ran or none failed).
+   * lastError: the Cursor poll source's last completed poll and last error (null when none ran or none failed);
+   * hasData: whether any Cursor records are stored (absent from servers before it existed).
    */
-  cursor: { dbPath: string | null; dbExists: boolean; lastPollAt: string | null; lastError: string | null };
+  cursor: { dbPath: string | null; dbExists: boolean; lastPollAt: string | null; lastError: string | null; hasData?: boolean };
 }
 
 export type SearchField = 'title' | 'id' | 'branch' | 'cwd' | 'prompt';

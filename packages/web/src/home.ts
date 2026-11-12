@@ -85,6 +85,15 @@ export function projectName(pathOrId: string): string {
   return parts[parts.length - 1] ?? pathOrId;
 }
 
+/** Display name of a Cursor project whose working directory could not be found (id `cursor-<workspaceId>`, spec 5.4). */
+export const CURSOR_UNKNOWN_DIR_NAME = 'Cursor（未知目录）';
+
+/** A project's display name: the last segment of its directory; a Cursor project without one is "Cursor（未知目录）". */
+export function projectTitle(project: Pick<Project, 'id' | 'cwd'>): string {
+  if (project.cwd === null && project.id.startsWith('cursor-')) return CURSOR_UNKNOWN_DIR_NAME;
+  return projectName(project.cwd ?? project.id);
+}
+
 const AVATARS = ['🚀', '🧩', '🛠️', '🌈', '🎯', '🪄', '🧪', '🎈'] as const;
 const HUES = [340, 265, 200, 160, 45, 20, 290, 130] as const;
 

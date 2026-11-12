@@ -21,7 +21,7 @@ let cwd: string;
 let project: string;
 
 async function setup(codexSessionsDir: string | null): Promise<void> {
-  config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir });
+  config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir, cursorDbPath: null });
   store = openStore(':memory:');
   pipeline = new Pipeline(store, config, { sources: fileSources(config, store) });
   app = buildServer({ store, pipeline, config });

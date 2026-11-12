@@ -198,6 +198,19 @@ test('status: prompt submitted → running; turn read to its end → idle; sessi
   expect(store.getSession('c1')!.status).toBe('ended');
 });
 
+test('a hook before the session exists still counts after 200 other unseen sessions got hooks; live = rebuild (M1)', async () => {
+  // Two hooks: the second one is applied after a replay of the first (c1's marks are then "restored").
+  await post(payload('stop', 'c1', { status: 'completed' }));
+  vi.setSystemTime(new Date(at(61)));
+  await post(payload('sessionEnd', 'c1', { reason: 'user_close' }));
+  for (let i = 0; i < 210; i++) await post(payload('sessionStart', `c-empty-${i}`));
+  const c = new CursorConv({ id: 'c1' });
+  await ingest(c, finishedTurn(c));
+  expect(store.getSession('c1')!.status).toBe('ended');
+  pipeline.rebuild();
+  expect(store.getSession('c1')!.status).toBe('ended');
+}, 30_000);
+
 test('a hook before the session exists counts once the records arrive, also after a restart', async () => {
   await post(payload('sessionEnd', 'c1', { reason: 'user_close' }));
   await close();

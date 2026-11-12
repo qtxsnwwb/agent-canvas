@@ -60,15 +60,22 @@ const diagnostics = async (): Promise<Diagnostics> => (await app.inject({ method
 test('/api/diagnostics cursor：配置的路径、文件是否存在；没有轮询来源时无轮询状态', async () => {
   const db = path.join(tmp, 'cursor', 'state.vscdb');
   setup(db);
-  expect((await diagnostics()).cursor).toEqual({ dbPath: db, dbExists: false, lastPollAt: null, lastError: null });
+  expect((await diagnostics()).cursor).toEqual({ dbPath: db, dbExists: false, lastPollAt: null, lastError: null, hasData: false });
   await fs.mkdir(path.dirname(db), { recursive: true });
   await fs.writeFile(db, '');
-  expect((await diagnostics()).cursor).toEqual({ dbPath: db, dbExists: true, lastPollAt: null, lastError: null });
+  expect((await diagnostics()).cursor).toEqual({ dbPath: db, dbExists: true, lastPollAt: null, lastError: null, hasData: false });
+});
+
+test('/api/diagnostics cursor：hasData 在存有 Cursor 记录后为 true（M7）', async () => {
+  setup(null);
+  expect((await diagnostics()).cursor.hasData).toBe(false);
+  store.insertRaw({ source: 'transcript', origin: 'cursor', file: 'cursor:c1/s1', offset: 0, line: '{}', recordType: 'composer', sessionId: 'c1', agentId: 's1', projectId: 'p' });
+  expect((await diagnostics()).cursor.hasData).toBe(true);
 });
 
 test('/api/diagnostics cursor：Cursor 关闭时 dbPath 为 null', async () => {
   setup(null);
-  expect((await diagnostics()).cursor).toEqual({ dbPath: null, dbExists: false, lastPollAt: null, lastError: null });
+  expect((await diagnostics()).cursor).toEqual({ dbPath: null, dbExists: false, lastPollAt: null, lastError: null, hasData: false });
 });
 
 test('/api/diagnostics cursor：轮询状态来自 cursor 轮询来源', async () => {
@@ -98,5 +105,5 @@ test('/api/diagnostics cursor：轮询来源的 status() 抛错时仍返回 200�
   setup(null, [fake]);
   const res = await app.inject({ method: 'GET', url: '/api/diagnostics' });
   expect(res.statusCode).toBe(200);
-  expect((res.json() as Diagnostics).cursor).toEqual({ dbPath: null, dbExists: false, lastPollAt: null, lastError: 'status broke' });
+  expect((res.json() as Diagnostics).cursor).toEqual({ dbPath: null, dbExists: false, lastPollAt: null, lastError: 'status broke', hasData: false });
 });
