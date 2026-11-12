@@ -1,4 +1,4 @@
-# claude-canvas 里程碑 3（子代理拓扑）实现计划
+# agent-canvas 里程碑 3（子代理拓扑）实现计划
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -8,7 +8,7 @@
 
 **Tech Stack:** 无新增依赖。
 
-**Spec:** `docs/superpowers/specs/2026-11-10-claude-canvas-design.md`（7.2 "子代理是可展开的容器节点"、7.3 的"拓扑"一行、12 节第 3 项）
+**Spec:** `docs/superpowers/specs/2026-11-10-agent-canvas-design.md`（7.2 "子代理是可展开的容器节点"、7.3 的"拓扑"一行、12 节第 3 项）
 
 **范围说明：** 只做里程碑 3。因果视角（里程碑 4）、复盘（里程碑 5）不在内；视角切换栏本里程碑只有"实时""拓扑"两项。
 

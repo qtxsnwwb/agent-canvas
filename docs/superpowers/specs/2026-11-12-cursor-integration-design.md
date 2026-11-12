@@ -2,7 +2,7 @@
 
 - 日期：2026-11-12
 - 状态：已实现（2026-11-12）。实现过程中在真实数据上发现的事实和由此做的改动见文末“实现修订”，与正文冲突处以修订为准。
-- 前置：`2026-11-10-claude-canvas-design.md`（主规格）、`2026-11-11-codex-integration-design.md`（Codex 规格）。本文只写新增和改动的部分。
+- 前置：`2026-11-10-agent-canvas-design.md`（主规格）、`2026-11-11-codex-integration-design.md`（Codex 规格）。本文只写新增和改动的部分。
 
 ## 1. 目标
 
@@ -86,7 +86,7 @@ Cursor hooks ──> hook-forward ──> POST /hooks?origin=cursor ──┘（
 ### 5.1 打开方式
 
 - 用 better-sqlite3 以 `readonly` 打开，设置 `query_only`、`busy_timeout = 1000`。只做自动提交的短查询（按主键或主键范围），不开显式事务，不写入，不执行 `VACUUM` / `checkpoint`。
-- 路径：环境变量 `CLAUDE_CANVAS_CURSOR_DB`；默认 Windows `%APPDATA%\Cursor\User\globalStorage\state.vscdb`，macOS `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`，Linux `~/.config/Cursor/User/globalStorage/state.vscdb`。空字符串表示关闭。文件不存在时视为没装 Cursor，不轮询、不报错。
+- 路径：环境变量 `AGENT_CANVAS_CURSOR_DB`；默认 Windows `%APPDATA%\Cursor\User\globalStorage\state.vscdb`，macOS `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`，Linux `~/.config/Cursor/User/globalStorage/state.vscdb`。空字符串表示关闭。文件不存在时视为没装 Cursor，不轮询、不报错。
 - 打开失败、表或列不存在、查询超时：记入诊断的 `lastError`，下个周期重试；不影响其他来源。
 
 ### 5.2 轮询周期
@@ -152,7 +152,7 @@ Cursor 的 hooks 是同步执行的，其中一类“权限 hooks”（`preToolU
 
 ### 7.2 安装
 
-`hooks install --cursor` / `hooks uninstall --cursor`，写 `~/.cursor/hooks.json`（`--settings <文件>` 或环境变量 `CLAUDE_CANVAS_CURSOR_HOOKS_FILE` 可改），文件不存在时新建，`~/.cursor` 不存在时视为没装 Cursor、不做改动。其余行为和现有的安装器一致：写入前列出改动并询问、先备份、只追加、只移除本安装本端口的条目、遇到不寻常的文件拒绝写入。
+`hooks install --cursor` / `hooks uninstall --cursor`，写 `~/.cursor/hooks.json`（`--settings <文件>` 或环境变量 `AGENT_CANVAS_CURSOR_HOOKS_FILE` 可改），文件不存在时新建，`~/.cursor` 不存在时视为没装 Cursor、不做改动。其余行为和现有的安装器一致：写入前列出改动并询问、先备份、只追加、只移除本安装本端口的条目、遇到不寻常的文件拒绝写入。
 
 安装 5 个事件，都是观察类：
 

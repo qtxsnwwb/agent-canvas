@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import type { Origin } from '@claude-canvas/shared';
+import type { Origin } from '@agent-canvas/shared';
 import { NormalizerRegistry } from '../src/normalize/registry.js';
 import type { AgentNormalizer, NormalizeResult } from '../src/normalize/types.js';
 import type { RawEvent } from '../src/store/store.js';

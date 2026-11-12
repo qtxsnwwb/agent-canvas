@@ -6,7 +6,7 @@ export interface Lock {
 }
 
 export function lockPath(dataDir: string): string {
-  return path.join(dataDir, 'claude-canvas.lock');
+  return path.join(dataDir, 'agent-canvas.lock');
 }
 
 function isAlive(pid: number): boolean {
@@ -28,7 +28,7 @@ function readHolder(file: string): { pid: number } | null {
 }
 
 /**
- * Takes `<dataDir>/claude-canvas.lock` (pid and start time), shared by `start` and `rebuild`. Throws when another
+ * Takes `<dataDir>/agent-canvas.lock` (pid and start time), shared by `start` and `rebuild`. Throws when another
  * live process holds it; a lock left by a process that is no longer running is taken over.
  */
 export function acquireLock(dataDir: string): Lock {
@@ -48,7 +48,7 @@ export function acquireLock(dataDir: string): Lock {
     }
     const holder = readHolder(file);
     if (holder !== null && isAlive(holder.pid)) {
-      throw new Error(`claude-canvas is already running with this data directory (pid ${holder.pid}); lock file: ${file}`);
+      throw new Error(`agent-canvas is already running with this data directory (pid ${holder.pid}); lock file: ${file}`);
     }
     fs.rmSync(file, { force: true }); // stale (holder gone) or unreadable: take it over
   }

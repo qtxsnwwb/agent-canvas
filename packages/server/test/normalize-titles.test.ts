@@ -1,5 +1,5 @@
 import { beforeEach, expect, test } from 'vitest';
-import type { Change } from '@claude-canvas/shared';
+import type { Change } from '@agent-canvas/shared';
 import { Normalizer } from '../src/normalize/normalizer.js';
 import { hook, rawLine, run, userPrompt } from './fixtures.js';
 

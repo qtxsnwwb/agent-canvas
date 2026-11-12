@@ -1,5 +1,5 @@
 import fsp from 'node:fs/promises';
-import { STALE_AFTER_MS, type Change, type Origin, type SeqChange } from '@claude-canvas/shared';
+import { STALE_AFTER_MS, type Change, type Origin, type SeqChange } from '@agent-canvas/shared';
 import type { Config } from './config.js';
 import { NORMALIZER_FACTORIES, NormalizerRegistry, type NormalizerFactories } from './normalize/registry.js';
 import type { BatchItem } from './normalize/types.js';
@@ -219,7 +219,7 @@ export class Pipeline {
     if (last !== undefined && now - last < LOG_EVERY_MS) return;
     this.lastLogged.set(key, now);
     const what = isNonFileKey(key) ? key : this.rel(key);
-    this.log(`claude-canvas: ingest failed: ${what}: ${error}`);
+    this.log(`agent-canvas: ingest failed: ${what}: ${error}`);
   }
 
   onChanges(listener: Listener): () => void {

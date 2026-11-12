@@ -1,4 +1,4 @@
-import { SEARCH_MAX_CHARS, SEARCH_MIN_CHARS, type SearchHit } from '@claude-canvas/shared';
+import { SEARCH_MAX_CHARS, SEARCH_MIN_CHARS, type SearchHit } from '@agent-canvas/shared';
 
 export const SEARCH_DEBOUNCE_MS = 250;
 

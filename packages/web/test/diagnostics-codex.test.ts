@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import type { Diagnostics } from '@claude-canvas/shared';
+import type { Diagnostics } from '@agent-canvas/shared';
 import { codexDirLine, EXPECTED_CODEX_HOOK_EVENTS, hooksByOrigin } from '../src/diagnostics';
 
 const base: Diagnostics = {

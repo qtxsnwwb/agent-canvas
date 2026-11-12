@@ -1,11 +1,11 @@
-# claude-canvas 设计规格
+# agent-canvas 设计规格
 
 - 日期：2026-11-10
 - 状态：待评审
 
 ## 1. 目标
 
-Claude Code 执行任务时，过程对使用者不透明。claude-canvas 是一个本地常驻服务，提供一个固定地址的网页，使用者在页面上选择项目和会话，以画布（节点图）的形式查看该会话的执行进程。
+Claude Code 执行任务时，过程对使用者不透明。agent-canvas 是一个本地常驻服务，提供一个固定地址的网页，使用者在页面上选择项目和会话，以画布（节点图）的形式查看该会话的执行进程。
 
 要满足四类需求，优先级从高到低：
 
@@ -197,7 +197,7 @@ subagent 节点另有 `childAgentId`：它派出的代理的 id（元数据到�
 
 ## 5. 存储
 
-SQLite，单文件，WAL 模式，位置 `~/.claude-canvas/data.db`。WAL 检查点由独立的工作线程（单独的连接，`PASSIVE`）每秒做一次，主连接关闭自动检查点，避免导入期间事件循环被检查点卡住。
+SQLite，单文件，WAL 模式，位置 `~/.agent-canvas/data.db`。WAL 检查点由独立的工作线程（单独的连接，`PASSIVE`）每秒做一次，主连接关闭自动检查点，避免导入期间事件循环被检查点卡住。
 
 | 表 | 内容 |
 |---|---|
@@ -219,7 +219,7 @@ SQLite，单文件，WAL 模式，位置 `~/.claude-canvas/data.db`。WAL 检查
 - 每个读取片段（原始行、未识别统计、派生变更、偏移）在一个事务里写入；hook 和 meta 的写入同样。进程中途被杀时，一个片段要么全部在库里，要么全不在。
 - 归一化规则有版本号 `NORMALIZER_VERSION`，`meta` 记录派生表是用哪个版本建的。`start` 发现版本不同，或上次重建没完成（`rebuild_in_progress` 仍在），会在监听前先重建并打印原因；全新的空库只记下当前版本。
 - 重建逐个会话进行：分页重放该会话的原始记录，提交该会话自己的事务，释放内存再处理下一个，内存峰值只取决于最大的单个会话；`unknown_stat` 一并重新统计。
-- `start` 与 `rebuild` 共用锁文件 `<数据目录>/claude-canvas.lock`（pid 和启动时间）：持有者还活着时以退出码 1 退出并给出它的 pid；持有者已不存在时接管。正常退出时释放。
+- `start` 与 `rebuild` 共用锁文件 `<数据目录>/agent-canvas.lock`（pid 和启动时间）：持有者还活着时以退出码 1 退出并给出它的 pid；持有者已不存在时接管。正常退出时释放。
 
 ## 6. 接口
 
@@ -323,10 +323,10 @@ WebSocket `/ws`：
 
 ## 10. 安装与运行
 
-- `claude-canvas start`：启动服务，默认地址 `http://127.0.0.1:4317`，端口可用参数覆盖。
-- `claude-canvas hooks install`：向 `~/.claude/settings.json` 追加本项目的 hooks。写入前打印将要添加的内容并要求确认；只追加，不改动已有 hooks；写入前备份原文件。
-- `claude-canvas hooks uninstall`：只移除指向本服务地址的 hooks。
-- `claude-canvas rebuild`：由原始表重建派生表，向 stderr 打印进度。与 `start` 互斥（锁文件，见第 5 节）。
+- `agent-canvas start`：启动服务，默认地址 `http://127.0.0.1:4317`，端口可用参数覆盖。
+- `agent-canvas hooks install`：向 `~/.claude/settings.json` 追加本项目的 hooks。写入前打印将要添加的内容并要求确认；只追加，不改动已有 hooks；写入前备份原文件。
+- `agent-canvas hooks uninstall`：只移除指向本服务地址的 hooks。
+- `agent-canvas rebuild`：由原始表重建派生表，向 stderr 打印进度。与 `start` 互斥（锁文件，见第 5 节）。
 
 首次启动时，服务对 `~/.claude/projects/` 下已有的全部 transcript 做一次全量导入，之后转为增量。升级后归一化版本变化时，`start` 会先自动重建。
 

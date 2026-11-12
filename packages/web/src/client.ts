@@ -10,7 +10,7 @@ import {
   type SearchHit,
   type ServerMessage,
   type Session,
-} from '@claude-canvas/shared';
+} from '@agent-canvas/shared';
 
 const RECONNECT_MS = 1000;
 

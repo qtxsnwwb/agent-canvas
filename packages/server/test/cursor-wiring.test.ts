@@ -32,7 +32,7 @@ afterEach(async () => {
 });
 
 test('the test environment never points at the real Cursor database', () => {
-  expect(process.env.CLAUDE_CANVAS_CURSOR_DB).toBe('');
+  expect(process.env.AGENT_CANVAS_CURSOR_DB).toBe('');
   expect(loadConfig(process.env).cursorDbPath).toBeNull();
 });
 

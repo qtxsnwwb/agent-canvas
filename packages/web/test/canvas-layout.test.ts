@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest';
 import ELK from 'elkjs/lib/elk.bundled.js';
-import { emptyGraph, type Graph, type GraphEdge, type GraphNode, type NodeKind } from '@claude-canvas/shared';
+import { emptyGraph, type Graph, type GraphEdge, type GraphNode, type NodeKind } from '@agent-canvas/shared';
 import { agentGroupKey, buildView, type AgentGroup, type CanvasView } from '../src/canvas/view';
 import {
   groupInput, layoutTurn, placeAgentGroups, wrapColumns, wrapTurns, turnInput, turnSignature, COLUMN_GAP, ROW_WIDTH, TURN_GAP, TURN_GAP_X, TURN_HEADER,

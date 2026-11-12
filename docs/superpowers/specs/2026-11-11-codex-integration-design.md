@@ -2,7 +2,7 @@
 
 - 日期：2026-11-11
 - 状态：待评审
-- 前置：`2026-11-10-claude-canvas-design.md`（下称"主规格"）。本文只写新增和改动的部分。
+- 前置：`2026-11-10-agent-canvas-design.md`（下称"主规格"）。本文只写新增和改动的部分。
 
 ## 1. 目标
 
@@ -108,7 +108,7 @@ POST /hooks（两种来源）────────────────┘
 
 ## 5. Codex 文件源
 
-- 新配置 `codexSessionsDir`，默认 `~/.codex/sessions`，环境变量 `CLAUDE_CANVAS_CODEX_DIR`；设为空字符串表示不接 Codex。目录不存在时静默跳过。
+- 新配置 `codexSessionsDir`，默认 `~/.codex/sessions`，环境变量 `AGENT_CANVAS_CODEX_DIR`；设为空字符串表示不接 Codex。目录不存在时静默跳过。
 - 发现文件：监视该目录（深度 4：年/月/日/文件），加上和 Claude 文件源相同的定时复查与全量扫描。
 - 一个文件属于哪个会话，文件名里只有线程 id，要读第一行 `session_meta` 才知道根线程和父线程。读到之前不处理这个文件的其他行；第一行不是 `session_meta` 的文件记入诊断页的"导入失败"。
 - 映射：会话 id = `session_meta.session_id`（根线程）；主线程的 `agentId` 为空；子代理线程的 `agentId` = 它的线程 id。
@@ -156,7 +156,7 @@ POST /hooks（两种来源）────────────────┘
 Codex 不能直接发 HTTP，所以加一个子命令：
 
 ```
-node <claude-canvas>/packages/server/dist/cli.js hook-forward --origin codex --port 4317
+node <agent-canvas>/packages/server/dist/cli.js hook-forward --origin codex --port 4317
 ```
 
 它从标准输入读一段 JSON，原样 POST 到 `http://127.0.0.1:<port>/hooks?origin=codex`，然后退出。要求：
@@ -172,7 +172,7 @@ node <claude-canvas>/packages/server/dist/cli.js hook-forward --origin codex --p
 - 每条 hook：`type: command`，`command` 和 `commandWindows` 都写（用绝对路径指向当前安装的 `node` 和 `cli.js`），`async: true`，`timeout: 5`；`SessionEnd`、`Interrupt` 是 `timeout: 3`（Codex 对这两个事件最多允许 3 秒，而且不管 `async` 都同步运行）。
 - 认哪些条目是本安装的：从命令里解析出 `cli.js` 的路径比较（Windows 上不分大小写），其后是 `hook-forward`，端口相同（`--port n`、`--port=n`，不写为 4317）。本安装的条目但命令里的 `node` 不是当前的（例如升级 node 后），报告为过期，install 在同一次写入里替换。
 - 沿用现有安装流程的全部保护：先列出改动、确认、备份、只追加不改动已有内容、遇到不寻常的文件拒绝写入。文件不存在时新建。
-- 安装成功后明确提示：**需要在 Codex 里确认信任这些 hooks 才会生效**（桌面应用"设置 → Hooks"，CLI 里 `/hooks`）；升级 claude-canvas 后如果命令路径变了，要重新安装并重新确认。
+- 安装成功后明确提示：**需要在 Codex 里确认信任这些 hooks 才会生效**（桌面应用"设置 → Hooks"，CLI 里 `/hooks`）；升级 agent-canvas 后如果命令路径变了，要重新安装并重新确认。
 
 ### 7.3 接收
 
@@ -219,7 +219,7 @@ node <claude-canvas>/packages/server/dist/cli.js hook-forward --origin codex --p
 - 存储迁移：从旧结构的库打开后，老数据的来源都是 `claude`，hook 统计不丢。
 - 转发程序：服务没启动、超时、输入不是 JSON 时都以 0 退出且无输出。
 - 安装：沿用现有安装测试的全部场景，目标换成 `hooks.json`；任何测试和手动运行都不读写真实的 `~/.codex/hooks.json`。
-- 测试和测试服务一律用临时目录（`CLAUDE_CANVAS_CODEX_DIR`、`CLAUDE_CANVAS_PROJECTS_DIR`、`CLAUDE_CANVAS_DATA_DIR`）。查看真实 Codex 数据只看结构和数量，不看内容。
+- 测试和测试服务一律用临时目录（`AGENT_CANVAS_CODEX_DIR`、`AGENT_CANVAS_PROJECTS_DIR`、`AGENT_CANVAS_DATA_DIR`）。查看真实 Codex 数据只看结构和数量，不看内容。
 
 ## 11. 里程碑
 

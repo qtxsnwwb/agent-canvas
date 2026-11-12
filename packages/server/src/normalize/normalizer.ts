@@ -7,7 +7,7 @@ import {
   type NodeDetail,
   type NodeStatus,
   type Session,
-} from '@claude-canvas/shared';
+} from '@agent-canvas/shared';
 import type { RawEvent } from '../store/store.js';
 import { parseHook, type HookDescription, type HookNodeEffect } from './hooks.js';
 import { summarize } from './summary.js';

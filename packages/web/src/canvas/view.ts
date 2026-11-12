@@ -1,4 +1,4 @@
-import type { EdgeKind, Graph, GraphNode } from '@claude-canvas/shared';
+import type { EdgeKind, Graph, GraphNode } from '@agent-canvas/shared';
 
 export const EXPANDED_RECENT_TURNS = 3;
 export const PRELUDE_TURN = '__prelude__';

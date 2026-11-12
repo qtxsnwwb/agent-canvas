@@ -13,7 +13,7 @@ import {
 } from '../src/hooks-config.js';
 
 const NODE = '/usr/local/bin/node';
-const CLI = '/opt/claude canvas/packages/server/dist/cli.js';
+const CLI = '/opt/agent canvas/packages/server/dist/cli.js';
 const target = (port = 4317, cliPath = CLI, nodePath = NODE, platform: NodeJS.Platform = 'linux') => codexHookTarget({ nodePath, cliPath, port, platform });
 const timeoutOf = (e: string): number => (e === 'SessionEnd' || e === 'Interrupt' ? 3 : 5);
 
@@ -38,10 +38,10 @@ test('Windows 引用：双引号包住，反斜杠原样', () => {
 
 test('命令：当前 node 的绝对路径 + 本安装的 cli.js + hook-forward --origin codex --port <n>', () => {
   const c = codexForwardCommands({ nodePath: NODE, cliPath: CLI, port: 4400 });
-  expect(c.command).toBe("'/usr/local/bin/node' '/opt/claude canvas/packages/server/dist/cli.js' hook-forward --origin codex --port 4400");
-  const w = codexForwardCommands({ nodePath: 'C:\\Program Files\\nodejs\\node.exe', cliPath: 'D:\\My Tools\\claude-canvas\\packages\\server\\dist\\cli.js', port: 4317 });
-  expect(w.commandWindows).toBe('"C:\\Program Files\\nodejs\\node.exe" "D:\\My Tools\\claude-canvas\\packages\\server\\dist\\cli.js" hook-forward --origin codex --port 4317');
-  expect(w.command).toBe("'C:\\Program Files\\nodejs\\node.exe' 'D:\\My Tools\\claude-canvas\\packages\\server\\dist\\cli.js' hook-forward --origin codex --port 4317");
+  expect(c.command).toBe("'/usr/local/bin/node' '/opt/agent canvas/packages/server/dist/cli.js' hook-forward --origin codex --port 4400");
+  const w = codexForwardCommands({ nodePath: 'C:\\Program Files\\nodejs\\node.exe', cliPath: 'D:\\My Tools\\agent-canvas\\packages\\server\\dist\\cli.js', port: 4317 });
+  expect(w.commandWindows).toBe('"C:\\Program Files\\nodejs\\node.exe" "D:\\My Tools\\agent-canvas\\packages\\server\\dist\\cli.js" hook-forward --origin codex --port 4317');
+  expect(w.command).toBe("'C:\\Program Files\\nodejs\\node.exe' 'D:\\My Tools\\agent-canvas\\packages\\server\\dist\\cli.js' hook-forward --origin codex --port 4317");
 });
 
 test('空文件：每个事件一条 command hook，没有 matcher，async；timeout 5（SessionEnd、Interrupt 是 3：Codex 最多允许 3 秒）', () => {

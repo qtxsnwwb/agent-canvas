@@ -1,4 +1,4 @@
-import type { NodeDetail } from '@claude-canvas/shared';
+import type { NodeDetail } from '@agent-canvas/shared';
 
 export const DETAIL_MAX_CHARS = 200_000;
 

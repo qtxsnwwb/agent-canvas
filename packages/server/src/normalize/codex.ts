@@ -5,7 +5,7 @@ import {
   type GraphNode,
   type NodeDetail,
   type Session,
-} from '@claude-canvas/shared';
+} from '@agent-canvas/shared';
 import type { RawEvent } from '../store/store.js';
 import { parseCodexHook, type CodexHook } from './codex-hooks.js';
 import { summarize } from './summary.js';

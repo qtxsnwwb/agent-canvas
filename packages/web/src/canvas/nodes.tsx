@@ -1,6 +1,6 @@
 import { createContext, memo, useContext, type CSSProperties, type MouseEvent, type ReactNode } from 'react';
 import { Handle, Position, type Node, type NodeProps, type NodeTypes } from '@xyflow/react';
-import type { GraphNode, NodeKind, NodeStatus } from '@claude-canvas/shared';
+import type { GraphNode, NodeKind, NodeStatus } from '@agent-canvas/shared';
 import { NODE_STATUS_LABEL } from '../labels';
 import { formatDuration, nodeAriaLabel } from './format';
 import { THINKING_NOT_RECORDED } from './reasoning';

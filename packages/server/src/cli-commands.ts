@@ -39,21 +39,21 @@ export interface Running {
 }
 
 const USAGE = `Usage:
-  claude-canvas start [--port <n>]   Watch transcripts and serve the canvas
-  claude-canvas rebuild              Re-derive the graph from the stored raw log
-  claude-canvas hooks install [--port <n>] [--yes] [--settings <file>]
-                                     Add the claude-canvas hooks to Claude Code's settings.json
-  claude-canvas hooks uninstall [--port <n>] [--yes] [--settings <file>]
+  agent-canvas start [--port <n>]   Watch transcripts and serve the canvas
+  agent-canvas rebuild              Re-derive the graph from the stored raw log
+  agent-canvas hooks install [--port <n>] [--yes] [--settings <file>]
+                                     Add the agent-canvas hooks to Claude Code's settings.json
+  agent-canvas hooks uninstall [--port <n>] [--yes] [--settings <file>]
                                      Remove them again
-  claude-canvas hooks install --codex [--port <n>] [--yes] [--settings <file>]
+  agent-canvas hooks install --codex [--port <n>] [--yes] [--settings <file>]
                                      Add the forwarding hooks to Codex's ~/.codex/hooks.json
-  claude-canvas hooks uninstall --codex [--port <n>] [--yes] [--settings <file>]
+  agent-canvas hooks uninstall --codex [--port <n>] [--yes] [--settings <file>]
                                      Remove them again
-  claude-canvas hooks install --cursor [--port <n>] [--yes] [--settings <file>]
+  agent-canvas hooks install --cursor [--port <n>] [--yes] [--settings <file>]
                                      Add the forwarding hooks to Cursor's ~/.cursor/hooks.json
-  claude-canvas hooks uninstall --cursor [--port <n>] [--yes] [--settings <file>]
+  agent-canvas hooks uninstall --cursor [--port <n>] [--yes] [--settings <file>]
                                      Remove them again
-  claude-canvas hook-forward [--origin <claude|codex|cursor>] [--port <n>]
+  agent-canvas hook-forward [--origin <claude|codex|cursor>] [--port <n>]
                                      Forward one hook payload from stdin to the server (run by Codex / Cursor)
 `;
 
@@ -140,7 +140,7 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
     });
     const reason = rebuildReason(store);
     if (reason !== null) {
-      options.log?.(`claude-canvas rebuilding derived data (reason: ${reason})`);
+      options.log?.(`agent-canvas rebuilding derived data (reason: ${reason})`);
       pipeline.rebuild(options.progress);
     }
     app = buildServer({ store, pipeline, config });
@@ -263,7 +263,7 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
         log: (line) => console.log(line),
         progress: (done, total) => process.stderr.write(`rebuild: ${done}/${total} sessions\n`),
       });
-      console.log(`claude-canvas listening on ${app.url}`);
+      console.log(`agent-canvas listening on ${app.url}`);
       process.once('SIGINT', () => {
         void app.close().then(
           () => process.exit(0),
@@ -275,7 +275,7 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
     if (command === 'rebuild') {
       parseArgs({ args: rest, options: {}, allowPositionals: false });
       rebuild({}, { progress: (done, total) => process.stderr.write(`rebuild: ${done}/${total} sessions\n`) });
-      console.log('claude-canvas rebuild complete');
+      console.log('agent-canvas rebuild complete');
       return 0;
     }
   } catch (err) {

@@ -12,9 +12,9 @@ import {
 } from '../src/hooks-config.js';
 
 const NODE = '/usr/local/bin/node';
-const CLI = '/opt/claude canvas/packages/server/dist/cli.js';
+const CLI = '/opt/agent canvas/packages/server/dist/cli.js';
 const WNODE = 'C:\\Program Files\\nodejs\\node.exe';
-const WCLI = 'D:\\My Tools\\claude-canvas\\packages\\server\\dist\\cli.js';
+const WCLI = 'D:\\My Tools\\agent-canvas\\packages\\server\\dist\\cli.js';
 const posix = (port = 4317, cliPath = CLI, nodePath = NODE) => ({ nodePath, cliPath, port, platform: 'linux' as const });
 const win = (port = 4317, cliPath = WCLI, nodePath = WNODE) => ({ nodePath, cliPath, port, platform: 'win32' as const });
 
@@ -25,9 +25,9 @@ test('五个事件，顺序固定；超时 5 秒', () => {
 
 test('命令：Windows 是 PowerShell 的调用形式 & "<node>" "<cli.js>"；其他平台是单引号的普通命令行', () => {
   expect(cursorForwardCommand(win())).toBe(
-    '& "C:\\Program Files\\nodejs\\node.exe" "D:\\My Tools\\claude-canvas\\packages\\server\\dist\\cli.js" hook-forward --origin cursor --port 4317',
+    '& "C:\\Program Files\\nodejs\\node.exe" "D:\\My Tools\\agent-canvas\\packages\\server\\dist\\cli.js" hook-forward --origin cursor --port 4317',
   );
-  expect(cursorForwardCommand(posix(4400))).toBe("'/usr/local/bin/node' '/opt/claude canvas/packages/server/dist/cli.js' hook-forward --origin cursor --port 4400");
+  expect(cursorForwardCommand(posix(4400))).toBe("'/usr/local/bin/node' '/opt/agent canvas/packages/server/dist/cli.js' hook-forward --origin cursor --port 4400");
 });
 
 test('PowerShell 引用：双引号内 ` $ " 用反引号转义；拆分能还原', () => {

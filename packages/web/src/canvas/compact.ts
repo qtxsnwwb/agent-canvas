@@ -1,4 +1,4 @@
-import { SUMMARY_MAX, type EdgeKind, type Graph, type GraphEdge, type GraphNode } from '@claude-canvas/shared';
+import { SUMMARY_MAX, type EdgeKind, type Graph, type GraphEdge, type GraphNode } from '@agent-canvas/shared';
 
 /** A run node stands for at least this many calls. */
 export const RUN_MIN = 3;

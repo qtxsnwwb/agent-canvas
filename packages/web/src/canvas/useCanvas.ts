@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
-import type { Graph, Usage } from '@claude-canvas/shared';
+import type { Graph, Usage } from '@agent-canvas/shared';
 import type { LiveSession } from '../client';
 import { createThrottle } from '../throttle';
 import { groupInput, placeAgentGroups, wrapTurns, turnInput, type Box, type TurnLayout } from './layout';
@@ -575,7 +575,7 @@ export function createCanvasModel(
 }
 
 /** The viewer's "精简 / 完整" choice, remembered in this browser. */
-const COMPACT_KEY = 'claude-canvas.compact';
+const COMPACT_KEY = 'agent-canvas.compact';
 function readCompactPreference(): boolean {
   try { return window.localStorage.getItem(COMPACT_KEY) !== '0'; } catch { return true; }
 }

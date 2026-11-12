@@ -1,5 +1,5 @@
 import { memo, useEffect, useMemo, useRef, useSyncExternalStore, type CSSProperties, type MouseEvent } from 'react';
-import type { Graph } from '@claude-canvas/shared';
+import type { Graph } from '@agent-canvas/shared';
 import type { LiveSession } from '../client';
 import { NODE_STATUS_LABEL } from '../labels';
 import { useNow } from '../useNow';

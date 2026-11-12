@@ -1,5 +1,5 @@
 import { beforeEach, afterEach, expect, test, vi } from 'vitest';
-import type { Change, GraphNode, Session, SessionStatus } from '@claude-canvas/shared';
+import type { Change, GraphNode, Session, SessionStatus } from '@agent-canvas/shared';
 import { CHANGE_LOG_MAX_ROWS, HOOK_STAT_BACKFILL_NOTICE, HOOK_STAT_BACKFILL_SELECT, openStore, type Store } from '../src/store/store.js';
 import { SCHEMA_SQL } from '../src/store/schema.js';
 

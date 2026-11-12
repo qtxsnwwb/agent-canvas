@@ -1,4 +1,4 @@
-# claude-canvas 里程碑 6（诊断与安装）实现计划
+# agent-canvas 里程碑 6（诊断与安装）实现计划
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -8,22 +8,22 @@
 
 **Tech Stack:** 无新增依赖（确认提示用 `node:readline`）。
 
-**Spec:** `docs/superpowers/specs/2026-11-10-claude-canvas-design.md`（7.1 诊断页、第 10 节的 `hooks install` / `hooks uninstall`、4.3 关于 stale 的最后一句、12 节第 6 项）
+**Spec:** `docs/superpowers/specs/2026-11-10-agent-canvas-design.md`（7.1 诊断页、第 10 节的 `hooks install` / `hooks uninstall`、4.3 关于 stale 的最后一句、12 节第 6 项）
 
 ## Global Constraints
 
 - 里程碑 2–5 计划的 Global Constraints 继续适用；本里程碑允许改 `packages/server`。
-- **任何测试都不得读写真实的 `~/.claude/settings.json`。** settings 路径可由 `--settings <路径>` 和环境变量 `CLAUDE_CANVAS_SETTINGS_FILE` 覆盖，测试一律指向临时文件。
+- **任何测试都不得读写真实的 `~/.claude/settings.json`。** settings 路径可由 `--settings <路径>` 和环境变量 `AGENT_CANVAS_SETTINGS_FILE` 覆盖，测试一律指向临时文件。
 - `hooks install` 只追加，不修改、不重排、不删除 settings 里已有的任何内容；写入前必须备份；写入必须是"写临时文件再改名"。
 - settings 不是合法 JSON、或结构不是预期形状时，不写入任何东西，以退出码 1 报错。
 - 诊断页不得把未识别记录的样例直接铺在页面上（样例含对话原文）：默认收起，点击才展开。
 
 ## Review Focus
 
-1. **settings 已有别人的 hooks。** 同一事件下已有其他命令型 hook、带 `matcher` 的条目、甚至另一个端口的 claude-canvas hook。期望：原有条目逐字节保留（顺序、字段都不变），只在该事件数组末尾追加一项；重复执行不产生重复项。（测试在 Task 1）
+1. **settings 已有别人的 hooks。** 同一事件下已有其他命令型 hook、带 `matcher` 的条目、甚至另一个端口的 agent-canvas hook。期望：原有条目逐字节保留（顺序、字段都不变），只在该事件数组末尾追加一项；重复执行不产生重复项。（测试在 Task 1）
 2. **settings 形状异常。** 文件不存在、空文件、不是对象、`hooks` 不是对象、某事件的值不是数组、带 BOM、CRLF 换行。期望：不存在或空文件视为 `{}`；BOM 和 CRLF 能读，写回时保持原换行风格；形状不对时报错且不写。（测试在 Task 1、Task 2）
 3. **确认环节被绕过。** 非交互终端（管道、CI）里没有 `--yes`。期望：不写入，提示需要 `--yes`，退出码 1。（测试在 Task 2）
-4. **卸载误删。** 期望：只删 `type` 为 `http` 且 `url` 恰好等于本服务地址（按 `--port`）的 hook；删空的条目和事件键一并移除，其余原样；别的端口的 claude-canvas hook 不动。（测试在 Task 1）
+4. **卸载误删。** 期望：只删 `type` 为 `http` 且 `url` 恰好等于本服务地址（按 `--port`）的 hook；删空的条目和事件键一并移除，其余原样；别的端口的 agent-canvas hook 不动。（测试在 Task 1）
 5. **标题来源互相覆盖。** 自定义标题、代理名、hook 带来的标题、首条提示先后到达且顺序不定。期望：按固定优先级取值，低优先级的后到不覆盖高优先级的；重放结果相同。（测试在 Task 4）
 
 ---
@@ -74,7 +74,7 @@ test('重复安装不产生重复项', () => {
   expect(twice.alreadyPresent).toEqual([...HOOK_EVENTS]);
   expect(twice.next).toEqual(once);
 });
-test('另一个端口的 claude-canvas hook 不算已存在，也不被改动', () => {});
+test('另一个端口的 agent-canvas hook 不算已存在，也不被改动', () => {});
 test('HOOK_EVENTS 与 docs/hooks-snippet.json 的事件一致', () => {});
 test.each([[[], 'settings'], ['x', 'settings'], [{ hooks: [] }, 'hooks'], [{ hooks: { Stop: {} } }, 'hooks.Stop']])('形状异常 %j 抛 SettingsShapeError 并指出 %s', (s, key) => {
   expect(() => planInstall(s, 4317)).toThrow(SettingsShapeError);
@@ -120,17 +120,17 @@ export interface HooksCliOptions { settingsFile: string; port: number; yes: bool
 /** 返回进程退出码。 */
 export function runHooksInstall(opts: HooksCliOptions, io: HooksCliIo): Promise<number>;
 export function runHooksUninstall(opts: HooksCliOptions, io: HooksCliIo): Promise<number>;
-export function defaultSettingsFile(env: NodeJS.ProcessEnv): string;   // CLAUDE_CANVAS_SETTINGS_FILE，否则 ~/.claude/settings.json
+export function defaultSettingsFile(env: NodeJS.ProcessEnv): string;   // AGENT_CANVAS_SETTINGS_FILE，否则 ~/.claude/settings.json
 ```
 
-命令行：`claude-canvas hooks install [--port N] [--yes] [--settings <路径>]`，`hooks uninstall` 同参数。行为（install，uninstall 对称）：
+命令行：`agent-canvas hooks install [--port N] [--yes] [--settings <路径>]`，`hooks uninstall` 同参数。行为（install，uninstall 对称）：
 
 1. 读文件：不存在或内容为空白 → `{}`；去掉开头的 BOM；JSON 解析失败 → `err("<路径> 不是合法的 JSON：<原因>")`，返回 1，不写。
 2. `planInstall`；`SettingsShapeError` → `err`，返回 1，不写。
 3. `added` 为空 → `out("hooks 已全部安装，无需改动（<路径>）")`，返回 0，不写、不备份。
 4. 输出将要做的事：settings 路径、hook 地址、将添加的事件列表、"不会改动已有的其他内容"、备份文件的路径。
 5. 没有 `--yes`：非交互终端 → `err("非交互终端下需要加 --yes 才会写入")`，返回 1；交互终端 → `confirm("写入以上改动？(y/N) ")`，否则 `out("已取消，未做任何改动")`，返回 0。
-6. 备份：原文件存在时复制为 `<路径>.bak-claude-canvas-<YYYYMMDD-HHMMSS>`（本地时间，取自 `io.now()`）；同名已存在则在末尾加 `-2`、`-3`…
+6. 备份：原文件存在时复制为 `<路径>.bak-agent-canvas-<YYYYMMDD-HHMMSS>`（本地时间，取自 `io.now()`）；同名已存在则在末尾加 `-2`、`-3`…
 7. 写入：`JSON.stringify(next, null, 2)` 加末尾换行；原文件用 CRLF 则写回 CRLF；先写 `<路径>.tmp-<pid>` 再 `rename` 覆盖；目录不存在则创建。
 8. 输出"已写入"、备份路径，以及"新开的 Claude Code 会话才会使用这些 hooks"。返回 0。
 
@@ -192,9 +192,9 @@ export interface DiagnosticsSummary {
 export function summarizeDiagnostics(d: Diagnostics, nowMs: number): DiagnosticsSummary;
 ```
 
-页面（`#/diagnostics`，顶栏"Claude Canvas"右侧加"诊断"链接）：每 5 秒刷新一次，卸载时停止；请求失败时保留上一次内容并在顶部显示"刷新失败：…"。分区：
+页面（`#/diagnostics`，顶栏"Agent Canvas"右侧加"诊断"链接）：每 5 秒刷新一次，卸载时停止；请求失败时保留上一次内容并在顶部显示"刷新失败：…"。分区：
 - **服务**：是否正在导入、推导规则版本、数据库标识。
-- **Hooks**：最近一次收到的时间（"N 秒/分钟前"）；`never` 时提示"尚未收到任何 hook。运行 `claude-canvas hooks install` 安装；新开的会话才会生效"；`quiet` 时提示"超过 10 分钟没有收到 hook"。表格：事件名、次数、最近一次；其下一行"尚未收到过：…"列出 `missingHookEvents`（为空则不显示）。
+- **Hooks**：最近一次收到的时间（"N 秒/分钟前"）；`never` 时提示"尚未收到任何 hook。运行 `agent-canvas hooks install` 安装；新开的会话才会生效"；`quiet` 时提示"超过 10 分钟没有收到 hook"。表格：事件名、次数、最近一次；其下一行"尚未收到过：…"列出 `missingHookEvents`（为空则不显示）。
 - **导入失败**：文件、错误、时间；为空显示"无"。
 - **未识别的记录类型**：类型、次数；样例放在 `<details>` 里默认收起，展开后以文本显示，最多 2000 字符。
 - **文件读取进度**：共 N 个文件，M 个尚未读完；列出未读完的（路径、已读/总字节）。
@@ -277,7 +277,7 @@ test('resync 时 500：按原有间隔重试', async () => {});
 **Files:**
 - Modify: `README.md`、`docs/hooks-snippet.json`（仅当与 `HOOK_EVENTS` 不一致）
 
-- [ ] **Step 1: 更新 README**：Hooks 一节以 `claude-canvas hooks install` / `uninstall` 为主（参数、确认、备份文件名、改端口时用 `--port`），手动合并降为备选；新增"诊断页"一节（地址 `#/diagnostics`，各分区看什么）；"已知限制"删去"目前还没有诊断页"。
+- [ ] **Step 1: 更新 README**：Hooks 一节以 `agent-canvas hooks install` / `uninstall` 为主（参数、确认、备份文件名、改端口时用 `--port`），手动合并降为备选；新增"诊断页"一节（地址 `#/diagnostics`，各分区看什么）；"已知限制"删去"目前还没有诊断页"。
 - [ ] **Step 2: 用临时目录核对命令行**：对一个含其他 hooks 的临时 settings 文件依次执行 install（交互取消）、install `--yes`、再次 install、uninstall `--yes`，逐条写出文件前后差异和退出码。
 - [ ] **Step 3: 由控制者核对真实配置（只读）**：把使用者真实的 settings 复制到临时目录，对副本执行 `hooks install --yes --settings <副本>`，期望"已全部安装，无需改动"；不对真实文件执行任何写入。
 - [ ] **Step 4: 浏览器核对**（临时目录、`--port 4399`）：诊断页各分区；发送几类 hook 后表格更新、"尚未收到过"相应缩短；首页项目名与标题；打开一个不存在的会话 id 显示"会话不存在"且网络面板里不再有重复请求。

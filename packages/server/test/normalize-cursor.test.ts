@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import type { GraphEdge, GraphNode, Session } from '@claude-canvas/shared';
+import type { GraphEdge, GraphNode, Session } from '@agent-canvas/shared';
 import { CursorNormalizer } from '../src/normalize/cursor.js';
 import { NORMALIZER_FACTORIES, NormalizerRegistry } from '../src/normalize/registry.js';
 import type { RawEvent } from '../src/store/store.js';

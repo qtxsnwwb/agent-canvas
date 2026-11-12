@@ -47,13 +47,13 @@ export function confirmOnStreams(question: string, input: NodeJS.ReadableStream,
 }
 
 export function defaultSettingsFile(env: NodeJS.ProcessEnv): string {
-  const fromEnv = env.CLAUDE_CANVAS_SETTINGS_FILE;
+  const fromEnv = env.AGENT_CANVAS_SETTINGS_FILE;
   return fromEnv !== undefined && fromEnv !== '' ? fromEnv : path.join(os.homedir(), '.claude', 'settings.json');
 }
 
-/** Codex's hooks file: `CLAUDE_CANVAS_CODEX_HOOKS_FILE`, else `~/.codex/hooks.json`. */
+/** Codex's hooks file: `AGENT_CANVAS_CODEX_HOOKS_FILE`, else `~/.codex/hooks.json`. */
 export function defaultCodexHooksFile(env: NodeJS.ProcessEnv): string {
-  const fromEnv = env.CLAUDE_CANVAS_CODEX_HOOKS_FILE;
+  const fromEnv = env.AGENT_CANVAS_CODEX_HOOKS_FILE;
   return fromEnv !== undefined && fromEnv !== '' ? fromEnv : path.join(os.homedir(), '.codex', 'hooks.json');
 }
 
@@ -64,9 +64,9 @@ export interface CodexHooksCliOptions extends HooksCliOptions {
   cliPath: string;
 }
 
-/** Cursor's hooks file: `CLAUDE_CANVAS_CURSOR_HOOKS_FILE`, else `~/.cursor/hooks.json`. */
+/** Cursor's hooks file: `AGENT_CANVAS_CURSOR_HOOKS_FILE`, else `~/.cursor/hooks.json`. */
 export function defaultCursorHooksFile(env: NodeJS.ProcessEnv): string {
-  const fromEnv = env.CLAUDE_CANVAS_CURSOR_HOOKS_FILE;
+  const fromEnv = env.AGENT_CANVAS_CURSOR_HOOKS_FILE;
   return fromEnv !== undefined && fromEnv !== '' ? fromEnv : path.join(os.homedir(), '.cursor', 'hooks.json');
 }
 
@@ -138,8 +138,8 @@ function codexProfile(opts: CodexHooksCliOptions): HooksProfile {
       mode === 'install'
         ? [
             '注意：这些 hooks 需要在 Codex 里确认信任后才会运行——桌面应用：设置 → Hooks；CLI：输入 /hooks',
-            '移动或升级 claude-canvas 后命令路径会变，需要重新安装（hooks install --codex）并在 Codex 里重新确认信任',
-            '没确认信任时 claude-canvas 只靠会话文件工作',
+            '移动或升级 agent-canvas 后命令路径会变，需要重新安装（hooks install --codex）并在 Codex 里重新确认信任',
+            '没确认信任时 agent-canvas 只靠会话文件工作',
           ]
         : ['已移除；Codex 不会再调用这些 hooks'],
   };
@@ -169,7 +169,7 @@ function cursorProfile(opts: CursorHooksCliOptions): HooksProfile {
       mode === 'install'
         ? [
             'Cursor 监视 hooks.json，保存后自动生效，不需要确认信任',
-            '移动或升级 claude-canvas 后命令路径会变，需要重新安装（hooks install --cursor）',
+            '移动或升级 agent-canvas 后命令路径会变，需要重新安装（hooks install --cursor）',
           ]
         : ['已移除；Cursor 不会再调用这些 hooks'],
   };
@@ -381,7 +381,7 @@ function stamp(d: Date): string {
 }
 
 function backupCandidate(file: string, d: Date, attempt: number): string {
-  return `${file}.bak-claude-canvas-${stamp(d)}${attempt === 1 ? '' : `-${attempt}`}`;
+  return `${file}.bak-agent-canvas-${stamp(d)}${attempt === 1 ? '' : `-${attempt}`}`;
 }
 
 /** The backup path that would be used right now (first name not yet taken). */

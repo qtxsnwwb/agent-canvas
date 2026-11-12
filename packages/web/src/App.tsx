@@ -40,7 +40,7 @@ export function App() {
   return (
     <div className="app">
       <header>
-        <a href="#/">Claude Canvas</a>
+        <a href="#/">Agent Canvas</a>
         <a className="header-link" href="#/diagnostics">诊断</a>
       </header>
       {route.page === 'session' ? (

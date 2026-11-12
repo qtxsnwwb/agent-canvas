@@ -1,4 +1,4 @@
-import type { Graph, GraphEdge, GraphNode, Usage } from '@claude-canvas/shared';
+import type { Graph, GraphEdge, GraphNode, Usage } from '@agent-canvas/shared';
 import { formatDuration } from './format';
 
 export interface ReplayRange { startMs: number; endMs: number }

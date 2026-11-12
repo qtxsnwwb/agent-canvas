@@ -1,4 +1,4 @@
-import type { Change, GraphEdge, GraphNode, NodeDetail, Session } from '@claude-canvas/shared';
+import type { Change, GraphEdge, GraphNode, NodeDetail, Session } from '@agent-canvas/shared';
 import { CURSOR_RECORD_TYPES } from '../sources/cursor/records.js';
 import type { RawEvent } from '../store/store.js';
 import {

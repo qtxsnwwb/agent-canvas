@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
-import { ORIGINS, type Origin, type Session } from '@claude-canvas/shared';
+import { ORIGINS, type Origin, type Session } from '@agent-canvas/shared';
 import { loadConfig, type Config } from '../src/config.js';
 import { NORMALIZER_FACTORIES, NormalizerRegistry, type NormalizerFactories } from '../src/normalize/registry.js';
 import type { AgentNormalizer, NormalizeResult } from '../src/normalize/types.js';

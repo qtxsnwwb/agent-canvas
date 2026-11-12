@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, expect, test } from 'vitest';
-import type { GraphSnapshot } from '@claude-canvas/shared';
+import type { GraphSnapshot } from '@agent-canvas/shared';
 import { fileSources } from '../src/cli.js';
 import { loadConfig, type Config } from '../src/config.js';
 import { Pipeline } from '../src/pipeline.js';

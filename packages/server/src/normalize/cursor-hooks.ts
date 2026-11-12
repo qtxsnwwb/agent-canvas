@@ -62,7 +62,7 @@ export function parseCursorHook(eventName: string, payload: string): ParsedCurso
 
 /**
  * The payload as stored: Cursor puts the signed-in user's e-mail address in every hook (`user_email`); it is personal
- * data claude-canvas has no use for, so it is dropped. beforeSubmitPrompt carries the prompt and its attachments, which
+ * data agent-canvas has no use for, so it is dropped. beforeSubmitPrompt carries the prompt and its attachments, which
  * the normalizer never reads: like the records' texts (CURSOR_TEXT_CAP_BYTES) the prompt is cut to 64 KB at a code
  * point, and attachments longer than that as JSON are dropped; either is then listed in `truncated`. A payload with
  * none of this to change (including one that is not a JSON object) is stored exactly as received, as for the other

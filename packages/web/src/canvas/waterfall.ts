@@ -1,4 +1,4 @@
-import { effectiveStatus, type Graph, type GraphNode, type Session } from '@claude-canvas/shared';
+import { effectiveStatus, type Graph, type GraphNode, type Session } from '@agent-canvas/shared';
 import { isNoise } from './compact';
 import { turnNodes, type ViewNode } from './view';
 

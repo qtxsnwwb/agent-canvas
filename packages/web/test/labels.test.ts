@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import { STALE_AFTER_MS, type Session } from '@claude-canvas/shared';
+import { STALE_AFTER_MS, type Session } from '@agent-canvas/shared';
 import { SESSION_STATUS_LABEL, sessionStatusView } from '../src/labels';
 
 const session = (over: Partial<Session>): Session => ({

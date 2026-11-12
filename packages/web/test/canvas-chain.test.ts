@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import type { Graph, GraphEdge, GraphNode, NodeKind } from '@claude-canvas/shared';
+import type { Graph, GraphEdge, GraphNode, NodeKind } from '@agent-canvas/shared';
 import { buildView, type CanvasView, type ViewMode } from '../src/canvas/view';
 import { EMPTY_CHAIN, expandCut, upstreamChain } from '../src/canvas/chain';
 

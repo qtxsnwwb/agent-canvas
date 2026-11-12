@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import type { Graph, GraphEdge, GraphNode } from '@claude-canvas/shared';
+import type { Graph, GraphEdge, GraphNode } from '@agent-canvas/shared';
 import { graphAt } from '../src/canvas/replay';
 
 // Wall-clock bounds: runs in the serial `timing` project with retries (see vitest.config.ts).

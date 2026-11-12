@@ -3,7 +3,7 @@
  * payload }`, turn ids where Codex puts them) with invented content. A CodexThread is one rollout file: each method
  * appends one line and returns the raw event the Codex file source would produce for it.
  */
-import { applyChanges, emptyGraph, type Change, type Graph, type Session } from '@claude-canvas/shared';
+import { applyChanges, emptyGraph, type Change, type Graph, type Session } from '@agent-canvas/shared';
 import type { AgentNormalizer } from '../src/normalize/types.js';
 import type { RawEvent } from '../src/store/store.js';
 

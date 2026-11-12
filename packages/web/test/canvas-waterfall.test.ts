@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import type { Graph, GraphEdge, GraphNode, NodeKind } from '@claude-canvas/shared';
+import type { Graph, GraphEdge, GraphNode, NodeKind } from '@agent-canvas/shared';
 import { buildView, turnKeyOf } from '../src/canvas/view';
 import {
   barOf, buildWaterfall, durationPlacement, isBackgroundStep, QUIET_AFTER_MS, scopeKey, scopeOf, stepChain, stepTicking, waterfallClock, withNow,

@@ -1,4 +1,4 @@
-# claude-canvas 里程碑 2（实时画布）实现计划
+# agent-canvas 里程碑 2（实时画布）实现计划
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -6,9 +6,9 @@
 
 **Architecture:** 前端在已有的实时图（`LiveSession`）之上加三层，全部在 `packages/web/src/canvas/`：纯函数 `buildView` 把图变成"画布视图"（只留主线节点、按轮次分组、折叠旧轮次、改写边）；布局层按轮次分别用 elkjs 在 Web Worker 里计算位置并缓存，再把各轮次自上而下堆叠；React Flow 组件只负责画。服务端只改一处数据模型（派发节点的归属）。
 
-**Tech Stack:** 已有栈之外新增 `@xyflow/react`（React Flow 12）和 `elkjs`，只加在 `@claude-canvas/web`。
+**Tech Stack:** 已有栈之外新增 `@xyflow/react`（React Flow 12）和 `elkjs`，只加在 `@agent-canvas/web`。
 
-**Spec:** `docs/superpowers/specs/2026-11-10-claude-canvas-design.md`（7.1、7.2、7.3 的"实时"一行、12 节第 2 项）
+**Spec:** `docs/superpowers/specs/2026-11-10-agent-canvas-design.md`（7.1、7.2、7.3 的"实时"一行、12 节第 2 项）
 
 **范围说明：** 只做里程碑 2。子代理在本里程碑是**单个节点**（显示类型、任务、状态、内部节点数），内部节点不上画布；展开为容器、拓扑视角属于里程碑 3。因果视角、复盘时间轴、视角切换栏、诊断页都不在本计划内。分支 `feat/m2-canvas`，从 `feat/m1-pipeline` 切出（PR #1 未合并）。
 
@@ -17,7 +17,7 @@
 - 不得放宽 Content-Security-Policy：`script-src` 不得出现 `unsafe-eval`、`blob:`、`data:`。Worker 必须是同源的独立文件。
 - 不新增服务端接口；除 Task 1 外不改 `packages/server`。
 - 界面文案一律简体中文。
-- 测试不得读写真实用户目录；需要起服务时用 `CLAUDE_CANVAS_PROJECTS_DIR` / `CLAUDE_CANVAS_DATA_DIR` 指向临时目录。夹具为合成数据，不含真实对话、路径、用户名。
+- 测试不得读写真实用户目录；需要起服务时用 `AGENT_CANVAS_PROJECTS_DIR` / `AGENT_CANVAS_DATA_DIR` 指向临时目录。夹具为合成数据，不含真实对话、路径、用户名。
 - web 的单元测试只测纯逻辑（Vitest，node 环境，文件名 `*.test.ts`），不引入 jsdom、不写组件测试；界面在浏览器里实测（规格第 11 节）。
 - 节点在画布上尺寸固定（`sizeOf`），文字超出用 CSS 截断，不得撑大节点。
 - 节点不可拖动、不可连线；位置全部自动计算。
@@ -65,7 +65,7 @@ packages/web/test/canvas-*.test.ts      view / format / layout / layoutClient / 
 **Files:**
 - Modify: `packages/shared/src/model.ts`
 - Modify: `packages/server/src/normalize/normalizer.ts`、`packages/server/src/normalize/version.ts`
-- Modify: `docs/superpowers/specs/2026-11-10-claude-canvas-design.md`（4.2 节表格下一行）
+- Modify: `docs/superpowers/specs/2026-11-10-agent-canvas-design.md`（4.2 节表格下一行）
 - Test: `packages/server/test/normalizer-subagent.test.ts`（没有则在现有的子代理测试文件里加）
 
 **Interfaces:**
@@ -340,7 +340,7 @@ test('应答带 error 字段时该请求 reject，且不写入缓存', async () 
 test('dispose 后终止 Worker，未完成的请求 reject', async () => {});
 ```
 
-- [ ] **Step 2: 安装依赖并运行，确认失败**（`npx --yes pnpm@10 --filter @claude-canvas/web add @xyflow/react elkjs`）
+- [ ] **Step 2: 安装依赖并运行，确认失败**（`npx --yes pnpm@10 --filter @agent-canvas/web add @xyflow/react elkjs`）
 - [ ] **Step 3: 实现 `sizes.ts`、`layout.ts`、`layout.worker.ts`、`layoutClient.ts`**
 - [ ] **Step 4: 运行，确认通过。**
 - [ ] **Step 5: 核对 CSP。** `npx --yes pnpm@10 build` 后在 `packages/web/dist/assets` 里确认 Worker 是独立的 `.js` 文件；在产物里搜索 `new Function(` 和 `eval(`，把命中情况写进报告。若 elkjs 的产物在不带 `unsafe-eval` 的页面里无法运行（Task 7 的浏览器检查会最终确认），**不得**改 CSP：改用 `@dagrejs/dagre` 实现同一个 `layoutTurn` 签名（同步计算包成 Promise，仍在 Worker 里），测试不变。

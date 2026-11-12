@@ -1,4 +1,4 @@
-import { effectiveStatus, type EffectiveSessionStatus, type NodeStatus, type Session } from '@claude-canvas/shared';
+import { effectiveStatus, type EffectiveSessionStatus, type NodeStatus, type Session } from '@agent-canvas/shared';
 
 export const NODE_STATUS_LABEL: Record<NodeStatus, string> = {
   running: '执行中',

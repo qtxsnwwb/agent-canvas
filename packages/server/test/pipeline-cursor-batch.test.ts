@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
-import type { Origin } from '@claude-canvas/shared';
+import type { Origin } from '@agent-canvas/shared';
 import { loadConfig, type Config } from '../src/config.js';
 import { Pipeline } from '../src/pipeline.js';
 import { ClaudeFileSource } from '../src/sources/claude.js';

@@ -17,7 +17,7 @@ importers:
 
   packages/server:
     dependencies:
-      '@claude-canvas/shared':
+      '@agent-canvas/shared':
         specifier: workspace:*
         version: link:../shared
       '@fastify/static':
@@ -53,7 +53,7 @@ importers:
 
   packages/web:
     dependencies:
-      '@claude-canvas/shared':
+      '@agent-canvas/shared':
         specifier: workspace:*
         version: link:../shared
       '@xyflow/react':

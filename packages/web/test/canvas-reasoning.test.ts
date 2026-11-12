@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import type { Graph, GraphEdge, GraphNode, NodeKind } from '@claude-canvas/shared';
+import type { Graph, GraphEdge, GraphNode, NodeKind } from '@agent-canvas/shared';
 import { buildView } from '../src/canvas/view';
 import { EMPTY_CHAIN, upstreamChain } from '../src/canvas/chain';
 import { NO_REASONING, reasoningRows, THINKING_NOT_RECORDED } from '../src/canvas/reasoning';

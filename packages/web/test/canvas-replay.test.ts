@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import type { Graph, GraphEdge, GraphNode, NodeKind, Usage } from '@claude-canvas/shared';
+import type { Graph, GraphEdge, GraphNode, NodeKind, Usage } from '@agent-canvas/shared';
 import { adjacentMark, advance, formatClock, formatTokens, graphAt, replayOverlay, replayRange, turnIndexAt, turnMarks, usageTotal } from '../src/canvas/replay';
 
 const EPOCH = Date.parse('2026-01-01T00:00:00Z');

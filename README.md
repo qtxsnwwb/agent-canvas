@@ -1,11 +1,11 @@
-<h1 align="center">🎨 Claude Canvas</h1>
+<h1 align="center">🎨 Agent Canvas</h1>
 
 <p align="center">
   <b>把编码智能体正在做的事，画成一张看得懂的画布。</b>
 </p>
 
 <p align="center">
-  Claude Canvas 是一个跑在你本机的小服务。<br/>
+  Agent Canvas 是一个跑在你本机的小服务。<br/>
   它读取 Claude Code、OpenAI Codex 和 Cursor 的会话记录，在浏览器里实时画出每个会话的来龙去脉：<br/>
   问了什么、调了哪些工具、派了哪些子代理、哪一步慢、哪一步失败。
 </p>
@@ -76,8 +76,8 @@ Claude Code、Codex 和 Cursor 的会话放在一起。同一个工作目录下�
 需要 **Node ≥ 22**。没装 pnpm 的话，把下面的 `pnpm` 换成 `npx --yes pnpm@10` 即可。
 
 ```bash
-git clone https://github.com/qtxsnwwb/claude-canvas.git
-cd claude-canvas
+git clone https://github.com/qtxsnwwb/agent-canvas.git
+cd agent-canvas
 pnpm install
 pnpm build
 pnpm start
@@ -86,7 +86,7 @@ pnpm start
 终端打印出地址后，在浏览器打开：
 
 ```
-claude-canvas listening on http://127.0.0.1:4317
+agent-canvas listening on http://127.0.0.1:4317
 ```
 
 就这些。第一次启动会在后台导入已有的会话，历史多的话要等一会儿，期间页面已经可以用。
@@ -161,7 +161,7 @@ flowchart LR
   A -.->|hooks（可选）| S
   B -.->|hooks（可选）| S
   C -.->|hooks（可选）| S
-  S["claude-canvas 服务<br/>127.0.0.1:4317"] --> D[("SQLite<br/>~/.claude-canvas")]
+  S["agent-canvas 服务<br/>127.0.0.1:4317"] --> D[("SQLite<br/>~/.agent-canvas")]
   S -->|WebSocket| W["浏览器里的画布"]
 ```
 
@@ -173,10 +173,10 @@ flowchart LR
 
 | 变量 | 默认值 | 含义 |
 |------|--------|------|
-| `CLAUDE_CANVAS_PROJECTS_DIR` | `~/.claude/projects` | Claude Code 会话文件的目录 |
-| `CLAUDE_CANVAS_CODEX_DIR` | `~/.codex/sessions` | Codex 会话文件的目录；设为空字符串表示不读取 |
-| `CLAUDE_CANVAS_CURSOR_DB` | Cursor 的 `state.vscdb`（按平台，见手册） | Cursor 的本地数据库，只读打开；设为空字符串表示不读取 |
-| `CLAUDE_CANVAS_DATA_DIR` | `~/.claude-canvas` | 数据目录（数据库 `data.db`） |
+| `AGENT_CANVAS_PROJECTS_DIR` | `~/.claude/projects` | Claude Code 会话文件的目录 |
+| `AGENT_CANVAS_CODEX_DIR` | `~/.codex/sessions` | Codex 会话文件的目录；设为空字符串表示不读取 |
+| `AGENT_CANVAS_CURSOR_DB` | Cursor 的 `state.vscdb`（按平台，见手册） | Cursor 的本地数据库，只读打开；设为空字符串表示不读取 |
+| `AGENT_CANVAS_DATA_DIR` | `~/.agent-canvas` | 数据目录（数据库 `data.db`） |
 
 完整列表见[使用手册 · 数据与环境变量](./docs/manual.md#数据与环境变量)。
 
@@ -198,7 +198,7 @@ flowchart LR
 ```bash
 pnpm test                               # 单元测试（vitest）
 pnpm typecheck
-pnpm --filter @claude-canvas/web dev    # 网页开发服务器，需先启动服务
+pnpm --filter @agent-canvas/web dev    # 网页开发服务器，需先启动服务
 ```
 
 项目是一个 pnpm workspace：`packages/server`（Fastify + better-sqlite3）、`packages/web`（React + React Flow）、`packages/shared`（共用的图模型）。

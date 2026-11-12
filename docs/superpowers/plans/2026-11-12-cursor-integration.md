@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task.
 
-**Goal:** Show Cursor Agent sessions in claude-canvas next to Claude Code and Codex sessions, through the same graph model, views and API.
+**Goal:** Show Cursor Agent sessions in agent-canvas next to Claude Code and Codex sessions, through the same graph model, views and API.
 
 **Architecture:** A third origin, `cursor`. Its data is not appended files but Cursor's local SQLite state database, read-only: a *poll source* reads changed conversations every few seconds, stores trimmed records as raw events (so rebuild never re-reads Cursor's database), and a `CursorNormalizer` turns them into the shared `Change` stream. Everything downstream is shared. Cursor hooks (observation-only events) leave session status marks and poke the poller.
 
@@ -14,12 +14,12 @@
 
 - Claude Code and Codex behaviour must not change: every existing test keeps passing unmodified, except where a shared type gains a member (then only fixture literals / exhaustive maps are updated).
 - TDD for logic: failing test first. Vitest, node environment, no jsdom, no component tests.
-- Tests and any server you start use temp dirs / temp files only: `CLAUDE_CANVAS_PROJECTS_DIR`, `CLAUDE_CANVAS_DATA_DIR`, `CLAUDE_CANVAS_CODEX_DIR`, `CLAUDE_CANVAS_CURSOR_DB`. Never read or write the real `~/.cursor/hooks.json`, `~/.claude/settings.json`, `~/.codex/hooks.json`. Never open the real Cursor database (`%APPDATA%\Cursor\User\globalStorage\state.vscdb`) or real session files; the real record *structure* is described in spec section 2.
+- Tests and any server you start use temp dirs / temp files only: `AGENT_CANVAS_PROJECTS_DIR`, `AGENT_CANVAS_DATA_DIR`, `AGENT_CANVAS_CODEX_DIR`, `AGENT_CANVAS_CURSOR_DB`. Never read or write the real `~/.cursor/hooks.json`, `~/.claude/settings.json`, `~/.codex/hooks.json`. Never open the real Cursor database (`%APPDATA%\Cursor\User\globalStorage\state.vscdb`) or real session files; the real record *structure* is described in spec section 2.
 - Fixtures are synthetic: shaped like the real records, invented text.
 - The Cursor database is only ever opened `readonly` with short auto-commit queries by primary key or key range; no writes, no explicit transactions, no pragmas that write.
 - Commits: English Conventional Commits ending with `Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>`. Commit only your own paths. Do not push.
 - Before each commit: `npx --yes pnpm@10 test`, `npx --yes pnpm@10 typecheck`, `npx --yes pnpm@10 build` all pass.
-- Names fixed across tasks: `Origin = 'claude' | 'codex' | 'cursor'`; key prefix `cursor:` (store key of a conversation: `cursor:<composerId>`); config field `cursorDbPath: string | null` (env `CLAUDE_CANVAS_CURSOR_DB`; unset → the platform default path of spec 5.1; empty string → null = disabled); interface `PollSource` in `packages/server/src/sources/poll.ts`; class `CursorSource` in `packages/server/src/sources/cursor/source.ts`; class `CursorNormalizer` in `packages/server/src/normalize/cursor.ts`; raw record types `composer` and `bubble`; `POST /hooks?origin=cursor`; CLI `hooks install|uninstall --cursor`, `hook-forward --origin cursor`; env `CLAUDE_CANVAS_CURSOR_HOOKS_FILE`.
+- Names fixed across tasks: `Origin = 'claude' | 'codex' | 'cursor'`; key prefix `cursor:` (store key of a conversation: `cursor:<composerId>`); config field `cursorDbPath: string | null` (env `AGENT_CANVAS_CURSOR_DB`; unset → the platform default path of spec 5.1; empty string → null = disabled); interface `PollSource` in `packages/server/src/sources/poll.ts`; class `CursorSource` in `packages/server/src/sources/cursor/source.ts`; class `CursorNormalizer` in `packages/server/src/normalize/cursor.ts`; raw record types `composer` and `bubble`; `POST /hooks?origin=cursor`; CLI `hooks install|uninstall --cursor`, `hook-forward --origin cursor`; env `AGENT_CANVAS_CURSOR_HOOKS_FILE`.
 
 ## Review Focus
 
@@ -80,7 +80,7 @@
 **Files:** `packages/server/src/{hook-forward.ts,hooks-config.ts,hooks-cli.ts,cli-commands.ts,api/server.ts,pipeline.ts}`, `packages/server/src/normalize/{cursor.ts,cursor-hooks.ts (new)}`; tests next to each.
 
 **Produces:** spec section 7 —
-- `hooks install|uninstall --cursor` writing `~/.cursor/hooks.json` (`--settings`, env `CLAUDE_CANVAS_CURSOR_HOOKS_FILE`): `{ "version": 1, "hooks": { <event>: [ { "command", "timeout": 5 } ] } }` for exactly `sessionStart`, `beforeSubmitPrompt`, `stop`, `subagentStop`, `sessionEnd`; command per spec 7.2 (PowerShell call form on Windows); all existing installer safety behaviour; creates the file when missing; refuses when `~/.cursor` is missing; never touches any other event or entry; an existing file without `version` gets `version: 1` only if it has no `version`.
+- `hooks install|uninstall --cursor` writing `~/.cursor/hooks.json` (`--settings`, env `AGENT_CANVAS_CURSOR_HOOKS_FILE`): `{ "version": 1, "hooks": { <event>: [ { "command", "timeout": 5 } ] } }` for exactly `sessionStart`, `beforeSubmitPrompt`, `stop`, `subagentStop`, `sessionEnd`; command per spec 7.2 (PowerShell call form on Windows); all existing installer safety behaviour; creates the file when missing; refuses when `~/.cursor` is missing; never touches any other event or entry; an existing file without `version` gets `version: 1` only if it has no `version`.
 - `hook-forward --origin cursor`: unchanged behaviour plus stdout `{"continue":true}` for `beforeSubmitPrompt` only (decided from the stdin payload's `hook_event_name`; printed even when the server is down).
 - `/hooks?origin=cursor` stored with origin; `conversation_id` is the session id (for a subagent's hook the root session when known); effects per spec 7.3: session-level marks only, combined with the records into the session status as a function of state (reuse the approach of the Codex hook marks), and `pollSource.poke(sessionId)`.
 - `NORMALIZER_VERSION` bumped.

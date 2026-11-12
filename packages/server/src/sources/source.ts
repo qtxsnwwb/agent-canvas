@@ -1,4 +1,4 @@
-import { ORIGINS, type Origin } from '@claude-canvas/shared';
+import { ORIGINS, type Origin } from '@agent-canvas/shared';
 
 /**
  * What a file is to the pipeline. `session` / `agent`: an appended JSONL of the session's main thread / of one of its

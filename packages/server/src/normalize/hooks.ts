@@ -1,4 +1,4 @@
-import type { NodeStatus, SessionStatus } from '@claude-canvas/shared';
+import type { NodeStatus, SessionStatus } from '@agent-canvas/shared';
 import { asyncLaunch } from './transcript.js';
 
 /** What a hook means for a node, independent of any session state. */
