@@ -1,24 +1,24 @@
 import type { Origin } from '@agent-canvas/shared';
+import { siClaude, siCursor } from 'simple-icons';
 import { originLook } from './home';
+import { OPENAI_MARK_PATH } from './openaiMark';
 
-/** A tiny line picture per origin, drawn in the badge's text colour. */
+/**
+ * The mark shown for each origin, drawn in the badge's text colour: each product's own mark. Claude Code and Cursor
+ * come from simple-icons; Codex has no mark of its own and uses OpenAI's (see openaiMark.ts). The marks are trademarks
+ * of their owners and are used only to identify which tool a session comes from.
+ */
+export const ORIGIN_MARKS: Readonly<Record<Origin, { viewBox: string; path: string }>> = {
+  claude: { viewBox: '0 0 24 24', path: siClaude.path },
+  cursor: { viewBox: '0 0 24 24', path: siCursor.path },
+  codex: { viewBox: '0 0 24 24', path: OPENAI_MARK_PATH },
+};
+
 function OriginIcon({ origin }: { origin: Origin }) {
+  const mark = ORIGIN_MARKS[origin];
   return (
-    <svg className="origin-icon" viewBox="0 0 12 12" width="11" height="11" aria-hidden="true" focusable="false">
-      {origin === 'claude' ? (
-        // A sunburst.
-        <g stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
-          <path d="M6 1.2v9.6M1.2 6h9.6M2.6 2.6l6.8 6.8M9.4 2.6l-6.8 6.8" />
-        </g>
-      ) : origin === 'cursor' ? (
-        // A pointer arrow.
-        <path d="M2.2 1.6l7.6 3.7-3.2 1.1-1.1 3.3z" fill="currentColor" stroke="currentColor" strokeWidth="1" strokeLinejoin="round" />
-      ) : (
-        // A terminal prompt.
-        <g fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M2 3l3 3-3 3M6.5 9.5h3.5" />
-        </g>
-      )}
+    <svg className="origin-icon" viewBox={mark.viewBox} width="12" height="12" aria-hidden="true" focusable="false">
+      <path d={mark.path} fill="currentColor" />
     </svg>
   );
 }

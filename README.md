@@ -224,3 +224,5 @@ pnpm release                            # 在 release/ 里生成要发布到 npm
 ## 📄 许可证
 
 [MIT](./LICENSE)
+
+Claude、Claude Code、Codex、OpenAI、Cursor 等名称和标志是各自所有者的商标。界面里用它们只是为了标明会话来自哪个工具；本项目与这些公司没有隶属或合作关系，这些标志也不在 MIT 许可的范围内。
