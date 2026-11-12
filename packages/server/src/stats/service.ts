@@ -25,10 +25,13 @@ export interface StatsSource {
   /**
    * `nodes` in snapshot order (store rowid order). `seq`: a change seq taken before the read began; any change committed
    * to the session during the read has a higher seq, so it marks the summary stale (noteChanges) for the next request.
+   * `stopped`: checked between pages of a long read; once true the read gives up (throws).
    */
-  readSession(sessionId: string): Promise<{ session: Session; nodes: GraphNode[]; seq: number } | null>;
+  readSession(sessionId: string, stopped?: () => boolean): Promise<{ session: Session; nodes: GraphNode[]; seq: number } | null>;
   projects(): Pick<Project, 'id' | 'cwd'>[];
 }
+
+const CLOSED = 'stats service closed';
 
 /** Nodes per page of storeStatsSource's session read (one page ≈ 10 ms of the event loop for typical node bodies). */
 export const STATS_PAGE_SIZE = 5000;
@@ -41,7 +44,7 @@ export function storeStatsSource(store: Store, options: { pageSize?: number } = 
   const pageSize = Math.max(1, options.pageSize ?? STATS_PAGE_SIZE);
   return {
     sessions: () => store.sessionProjectIds().flatMap((id) => store.listSessions(id)),
-    async readSession(sessionId) {
+    async readSession(sessionId, stopped) {
       const seq = store.lastSeq();
       const session = store.getSession(sessionId);
       if (session === null) return null;
@@ -53,6 +56,7 @@ export function storeStatsSource(store: Store, options: { pageSize?: number } = 
         if (page.length < pageSize) break;
         after = page[page.length - 1]!.node.id;
         await turn();
+        if (stopped?.() === true) throw new Error(CLOSED);
       }
       rows.sort((a, b) => a.rowid - b.rowid);
       return { session, nodes: rows.map((r) => r.node), seq };
@@ -145,6 +149,7 @@ export class StatsService {
   private generation = 0;
   private pass = 0;
   private inflight: { generation: number; promise: Promise<Snapshot> } | null = null;
+  private closed = false;
 
   constructor(private readonly source: StatsSource, options: StatsServiceOptions = {}) {
     this.capacity = Math.max(1, options.capacity ?? STATS_CACHE_CAPACITY);
@@ -167,6 +172,23 @@ export class StatsService {
     return this.cache.size;
   }
 
+  /**
+   * Builds (or refreshes) every session summary ahead of a request: the same shared refresh a request runs, so a request
+   * arriving meanwhile waits for it instead of starting another. Never rejects.
+   */
+  async warm(): Promise<void> {
+    try {
+      await this.snapshot();
+    } catch {
+      // closed, or the source failed: a request will try again
+    }
+  }
+
+  /** Stops a refresh in progress at its next session or page boundary; every later request is refused. */
+  close(): void {
+    this.closed = true;
+  }
+
   async get(query: StatsQuery): Promise<StatsResponse> {
     const snap = await this.snapshot();
     return aggregateStats({ ...snap, ...query, nowMs: this.now(), dayKey: this.dayKey, failedSessions: snap.failed });
@@ -174,6 +196,7 @@ export class StatsService {
 
   private async snapshot(): Promise<Snapshot> {
     for (;;) {
+      if (this.closed) throw new Error(CLOSED);
       const current = this.inflight;
       if (current !== null && current.generation === this.generation) return current.promise;
       if (current !== null) {
@@ -204,11 +227,13 @@ export class StatsService {
     const entries: Snapshot['entries'] = [];
     let failed = 0;
     let lastYield = performance.now();
+    const stopped = (): boolean => this.closed;
     for (const session of sessions) {
       if (performance.now() - lastYield >= this.yieldAfterMs) {
         await turn();
         lastYield = performance.now();
       }
+      if (this.closed) throw new Error(CLOSED);
       const id = session.id;
       const cached = this.cache.get(id);
       if (cached !== undefined && cached.seq >= (this.changed.get(id) ?? -Infinity)) {
@@ -219,12 +244,13 @@ export class StatsService {
         continue;
       }
       try {
-        const read = await this.source.readSession(id);
+        const read = await this.source.readSession(id, stopped);
         if (read === null) continue; // gone since the listing
         const summary = summarizeSession(read.session, read.nodes);
         this.remember(id, { seq: read.seq, summary, pass });
         entries.push({ session, summary });
       } catch {
+        if (this.closed) throw new Error(CLOSED);
         failed++;
       }
     }

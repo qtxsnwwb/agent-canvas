@@ -193,6 +193,19 @@ export class Pipeline {
   }
 
   /**
+   * The start-up work is over: the initial scan has run, no scan or rebuild is in progress (importing()), and every poll
+   * source has completed (or failed) its first round. Unlike importing(), it does not flicker false between a poll
+   * source's first batches. The stats warm-up waits for it.
+   */
+  startupDone(): boolean {
+    if (!this.initialScanDone || this.importing()) return false;
+    return this.polls.every((p) => {
+      const status = this.pollStatus(p.origin);
+      return status === null || status.lastPollAt !== null || status.lastError !== null;
+    });
+  }
+
+  /**
    * Stops the poll sources (a pipeline closed before its initial scan never starts them). Pending ingestion is left to
    * idle().
    */

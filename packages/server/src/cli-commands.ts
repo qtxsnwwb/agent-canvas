@@ -31,12 +31,19 @@ import { CursorSource } from './sources/cursor/source.js';
 import type { PollSource } from './sources/poll.js';
 import type { FileSource } from './sources/source.js';
 import { startWatcher } from './sources/transcript/watcher.js';
+import { StatsService, storeStatsSource } from './stats/service.js';
+import { startStatsWarmup, type StatsWarmup } from './stats/warmup.js';
 import { openStore, type Store } from './store/store.js';
 
 export interface Running {
   url: string;
   /** The address the server is actually bound to. */
   address: { address: string; port: number };
+  /**
+   * The stats warm-up (see stats/warmup.ts): resolves once it has run, or was stopped by close(); never rejects. null
+   * when it is off.
+   */
+  statsWarmup: Promise<void> | null;
   close(): Promise<void>;
 }
 
@@ -165,6 +172,11 @@ export interface StartOptions {
   progress?: (done: number, total: number) => void;
   /** Delivery of desktop notifications (tests); default: the system's own (DesktopNotifier). */
   notifier?: ServiceNotifier;
+  /**
+   * Build the stats summaries in the background once start-up is done. Default: on, unless the environment sets
+   * AGENT_CANVAS_STATS_WARMUP=0 (the test configuration does).
+   */
+  statsWarmup?: boolean;
 }
 
 export async function start(overrides: Partial<Config> = {}, options: StartOptions = {}): Promise<Running> {
@@ -174,6 +186,8 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
   let app: ReturnType<typeof buildServer> | null = null;
   let watcher: ReturnType<typeof startWatcher> | null = null;
   let notifications: NotificationService | null = null;
+  let stats: StatsService | null = null;
+  let warmup: StatsWarmup | null = null;
   let pipeline: Pipeline;
   try {
     store = openStore(config.dbPath, options.log ? { log: options.log } : {});
@@ -193,13 +207,21 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
       notifier: options.notifier ?? new DesktopNotifier(),
       log: (line) => process.stderr.write(`${line}\n`),
     });
-    app = buildServer({ store, pipeline, config, notifications });
+    stats = new StatsService(storeStatsSource(store));
+    app = buildServer({ store, pipeline, config, notifications, stats });
     await app.listen({ port: config.port, host: config.host });
     // After the (automatic) rebuild above, before the initial scan: its changes arrive while importing() holds.
     notifications.start(`http://${config.host}:${(app.server.address() as AddressInfo).port}`);
     // The initial scan runs in the background; the server is already answering requests.
     watcher = startWatcher(pipeline, config);
+    if (options.statsWarmup ?? process.env.AGENT_CANVAS_STATS_WARMUP !== '0') {
+      const statsNow = stats;
+      const pipelineNow = pipeline;
+      warmup = startStatsWarmup({ warm: () => statsNow.warm(), settled: () => pipelineNow.startupDone() });
+    }
   } catch (err) {
+    stats?.close();
+    await warmup?.stop();
     await notifications?.close().catch(() => undefined);
     await app?.close().catch(() => undefined);
     store?.close();
@@ -212,12 +234,19 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
   const openedStore = store;
   const server = app;
   const service = notifications!;
+  const statsService = stats!;
+  const statsWarmup = warmup;
   return {
     url,
     address: { address: bound.address, port: bound.port },
+    statsWarmup: statsWarmup?.done ?? null,
     close() {
       closing ??= (async () => {
         try {
+          // The warm-up first: it stops waiting, and a summary build in progress stops at its next page.
+          await statsWarmup?.stop();
+          statsService.close();
+          await statsWarmup?.done;
           // Unsubscribes and stops the timer at once; deliveries in flight end within their timeout meanwhile.
           const notificationsClosed = service.close();
           await watcher!.close();

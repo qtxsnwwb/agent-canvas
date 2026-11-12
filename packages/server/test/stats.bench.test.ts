@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
+import Database from 'better-sqlite3';
 import { describe, expect, test } from 'vitest';
 import type { Change, GraphNode, Origin, Session } from '@agent-canvas/shared';
 import { StatsService, storeStatsSource, type StatsSource } from '../src/stats/service.js';
@@ -196,6 +197,80 @@ describe.skipIf(!BENCH)('stats benchmark', () => {
       expect(first.result.totals.sessions).toBe(3000);
       expect(unchangedReads).toBe(0);
       expect(changedReads).toBe(1);
+    } finally {
+      store.close();
+      await fs.promises.rm(dir, { recursive: true, force: true, maxRetries: 20 }).catch(() => undefined);
+    }
+  });
+
+  // The shape of the real dataset measured on 2026-11-12: 36 sessions, about 214,000 nodes (four of 30–40k nodes),
+  // about 120,000 tool calls. Reports where a cold request's time goes (SQL + JSON parse, summaries, aggregation).
+  test('real shape: 36 sessions / 214,000 nodes: cold request split', { timeout: 600_000 }, async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-stats-bench-'));
+    const store = openStore(path.join(dir, 'bench.db'));
+    try {
+      const sizes = [40_000, 38_000, 34_000, 30_000, ...Array.from({ length: 32 }, () => 2_250)];
+      let total = 0;
+      sizes.forEach((count, i) => {
+        store.applyChanges(sessionChanges(i, count, NOW - 40 * 24 * 3600_000 + i * 24 * 3600_000));
+        total += count;
+      });
+      const src = storeStatsSource(store);
+      const ids = src.sessions().map((x) => x.id);
+      let readMs = 0;
+      let summarizeMs = 0;
+      const t0 = performance.now();
+      for (const id of ids) {
+        let t = performance.now();
+        const read = (await src.readSession(id))!;
+        readMs += performance.now() - t;
+        t = performance.now();
+        summarizeSession(read.session, read.nodes);
+        summarizeMs += performance.now() - t;
+      }
+      const splitMs = performance.now() - t0;
+      // The SQL alone (no JSON parse), on a second connection, for the split.
+      const raw = new Database(path.join(dir, 'bench.db'), { readonly: true });
+      const page = raw.prepare('SELECT id, body FROM node WHERE session_id = ? AND id > ? ORDER BY id LIMIT ?');
+      let t = performance.now();
+      let bytes = 0;
+      for (const id of ids) {
+        for (let after = ''; ;) {
+          const rows = page.all(id, after, 5000) as { id: string; body: string }[];
+          for (const r of rows) bytes += r.body.length;
+          if (rows.length < 5000) break;
+          after = rows[rows.length - 1]!.id;
+        }
+      }
+      const sqlMs = performance.now() - t;
+      // Only the fields a summary needs, extracted in SQL (one JSON parse per body in SQLite), then parsed in JS.
+      const FIELDS = ['id', 'agentId', 'turnId', 'kind', 'status', 'timestamp', 'endedAt', 'durationMs', 'childAgentId', 'toolName', 'messageId', 'usage'];
+      const slim = raw.prepare(`SELECT id, json_extract(body, ${FIELDS.map((f) => `'$.${f}'`).join(', ')}) AS f FROM node WHERE session_id = ? AND id > ? ORDER BY id LIMIT ?`);
+      t = performance.now();
+      let slimRows = 0;
+      for (const id of ids) {
+        for (let after = ''; ;) {
+          const rows = slim.all(id, after, 5000) as { id: string; f: string }[];
+          for (const r of rows) { JSON.parse(r.f); slimRows++; }
+          if (rows.length < 5000) break;
+          after = rows[rows.length - 1]!.id;
+        }
+      }
+      const slimMs = performance.now() - t;
+      raw.close();
+      const svc = new StatsService(storeStatsSource(store), { now: () => NOW });
+      const cold = await measured(() => svc.get({ range: 'all', origin: null, projectId: null }));
+      const warm = await measured(() => svc.get({ range: 'all', origin: null, projectId: null }));
+      console.log(
+        `stats benchmark, real shape: ${total} nodes / ${sizes.length} sessions, ${cold.result.totals.toolCalls} tool calls, ` +
+          `${(bytes / 1e6).toFixed(0)} MB of node bodies
+` +
+          `  ${line('cold request (all)', cold)}
+  ${line('warm request (all)', warm)}
+` +
+          `  split over all sessions (${splitMs.toFixed(0)} ms): read ${readMs.toFixed(0)} ms (SQL alone ${sqlMs.toFixed(0)} ms), ` +
+          `summarize ${summarizeMs.toFixed(0)} ms; slim read (SQL json_extract + parse, ${slimRows} rows) ${slimMs.toFixed(0)} ms`,
+      );
     } finally {
       store.close();
       await fs.promises.rm(dir, { recursive: true, force: true, maxRetries: 20 }).catch(() => undefined);

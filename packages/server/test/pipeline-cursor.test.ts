@@ -244,6 +244,18 @@ describe('poll sources in the pipeline', () => {
     expect(store.rawForSession('c1')).toHaveLength(1);
   });
 
+  test('startupDone(): after the initial scan and once every poll source has finished (or failed) a first round', async () => {
+    expect(pipeline.startupDone()).toBe(false);
+    const scan = pipeline.scanAll();
+    expect(pipeline.startupDone()).toBe(false);
+    await scan;
+    expect(pipeline.startupDone()).toBe(false); // the poll source has not completed a round yet
+    fake.state = { lastPollAt: null, lastError: 'cannot open' };
+    expect(pipeline.startupDone()).toBe(true);
+    fake.state = { lastPollAt: '2026-11-12T00:00:00.000Z', lastError: null };
+    expect(pipeline.startupDone()).toBe(true);
+  });
+
   test('markSourceDeleted / clearSourceDeleted flag the session; a later record keeps the flag', async () => {
     pipeline = makePipeline({ ...NORMALIZER_FACTORIES, cursor: () => new EchoNormalizer([]) });
     const sink = await started();
