@@ -297,6 +297,7 @@ function changeSessionId(c: Change): string {
     case 'edge_added':
       return c.edge.sessionId;
     case 'node_updated':
+    case 'edge_removed':
       return c.sessionId;
   }
 }
@@ -421,6 +422,7 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
      WHERE n.session_id = ? AND n.id = ?`,
   );
   const insertEdge = db.prepare(`INSERT OR REPLACE INTO edge (session_id, id, body) VALUES (?, ?, ?)`);
+  const deleteEdge = db.prepare(`DELETE FROM edge WHERE session_id = ? AND id = ?`);
 
   // Active = effective status running/awaiting_*: a `running` session older than STALE_AFTER_MS is stale, not active.
   // strftime normalizes the stored ISO timestamp so it compares correctly with the cutoff's toISOString().
@@ -565,6 +567,9 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
       }
       case 'edge_added':
         insertEdge.run(c.edge.sessionId, c.edge.id, JSON.stringify(c.edge));
+        break;
+      case 'edge_removed':
+        deleteEdge.run(c.sessionId, c.id);
         break;
     }
   }

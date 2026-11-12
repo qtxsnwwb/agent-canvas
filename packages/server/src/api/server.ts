@@ -44,6 +44,8 @@ function sessionIdOf(c: Change): string {
       return c.sessionId;
     case 'edge_added':
       return c.edge.sessionId;
+    case 'edge_removed':
+      return c.sessionId;
   }
 }
 
