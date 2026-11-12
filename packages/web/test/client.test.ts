@@ -229,3 +229,14 @@ test('会话已不存在后，再来的 resync 消息或换 epoch 的 hello 不�
   expect(fn).toHaveBeenCalledTimes(1);
   live.close();
 });
+
+test('edge_removed from the server removes the edge from the live graph', async () => {
+  const sock = fakeSocket();
+  const live = await openLiveSession('s1', { fetchGraph: async () => snapshot({ seq: 1, nodes: [mkNode('a'), mkNode('b')] }), createSocket: () => sock });
+  await Promise.resolve();
+  sock.receive({ type: 'changes', changes: [{ seq: 2, type: 'edge_added', edge: { id: 'a->b', sessionId: 's1', from: 'a', to: 'b', kind: 'sequence' } }] });
+  expect(Object.keys(live.getGraph().edges)).toEqual(['a->b']);
+  sock.receive({ type: 'changes', changes: [{ seq: 3, type: 'edge_removed', sessionId: 's1', id: 'a->b' }] });
+  expect(live.getGraph().edges).toEqual({});
+  live.close();
+});

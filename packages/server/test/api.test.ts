@@ -70,7 +70,7 @@ describe('http api', () => {
 
   beforeEach(async () => {
     tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-api-'));
-    config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data') });
+    config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), cursorDbPath: null });
     await fs.mkdir(config.projectsDir, { recursive: true });
     store = openStore(':memory:');
     pipeline = new Pipeline(store, config);

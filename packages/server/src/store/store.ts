@@ -88,6 +88,8 @@ export interface StoreOptions {
   pruneCheckEvery?: number;
   /** Size the WAL file is truncated to when it restarts (default 64 MB). */
   walSizeLimitBytes?: number;
+  /** How far past walSizeLimitBytes the WAL file may grow before settleWal waits (default 16 MB). */
+  walSettleSlackBytes?: number;
   /** Receives every SQL statement executed (tests). */
   verbose?: (sql: unknown) => void;
   /** Receives notices about slow one-time work done while opening (start prints them); silent when omitted. */
@@ -127,6 +129,10 @@ export interface Store {
   transaction<T>(fn: () => T): T;
   /** Returns the ingestId, or null for a duplicate transcript line. */
   insertRaw(event: RawEvent): number | null;
+  /** True when this exact line is stored as a transcript raw event under `file` (the dedupe index; nothing inserted). */
+  hasTranscriptLine(file: string, line: string): boolean;
+  /** Highest `offset` of the transcript raw events stored under `file`, or null when there is none. */
+  maxTranscriptOffset(file: string): number | null;
   /** 0 when the file has no recorded offset. */
   getOffset(file: string): number;
   setOffset(file: string, offset: number, size: number): void;
@@ -180,6 +186,14 @@ export interface Store {
   /** Distinct project ids of the derived sessions, ascending. */
   sessionProjectIds(): string[];
   allSessionIdsInRaw(): string[];
+  /**
+   * Distinct session ids of the transcript raw events whose store key starts with `keyPrefix` (non-empty, e.g.
+   * `cursor:`), ascending: the session of each key's first record (all records of a key belong to one session). One
+   * index seek per key, whatever the number of records.
+   */
+  transcriptSessionIds(keyPrefix: string): string[];
+  /** The store keys of transcript raw events that start with `keyPrefix` (non-empty), ascending; one seek per key. */
+  transcriptKeys(keyPrefix: string): string[];
   /** Clears derived tables, the change log and unknown_stat; keeps raw_event, file_offset and meta. */
   clearDerived(): void;
   /**
@@ -194,12 +208,22 @@ export interface Store {
   dirtySessionIds(): string[];
   bumpUnknown(recordType: string, sample: string): void;
   getMeta(key: string): string | null;
+  /** Every meta row whose key starts with `prefix` (non-empty), by key ascending. */
+  metaWithPrefix(prefix: string): [string, string][];
   setMeta(key: string, value: string): void;
   deleteMeta(key: string): void;
   /** True when raw_event holds at least one row of this session (served by the raw_event_session index). */
   hasRawForSession(sessionId: string): boolean;
   /** True when raw_event holds at least one row. */
   hasRawEvents(): boolean;
+  /**
+   * Resolves at once unless the WAL file has grown past its size limit by more than WAL_SETTLE_SLACK_BYTES; then once
+   * the checkpointer reports a complete checkpoint (or after about two seconds), so the caller's next write restarts
+   * the WAL from its start instead of growing it. For a long import that writes back to back: SQLite restarts the WAL
+   * only when a write begins after every frame was checkpointed, which never happens while writes keep arriving during
+   * each (passive) checkpoint. Writes nothing; the event loop stays free while waiting.
+   */
+  settleWal(): Promise<void>;
   /** Random id generated when the database file was created; stable across restarts and rebuilds. */
   epoch(): string;
   /** Latest receivedAt of any stored hook event (kept in `meta`, no raw_event scan). */
@@ -290,6 +314,7 @@ function changeSessionId(c: Change): string {
     case 'edge_added':
       return c.edge.sessionId;
     case 'node_updated':
+    case 'edge_removed':
       return c.sessionId;
   }
 }
@@ -305,6 +330,11 @@ function withoutDetail(c: Change): Change {
 }
 
 const CHECKPOINT_INTERVAL_MS = 1000;
+/** settleWal waits once the WAL file is this much larger than its size limit. */
+const WAL_SETTLE_SLACK_BYTES = 16 * 1024 * 1024;
+/** settleWal gives up waiting after this many checkpoint requests (50 ms apart) or this long per request. */
+const WAL_SETTLE_ATTEMPTS = 40;
+const WAL_SETTLE_REPLY_MS = 2000;
 /** The WAL file is truncated to this size when it restarts; without a limit it keeps its high-water mark on disk. */
 const WAL_SIZE_LIMIT_BYTES = 64 * 1024 * 1024;
 
@@ -312,13 +342,14 @@ const WAL_SIZE_LIMIT_BYTES = 64 * 1024 * 1024;
  * Auto-checkpoints on the main connection copy the WAL into the database file synchronously, stalling the event loop
  * for hundreds of milliseconds during an import. They are disabled here and a worker thread checkpoints instead.
  */
-function startCheckpointer(db: Database.Database, dbPath: string): Worker | null {
+function startCheckpointer(db: Database.Database, dbPath: string, onError: () => void): Worker | null {
   const here = path.dirname(fileURLToPath(import.meta.url));
   const script = ['checkpointer.js', 'checkpointer.ts'].map((f) => path.join(here, f)).find((f) => fs.existsSync(f));
   if (script === undefined) return null; // keep SQLite's automatic checkpoints
   try {
     const worker = new Worker(script, { workerData: { dbPath, intervalMs: CHECKPOINT_INTERVAL_MS } });
     worker.on('error', () => {
+      onError();
       try {
         if (db.open) db.pragma('wal_autocheckpoint = 1000'); // fall back to automatic checkpoints
       } catch {
@@ -357,7 +388,52 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   db.pragma(`journal_size_limit = ${options.walSizeLimitBytes ?? WAL_SIZE_LIMIT_BYTES}`);
   db.exec(SCHEMA_SQL);
   migrateSchema(db);
-  const checkpointer = dbPath === ':memory:' || dbPath === '' ? null : startCheckpointer(db, dbPath);
+  let checkpointerFailed = false;
+  const checkpointer =
+    dbPath === ':memory:' || dbPath === ''
+      ? null
+      : startCheckpointer(db, dbPath, () => {
+          checkpointerFailed = true;
+        });
+  const walLimit = options.walSizeLimitBytes ?? WAL_SIZE_LIMIT_BYTES;
+  const walPath = `${dbPath}-wal`;
+  /** Checkpoint requests waiting for the worker's answer, by request id. */
+  const replies = new Map<number, (complete: boolean) => void>();
+  let nextRequest = 0;
+  checkpointer?.on('message', (m: { type?: unknown; id?: unknown; busy?: unknown; log?: unknown; checkpointed?: unknown }) => {
+    if (m?.type !== 'checkpointed' || typeof m.id !== 'number') return;
+    const reply = replies.get(m.id);
+    replies.delete(m.id);
+    reply?.(m.busy === 0 && typeof m.log === 'number' && m.log >= 0 && m.log === m.checkpointed);
+  });
+  /** One immediate checkpoint by the worker: true when it copied every frame. */
+  const checkpointNow = (): Promise<boolean> =>
+    new Promise((resolve) => {
+      const id = nextRequest++;
+      const timer = setTimeout(() => {
+        replies.delete(id);
+        resolve(false);
+      }, WAL_SETTLE_REPLY_MS);
+      timer.unref();
+      replies.set(id, (complete) => {
+        clearTimeout(timer);
+        resolve(complete);
+      });
+      try {
+        checkpointer!.postMessage({ type: 'now', id });
+      } catch {
+        replies.delete(id);
+        clearTimeout(timer);
+        resolve(false);
+      }
+    });
+  const walFileSize = (): number => {
+    try {
+      return fs.statSync(walPath).size;
+    } catch {
+      return 0;
+    }
+  };
 
   // INSERT ... SELECT ... WHERE NOT EXISTS (rather than INSERT OR IGNORE): with AUTOINCREMENT, an
   // ignored insert would still consume an ingest_id and leave gaps.
@@ -376,6 +452,12 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     `INSERT INTO raw_event (source, origin, file, session_id, agent_id, project_id, body)
      VALUES ('meta', @origin, @file, @sessionId, @agentId, @projectId, @payload)`,
   );
+  const selectTranscriptLine = db
+    .prepare(`SELECT 1 FROM raw_event WHERE source = 'transcript' AND file = ? AND line_hash = ?`)
+    .pluck();
+  const selectMaxTranscriptOffset = db.prepare(
+    `SELECT MAX("offset") AS off FROM raw_event WHERE source = 'transcript' AND file = ?`,
+  );
   const selectOffset = db.prepare(`SELECT "offset" AS off FROM file_offset WHERE file = ?`);
   const upsertOffset = db.prepare(
     `INSERT INTO file_offset (file, "offset", size) VALUES (@file, @offset, @size)
@@ -386,6 +468,7 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   const epoch = selectMeta.get('epoch') as string;
   const upsertMeta = db.prepare(`INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`);
   const deleteMeta = db.prepare(`DELETE FROM meta WHERE key = ?`);
+  const selectMetaRange = db.prepare(`SELECT key, value FROM meta WHERE key >= ? AND key < ? ORDER BY key`).raw();
   const selectAnyRaw = db.prepare(`SELECT 1 FROM raw_event LIMIT 1`).pluck();
   const selectAnyRawForSession = db.prepare(`SELECT 1 FROM raw_event WHERE session_id = ? LIMIT 1`).pluck();
   const upsertLaterMeta = db.prepare(
@@ -411,6 +494,7 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
      WHERE n.session_id = ? AND n.id = ?`,
   );
   const insertEdge = db.prepare(`INSERT OR REPLACE INTO edge (session_id, id, body) VALUES (?, ?, ?)`);
+  const deleteEdge = db.prepare(`DELETE FROM edge WHERE session_id = ? AND id = ?`);
 
   // Active = effective status running/awaiting_*: a `running` session older than STALE_AFTER_MS is stale, not active.
   // strftime normalizes the stored ISO timestamp so it compares correctly with the cutoff's toISOString().
@@ -484,6 +568,11 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   const selectRawSessionIds = db.prepare(
     `SELECT DISTINCT session_id AS id FROM raw_event WHERE session_id IS NOT NULL ORDER BY session_id`,
   );
+  // The next stored key after `file` (exclusive) below `end`: a loose scan of the dedupe index, one seek per key, never
+  // the rows of a key (a large conversation has tens of thousands).
+  const selectNextTranscriptFile = db
+    .prepare(`SELECT MIN(file) FROM raw_event WHERE source = 'transcript' AND file > ? AND file < ?`)
+    .pluck();
   const upsertUnknown = db.prepare(
     `INSERT INTO unknown_stat (record_type, count, sample) VALUES (?, 1, ?)
      ON CONFLICT(record_type) DO UPDATE SET count = count + 1`,
@@ -549,6 +638,9 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
       }
       case 'edge_added':
         insertEdge.run(c.edge.sessionId, c.edge.id, JSON.stringify(c.edge));
+        break;
+      case 'edge_removed':
+        deleteEdge.run(c.sessionId, c.id);
         break;
     }
   }
@@ -618,6 +710,15 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   };
 
   const lastSeq = (): number => (selectSeqCounter.get() as number | undefined) ?? 0;
+  const transcriptKeys = (keyPrefix: string): string[] => {
+    if (keyPrefix === '') throw new Error('transcriptKeys: empty key prefix');
+    const end = keyPrefix.slice(0, -1) + String.fromCharCode(keyPrefix.charCodeAt(keyPrefix.length - 1) + 1);
+    const keys: string[] = [];
+    if (selectTranscriptOwner.get(keyPrefix) !== undefined) keys.push(keyPrefix); // `file > prefix` misses the prefix itself
+    let file: string | null = keyPrefix;
+    while ((file = (selectNextTranscriptFile.get(file, end) as string | null | undefined) ?? null) !== null) keys.push(file);
+    return keys;
+  };
   const lastHookAt = (): string | null => (selectMeta.get('last_hook_at') as string | undefined) ?? null;
   const listOffsets = (): { path: string; offset: number; size: number }[] =>
     (selectFiles.all() as { file: string; offset: number; size: number }[]).map((r) => ({
@@ -638,6 +739,12 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
       }
       if (event.source === 'hook') return insertHookTx(event);
       return Number(insertRawMeta.run({ ...event, origin: event.origin ?? 'claude', projectId: event.projectId ?? null }).lastInsertRowid);
+    },
+    hasTranscriptLine(file, line) {
+      return selectTranscriptLine.get(file, createHash('sha1').update(line).digest('hex')) !== undefined;
+    },
+    maxTranscriptOffset(file) {
+      return (selectMaxTranscriptOffset.get(file) as { off: number | null }).off;
     },
     getOffset(file) {
       const row = selectOffset.get(file) as { off: number } | undefined;
@@ -775,6 +882,16 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     allSessionIdsInRaw() {
       return (selectRawSessionIds.all() as { id: string }[]).map((r) => r.id);
     },
+    transcriptSessionIds(keyPrefix) {
+      if (keyPrefix === '') throw new Error('transcriptSessionIds: empty key prefix');
+      const ids = new Set<string>();
+      for (const file of transcriptKeys(keyPrefix)) {
+        const sessionId = (selectTranscriptOwner.get(file) as { sessionId: string | null } | undefined)?.sessionId;
+        if (sessionId != null) ids.add(sessionId);
+      }
+      return [...ids].sort();
+    },
+    transcriptKeys,
     clearDerived() {
       clearDerivedTx();
     },
@@ -795,8 +912,21 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
       upsertUnknown.run(recordType, sample.slice(0, SAMPLE_MAX));
     },
     lastHookAt,
+    async settleWal() {
+      if (checkpointer === null || checkpointerFailed || !db.open) return;
+      if (walFileSize() <= walLimit + (options.walSettleSlackBytes ?? WAL_SETTLE_SLACK_BYTES)) return;
+      for (let attempt = 0; attempt < WAL_SETTLE_ATTEMPTS && db.open && !checkpointerFailed; attempt++) {
+        if (await checkpointNow()) return;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    },
     epoch: () => epoch,
     getMeta: (key) => (selectMeta.get(key) as string | undefined) ?? null,
+    metaWithPrefix(prefix) {
+      if (prefix === '') throw new Error('metaWithPrefix: empty prefix');
+      const end = prefix.slice(0, -1) + String.fromCharCode(prefix.charCodeAt(prefix.length - 1) + 1);
+      return selectMetaRange.all(prefix, end) as [string, string][];
+    },
     setMeta(key, value) {
       upsertMeta.run(key, value);
     },
@@ -819,6 +949,8 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
       };
     },
     close() {
+      for (const reply of [...replies.values()]) reply(false);
+      replies.clear();
       checkpointer?.postMessage('close');
       db.close();
     },

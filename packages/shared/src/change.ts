@@ -4,7 +4,9 @@ export type Change =
   | { type: 'session_upserted'; session: Session }
   | { type: 'node_added'; node: GraphNode; detail: Partial<NodeDetail> }
   | { type: 'node_updated'; sessionId: string; id: string; patch: Partial<GraphNode>; detail?: Partial<NodeDetail> }
-  | { type: 'edge_added'; edge: GraphEdge };
+  | { type: 'edge_added'; edge: GraphEdge }
+  /** An edge a normalizer no longer derives (a re-derived part of the graph). Unknown ids are ignored. */
+  | { type: 'edge_removed'; sessionId: string; id: string };
 export type SeqChange = Change & { seq: number };
 
 export interface Graph { nodes: Record<string, GraphNode>; edges: Record<string, GraphEdge> }
@@ -13,7 +15,7 @@ export function emptyGraph(): Graph {
   return { nodes: {}, edges: {} };
 }
 
-/** Immutable update. session_upserted is returned unchanged; updates to unknown nodes are ignored. */
+/** Immutable update. session_upserted is returned unchanged; updates to unknown nodes and removals of unknown edges are ignored. */
 export function applyChange(graph: Graph, change: Change): Graph {
   switch (change.type) {
     case 'node_added':
@@ -25,6 +27,11 @@ export function applyChange(graph: Graph, change: Change): Graph {
     }
     case 'edge_added':
       return { ...graph, edges: { ...graph.edges, [change.edge.id]: change.edge } };
+    case 'edge_removed': {
+      if (!(change.id in graph.edges)) return graph;
+      const { [change.id]: _removed, ...edges } = graph.edges;
+      return { ...graph, edges };
+    }
     case 'session_upserted':
       return graph;
   }
@@ -50,6 +57,9 @@ export function applyChanges(graph: Graph, changes: Change[]): Graph {
       }
       case 'edge_added':
         (edges ??= { ...graph.edges })[c.edge.id] = c.edge;
+        break;
+      case 'edge_removed':
+        if (c.id in (edges ?? graph.edges)) delete (edges ??= { ...graph.edges })[c.id];
         break;
       case 'session_upserted':
         break;

@@ -1,11 +1,15 @@
 import fsp from 'node:fs/promises';
 import { STALE_AFTER_MS, type Change, type Origin, type SeqChange } from '@claude-canvas/shared';
 import type { Config } from './config.js';
-import { NormalizerRegistry } from './normalize/registry.js';
+import { NORMALIZER_FACTORIES, NormalizerRegistry, type NormalizerFactories } from './normalize/registry.js';
+import type { BatchItem } from './normalize/types.js';
 import { NORMALIZER_VERSION } from './normalize/version.js';
 import { ClaudeFileSource } from './sources/claude.js';
 import { encodeProjectId } from './sources/codex/source.js';
-import { isPromise, originOfKey, type FileClass, type FileSource, type MaybePromise } from './sources/source.js';
+import { fileUriToPath, normaliseCwd } from './sources/cursor/project.js';
+import type { PollBatch, PollSink, PollSource, PollStatus } from './sources/poll.js';
+import { ProjectIdResolver } from './sources/project-ids.js';
+import { isPromise, KEY_PREFIXES, originOfKey, type FileClass, type FileSource, type MaybePromise } from './sources/source.js';
 import { readNewLines } from './sources/transcript/reader.js';
 import type { RawEvent, Store, StoredRawEvent } from './store/store.js';
 
@@ -19,6 +23,18 @@ const HYDRATE_PAGE_BYTES = 256 * 1024;
 const LIVE_STATUSES: ReadonlySet<string> = new Set(['running', 'awaiting_permission', 'awaiting_input']);
 const UNKNOWN_PROJECT = 'unknown';
 const REBUILD_PROGRESS_EVERY = 100;
+
+/**
+ * A Cursor hook's workspace root as a local directory spelled as the Cursor source spells a working directory: a
+ * `file://` URI becomes a path, `/d:/x` becomes `d:\x`, then normaliseCwd (drive letter upper-cased, trailing separator
+ * removed). Null for a URI that names no local path.
+ */
+function cursorRootPath(root: string): string | null {
+  let p: string | null = root;
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(root)) p = fileUriToPath(root);
+  else if (/^\/[A-Za-z]:([\\/]|$)/.test(root)) p = root.slice(1).replace(/\//g, '\\');
+  return p === null || p === '' ? null : normaliseCwd(p);
+}
 /** At most one failure log line per file (or hook session) per minute. */
 const LOG_EVERY_MS = 60_000;
 
@@ -27,6 +43,13 @@ export interface PipelineOptions {
   log?: (line: string) => void;
   /** The directories of session files to read; default: Claude Code's projectsDir only (defaultSources). */
   sources?: readonly FileSource[];
+  /**
+   * Sources whose data is polled (Cursor's database), at most one per origin: started after the initial scan, stopped
+   * by close(), poked when a hook of their origin arrives. Default: none.
+   */
+  pollSources?: readonly PollSource[];
+  /** The normalizer of each origin (tests); default NORMALIZER_FACTORIES. */
+  normalizers?: NormalizerFactories;
 }
 
 /** The sources a pipeline reads when none are given: Claude Code's projects directory. */
@@ -36,6 +59,8 @@ export function defaultSources(config: Config): FileSource[] {
 /** meta keys */
 export const REBUILD_FLAG = 'rebuild_in_progress';
 export const NORMALIZER_VERSION_KEY = 'normalizer_version';
+/** meta key prefix of a poll source's notes about its units (PollSink.saveUnitState): `poll:` + the store key. */
+export const POLL_STATE_PREFIX = 'poll:';
 
 type Listener = (changes: SeqChange[]) => void;
 type ResyncListener = (sessionId: string) => void;
@@ -49,6 +74,13 @@ interface FileLock {
 }
 
 const yieldToEventLoop = (): Promise<void> => new Promise<void>((resolve) => setImmediate(resolve));
+
+/** A poll batch that found the pipeline closed after waiting its turn: rejected, not reported (PollSink contract). */
+class PipelineClosed extends Error {
+  constructor() {
+    super('pipeline closed');
+  }
+}
 
 function topLevelType(text: string): string {
   try {
@@ -65,8 +97,20 @@ function topLevelType(text: string): string {
 
 export class Pipeline {
   /** One normalizer per origin; replaced wholesale by a rebuild (hydration checks identity to notice). */
-  private normalizer = new NormalizerRegistry();
+  private normalizer: NormalizerRegistry;
+  private readonly factories: NormalizerFactories;
   private readonly sources: readonly FileSource[];
+  private readonly polls: readonly PollSource[];
+  private pollsStarted = false;
+  private closed = false;
+  /** The first close()'s result, returned by every later call. */
+  private closing: Promise<void> | null = null;
+  /** ingestRecords calls in flight (importing()). */
+  private pollIngests = 0;
+  /** Tail of the poll batches' turns at store.settleWal (keeps their call order). */
+  private walGate: Promise<void> = Promise.resolve();
+  /** Poll store key -> offset of its next transcript raw event (seeded from the store on first use). */
+  private readonly pollOffsets = new Map<string, number>();
   private readonly listeners = new Set<Listener>();
   private readonly resyncListeners = new Set<ResyncListener>();
   /**
@@ -97,6 +141,8 @@ export class Pipeline {
   private lastHook: string | null = null;
   /** Hook events already inserted into raw_event (so a failed task does not insert them twice). */
   private readonly persistedHooks = new WeakSet<object>();
+  /** Project ids of Cursor hooks for sessions the store does not know (the stored sessions' ids, case-insensitively reused). */
+  private readonly cursorProjects = new ProjectIdResolver(() => this.store.sessionProjectIds());
   private flagsChecked = false;
   /** Absolute paths whose last classification threw (reported); cleared, with the failure, once one succeeds. */
   private readonly classifyFailed = new Set<string>();
@@ -110,6 +156,9 @@ export class Pipeline {
   ) {
     this.log = options.log ?? (() => {});
     this.sources = options.sources ?? defaultSources(config);
+    this.polls = options.pollSources ?? [];
+    this.factories = options.normalizers ?? NORMALIZER_FACTORIES;
+    this.normalizer = this.newNormalizer();
     this.dirty = new Set(store.dirtySessionIds());
   }
 
@@ -118,9 +167,44 @@ export class Pipeline {
     return this.sources;
   }
 
-  /** True while the initial full scan or a rebuild is running. */
+  /** The poll sources this pipeline drives. */
+  pollSources(): readonly PollSource[] {
+    return this.polls;
+  }
+
+  /** Status of the poll source of `origin`, or null when there is none; a throwing status() becomes its lastError. */
+  pollStatus(origin: Origin): PollStatus | null {
+    const source = this.pollSourceFor(origin);
+    if (source === null) return null;
+    try {
+      const { lastPollAt, lastError } = source.status();
+      return { lastPollAt, lastError };
+    } catch (err) {
+      return { lastPollAt: null, lastError: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /**
+   * True while the initial full scan or a rebuild is running, or while a poll source's records are being ingested before
+   * its first completed round (the first import; later rounds would make it flicker every few seconds).
+   */
   importing(): boolean {
-    return this.importDepth > 0;
+    return this.importDepth > 0 || (this.pollIngests > 0 && this.polls.some((p) => this.pollStatus(p.origin)?.lastPollAt === null));
+  }
+
+  /**
+   * Stops the poll sources (a pipeline closed before its initial scan never starts them). Pending ingestion is left to
+   * idle().
+   */
+  close(): Promise<void> {
+    if (this.closing === null) {
+      this.closed = true;
+      // Never rejects: a stop() that throws (synchronously too) or rejects does not keep the others from stopping.
+      this.closing = this.pollsStarted
+        ? Promise.allSettled(this.polls.map(async (p) => p.stop())).then(() => undefined)
+        : Promise.resolve();
+    }
+    return this.closing;
   }
 
   /**
@@ -202,6 +286,8 @@ export class Pipeline {
   /**
    * `transcriptPath` is the payload's `transcript_path`: when the source of `origin` knows it as a session or agent
    * transcript, its project is stored with the raw event (so replay reproduces it) and used for a new session.
+   * Cursor: `sessionId` is the payload's conversation id and `from.cwd` its first workspace root; the hook of a stored
+   * subagent conversation is filed under its owning session and pokes every session owning it (cursorHookTarget).
    */
   ingestHook(
     eventName: string,
@@ -213,13 +299,18 @@ export class Pipeline {
   ): void {
     const receivedAt = new Date().toISOString();
     const source = this.sourceFor(origin);
-    const projectId =
-      origin === 'codex'
-        ? this.codexHookProject(sessionId, transcriptPath ?? null, from)
-        : source !== null && typeof transcriptPath === 'string' && transcriptPath !== ''
-          ? source.projectOfTranscript(transcriptPath)
-          : null;
+    let projectId: string | null;
+    let pokes: (string | null)[] = [sessionId];
+    if (origin === 'cursor') ({ sessionId, projectId, pokes } = this.cursorHookTarget(sessionId, from.cwd));
+    else
+      projectId =
+        origin === 'codex'
+          ? this.codexHookProject(sessionId, transcriptPath ?? null, from)
+          : source !== null && typeof transcriptPath === 'string' && transcriptPath !== ''
+            ? source.projectOfTranscript(transcriptPath)
+            : null;
     const event: RawEvent = { source: 'hook', origin, receivedAt, eventName, sessionId, payload, projectId };
+    for (const id of pokes) this.pokePoll(origin, id);
     this.seed();
     if (this.lastHook === null || receivedAt > this.lastHook) this.lastHook = receivedAt;
     const key = `hook:${sessionId}`;
@@ -247,7 +338,7 @@ export class Pipeline {
         (!this.normalizer.hasSession(sessionId) &&
           (this.store.getSession(sessionId) !== null ||
             (this.normalizer.needsPreSessionReplay(sessionId) && this.store.hasRawForSession(sessionId)))));
-    if (!needsQueue) {
+    if (!needsQueue || sessionId === null) {
       try {
         this.applyHook(event);
         this.failures.delete(key);
@@ -272,7 +363,10 @@ export class Pipeline {
     try {
       await this.fullScan();
     } finally {
-      if (initial) this.importDepth -= 1;
+      if (initial) {
+        this.importDepth -= 1;
+        this.startPolls();
+      }
     }
   }
 
@@ -325,7 +419,7 @@ export class Pipeline {
       if (now - touched > this.config.evictAfterMs) continue;
       for (const file of this.filesBySession.get(id) ?? []) targets.add(file);
     }
-    for (const key of this.failures.keys()) if (!isNonFileKey(key)) targets.add(key);
+    for (const key of this.failures.keys()) if (!isNonFileKey(key) && !this.isPollKey(key)) targets.add(key);
     for (const file of [...targets].sort()) {
       if (await this.unchanged(file)) continue;
       await this.safeIngest(file);
@@ -360,37 +454,36 @@ export class Pipeline {
   private rebuildAll(progress?: (done: number, total: number) => void): void {
     this.store.setMeta(REBUILD_FLAG, '1');
     this.store.clearDerived();
-    this.normalizer = new NormalizerRegistry();
+    this.normalizer = this.newNormalizer();
     this.lastTouch.clear();
     const ids = this.store.allSessionIdsInRaw();
     try {
       ids.forEach((id, i) => {
-        this.normalizer = new NormalizerRegistry();
+        this.normalizer = this.newNormalizer();
         const changes: Change[] = [];
         const unknown: [string, string][] = [];
         let after = 0;
         for (;;) {
           const page = this.store.rawForSessionAfter(id, after, HYDRATE_PAGE_ROWS, HYDRATE_PAGE_BYTES);
           if (page.length === 0) break;
-          for (const ev of page) {
-            const out = this.normalizer.apply(ev, this.projectOf(ev));
-            changes.push(...out.changes);
-            if (out.unknownRecordType !== undefined && ev.source !== 'meta') {
-              unknown.push([out.unknownRecordType, ev.source === 'transcript' ? ev.line : ev.payload]);
-            }
-          }
+          const out = this.replay(page);
+          for (const c of out.changes) changes.push(c);
+          page.forEach((ev, k) => {
+            const type = out.unknown[k];
+            if (type !== undefined && ev.source !== 'meta') unknown.push([type, ev.source === 'transcript' ? ev.line : ev.payload]);
+          });
           after = page[page.length - 1]!.ingestId;
         }
         this.atomically(null, () => {
           for (const [type, sample] of unknown) this.store.bumpUnknown(type, sample);
           return changes;
         });
-        this.normalizer = new NormalizerRegistry(); // release this session before the next one
+        this.normalizer = this.newNormalizer(); // release this session before the next one
         if ((i + 1) % REBUILD_PROGRESS_EVERY === 0 || i + 1 === ids.length) progress?.(i + 1, ids.length);
       });
     } finally {
       // Sessions are re-hydrated on demand; leave nothing loaded-but-untracked.
-      this.normalizer = new NormalizerRegistry();
+      this.normalizer = this.newNormalizer();
       this.lastTouch.clear();
     }
     this.store.setMeta(NORMALIZER_VERSION_KEY, String(NORMALIZER_VERSION));
@@ -407,6 +500,144 @@ export class Pipeline {
   async listFiles(): Promise<string[]> {
     const lists = await Promise.all(this.sources.map((s) => s.listFiles()));
     return lists.flat().sort();
+  }
+
+  // ---------------------------------------------------------------- poll sources
+
+  private newNormalizer(): NormalizerRegistry {
+    return new NormalizerRegistry(this.factories);
+  }
+
+  private pollSourceFor(origin: Origin): PollSource | null {
+    return this.polls.find((p) => p.origin === origin) ?? null;
+  }
+
+  /** True for a store key of a polled origin: its failures are not files the rescan could re-read. */
+  private isPollKey(key: string): boolean {
+    return this.polls.length > 0 && this.pollSourceFor(originOfKey(key)) !== null;
+  }
+
+  /** Starts each poll source once, after the initial scan, unless the pipeline was closed. */
+  private startPolls(): void {
+    if (this.pollsStarted || this.closed) return;
+    this.pollsStarted = true;
+    for (const source of this.polls) {
+      try {
+        source.start(this.sinkFor(source));
+      } catch (err) {
+        this.reportFailure(`${KEY_PREFIXES[source.origin]}poll`, err);
+      }
+    }
+  }
+
+  /** A hook of `origin` arrived for a session: the poll source of that origin (if any) polls it soon. */
+  private pokePoll(origin: Origin, sessionId: string | null): void {
+    if (sessionId === null) return;
+    const source = this.pollSourceFor(origin);
+    if (source === null) return;
+    try {
+      source.poke(sessionId);
+    } catch {
+      // a failing source must not break hook ingestion
+    }
+  }
+
+  /** What `source` may ask of the pipeline, bound to its origin. */
+  private sinkFor(source: PollSource): PollSink {
+    return {
+      ingestRecords: (batch) => this.ingestPolled(source.origin, batch),
+      markSourceDeleted: (sessionId) => this.markSourceDeleted(sessionId),
+      clearSourceDeleted: (sessionId) => this.clearSourceDeleted(sessionId),
+      reportFailure: (key, err) => this.reportFailure(key, err),
+      clearFailure: (key) => {
+        this.failures.delete(key);
+      },
+      storedSessionIds: () => this.store.transcriptSessionIds(KEY_PREFIXES[source.origin]),
+      loadUnitStates: () =>
+        new Map(this.store.metaWithPrefix(`${POLL_STATE_PREFIX}${KEY_PREFIXES[source.origin]}`).map(([k, v]) => [k.slice(POLL_STATE_PREFIX.length), v])),
+      saveUnitState: (key, value) => {
+        if (!key.startsWith(KEY_PREFIXES[source.origin])) throw new Error(`not a ${source.origin} key: ${key}`);
+        if (value === null) this.store.deleteMeta(`${POLL_STATE_PREFIX}${key}`);
+        else this.store.setMeta(`${POLL_STATE_PREFIX}${key}`, value);
+      },
+    };
+  }
+
+  /**
+   * PollSink.ingestRecords: one transaction and one derivation per batch, in the session's work chain. Each record not
+   * stored yet under the key becomes a transcript raw event whose offset is the key's next sequence number (0, 1, 2, ...
+   * in ingestion order, continuing after the highest one stored), so a key's offsets follow ingest order as a file's
+   * byte offsets do. A batch whose records are all stored already does nothing at all (no hydration, no derivation).
+   * Before writing, batches wait in turn (in call order) for store.settleWal, which keeps the WAL bounded during a
+   * long import.
+   */
+  private ingestPolled(origin: Origin, batch: PollBatch): Promise<void> {
+    if (this.closed) return Promise.reject(new Error('pipeline closed'));
+    if (batch.records.length === 0) return Promise.resolve();
+    const { key } = batch;
+    if (batch.records.every((r) => this.store.hasTranscriptLine(key, r.line))) return Promise.resolve();
+    this.pollIngests += 1;
+    const gate = this.walGate.then(() => this.store.settleWal());
+    this.walGate = gate.catch(() => undefined);
+    const run = (async (): Promise<void> => {
+      try {
+        await gate;
+        if (this.closed) throw new PipelineClosed();
+        await this.storePolled(origin, batch);
+      } catch (err) {
+        if (!(err instanceof PipelineClosed)) this.reportFailure(key, err);
+        throw err;
+      } finally {
+        this.pollIngests -= 1;
+      }
+    })();
+    return this.track(run);
+  }
+
+  /** The write of one poll batch (see ingestPolled), in the session's work chain. */
+  private async storePolled(origin: Origin, batch: PollBatch): Promise<void> {
+    const { key, sessionId, agentId, projectId } = batch;
+    await this.enqueue(sessionId, () => {
+      let next = this.pollOffsets.get(key) ?? (this.store.maxTranscriptOffset(key) ?? -1) + 1;
+      this.atomically(
+        sessionId,
+        () => {
+          // One transaction and one derivation for the whole batch.
+          const items: BatchItem[] = [];
+          const lines: string[] = [];
+          for (const { recordType, line } of batch.records) {
+            const event: RawEvent = { source: 'transcript', origin, file: key, offset: next, line, recordType, sessionId, agentId, projectId };
+            if (this.store.insertRaw(event) === null) continue;
+            next += 1;
+            items.push({ event, projectId });
+            lines.push(line);
+          }
+          const out = this.normalizer.applyBatch(items);
+          out.unknown.forEach((type, k) => {
+            if (type !== undefined) this.store.bumpUnknown(type, lines[k]!);
+          });
+          return out.changes;
+        },
+        () => this.pollOffsets.set(key, next),
+      );
+    });
+    // No failure is cleared here: the key's failures may come from the source itself (clearFailure clears them).
+  }
+
+  /** PollSink.markSourceDeleted: the session is flagged, and stays flagged in every later change of it. */
+  private async markSourceDeleted(sessionId: string): Promise<void> {
+    if (this.closed) return;
+    this.deleted.add(sessionId);
+    const session = this.store.getSession(sessionId);
+    if (session && !session.sourceDeleted) this.commit([{ type: 'session_upserted', session: { ...session, sourceDeleted: true } }]);
+  }
+
+  /** PollSink.clearSourceDeleted: also clears a flag stored by an earlier run (no longer in `deleted`). */
+  private async clearSourceDeleted(sessionId: string): Promise<void> {
+    if (this.closed) return;
+    this.deleted.delete(sessionId);
+    const session = this.store.getSession(sessionId);
+    if (session?.sourceDeleted) this.commit([{ type: 'session_upserted', session: { ...session, sourceDeleted: false } }]);
   }
 
   // ---------------------------------------------------------------- internals
@@ -474,6 +705,38 @@ export class Pipeline {
 
   private sourceFor(origin: Origin): FileSource | null {
     return this.sources.find((s) => s.origin === origin) ?? null;
+  }
+
+  /**
+   * Session, project and pokes of a Cursor hook, decided once on arrival and stored with the raw event (replay uses the
+   * stored values). A main conversation (`cursor:<id>` stored) is its own session. A subagent conversation stored under
+   * `cursor:<session>/<id>` belongs to every such session (forks share subagents): the hook is filed under the lowest
+   * of their ids and pokes each of them. Otherwise (nothing stored yet) the session is the conversation id. Project:
+   * the session's own when the store knows the session (a hook never moves it); else the one stored with the records;
+   * else the first workspace root encoded as the Cursor source encodes a working directory (reusing a known project id
+   * that differs only in letter case); else null.
+   */
+  private cursorHookTarget(
+    conversationId: string | null,
+    workspaceRoot: string | null,
+  ): { sessionId: string | null; projectId: string | null; pokes: (string | null)[] } {
+    if (conversationId === null) return { sessionId: null, projectId: null, pokes: [] };
+    const prefix = KEY_PREFIXES.cursor;
+    let owner = this.store.transcriptFileOwner(`${prefix}${conversationId}`);
+    let owners = owner === null ? [] : [conversationId];
+    if (owner === null) {
+      const suffix = `/${conversationId}`;
+      const keys = this.store.transcriptKeys(prefix).filter((k) => k.endsWith(suffix) && k.indexOf('/') === k.length - suffix.length);
+      owners = [...new Set(keys.map((k) => k.slice(prefix.length, k.length - suffix.length)))].sort();
+      if (owners.length > 0) owner = this.store.transcriptFileOwner(`${prefix}${owners[0]}${suffix}`);
+    }
+    const sessionId = owners[0] ?? conversationId;
+    const pokes = owners.length > 0 ? owners : [conversationId];
+    const stored = this.store.getSession(sessionId)?.projectId ?? null;
+    if (stored !== null && stored !== UNKNOWN_PROJECT) return { sessionId, projectId: stored, pokes };
+    if (owner?.projectId != null && owner.projectId !== UNKNOWN_PROJECT) return { sessionId, projectId: owner.projectId, pokes };
+    const cwd = workspaceRoot === null ? null : cursorRootPath(workspaceRoot);
+    return { sessionId, projectId: cwd === null ? null : this.cursorProjects.forCwd(cwd), pokes };
   }
 
   /**
@@ -792,7 +1055,7 @@ export class Pipeline {
         const start = performance.now();
         while (!done && performance.now() - start < HYDRATE_SLICE_MS) {
           const page = this.store.rawForSessionAfter(sessionId, after, HYDRATE_PAGE_ROWS, HYDRATE_PAGE_BYTES);
-          for (const ev of page) this.replayOne(ev);
+          this.replay(page);
           if (page.length === 0) done = true;
           else after = page[page.length - 1]!.ingestId;
         }
@@ -834,7 +1097,7 @@ export class Pipeline {
     let applied: SeqChange[];
     try {
       const changes: Change[] = [];
-      for (const ev of this.rawPages(sessionId)) changes.push(...this.replayOne(ev));
+      for (const page of this.rawPageList(sessionId)) for (const c of this.replay(page).changes) changes.push(c);
       applied = this.store.transaction(() => {
         this.store.deleteDerivedForSession(sessionId);
         const out = this.persist(changes);
@@ -859,11 +1122,16 @@ export class Pipeline {
 
   /** Every stored raw event of a session in ingest order, read page by page. */
   private *rawPages(sessionId: string): Generator<StoredRawEvent> {
+    for (const page of this.rawPageList(sessionId)) yield* page;
+  }
+
+  /** The pages of rawPages. */
+  private *rawPageList(sessionId: string): Generator<StoredRawEvent[]> {
     let after = 0;
     for (;;) {
       const page = this.store.rawForSessionAfter(sessionId, after, HYDRATE_PAGE_ROWS, HYDRATE_PAGE_BYTES);
       if (page.length === 0) return;
-      yield* page;
+      yield page;
       after = page[page.length - 1]!.ingestId;
     }
   }
@@ -878,8 +1146,12 @@ export class Pipeline {
     return this.sourceFor(ev.origin)?.projectOfKey(ev.file) ?? UNKNOWN_PROJECT;
   }
 
-  private replayOne(ev: StoredRawEvent): Change[] {
-    return this.normalizer.apply(ev, this.projectOf(ev)).changes;
+  /**
+   * Applies stored raw events in order as one batch (a normalizer with applyBatch derives once per page; the others
+   * apply them one by one, as before).
+   */
+  private replay(events: readonly StoredRawEvent[]): { changes: Change[]; unknown: (string | undefined)[] } {
+    return this.normalizer.applyBatch(events.map((event) => ({ event, projectId: this.projectOf(event) })));
   }
 
   private drop(sessionId: string): void {

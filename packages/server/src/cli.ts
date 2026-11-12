@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * The `claude-canvas` entry. `hook-forward` runs once per Codex hook event, so it must start fast: this module imports
+ * The `claude-canvas` entry. `hook-forward` runs once per Codex or Cursor hook event, so it must start fast: this module imports
  * nothing heavy itself, and only loads the commands (server, store, pipeline, watcher) when it is not that invocation.
  * Importers (tests) always get the full command set.
  */

@@ -6,6 +6,18 @@ export interface NormalizeResult {
   unknownRecordType?: string;
 }
 
+/** One event of a batch and the project it belongs to (as `apply` takes them). */
+export interface BatchItem {
+  event: RawEvent;
+  projectId: string;
+}
+
+/** The result of applying a batch: every change, and the unknown record type of each event (by index). */
+export interface BatchResult {
+  changes: Change[];
+  unknown: (string | undefined)[];
+}
+
 /**
  * What the pipeline needs from the normalizer of one origin: raw events in, graph changes out, plus the in-memory
  * session bookkeeping the pipeline drives (eviction, hydration from the raw log). One instance per origin; the
@@ -14,6 +26,12 @@ export interface NormalizeResult {
 export interface AgentNormalizer {
   /** `projectId` is the project the event belongs to ('unknown' when it cannot be told). Never throws. */
   apply(event: RawEvent, projectId: string): NormalizeResult;
+  /**
+   * Optional: applies the events in order, ending in the state, graph and session that applying them one by one would
+   * give (the change stream may be shorter: intermediate versions are not emitted), deriving once at the end instead
+   * of once per event. Never throws. Without it, callers apply the events one by one.
+   */
+  applyBatch?(items: readonly BatchItem[]): BatchResult;
   /** Forgets everything held for the session (it is re-hydrated from the raw log on its next event). */
   dropSession(sessionId: string): void;
   /** True when the session has no state and its pre-session memory has not been restored since it was last dropped. */

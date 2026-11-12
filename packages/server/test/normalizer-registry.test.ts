@@ -50,7 +50,7 @@ const meta = (file: string, origin?: Origin): RawEvent => ({
 function twoFakes(): { claude: FakeNormalizer; codex: FakeNormalizer; registry: NormalizerRegistry } {
   const claude = new FakeNormalizer('claude');
   const codex = new FakeNormalizer('codex');
-  return { claude, codex, registry: new NormalizerRegistry({ claude: () => claude, codex: () => codex }) };
+  return { claude, codex, registry: new NormalizerRegistry({ claude: () => claude, codex: () => codex, cursor: null }) };
 }
 
 describe('NormalizerRegistry', () => {
@@ -73,7 +73,7 @@ describe('NormalizerRegistry', () => {
 
   test('没有工厂的 origin：apply 不产生变化也不计未识别，会话级调用只问有归一器的', () => {
     const claude = new FakeNormalizer('claude');
-    const registry = new NormalizerRegistry({ claude: () => claude, codex: null });
+    const registry = new NormalizerRegistry({ claude: () => claude, codex: null, cursor: null });
     expect(registry.apply(meta('x', 'codex'), 'p')).toEqual({ changes: [] });
     expect(claude.applied).toEqual([]);
     claude.sessions.add('s1');
@@ -88,7 +88,7 @@ describe('NormalizerRegistry', () => {
   });
 
   test('没有任何工厂时一切为空', () => {
-    const registry = new NormalizerRegistry({ claude: null, codex: null });
+    const registry = new NormalizerRegistry({ claude: null, codex: null, cursor: null });
     expect(registry.apply(meta('x'), 'p')).toEqual({ changes: [] });
     expect(registry.hasSession('s')).toBe(false);
     expect(registry.needsPreSessionReplay('s')).toBe(false);

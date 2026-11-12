@@ -4,7 +4,7 @@ import { api, openLiveSessions } from '../client';
 import { sessionStatusView } from '../labels';
 import {
   effectiveOriginFilter, filterEmptyMessage, heroTotals, matchesOrigin, ORIGIN_FILTER_KEY, ORIGIN_FILTER_OPTIONS, originLook, parseOriginFilter,
-  projectCountsExact, projectLook, projectName, relativeTime, shownProjectId, showOriginFilter, stripProjects,
+  projectCountsExact, projectLook, projectName, projectTitle, relativeTime, shownProjectId, showOriginFilter, stripProjects,
   type OriginFilter,
 } from '../home';
 import { OriginBadge } from '../OriginBadge';
@@ -38,7 +38,7 @@ function readOriginFilter(): OriginFilter {
   try { return parseOriginFilter(window.localStorage.getItem(ORIGIN_FILTER_KEY)); } catch { return 'all'; }
 }
 
-/** 全部 / Claude Code / Codex; shown only when some project has Codex sessions. */
+/** 全部 / Claude Code / Codex / Cursor; shown only when some project has Codex or Cursor sessions. */
 function OriginFilterSwitch({ value, onChange }: { value: OriginFilter; onChange(value: OriginFilter): void }) {
   return (
     <div className="origin-filter">
@@ -103,7 +103,7 @@ export function Home({ projectId }: { projectId: string | null }) {
     try { window.localStorage.setItem(ORIGIN_FILTER_KEY, value); } catch { /* storage unavailable: not remembered */ }
     setChosenFilter(value);
   };
-  // Without any Codex project the filter is hidden and has no effect.
+  // Without any Codex or Cursor project the filter is hidden and has no effect.
   const filter = effectiveOriginFilter(chosenFilter, projects);
   // With no project in the address, the busiest visible one is shown (the page is never an empty "pick something");
   // a project in the address is shown even when the filter hides it.
@@ -214,7 +214,7 @@ export function Home({ projectId }: { projectId: string | null }) {
       {error !== null && <p className="error">加载失败：{error}</p>}
       {showOriginFilter(projects) && <OriginFilterSwitch value={chosenFilter} onChange={chooseFilter} />}
       <nav className="project-strip" aria-label="项目">
-        {projects.length === 0 && <p className="muted">还没有项目。在任意目录里用一次 Claude Code 或 Codex，它就会出现在这里。</p>}
+        {projects.length === 0 && <p className="muted">还没有项目。在任意目录里用一次 Claude Code、Codex 或 Cursor，它就会出现在这里。</p>}
         {filterEmptyMessage(projects, filter) !== null && <p className="muted">{filterEmptyMessage(projects, filter)}</p>}
         {strip.map((p) => {
           const look = projectLook(p.id);
@@ -224,7 +224,7 @@ export function Home({ projectId }: { projectId: string | null }) {
               aria-current={p.id === shownId ? 'true' : undefined} style={{ ['--hue' as string]: look.hue } as CSSProperties}>
               <span className="project-avatar" aria-hidden="true">{look.emoji}</span>
               <span className="project-text">
-                <span className="project-name">{projectName(path)}</span>
+                <span className="project-name">{projectTitle(p)}</span>
                 <span className="project-path" title={path}>{path}</span>
               </span>
               <span className="project-counts">
@@ -243,7 +243,7 @@ export function Home({ projectId }: { projectId: string | null }) {
         })}
       </nav>
       <section className="sessions">
-        <h2>{shown !== undefined ? `${projectName(shown.cwd ?? shown.id)} 的会话` : '会话'}</h2>
+        <h2>{shown !== undefined ? `${projectTitle(shown)} 的会话` : '会话'}</h2>
         {shownId !== null && sessions.length === 0 && <p className="muted">这个项目还没有会话</p>}
         {sessions.length > 0 && shownSessions.length === 0 && filter !== 'all' && (
           <p className="muted">这个项目没有 {originLook(filter).label} 会话</p>

@@ -6,7 +6,7 @@
 
 <p align="center">
   Claude Canvas 是一个跑在你本机的小服务。<br/>
-  它读取 Claude Code 和 OpenAI Codex 的会话记录，在浏览器里实时画出每个会话的来龙去脉：<br/>
+  它读取 Claude Code、OpenAI Codex 和 Cursor 的会话记录，在浏览器里实时画出每个会话的来龙去脉：<br/>
   问了什么、调了哪些工具、派了哪些子代理、哪一步慢、哪一步失败。
 </p>
 
@@ -15,6 +15,7 @@
   <img src="https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript&logoColor=white" alt="TypeScript"/>
   <img src="https://img.shields.io/badge/Claude%20Code-%E2%9C%93-D97757" alt="Claude Code"/>
   <img src="https://img.shields.io/badge/Codex-%E2%9C%93-5B6CFF" alt="Codex"/>
+  <img src="https://img.shields.io/badge/Cursor-%E2%9C%93-14B8A6" alt="Cursor"/>
   <img src="https://img.shields.io/badge/%E6%95%B0%E6%8D%AE-%E5%8F%AA%E5%9C%A8%E6%9C%AC%E6%9C%BA-2EA44F" alt="数据只在本机"/>
 </p>
 
@@ -43,8 +44,8 @@
 ### 🤖 子代理不再是黑盒
 主线派出的子代理挂在对应的轮次下面，可以展开看它内部的每一步；后台运行的子代理会一直跟到它真正结束。
 
-### 🧩 两种工具，一个页面
-Claude Code 和 Codex 的会话放在一起。同一个工作目录下的会话归到同一个项目，每个会话带来源标记，首页可以按来源筛选。
+### 🧩 三种工具，一个页面
+Claude Code、Codex 和 Cursor 的会话放在一起。同一个工作目录下的会话归到同一个项目，每个会话带来源标记，首页可以按来源筛选。
 
 ### ⚡ 接近实时
 只靠会话文件就能工作，延迟几秒。装上 hooks 之后状态变化在 1 秒内到达，还能看到“正在等你确认权限”。
@@ -111,9 +112,12 @@ node packages/server/dist/cli.js hooks install
 
 # Codex（装完需要在 Codex 的 设置 → Hooks 里确认信任）
 node packages/server/dist/cli.js hooks install --codex
+
+# Cursor（保存后自动生效）
+node packages/server/dist/cli.js hooks install --cursor
 ```
 
-安装前会先列出要改的文件和内容并询问确认，改之前自动备份；`hooks uninstall`（加 `--codex` 对应 Codex）可以原样移除。细节见[使用手册 · Hooks](./docs/manual.md#hooks可选)。
+安装前会先列出要改的文件和内容并询问确认，改之前自动备份；`hooks uninstall`（加 `--codex` / `--cursor` 对应另外两个工具）可以原样移除。Cursor 的 hooks 只装观察类事件，不会拦住 Cursor 的任何操作，所以 Cursor 会话没有“等待权限确认”。细节见[使用手册 · Hooks](./docs/manual.md#hooks可选)。
 
 ## 🖼️ 五个视角
 
@@ -129,16 +133,18 @@ node packages/server/dist/cli.js hooks install --codex
 
 ## 🧩 支持情况
 
-| 能力 | Claude Code | Codex |
-|------|:-----------:|:-----:|
-| 读取会话文件 | ✅ | ✅ |
-| 轮次、工具调用、回复 | ✅ | ✅ |
-| 并行调用的分叉与汇合 | ✅ | ✅ |
-| 子代理（含嵌套） | ✅ | ✅ |
-| 思考内容 | ⚠️ 多数只有时长 | ⚠️ 只有摘要，多数为空 |
-| token 用量 | ✅ | ❌ |
-| hooks：实时状态、等待权限确认 | ✅ | ⚠️ 已实现，未用真实数据验证 |
-| 已归档的会话 | — | ❌ 不导入 |
+| 能力 | Claude Code | Codex | Cursor |
+|------|:-----------:|:-----:|:------:|
+| 数据来源 | 会话文件 | 会话文件 | 本地数据库（只读） |
+| 轮次、工具调用、回复 | ✅ | ✅ | ✅ |
+| 并行调用的分叉与汇合 | ✅ | ✅ | ✅ |
+| 子代理（含嵌套） | ✅ | ✅ | ✅ |
+| 每一步的耗时与成败 | ✅ | ✅ | ✅ |
+| 思考内容 | ⚠️ 多数只有时长 | ⚠️ 只有摘要，多数为空 | ⚠️ 只有 Cursor 存下来的部分 |
+| token 用量 | ✅ | ❌ | ❌ |
+| hooks：实时状态 | ✅ | ⚠️ 已实现，未用真实数据验证 | ⚠️ 已实现，未用真实数据验证 |
+| hooks：等待权限确认 | ✅ | ⚠️ 同上 | ❌ 不做（见手册） |
+| 已归档的会话 | — | ❌ 不导入 | ❌ 不导入 |
 
 | 平台 | 状态 |
 |------|------|
@@ -151,13 +157,15 @@ node packages/server/dist/cli.js hooks install --codex
 flowchart LR
   A["Claude Code<br/>~/.claude/projects"] -->|会话文件| S
   B["Codex<br/>~/.codex/sessions"] -->|会话文件| S
+  C["Cursor<br/>state.vscdb"] -->|只读轮询| S
   A -.->|hooks（可选）| S
   B -.->|hooks（可选）| S
+  C -.->|hooks（可选）| S
   S["claude-canvas 服务<br/>127.0.0.1:4317"] --> D[("SQLite<br/>~/.claude-canvas")]
   S -->|WebSocket| W["浏览器里的画布"]
 ```
 
-服务监视两个目录里的会话文件，把记录归一成同一种图（节点和边），存进本地数据库，再通过 WebSocket 推给页面。原始记录也一并保存，升级后可以据此重新推导，不需要重新导入。
+服务监视 Claude Code 和 Codex 的会话文件，每隔几秒只读地查一次 Cursor 的本地数据库，把三种来源的记录归一成同一种图（节点和边），存进本地数据库，再通过 WebSocket 推给页面。原始记录也一并保存，升级后可以据此重新推导，不需要重新导入。
 
 ## ⚙️ 配置
 
@@ -167,6 +175,7 @@ flowchart LR
 |------|--------|------|
 | `CLAUDE_CANVAS_PROJECTS_DIR` | `~/.claude/projects` | Claude Code 会话文件的目录 |
 | `CLAUDE_CANVAS_CODEX_DIR` | `~/.codex/sessions` | Codex 会话文件的目录；设为空字符串表示不读取 |
+| `CLAUDE_CANVAS_CURSOR_DB` | Cursor 的 `state.vscdb`（按平台，见手册） | Cursor 的本地数据库，只读打开；设为空字符串表示不读取 |
 | `CLAUDE_CANVAS_DATA_DIR` | `~/.claude-canvas` | 数据目录（数据库 `data.db`） |
 
 完整列表见[使用手册 · 数据与环境变量](./docs/manual.md#数据与环境变量)。
@@ -175,7 +184,7 @@ flowchart LR
 
 - 只监听 `127.0.0.1`，不对局域网开放；来自非本机页面的请求会被拒绝。
 - 没有账号、没有遥测、不联网。
-- 对会话文件只读。只有你主动运行 `hooks install` 时，才会修改 Claude Code 或 Codex 的配置文件，并且先备份。
+- 对会话文件只读；Cursor 的数据库只读打开，只做按主键的短查询，从不写入。只有你主动运行 `hooks install` 时，才会修改 Claude Code、Codex 或 Cursor 的配置文件，并且先备份。
 - 数据库里是你的对话和工具输出的明文，请像对待对话记录本身一样对待数据目录。
 
 ## 📚 文档

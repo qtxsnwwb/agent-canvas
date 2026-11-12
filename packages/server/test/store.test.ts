@@ -724,3 +724,20 @@ test('新建的数据库打开时不回填、不打印', () => {
   s.close();
   expect(logs).toEqual([]);
 });
+
+test('edge_removed deletes the edge row, is logged like any change and reaches changesSince', () => {
+  const out = store.applyChanges([
+    sessionUpsert('s1', 'p1'),
+    nodeAdded('n1', 's1'),
+    nodeAdded('n2', 's1'),
+    { type: 'edge_added', edge: { id: 'n1->n2', sessionId: 's1', from: 'n1', to: 'n2', kind: 'sequence' } },
+    { type: 'edge_added', edge: { id: 'n2->n1', sessionId: 's1', from: 'n2', to: 'n1', kind: 'sequence' } },
+    { type: 'edge_removed', sessionId: 's1', id: 'n2->n1' },
+  ]);
+  expect(store.getGraph('s1')!.edges.map((e) => e.id)).toEqual(['n1->n2']);
+  expect(out.at(-1)).toMatchObject({ type: 'edge_removed', sessionId: 's1', id: 'n2->n1' });
+  expect(store.changesSince(0, 's1').map((c) => c.type)).toContain('edge_removed');
+  // Removing an edge that does not exist is harmless.
+  store.applyChanges([{ type: 'edge_removed', sessionId: 's1', id: 'nope' }]);
+  expect(store.getGraph('s1')!.edges.map((e) => e.id)).toEqual(['n1->n2']);
+});

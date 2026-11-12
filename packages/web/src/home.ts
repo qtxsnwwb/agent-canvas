@@ -4,6 +4,7 @@ import { ORIGINS, type Origin, type Project } from '@claude-canvas/shared';
 export const ORIGIN_LOOK: Record<Origin, { label: string; className: string }> = {
   claude: { label: 'Claude Code', className: 'origin-claude' },
   codex: { label: 'Codex', className: 'origin-codex' },
+  cursor: { label: 'Cursor', className: 'origin-cursor' },
 };
 
 export function originLook(origin: Origin): { label: string; className: string } {
@@ -24,9 +25,9 @@ export function parseOriginFilter(value: string | null): OriginFilter {
   return value === 'all' || (ORIGINS as readonly string[]).includes(value ?? '') ? (value as OriginFilter) : 'all';
 }
 
-/** The filter is offered only once some project has Codex sessions (a Claude-only install looks as before). */
+/** The filter is offered only once some project has Codex or Cursor sessions (a Claude-only install looks as before). */
 export function showOriginFilter(projects: readonly Project[]): boolean {
-  return projects.some((p) => p.origins.includes('codex'));
+  return projects.some((p) => p.origins.some((o) => o !== 'claude'));
 }
 
 /** The filter in force: the chosen one while the filter is offered, `all` otherwise. */
@@ -82,6 +83,15 @@ export function heroTotals(projects: readonly Project[], filter: OriginFilter): 
 export function projectName(pathOrId: string): string {
   const parts = pathOrId.split(/[\\/]+/).filter((x) => x !== '');
   return parts[parts.length - 1] ?? pathOrId;
+}
+
+/** Display name of a Cursor project whose working directory could not be found (id `cursor-<workspaceId>`, spec 5.4). */
+export const CURSOR_UNKNOWN_DIR_NAME = 'Cursor（未知目录）';
+
+/** A project's display name: the last segment of its directory; a Cursor project without one is "Cursor（未知目录）". */
+export function projectTitle(project: Pick<Project, 'id' | 'cwd'>): string {
+  if (project.cwd === null && project.id.startsWith('cursor-')) return CURSOR_UNKNOWN_DIR_NAME;
+  return projectName(project.cwd ?? project.id);
 }
 
 const AVATARS = ['🚀', '🧩', '🛠️', '🌈', '🎯', '🪄', '🧪', '🎈'] as const;

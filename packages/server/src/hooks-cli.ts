@@ -7,10 +7,16 @@ import {
   claudeHookTarget,
   codexForwardCommands,
   codexHookTarget,
+  cursorForwardCommand,
+  cursorHookTarget,
   hookUrl,
+  planCursorInstall,
+  planCursorUninstall,
   planInstallFor,
   planUninstallFor,
   type HookTarget,
+  type InstallPlan,
+  type UninstallPlan,
 } from './hooks-config.js';
 
 export interface HooksCliIo {
@@ -58,6 +64,17 @@ export interface CodexHooksCliOptions extends HooksCliOptions {
   cliPath: string;
 }
 
+/** Cursor's hooks file: `CLAUDE_CANVAS_CURSOR_HOOKS_FILE`, else `~/.cursor/hooks.json`. */
+export function defaultCursorHooksFile(env: NodeJS.ProcessEnv): string {
+  const fromEnv = env.CLAUDE_CANVAS_CURSOR_HOOKS_FILE;
+  return fromEnv !== undefined && fromEnv !== '' ? fromEnv : path.join(os.homedir(), '.cursor', 'hooks.json');
+}
+
+export interface CursorHooksCliOptions extends CodexHooksCliOptions {
+  /** Decides the command form (PowerShell call form on win32). Default: process.platform. */
+  platform?: NodeJS.Platform;
+}
+
 /** What differs between installing into Claude Code's settings.json and into Codex's hooks.json. */
 interface HooksProfile {
   target: HookTarget;
@@ -73,6 +90,9 @@ interface HooksProfile {
   after(mode: Mode): string[];
   /** The node binary the hook commands run (named when outdated handlers are replaced). */
   nodePath?: string;
+  /** Planning for a file whose format differs from the shared one (Cursor's `version`). Default: the shared planners. */
+  planInstall?(settings: unknown): InstallPlan;
+  planUninstall?(settings: unknown): UninstallPlan;
 }
 
 function claudeProfile(port: number): HooksProfile {
@@ -122,6 +142,36 @@ function codexProfile(opts: CodexHooksCliOptions): HooksProfile {
             '没确认信任时 claude-canvas 只靠会话文件工作',
           ]
         : ['已移除；Codex 不会再调用这些 hooks'],
+  };
+}
+
+function cursorProfile(opts: CursorHooksCliOptions): HooksProfile {
+  const spec = { nodePath: opts.nodePath, cliPath: opts.cliPath, port: opts.port, ...(opts.platform ? { platform: opts.platform } : {}) };
+  const target = cursorHookTarget(spec);
+  return {
+    target,
+    nodePath: opts.nodePath,
+    planInstall: (settings) => planCursorInstall(target, settings),
+    planUninstall: (settings) => planCursorUninstall(target, settings),
+    // ~/.cursor is Cursor's own directory: never created here.
+    precheck: (file, mode) =>
+      mode === 'install' && !isDirectory(path.dirname(file))
+        ? `目录 ${path.dirname(file)} 不存在，Cursor 似乎没有安装，未做任何改动`
+        : null,
+    describe: (file) => [
+      `Cursor hooks 文件：${file}`,
+      `hook 命令：${cursorForwardCommand(spec)}`,
+      `转发到：${hookUrl(opts.port)}?origin=cursor`,
+    ],
+    nothingToRemove: `没有找到本安装（${opts.cliPath}，端口 ${opts.port}）的 Cursor hooks`,
+    willCreate: (file) => `将新建 ${file}`,
+    after: (mode) =>
+      mode === 'install'
+        ? [
+            'Cursor 监视 hooks.json，保存后自动生效，不需要确认信任',
+            '移动或升级 claude-canvas 后命令路径会变，需要重新安装（hooks install --cursor）',
+          ]
+        : ['已移除；Cursor 不会再调用这些 hooks'],
   };
 }
 
@@ -406,12 +456,12 @@ async function run(mode: Mode, opts: HooksCliOptions, io: HooksCliIo, profile: H
   try {
     loaded = loadSettings(file);
     if (mode === 'install') {
-      const plan = planInstallFor(profile.target, loaded.settings);
+      const plan = profile.planInstall ? profile.planInstall(loaded.settings) : planInstallFor(profile.target, loaded.settings);
       events = plan.added;
       replaced = plan.replaced;
       next = plan.next;
     } else {
-      const plan = planUninstallFor(profile.target, loaded.settings);
+      const plan = profile.planUninstall ? profile.planUninstall(loaded.settings) : planUninstallFor(profile.target, loaded.settings);
       events = plan.removed;
       next = plan.next;
     }
@@ -488,4 +538,13 @@ export function runCodexHooksInstall(opts: CodexHooksCliOptions, io: HooksCliIo)
 
 export function runCodexHooksUninstall(opts: CodexHooksCliOptions, io: HooksCliIo): Promise<number> {
   return run('uninstall', opts, io, codexProfile(opts));
+}
+
+/** `hooks install --cursor`: the same flow and protections, writing Cursor's hooks.json (created when missing). */
+export function runCursorHooksInstall(opts: CursorHooksCliOptions, io: HooksCliIo): Promise<number> {
+  return run('install', opts, io, cursorProfile(opts));
+}
+
+export function runCursorHooksUninstall(opts: CursorHooksCliOptions, io: HooksCliIo): Promise<number> {
+  return run('uninstall', opts, io, cursorProfile(opts));
 }

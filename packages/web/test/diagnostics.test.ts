@@ -15,6 +15,7 @@ const base: Diagnostics = {
   normalizerVersion: 1,
   dbEpoch: 'e',
   codex: { sessionsDir: null, sessionsDirExists: false },
+  cursor: { dbPath: null, dbExists: false, lastPollAt: null, lastError: null },
 };
 const at = (msAgo: number): string => new Date(NOW - msAgo).toISOString();
 
@@ -216,4 +217,62 @@ test('hookState：和 summarizeDiagnostics 的 hooks / hookAgeMs 同一规则', 
   expect(hookState(at(5_000), NOW)).toEqual({ hooks: 'recent', hookAgeMs: 5_000 });
   expect(hookState(at(600_001), NOW)).toEqual({ hooks: 'quiet', hookAgeMs: 600_001 });
   expect(hookState('garbage', NOW)).toEqual({ hooks: 'quiet', hookAgeMs: null });
+});
+
+// ---- Cursor block ----
+import { cursorBlockVisible, cursorDbLine, cursorHooks, cursorPollLine, cursorUnknownRecords } from '../src/diagnostics';
+
+const cursorHook = { origin: 'cursor' as const, eventName: 'stop', count: 2, lastAt: at(1) };
+
+test('cursorBlockVisible：库存在，或有 Cursor 的数据 / hook / 未识别记录时显示，否则不显示', () => {
+  expect(cursorBlockVisible(base)).toBe(false);
+  // A configured path alone says nothing (the default path is configured even where Cursor is not installed).
+  expect(cursorBlockVisible({ ...base, cursor: { ...base.cursor, dbPath: '/x/state.vscdb' } })).toBe(false);
+  expect(cursorBlockVisible({ ...base, cursor: { ...base.cursor, dbExists: true } })).toBe(true);
+  expect(cursorBlockVisible({ ...base, hookEvents: [cursorHook] })).toBe(true);
+  // Stored Cursor records with the database gone (M7): the server says so; Cursor never has file offsets.
+  expect(cursorBlockVisible({ ...base, cursor: { ...base.cursor, hasData: true } })).toBe(true);
+  expect(cursorBlockVisible({ ...base, files: [{ path: 'cursor:abc', offset: 1, size: 1 }] })).toBe(false);
+  expect(cursorBlockVisible({ ...base, unknownRecords: [{ recordType: 'bubble:type9/cap3', count: 1, sample: '' }] })).toBe(true);
+  expect(cursorBlockVisible({ ...base, unknownRecords: [{ recordType: 'foo', count: 1, sample: '' }] })).toBe(false);
+});
+
+test('cursorUnknownRecords：只取 Cursor 的（bubble:、composer: 或 cursor: 开头）', () => {
+  const u = [
+    { recordType: 'bubble:type9/cap3', count: 2, sample: 's' },
+    { recordType: 'composer:invalid-json', count: 1, sample: '' },
+    { recordType: 'cursor:composer', count: 1, sample: '' },
+    { recordType: 'weird', count: 4, sample: '' },
+    { recordType: 'normalizer-error', count: 1, sample: '' },
+  ];
+  expect(cursorUnknownRecords({ ...base, unknownRecords: u }).map((r) => r.recordType)).toEqual(['bubble:type9/cap3', 'composer:invalid-json', 'cursor:composer']);
+});
+
+test('cursorDbLine：未启用 / 存在 / 不存在（M8）', () => {
+  expect(cursorDbLine({ ...base.cursor, dbPath: null })).toBe('Cursor 数据库：未启用');
+  expect(cursorDbLine({ ...base.cursor, dbPath: '/c/state.vscdb', dbExists: true })).toBe('Cursor 数据库：/c/state.vscdb（存在）');
+  expect(cursorDbLine({ ...base.cursor, dbPath: '/c/state.vscdb', dbExists: false })).toBe('Cursor 数据库：/c/state.vscdb（不存在，Cursor 似乎没有安装）');
+});
+
+test('cursorPollLine：相对时间，null 是“尚未轮询”', () => {
+  expect(cursorPollLine(null, NOW)).toBe('尚未轮询');
+  expect(cursorPollLine(at(90_000), NOW)).toBe('1 分钟前');
+  expect(cursorPollLine('nonsense', NOW)).toBe('时间无法识别');
+});
+
+test('cursorHooks：Cursor 的事件、最近时间；没有 hook 时 events 为空，五个安装的事件都算缺少', () => {
+  expect(cursorHooks(base)).toEqual({
+    origin: 'cursor',
+    events: [],
+    missing: ['sessionStart', 'beforeSubmitPrompt', 'stop', 'subagentStop', 'sessionEnd'],
+    lastAt: null,
+  });
+  const h = cursorHooks({ ...base, hookEvents: [{ origin: 'claude', eventName: 'Stop', count: 1, lastAt: at(5) }, cursorHook] });
+  expect(h.events.map((e) => e.eventName)).toEqual(['stop']);
+  expect(h.missing).toEqual(['sessionStart', 'beforeSubmitPrompt', 'subagentStop', 'sessionEnd']);
+  expect(h.lastAt).toBe(at(1));
+});
+
+test('EXPECTED_HOOK_EVENTS_BY_ORIGIN.cursor 与 hooks install --cursor 安装的五个事件一致', () => {
+  expect([...EXPECTED_HOOK_EVENTS_BY_ORIGIN.cursor]).toEqual(['sessionStart', 'beforeSubmitPrompt', 'stop', 'subagentStop', 'sessionEnd']);
 });

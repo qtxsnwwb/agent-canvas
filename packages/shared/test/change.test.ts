@@ -68,3 +68,23 @@ test('applyChanges 没有变化时返回原图', () => {
   expect(applyChanges(g, [])).toBe(g);
   expect(applyChanges(g, [{ type: 'node_updated', sessionId: 's1', id: 'x', patch: {} }])).toBe(g);
 });
+
+test('edge_removed removes the edge by id; an unknown id changes nothing', () => {
+  const e = { id: 'a->b', sessionId: 's1', from: 'a', to: 'b', kind: 'sequence' as const };
+  const g = applyChange(emptyGraph(), { type: 'edge_added', edge: e });
+  const removed = applyChange(g, { type: 'edge_removed', sessionId: 's1', id: 'a->b' });
+  expect(removed.edges).toEqual({});
+  expect(applyChange(removed, { type: 'edge_removed', sessionId: 's1', id: 'nope' })).toBe(removed);
+  expect(applyChanges(g, [{ type: 'edge_removed', sessionId: 's1', id: 'a->b' }]).edges).toEqual({});
+  expect(applyChanges(g, [{ type: 'edge_removed', sessionId: 's1', id: 'nope' }])).toBe(g);
+});
+
+test('applyChanges equals folding applyChange, with edge_removed in the mix', () => {
+  for (let seed = 1; seed <= 200; seed++) {
+    const r = rng(seed);
+    const cs: Change[] = randomChanges(r, Math.floor(r() * 30)).flatMap((c) =>
+      c.type === 'edge_added' && r() < 0.5 ? [c, { type: 'edge_removed' as const, sessionId: 's1', id: r() < 0.7 ? c.edge.id : 'x->y' }] : [c],
+    );
+    expect(applyChanges(emptyGraph(), cs)).toEqual(cs.reduce(applyChange, emptyGraph()));
+  }
+});

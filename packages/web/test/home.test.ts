@@ -121,5 +121,23 @@ test('heroTotals：项目数随筛选；会话数只在都准确时给出，否�
 test('ORIGIN_LOOK：两个来源各有名字和不同的类名', () => {
   expect(originLook('claude')).toEqual({ label: 'Claude Code', className: 'origin-claude' });
   expect(originLook('codex')).toEqual({ label: 'Codex', className: 'origin-codex' });
-  expect(ORIGIN_FILTER_OPTIONS.map((o) => [o.value, o.label])).toEqual([['all', '全部'], ['claude', 'Claude Code'], ['codex', 'Codex']]);
+  expect(ORIGIN_FILTER_OPTIONS.map((o) => [o.value, o.label])).toEqual([['all', '全部'], ['claude', 'Claude Code'], ['codex', 'Codex'], ['cursor', 'Cursor']]);
+});
+
+test('showOriginFilter：只有 Cursor 的项目也提供筛选；parseOriginFilter 认 cursor', () => {
+  expect(showOriginFilter([mixed('a', ['claude']), mixed('b', ['cursor'])])).toBe(true);
+  expect(effectiveOriginFilter('cursor', [mixed('b', ['cursor'])])).toBe('cursor');
+  expect(parseOriginFilter('cursor')).toBe('cursor');
+  expect(originLook('cursor')).toEqual({ label: 'Cursor', className: 'origin-cursor' });
+  expect(visibleProjects([mixed('a', ['claude']), mixed('b', ['claude', 'cursor'])], 'cursor').map((p) => p.id)).toEqual(['b']);
+  expect(filterEmptyMessage([mixed('a', ['claude'])], 'cursor')).toBe('没有 Cursor 的项目');
+});
+
+test('projectTitle: the directory name; a Cursor project without a directory is "Cursor（未知目录）" (M4)', async () => {
+  const { projectTitle, CURSOR_UNKNOWN_DIR_NAME } = await import('../src/home');
+  expect(projectTitle({ id: 'D--work-app', cwd: 'D:\\work\\app' })).toBe('app');
+  expect(projectTitle({ id: 'cursor-ws-1', cwd: null })).toBe(CURSOR_UNKNOWN_DIR_NAME);
+  expect(CURSOR_UNKNOWN_DIR_NAME).toBe('Cursor（未知目录）');
+  expect(projectTitle({ id: 'cursor-unknown', cwd: null })).toBe('Cursor（未知目录）');
+  expect(projectTitle({ id: 'D--work-app', cwd: null })).toBe('D--work-app');
 });

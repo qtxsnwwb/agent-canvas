@@ -34,7 +34,7 @@ export type MaybePromise<T> = T | Promise<T>;
  * Prefix of each origin's store keys (raw_event.file, file_offset.file). Claude Code keys are the paths relative to
  * projectsDir, unprefixed as before origins existed; every other origin's keys carry its prefix.
  */
-export const KEY_PREFIXES: Readonly<Record<Origin, string>> = { claude: '', codex: 'codex:' };
+export const KEY_PREFIXES: Readonly<Record<Origin, string>> = { claude: '', codex: 'codex:', cursor: 'cursor:' };
 
 /** The origin a store key belongs to: the one whose prefix is the longest that matches. */
 export function originOfKey(key: string): Origin {

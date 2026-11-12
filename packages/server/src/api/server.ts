@@ -3,6 +3,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyStatic from '@fastify/static';
 import fastifyWebsocket from '@fastify/websocket';
 import {
+  ORIGINS,
   SEARCH_DEFAULT_LIMIT,
   SEARCH_MAX_LIMIT,
   type Change,
@@ -14,8 +15,10 @@ import {
   type ServerMessage,
 } from '@claude-canvas/shared';
 import type { Config } from '../config.js';
+import { cursorHookConversationId, cursorHookWorkspaceRoot, sanitizeCursorHookPayload } from '../normalize/cursor-hooks.js';
 import { NORMALIZER_VERSION } from '../normalize/version.js';
 import type { Pipeline } from '../pipeline.js';
+import { KEY_PREFIXES } from '../sources/source.js';
 import type { Store } from '../store/store.js';
 
 const HOOK_BODY_LIMIT = 64 * 1024 * 1024;
@@ -43,6 +46,8 @@ function sessionIdOf(c: Change): string {
       return c.sessionId;
     case 'edge_added':
       return c.edge.sessionId;
+    case 'edge_removed':
+      return c.sessionId;
   }
 }
 
@@ -97,6 +102,16 @@ export function isAllowedRequest(headers: {
     }
   }
   return true;
+}
+
+/** Whether the path names an existing file (only stat'ed, never opened). */
+function isFile(file: string | null): boolean {
+  if (file === null || file === '') return false;
+  try {
+    return fs.statSync(file).isFile();
+  } catch {
+    return false;
+  }
 }
 
 /** Whether the path names an existing directory (only stat'ed, never read). */
@@ -249,16 +264,26 @@ export function buildServer(deps: { store: Store; pipeline: Pipeline; config: Co
   });
   app.get(
     '/api/diagnostics',
-    async (): Promise<Diagnostics> => ({
-      ...store.diagnostics(),
-      hookEvents: store.allHookEventStats(),
-      lastHookAt: pipeline.lastHookAt(),
-      ingestFailures: pipeline.ingestFailures(),
-      importing: pipeline.importing(),
-      normalizerVersion: NORMALIZER_VERSION,
-      dbEpoch: store.epoch(),
-      codex: { sessionsDir: config.codexSessionsDir, sessionsDirExists: isDirectory(config.codexSessionsDir) },
-    }),
+    async (): Promise<Diagnostics> => {
+      const cursorPoll = pipeline.pollStatus('cursor');
+      return {
+        ...store.diagnostics(),
+        hookEvents: store.allHookEventStats(),
+        lastHookAt: pipeline.lastHookAt(),
+        ingestFailures: pipeline.ingestFailures(),
+        importing: pipeline.importing(),
+        normalizerVersion: NORMALIZER_VERSION,
+        dbEpoch: store.epoch(),
+        codex: { sessionsDir: config.codexSessionsDir, sessionsDirExists: isDirectory(config.codexSessionsDir) },
+        cursor: {
+          dbPath: config.cursorDbPath,
+          dbExists: isFile(config.cursorDbPath),
+          lastPollAt: cursorPoll?.lastPollAt ?? null,
+          lastError: cursorPoll?.lastError ?? null,
+          hasData: store.transcriptKeys(KEY_PREFIXES.cursor).length > 0,
+        },
+      };
+    },
   );
 
   // Encapsulated so its catch-all parser and error handler only affect /hooks: whatever arrives, the answer is an empty 200.
@@ -270,8 +295,10 @@ export function buildServer(deps: { store: Store; pipeline: Pipeline; config: Co
     });
     instance.post<{ Querystring: { origin?: unknown } }>('/hooks', { bodyLimit: HOOK_BODY_LIMIT }, (req, reply) => {
       const text = typeof req.body === 'string' ? req.body : '';
-      // `?origin=codex` comes from `claude-canvas hook-forward`; anything else (none: Claude Code's http hooks) is Claude.
-      const origin: Origin = req.query.origin === 'codex' ? 'codex' : 'claude';
+      // `?origin=codex|cursor` comes from `claude-canvas hook-forward`; anything else (none: Claude Code's http hooks) is
+      // Claude.
+      const q = req.query.origin;
+      const origin: Origin = typeof q === 'string' && (ORIGINS as readonly string[]).includes(q) ? (q as Origin) : 'claude';
       void reply.code(200).send();
       setImmediate(() => {
         try {
@@ -286,7 +313,13 @@ export function buildServer(deps: { store: Store; pipeline: Pipeline; config: Co
           const sessionId = typeof obj.session_id === 'string' ? obj.session_id : null;
           const transcriptPath = typeof obj.transcript_path === 'string' ? obj.transcript_path : null;
           if (origin === 'claude') pipeline.ingestHook(eventName, sessionId, text, transcriptPath);
-          else {
+          else if (origin === 'cursor') {
+            // Cursor: the conversation id is the session id; the payload is stored without the user's e-mail address.
+            pipeline.ingestHook(eventName, cursorHookConversationId(obj), sanitizeCursorHookPayload(text), null, origin, {
+              cwd: cursorHookWorkspaceRoot(obj),
+              agentId: null,
+            });
+          } else {
             const cwd = typeof obj.cwd === 'string' && obj.cwd !== '' ? obj.cwd : null;
             const agentId = typeof obj.agent_id === 'string' && obj.agent_id !== '' ? obj.agent_id : null;
             pipeline.ingestHook(eventName, sessionId, text, transcriptPath, origin, { cwd, agentId });

@@ -50,14 +50,18 @@ export const EXPECTED_CODEX_HOOK_EVENTS: readonly string[] = [
   'Interrupt',
 ];
 
+/** The hook events `claude-canvas hooks install --cursor` registers in `~/.cursor/hooks.json`. */
+export const EXPECTED_CURSOR_HOOK_EVENTS: readonly string[] = ['sessionStart', 'beforeSubmitPrompt', 'stop', 'subagentStop', 'sessionEnd'];
+
 export const EXPECTED_HOOK_EVENTS_BY_ORIGIN: Record<Origin, readonly string[]> = {
   claude: EXPECTED_HOOK_EVENTS,
   codex: EXPECTED_CODEX_HOOK_EVENTS,
+  cursor: EXPECTED_CURSOR_HOOK_EVENTS,
 };
 
-/** The origin of a file by its store key: Codex files are `codex:`-prefixed. */
+/** The origin of a file by its store key: Codex files are `codex:`-prefixed, Cursor conversations `cursor:`-prefixed. */
 export function fileOrigin(path: string): Origin {
-  return path.startsWith('codex:') ? 'codex' : 'claude';
+  return path.startsWith('codex:') ? 'codex' : path.startsWith('cursor:') ? 'cursor' : 'claude';
 }
 
 /** Whether hooks were received, and how long ago, from the time of the last one (null: never). */
@@ -86,10 +90,11 @@ export interface OriginHooks {
  */
 export function hooksByOrigin(d: Diagnostics): OriginHooks[] {
   const codexKnown = d.codex.sessionsDirExists || d.files.some((f) => fileOrigin(f.path) === 'codex');
+  const cursorKnown = d.cursor.dbExists || d.cursor.hasData === true;
   const out: OriginHooks[] = [];
   for (const origin of ORIGINS) {
     const events = d.hookEvents.filter((e) => e.origin === origin);
-    if (origin !== 'claude' && events.length === 0 && !(origin === 'codex' && codexKnown)) continue;
+    if (origin !== 'claude' && events.length === 0 && !(origin === 'codex' && codexKnown) && !(origin === 'cursor' && cursorKnown)) continue;
     const seen = new Set(events.map((e) => e.eventName));
     let lastAt: string | null = null;
     for (const e of events) {
@@ -101,6 +106,44 @@ export function hooksByOrigin(d: Diagnostics): OriginHooks[] {
     out.push({ origin, events, missing: EXPECTED_HOOK_EVENTS_BY_ORIGIN[origin].filter((e) => !seen.has(e)), lastAt });
   }
   return out;
+}
+
+/**
+ * Whether the page shows the Cursor block: the database exists, or any Cursor data is known — stored records (the
+ * server's `cursor.hasData`), hooks or unrecognised records (a configured path alone says nothing).
+ */
+export function cursorBlockVisible(d: Diagnostics): boolean {
+  return d.cursor.dbExists
+    || d.cursor.hasData === true
+    || d.hookEvents.some((e) => e.origin === 'cursor')
+    || cursorUnknownRecords(d).length > 0;
+}
+
+/**
+ * Unknown records that come from Cursor: bubble shapes the normalizer does not know (`bubble:...`), records it could not
+ * read (`composer:...`, `bubble:...`) and unknown record types (`cursor:...`).
+ */
+export function cursorUnknownRecords(d: Diagnostics): Diagnostics['unknownRecords'] {
+  return d.unknownRecords.filter((r) => r.recordType.startsWith('bubble:') || r.recordType.startsWith('composer:') || r.recordType.startsWith('cursor:'));
+}
+
+/** The Cursor block's line about the database: not enabled / exists / does not exist. */
+export function cursorDbLine(cursor: Diagnostics['cursor']): string {
+  if (cursor.dbPath === null) return 'Cursor 数据库：未启用';
+  return `Cursor 数据库：${cursor.dbPath}（${cursor.dbExists ? '存在' : '不存在，Cursor 似乎没有安装'}）`;
+}
+
+/** The Cursor block's "last poll" text. */
+export function cursorPollLine(lastPollAt: string | null, nowMs: number): string {
+  if (lastPollAt === null) return '尚未轮询';
+  const t = Date.parse(lastPollAt);
+  return Number.isNaN(t) ? '时间无法识别' : formatAge(nowMs - t);
+}
+
+/** Cursor's hook events for the Cursor block (always an entry, empty when none arrived). */
+export function cursorHooks(d: Diagnostics): OriginHooks {
+  return hooksByOrigin({ ...d, cursor: { ...d.cursor, dbExists: true } }).find((h) => h.origin === 'cursor')
+    ?? { origin: 'cursor', events: [], missing: [], lastAt: null };
 }
 
 /** The Codex block's line about the sessions directory. */

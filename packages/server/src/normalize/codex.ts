@@ -24,7 +24,7 @@ type TitleSource = (typeof TITLE_PRIORITY)[number];
 const PROMPT_TITLE_CHARS = 60;
 
 /** Prompt text as a title: trimmed, whitespace collapsed, first 60 code points; null when nothing is left. */
-function promptTitle(text: string): string | null {
+export function promptTitle(text: string): string | null {
   const folded = text.trim().replace(/\s+/g, ' ');
   if (folded.replace(/\[image\]/g, '').trim() === '') return null;
   return Array.from(folded).slice(0, PROMPT_TITLE_CHARS).join('');
