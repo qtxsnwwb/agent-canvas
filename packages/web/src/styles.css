@@ -202,3 +202,56 @@ header .header-link:hover { background: var(--paper); }
 .diag-origin + .diag-origin { margin-top: 12px; padding-top: 10px; border-top: 1.5px dashed var(--line); }
 .diag-origin h3 { margin: 0 0 4px; font-size: 13px; }
 .diag code { font: 12px var(--mono); background: var(--paper-deep); padding: 0 5px; border-radius: 6px; }
+
+/* Notifications: header marker, settings page, diagnostics line. */
+header .header-link-next { margin-left: 8px; }
+header .header-link[aria-current="page"] { background: var(--sun); }
+.header-dot { display: inline-block; width: 8px; height: 8px; margin-left: 6px; border-radius: 50%; background: var(--mint); vertical-align: 1px; }
+.notify { padding: 18px; max-width: 900px; }
+.notify h1 { font: 800 20px/1.3 var(--font-fun); margin: 0 0 4px; }
+.notify > .muted { margin: 0 0 14px; }
+.notify section { margin-bottom: 20px; padding: 12px 16px; border: 2px solid var(--edge); border-radius: 16px; background: var(--card); box-shadow: var(--shadow); }
+.notify-row { display: flex; align-items: flex-start; gap: 12px; padding: 8px 0; }
+.notify-row + .notify-row { border-top: 1.5px dashed var(--line); }
+.notify-row-body { min-width: 0; flex: 1; }
+.notify-row-title { font-weight: 700; font-size: 14px; }
+.notify-row-body p { margin: 2px 0 0; }
+.notify-field { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 13px; font-weight: 600; }
+.notify-field input {
+  box-sizing: border-box; width: 96px; padding: 4px 12px; border: 2px solid var(--edge); border-radius: 999px;
+  background: var(--card); font: inherit; color: var(--ink);
+}
+.notify-field input:focus-visible { outline: none; border-color: var(--grape); box-shadow: 0 2px 0 #cbb3ff; }
+.notify-field input:disabled { opacity: 0.55; background: var(--paper-deep); }
+.notify-field input[aria-invalid="true"] { border-color: var(--coral); }
+.notify-field-error { color: #c0392b; font-size: 12px; font-weight: 600; }
+/* A real checkbox drawn as a pill switch, so it keeps its keyboard and screen-reader behaviour. */
+.notify-switch {
+  appearance: none; -webkit-appearance: none; flex: none; position: relative; width: 42px; height: 24px; margin: 2px 0 0;
+  border: 2px solid var(--edge-strong); border-radius: 999px; background: var(--paper-deep); cursor: pointer; box-shadow: var(--shadow-sm);
+  transition: background 0.15s;
+}
+.notify-switch::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff;
+  box-shadow: 0 1px 0 var(--ledge); transition: transform 0.15s;
+}
+.notify-switch:checked { background: var(--mint); }
+.notify-switch:checked::after { transform: translateX(18px); }
+.notify-switch:disabled { cursor: default; opacity: 0.5; }
+.notify-switch:focus-visible { outline: 3px solid var(--grape); outline-offset: 2px; }
+.notify-save { min-height: 20px; margin: 0 0 12px; font-size: 12px; font-weight: 700; }
+.notify-save.ok { color: #1f7a3d; }
+.notify-save.bad { color: #c0392b; }
+.notify-btn {
+  margin: 0; padding: 4px 16px; border: 2px solid var(--edge); border-radius: 999px; background: var(--sun); color: var(--ink);
+  font: 700 13px/20px var(--font); cursor: pointer; box-shadow: var(--shadow-sm);
+}
+.notify-btn:hover:not(:disabled) { filter: brightness(1.04); }
+.notify-btn:disabled { cursor: default; opacity: 0.55; }
+.notify-btn:focus-visible { outline: 3px solid var(--grape); outline-offset: 2px; }
+.notify-result { margin: 8px 0 0; font-size: 13px; font-weight: 600; }
+.notify-result.ok { color: #1f7a3d; }
+.notify-result.bad { color: #c0392b; }
+.notify section p { margin: 4px 0; }
+.notify .notify-warn { color: #c2410c; font-weight: 700; }
+.notify-privacy { margin: 0; }

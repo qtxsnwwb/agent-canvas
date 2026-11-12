@@ -5,6 +5,7 @@ import {
   codexDirLine, createPoller, cursorBlockVisible, cursorDbLine, cursorHooks, cursorPollLine, cursorUnknownRecords, fileOrigin, formatAge, hookState, hooksByOrigin, summarizeDiagnostics, truncateSample, FILES_BEHIND_MAX,
   type OriginHooks,
 } from '../diagnostics';
+import { diagnosticsNotificationLines } from '../notifications';
 import { OriginBadge } from '../OriginBadge';
 import { useNow } from '../useNow';
 
@@ -65,6 +66,22 @@ function OriginHookSection({ hooks, lastAt, titled, codex }: {
 function FilePath({ path }: { path: string }) {
   const origin = fileOrigin(path);
   return origin === 'claude' ? <>{path}</> : <><OriginBadge origin={origin} /> {path}</>;
+}
+
+/** The notifications line; nothing at all when the server reports no notifications block. */
+function NotificationsSection({ data }: { data: DiagnosticsData['notifications'] }) {
+  const now = useNow(1000);
+  const n = diagnosticsNotificationLines(data, now);
+  if (n === null) return null;
+  return (
+    <section>
+      <h2>通知</h2>
+      <p>桌面通知：{n.state}（<a href="#/notifications">设置</a>）</p>
+      <p>最近一次发出：{n.lastSent}</p>
+      {n.lastError !== null && <p className="error" style={{ padding: 0 }}>最近一次错误：{n.lastError}</p>}
+      {n.settingsError !== null && <p className="diag-warn">保存的通知设置读不出来，按默认（关闭）处理：{n.settingsError}</p>}
+    </section>
+  );
 }
 
 /** Owns the 1-second tick for the "last poll" age. */
@@ -155,6 +172,8 @@ export function Diagnostics() {
             lastAt={h.origin === 'claude' && onlyClaude ? data.lastHookAt : h.lastAt} />
         ))}
       </section>
+
+      <NotificationsSection data={data.notifications} />
 
       {cursorBlockVisible(data) && <CursorSection data={data} />}
 
