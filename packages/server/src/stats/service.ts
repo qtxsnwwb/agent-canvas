@@ -158,6 +158,11 @@ export class StatsService {
     });
   }
 
+  /** The summary cache, for linking with another service's (SessionSummaryCache.shareReadsWith). */
+  summaryCache(): SessionSummaryCache<SessionSummary> {
+    return this.cache;
+  }
+
   /** Calls retained over all cached summaries (for tests). */
   retainedCallCount(): number {
     return this.cache.retainedWeight();

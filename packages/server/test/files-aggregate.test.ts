@@ -126,11 +126,15 @@ describe('aggregateProjectFiles', () => {
     expect(run(specs).files).toHaveLength(2);
   });
 
-  test('q: case-insensitive substring of the path, either separator', () => {
+  test('q: case-insensitive substring of the relative path, either separator, trimmed', () => {
     const specs: Spec[] = [[session('a'), [[NOW, [edit('D:/w/shop/src/Cart.ts'), edit('D:/w/shop/lib/x.ts')]]]]];
     expect(run(specs, { q: 'cart' }).files.map((f) => f.relativePath)).toEqual(['src/Cart.ts']);
     expect(run(specs, { q: 'SRC\\CA' }).files.map((f) => f.relativePath)).toEqual(['src/Cart.ts']);
     expect(run(specs, { q: 'nothing' }).files).toEqual([]);
+    // what is shown: the project directory is not part of it; surrounding spaces are ignored
+    expect(run(specs, { q: 'shop' }).files).toEqual([]);
+    expect(run(specs, { q: '  cart ' }).files.map((f) => f.relativePath)).toEqual(['src/Cart.ts']);
+    expect(run(specs, { q: '   ' }).files).toHaveLength(2);
   });
 
   test('sort: recent (default), changes, path', () => {
@@ -193,5 +197,13 @@ describe('aggregateProjectFiles', () => {
   test('no conversation content', () => {
     const r = run([[session('a', { title: 'a title' }), [[NOW, [edit('D:/w/shop/a.ts')]]]]]);
     expect(JSON.stringify(r)).not.toMatch(/SECRET/);
+  });
+  test('ties: equal last times give the smaller session id’s origin; equal first times its spelling (any input order)', () => {
+    const a: Spec = [session('a', { origin: 'codex' }), [[NOW - 1000, [edit('D:/w/shop/X.ts')]]]];
+    const b: Spec = [session('b', { origin: 'cursor' }), [[NOW - 1000, [edit('d:/w/shop/x.ts')]]]];
+    for (const order of [[a, b], [b, a]]) {
+      const f = run(order).files[0]!;
+      expect(f).toMatchObject({ lastOrigin: 'codex', path: 'D:/w/shop/X.ts' });
+    }
   });
 });

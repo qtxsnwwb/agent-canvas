@@ -169,6 +169,8 @@ export function buildServer(deps: {
   const { store, pipeline, config, notifications } = deps;
   const stats = deps.stats ?? new StatsService(storeStatsSource(store));
   const files = deps.files ?? new FilesService(storeStatsSource(store));
+  // One read of a session builds both its stats and its file summary.
+  files.shareReadsWith(stats);
   const app = Fastify();
   const connections = new Set<Connection>();
 
@@ -220,6 +222,7 @@ export function buildServer(deps: {
     unsubscribeResync();
     unsubscribeStats();
     unsubscribeFiles();
+    if (deps.files === undefined) files.close(); // the default one is ours
     connections.clear();
   });
 

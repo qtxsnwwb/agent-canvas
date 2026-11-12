@@ -15,7 +15,7 @@ import {
   type SessionFilesResponse,
 } from '@agent-canvas/shared';
 import { SessionSummaryCache } from '../stats/session-cache.js';
-import { STATS_CACHE_CAPACITY, STATS_YIELD_AFTER_MS, type StatsSource } from '../stats/service.js';
+import { STATS_CACHE_CAPACITY, STATS_YIELD_AFTER_MS, type StatsService, type StatsSource } from '../stats/service.js';
 import { aggregateProjectFiles, rangeStartMs } from './aggregate.js';
 import { sessionFilesResponse, summarizeSessionFiles, type SessionFilesSummary } from './summary.js';
 
@@ -122,6 +122,14 @@ export class FilesService {
   /** Touches retained over all cached summaries (for tests). */
   retainedTouchCount(): number {
     return this.cache.retainedWeight();
+  }
+
+  /**
+   * Shares session reads with the stats service (both read the same store): a session either reads builds both
+   * summaries, so the warm-up (stats, then files) reads each session once. Results are unchanged.
+   */
+  shareReadsWith(stats: StatsService): void {
+    this.cache.shareReadsWith(stats.summaryCache());
   }
 
   /** Builds (or refreshes) every session's file summary ahead of a request (see StatsService.warm). Never rejects. */

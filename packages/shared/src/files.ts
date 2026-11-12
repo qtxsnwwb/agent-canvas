@@ -20,6 +20,8 @@ import type { FileAction, NodeStatus, Origin } from './model.js';
 
 /** Most touches listed per file in SessionFile.touches (the earliest are dropped; counts stay complete). */
 export const FILE_TOUCHES_MAX = 500;
+/** Most files in one SessionFilesResponse (the first in its order are kept; totals stay complete). */
+export const SESSION_FILES_MAX = 2000;
 /** Most sessions listed per file in ProjectFile.sessions (the least recent are dropped; sessionCount stays complete). */
 export const FILE_SESSIONS_MAX = 50;
 /** Most files in one ProjectFilesResponse (FILES_DEFAULT_LIMIT is also the largest `limit` accepted). */
@@ -89,10 +91,18 @@ export interface SessionFilesResponse {
   origin: Origin;
   /** The session's working directory (what relativePath is relative to); null when unknown. */
   cwd: string | null;
-  /** Every file the session touched (subagent-internal touches included): changes desc, then lastAt desc, then path. */
+  /**
+   * The files the session touched (subagent-internal touches included): changes desc, then lastAt desc, then path; at
+   * most SESSION_FILES_MAX (the first in that order).
+   */
   files: SessionFile[];
+  /** Files the session touched, all of them (≥ files.length). Optional for compatibility; always set. */
+  totalFiles?: number;
+  /** totalFiles > files.length. Optional for compatibility; always set. */
+  truncated?: boolean;
+  /** Over every file the session touched, listed or not. */
   totals: {
-    /** files.length. */
+    /** All files (= totalFiles). */
     files: number;
     /** Files with changed: true. */
     changedFiles: number;

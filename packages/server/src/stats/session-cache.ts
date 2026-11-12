@@ -13,6 +13,10 @@ import type { Change, GraphNode, SeqChange, Session } from '@agent-canvas/shared
  * - The cache is an LRU of at most `capacity` summaries and `maxWeight` total weight; a refresh never evicts a summary
  *   it has itself used (with more sessions than capacity, the overflow is recomputed each time rather than everything).
  * - A session whose read or summary fails is skipped and counted (`failed`); the others are unaffected.
+ * - one(): a single session's summary; concurrent calls for the same session share one read.
+ * - shareReadsWith(): caches over the same store (stats and files) hand each other every session read they make, so
+ *   one read builds both summaries (the warm-up reads each session once). A handed read is used only when the
+ *   receiving cache's own summary of that session is missing or stale, under the same validity rule (the read's seq).
  */
 
 /** Gives the event loop a turn. */
@@ -71,6 +75,12 @@ export class SessionSummaryCache<S> {
   private generation = 0;
   private pass = 0;
   private inflight: { generation: number; promise: Promise<SummarySnapshot<S>> } | null = null;
+  /** The pass of the refresh in progress (its summaries are never evicted for it); null when none runs. */
+  private runningPass: number | null = null;
+  /** one() reads in flight, by session id. */
+  private readonly oneInflight = new Map<string, { generation: number; promise: Promise<SummaryEntry<S> | null> }>();
+  /** Caches this one hands its session reads to (shareReadsWith). */
+  private readonly companions = new Set<SessionSummaryCache<any>>();
   private closed = false;
 
   constructor(private readonly source: SessionSummarySource, private readonly options: SessionSummaryCacheOptions<S>) {
@@ -103,6 +113,31 @@ export class SessionSummaryCache<S> {
 
   isClosed(): boolean {
     return this.closed;
+  }
+
+  /** Hands every session read of either cache to the other (see the class comment). */
+  shareReadsWith<T>(other: SessionSummaryCache<T>): void {
+    if (other === (this as unknown)) return;
+    this.companions.add(other);
+    other.companions.add(this);
+  }
+
+  /** A session read made by a companion: summarized and cached when this cache's summary is missing or stale. */
+  private offer(sessionId: string, read: { session: Session; nodes: GraphNode[]; seq: number }): void {
+    if (this.closed) return;
+    const cached = this.cache.get(sessionId);
+    if (cached !== undefined && cached.seq >= read.seq) return; // at least as recent already
+    if (this.fresh(sessionId) !== undefined) return;
+    try {
+      const summary = this.options.summarize(read.session, read.nodes);
+      this.remember(sessionId, { seq: read.seq, session: read.session, summary, weight: this.options.weight(summary), pass: -1 });
+    } catch {
+      // this cache's own read will try again (and count the failure)
+    }
+  }
+
+  private share(sessionId: string, read: { session: Session; nodes: GraphNode[]; seq: number }): void {
+    for (const c of this.companions) c.offer(sessionId, read);
   }
 
   /** Every listed session's summary (see the class comment). */
@@ -140,12 +175,25 @@ export class SessionSummaryCache<S> {
       this.cache.set(sessionId, cached);
       return { session: cached.session, summary: cached.summary };
     }
+    // Share a read in flight unless a change was noted since it began (then it may miss that change).
+    const current = this.oneInflight.get(sessionId);
+    if (current !== undefined && current.generation === this.generation) return current.promise;
+    const entry = { generation: this.generation, promise: this.readOne(sessionId) };
+    this.oneInflight.set(sessionId, entry);
+    const clear = (): void => {
+      if (this.oneInflight.get(sessionId) === entry) this.oneInflight.delete(sessionId);
+    };
+    void entry.promise.then(clear, clear);
+    return entry.promise;
+  }
+
+  private async readOne(sessionId: string): Promise<SummaryEntry<S> | null> {
     const read = await this.source.readSession(sessionId, () => this.closed);
     if (read === null) return null;
     const summary = this.options.summarize(read.session, read.nodes);
-    this.remember(sessionId, {
-      seq: read.seq, session: read.session, summary, weight: this.options.weight(summary), pass: this.pass,
-    });
+    // pass -1: not a refresh's; it may evict any summary but those of a refresh in progress.
+    this.remember(sessionId, { seq: read.seq, session: read.session, summary, weight: this.options.weight(summary), pass: -1 });
+    this.share(sessionId, read);
     return { session: read.session, summary };
   }
 
@@ -161,6 +209,15 @@ export class SessionSummaryCache<S> {
 
   private async refresh(): Promise<SummarySnapshot<S>> {
     const pass = ++this.pass;
+    this.runningPass = pass;
+    try {
+      return await this.refreshPass(pass);
+    } finally {
+      if (this.runningPass === pass) this.runningPass = null;
+    }
+  }
+
+  private async refreshPass(pass: number): Promise<SummarySnapshot<S>> {
     const sessions = this.source.sessions();
     const entries: SummaryEntry<S>[] = [];
     let failed = 0;
@@ -186,6 +243,7 @@ export class SessionSummaryCache<S> {
         if (read === null) continue; // gone since the listing
         const summary = this.options.summarize(read.session, read.nodes);
         this.remember(id, { seq: read.seq, session: read.session, summary, weight: this.options.weight(summary), pass });
+        this.share(id, read);
         entries.push({ session, summary });
       } catch {
         if (this.closed) throw new Error(this.options.closedMessage);
@@ -197,14 +255,15 @@ export class SessionSummaryCache<S> {
 
   /**
    * Caches `entry`, evicting least recently used summaries while over capacity or over maxWeight; a summary used by the
-   * current refresh is never evicted for it (the new one is then not cached), nor is one heavier than maxWeight cached.
+   * refresh in progress is never evicted (the new one is then not cached), nor is one heavier than maxWeight cached.
    */
   private remember(id: string, entry: CacheEntry<S>): void {
     this.forget(id);
     if (entry.weight > this.maxWeight) return;
     while (this.cache.size >= this.capacity || this.retained + entry.weight > this.maxWeight) {
       const [oldestId, oldest] = this.cache.entries().next().value as [string, CacheEntry<S>];
-      if (oldest.pass === entry.pass) return; // everything cached was used by this refresh: keep it
+      // Everything left was used by the refresh in progress: keep it.
+      if (this.runningPass !== null && oldest.pass === this.runningPass) return;
       this.forget(oldestId);
     }
     this.cache.set(id, entry);

@@ -21,7 +21,10 @@ import type { SessionFilesSummary } from './summary.js';
  *   two projects is listed under each, with that project's touches only.
  * - Range: a file is listed when it has a touch at or after fromMs (dated touches only); every count, flag and time is
  *   of those touches. fromMs null (range `all`): every touch, undated ones included.
- * - changedOnly: files with at least one change in range. q: case-insensitive substring of the path (`\` read as `/`).
+ * - changedOnly: files with at least one change in range. q (trimmed): case-insensitive substring of relativePath, the
+ *   path as shown (`\` read as `/`).
+ * - Ties: the spelling is that of the session with the earliest dated touch, lastOrigin that of the session with the
+ *   latest one; on equal times, of the smaller session id.
  * - Sorted (FilesSort), then cut to `limit`; per-file session rows are built for the listed files only.
  */
 
@@ -53,14 +56,16 @@ export function rangeStartMs(range: FilesRange, nowMs: number): number | null {
 interface SessionPart { session: Session; reads: number; changes: number; lastMs: number | null }
 interface Acc {
   path: string;
-  /** Earliest dated touch of the file (any time), for the spelling. */
+  /** Earliest dated touch of the file (any time), for the spelling, and its session. */
   firstMs: number | null;
+  firstSession: string;
   reads: number;
   changes: number;
   created: boolean;
   deleted: boolean;
   lastMs: number | null;
   lastOrigin: Origin | null;
+  lastSession: string;
   sessions: SessionPart[];
 }
 
@@ -105,32 +110,42 @@ export function aggregateProjectFiles(input: ProjectFilesInput): ProjectFilesRes
       let acc = files.get(file.key);
       if (acc === undefined) {
         acc = {
-          path: file.path, firstMs: file.firstMs, reads: 0, changes: 0, created: false, deleted: false, lastMs: null,
-          lastOrigin: null, sessions: [],
+          path: file.path, firstMs: file.firstMs, firstSession: session.id, reads: 0, changes: 0, created: false,
+          deleted: false, lastMs: null, lastOrigin: null, lastSession: '', sessions: [],
         };
         files.set(file.key, acc);
-      } else if (file.firstMs !== null && (acc.firstMs === null || file.firstMs < acc.firstMs)) {
+      } else if (
+        file.firstMs !== null &&
+        (acc.firstMs === null || file.firstMs < acc.firstMs || (file.firstMs === acc.firstMs && session.id < acc.firstSession))
+      ) {
         acc.path = file.path;
         acc.firstMs = file.firstMs;
+        acc.firstSession = session.id;
       }
       acc.reads += reads;
       acc.changes += changes;
       if (writes > 0) acc.created = true;
       if (deletes > 0) acc.deleted = true;
-      if (lastMs !== null && (acc.lastMs === null || lastMs > acc.lastMs)) {
+      if (
+        lastMs !== null &&
+        (acc.lastMs === null || lastMs > acc.lastMs || (lastMs === acc.lastMs && session.id < acc.lastSession))
+      ) {
         acc.lastMs = lastMs;
         acc.lastOrigin = session.origin;
+        acc.lastSession = session.id;
       }
       acc.sessions.push({ session, reads, changes, lastMs });
     }
   }
 
-  const q = input.q === null || input.q === '' ? null : input.q.replace(/\\/g, '/').toLowerCase();
+  const trimmed = input.q?.trim() ?? '';
+  const q = trimmed === '' ? null : trimmed.replace(/\\/g, '/').toLowerCase();
   const listed: { acc: Acc; relativePath: string }[] = [];
   for (const acc of files.values()) {
     if (input.changedOnly && acc.changes === 0) continue;
-    if (q !== null && !acc.path.toLowerCase().includes(q)) continue;
-    listed.push({ acc, relativePath: relativeToDir(acc.path, projectDir) });
+    const relativePath = relativeToDir(acc.path, projectDir);
+    if (q !== null && !relativePath.toLowerCase().includes(q)) continue;
+    listed.push({ acc, relativePath });
   }
   const tie = (a: (typeof listed)[number], b: (typeof listed)[number]): number =>
     cmp(a.relativePath, b.relativePath) || cmp(a.acc.path, b.acc.path);

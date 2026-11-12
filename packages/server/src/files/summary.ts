@@ -1,6 +1,7 @@
 import {
   FILE_ACTIONS,
   FILE_TOUCHES_MAX,
+  SESSION_FILES_MAX,
   normalizeFilePath,
   relativeToDir,
   type FileAction,
@@ -140,12 +141,15 @@ export function sessionFilesResponse(session: Session, summary: SessionFilesSumm
   let changedFiles = 0;
   let reads = 0;
   let changes = 0;
-  const files = summary.files.map((f): SessionFile => {
+  for (const f of summary.files) {
+    const fileChanges = changesOf(f.counts);
+    if (fileChanges > 0) changedFiles++;
+    reads += f.counts.read;
+    changes += fileChanges;
+  }
+  const files = summary.files.slice(0, SESSION_FILES_MAX).map((f): SessionFile => {
     const c = f.counts;
     const fileChanges = changesOf(c);
-    if (fileChanges > 0) changedFiles++;
-    reads += c.read;
-    changes += fileChanges;
     const truncated = f.touches.length > FILE_TOUCHES_MAX;
     const kept = truncated ? f.touches.slice(f.touches.length - FILE_TOUCHES_MAX) : f.touches;
     return {
@@ -168,7 +172,9 @@ export function sessionFilesResponse(session: Session, summary: SessionFilesSumm
     origin: session.origin,
     cwd: session.cwd,
     files,
-    totals: { files: files.length, changedFiles, reads, changes },
+    totalFiles: summary.files.length,
+    truncated: summary.files.length > files.length,
+    totals: { files: summary.files.length, changedFiles, reads, changes },
     truncatedNodes: summary.truncatedNodes,
   };
 }

@@ -9,12 +9,14 @@ import { loadConfig, type Config } from '../src/config.js';
 import { FilesService } from '../src/files/service.js';
 import { Pipeline } from '../src/pipeline.js';
 import { storeStatsSource } from '../src/stats/service.js';
-import { openStore, type Store } from '../src/store/store.js';
+import { openStore, type RawEvent, type Store } from '../src/store/store.js';
+import { assistantBlock, toolResult, userPrompt } from './fixtures.js';
 
 const NOW = Date.parse('2026-01-02T12:00:00.000Z');
 /** The project id the store derives from the cwd (so it reports that cwd as the project's directory). */
 const P = 'D--w-tea-shop';
 const iso = (ms: number): string => new Date(ms).toISOString();
+const linesOf = (events: RawEvent[]): string => events.map((e) => (e.source === 'transcript' ? e.line : '') + '\n').join('');
 
 function session(id: string, o: Partial<Session> = {}): Session {
   return {
@@ -39,10 +41,6 @@ describe('file routes', () => {
   let app: FastifyInstance;
   const get = (url: string, headers: Record<string, string> = {}) => app.inject({ method: 'GET', url, headers });
   const apply = (changes: Change[]) => store.applyChanges(changes);
-  /** Reports committed changes to the pipeline's onChanges listeners, as the pipeline does after ingesting. */
-  const report = (committed: ReturnType<Store['applyChanges']>) =>
-    (pipeline as unknown as { listeners: Set<(c: unknown) => void> }).listeners.forEach((l) => l(committed));
-
   beforeEach(async () => {
     tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-api-files-'));
     config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), cursorDbPath: null });
@@ -126,15 +124,28 @@ describe('file routes', () => {
     expect((await get(url)).statusCode).toBe(400);
   });
 
-  test('a change reported by the pipeline refreshes the session\'s summary', async () => {
-    expect(((await get('/api/sessions/s1/files')).json() as SessionFilesResponse).totals.files).toBe(2);
-    const committed = store.applyChanges([
-      { type: 'node_added', node: node('s1', 'n9', NOW - 500, [{ path: 'D:/w/tea-shop/new.ts', action: 'write' }]), detail: {} },
-    ]);
-    expect(((await get('/api/sessions/s1/files')).json() as SessionFilesResponse).totals.files).toBe(2); // not yet told
-    report(committed);
-    const after = (await get('/api/sessions/s1/files')).json() as SessionFilesResponse;
-    expect(after.totals.files).toBe(3);
+  test('a session ingested and then changed through the pipeline is reflected on the next request', async () => {
+    const file = path.join(config.projectsDir, 'proj', 's9.jsonl');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, linesOf([
+      userPrompt('u1', null, 'hello'), // the first prompt becomes the session title, which is exposed
+      assistantBlock('a1', 'u1', { type: 'tool_use', id: 'tu1', name: 'Read', input: { file_path: '/w/app/a.ts' } }),
+      toolResult('r1', 'a1', 'tu1', 'SECRET BODY'),
+    ]));
+    await pipeline.ingestFile(file);
+    const id = (store.listSessions('proj')[0] as Session).id;
+    const files = async () => (await get(`/api/sessions/${id}/files`)).json() as SessionFilesResponse;
+    expect((await files()).files.map((f) => [f.path, f.reads, f.changes])).toEqual([['/w/app/a.ts', 1, 0]]);
+    await fs.appendFile(file, linesOf([
+      assistantBlock('a2', 'r1', { type: 'tool_use', id: 'tu2', name: 'Edit', input: { file_path: '/w/app/a.ts', old_string: 'x', new_string: 'y' } }),
+      toolResult('r2', 'a2', 'tu2', 'ok'),
+    ]));
+    await pipeline.ingestFile(file);
+    const after = await files();
+    expect(after.files.map((f) => [f.path, f.reads, f.changes])).toEqual([['/w/app/a.ts', 1, 1]]);
+    const project = (await get('/api/files?projectId=proj')).json() as ProjectFilesResponse;
+    expect(project.files.map((f) => [f.path, f.reads, f.changes, f.sessionCount])).toEqual([['/w/app/a.ts', 1, 1, 1]]);
+    expect(JSON.stringify(after) + JSON.stringify(project)).not.toMatch(/SECRET/);
   });
 
   test('only local requests', async () => {

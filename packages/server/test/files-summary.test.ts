@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { FILE_TOUCHES_MAX, type FileTouch, type GraphNode, type Session } from '@agent-canvas/shared';
+import { FILE_TOUCHES_MAX, SESSION_FILES_MAX, type FileTouch, type GraphNode, type Session } from '@agent-canvas/shared';
 import { pathKey, sessionFilesResponse, summarizeSessionFiles } from '../src/files/summary.js';
 
 const T0 = Date.parse('2026-11-10T10:00:00.000Z');
@@ -166,5 +166,15 @@ describe('summarizeSessionFiles / sessionFilesResponse', () => {
   test('no conversation content in the response', () => {
     const r = respond(session(), [tool('n1', 1, [edit('D:/w/shop/a.ts')])]);
     expect(JSON.stringify(r)).not.toMatch(/SECRET/);
+  });
+  test('more files than SESSION_FILES_MAX: the first in order are listed; totals and totalFiles cover all', () => {
+    const nodes = Array.from({ length: SESSION_FILES_MAX + 5 }, (_, i) => tool(`n${i}`, i + 1, [read(`D:/w/shop/f${i}.ts`)]));
+    nodes.push(tool('e', 1, [edit('D:/w/shop/f0.ts')]));
+    const r = respond(session(), nodes);
+    expect(r.files).toHaveLength(SESSION_FILES_MAX);
+    expect(r).toMatchObject({ totalFiles: SESSION_FILES_MAX + 5, truncated: true });
+    expect(r.totals).toEqual({ files: SESSION_FILES_MAX + 5, changedFiles: 1, reads: SESSION_FILES_MAX + 5, changes: 1 });
+    expect(r.files[0]!.relativePath).toBe('f0.ts'); // the changed file first
+    expect(respond(session(), nodes.slice(0, 3))).toMatchObject({ totalFiles: 3, truncated: false });
   });
 });

@@ -5,7 +5,7 @@ import { performance } from 'node:perf_hooks';
 import { describe, expect, test } from 'vitest';
 import type { Change, FileAction, GraphNode, Origin, Session } from '@agent-canvas/shared';
 import { FilesService, type FilesQuery } from '../src/files/service.js';
-import { storeStatsSource, type StatsSource } from '../src/stats/service.js';
+import { StatsService, storeStatsSource, type StatsSource } from '../src/stats/service.js';
 import { openStore } from '../src/store/store.js';
 
 /*
@@ -13,7 +13,7 @@ import { openStore } from '../src/store/store.js';
  * about 214,000 derived nodes (four of 30–40k), about 45,000 file touches over about 6,000 distinct files in 6 projects.
  * Reports wall time and the longest event-loop stall for: the first /api/files request (every summary built), a filter
  * switch (nothing read), a request after one session changed (only it re-read), and /api/sessions/:id/files of the
- * largest session, cold.
+ * largest session, cold; and the start-up warm-up (stats, then files) with and without shared reads.
  *
  * Skipped by default. Run:
  *   AGENT_CANVAS_BENCH=1 npx --yes pnpm@10 vitest run packages/server/test/files.bench.test.ts
@@ -129,6 +129,22 @@ describe.skipIf(!BENCH)('files benchmark', () => {
       const cold = new FilesService(storeStatsSource(store), { now: () => NOW });
       const big = await measured(() => cold.session('bench-s000'));
 
+      // The start-up warm-up: stats then files, each reading every session (before), or sharing reads (after).
+      const warmup = async (linked: boolean) => {
+        const sb = storeStatsSource(store);
+        let n = 0;
+        const counting: StatsSource = { ...sb, readSession: (id, stopped) => { n++; return sb.readSession(id, stopped); } };
+        const stats = new StatsService(counting, { now: () => NOW });
+        const files = new FilesService(counting, { now: () => NOW });
+        if (linked) files.shareReadsWith(stats);
+        const m = await measured(async () => {
+          await stats.warm();
+          await files.warm();
+        });
+        return { ...m, reads: n };
+      };
+      const warmBefore = await warmup(false);
+      const warmAfter = await warmup(true);
       // Totals of the dataset, from the warm cache.
       let touches = 0;
       let distinct = 0;
@@ -143,9 +159,14 @@ describe.skipIf(!BENCH)('files benchmark', () => {
           `  ${line(`filter switch (${switchReads} session reads)`, sw)}\n` +
           `  ${line('another project, 7d', other)}\n` +
           `  ${line(`after one session changed (${changedReads} session read)`, changed)}\n` +
-          `  ${line('session route, largest session (40,000 nodes), cold', big)}`,
+          `  ${line('session route, largest session (40,000 nodes), cold', big)}
+` +
+          `  ${line(`warm-up stats + files, separate reads (${warmBefore.reads} session reads)`, warmBefore)}
+` +
+          `  ${line(`warm-up stats + files, shared reads (${warmAfter.reads} session reads)`, warmAfter)}`,
       );
       expect(switchReads).toBe(0);
+      expect(warmAfter.reads).toBe(sizes.length);
       expect(changedReads).toBe(1);
       expect(changed.result.files.some((f) => f.relativePath === 'new.ts')).toBe(true);
       if (ASSERT) {
