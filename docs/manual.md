@@ -2,7 +2,7 @@
 
 > 这里是完整的参考说明。想快速上手请看[项目首页](../README.md)。
 
-claude-canvas 是一个本地服务：它读取 Claude Code 的 transcript 文件和 OpenAI Codex 的会话文件，并接收 hook 事件，在固定的本地网址上用网页展示每个会话正在做什么。两种工具的会话用同一套页面展示（Codex 见下文“Codex”）。
+claude-canvas 是一个本地服务：它读取 Claude Code 的 transcript 文件、OpenAI Codex 的会话文件和 Cursor 的本地数据库，并接收 hook 事件，在固定的本地网址上用网页展示每个会话正在做什么。两种工具的会话用同一套页面展示（Codex 见下文“Codex”）。
 每个会话显示为一张实时更新的画布。默认的“概览”视角只画骨架（每个轮次一张卡片，下面挂它派出的子代理），选中一个轮次或子代理，它的执行过程在下方以瀑布图列出。另有逐步、拓扑、因果、复盘四个视角（见下文“画布”）。首页可以检索会话，诊断页给出服务和 hooks 的运行情况。
 
 ## 环境要求
@@ -152,6 +152,40 @@ node packages/server/dist/cli.js hooks uninstall --codex    # 只移除本安装
 - 派发子代理的调用找不到对应的子代理线程时（例如派出失败），派发节点在派出它的轮次进行中显示执行中，轮次结束后显示失败；之后子代理线程出现，就改为跟着它走。
 - 追加给子代理的任务（`followup_task`、`send_message`），在逐步视角的因果链上接在子代理上一个任务的回复之后，而不是接在发出追加任务的那次调用上。
 
+## Cursor
+
+- 服务启动时会自动只读地打开 Cursor 的本地状态数据库，并每 3 秒查一次哪些会话变了。数据库不存在时视为没装 Cursor，跳过，不报错。
+  - 默认位置：Windows `%APPDATA%\Cursor\User\globalStorage\state.vscdb`；macOS `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`；Linux `~/.config/Cursor/User/globalStorage/state.vscdb`。
+  - 用环境变量 `CLAUDE_CANVAS_CURSOR_DB` 指定别的位置；设为空字符串表示不读取 Cursor。
+- 对 Cursor 没有影响：数据库以只读方式打开，只做按主键的短查询，不写入、不持有长事务；数据库被占用或出错时这一轮放弃，下一轮重试，错误显示在诊断页。
+- 读到的记录会裁剪后存进 claude-canvas 自己的数据库（文本、工具参数、工具结果各截到 64 KB）。之后的重建只用这份记录，不需要再读 Cursor 的数据库；Cursor 归档或删掉会话后，已采集的内容仍可看。
+- 导入范围：未归档、至少有一条消息的 Agent 会话。**不导入**：已归档会话、没发过消息的空会话、云端 / 后台 Agent、Tab 补全。会话在 Cursor 里被归档或删除后，这里显示为“源文件已删除”。
+- 子代理：Cursor 的子代理是单独的会话，这里显示在派出它的那一步（`task_v2`）下面，展开后是它内部的步骤。从同一个会话分叉出来的两个会话各自显示它们共用的子代理。
+- 项目归属：按会话的工作目录归到项目，和同目录的 Claude Code、Codex 会话在同一个项目下；取不到工作目录时归到“Cursor（未知目录）”。
+- 会话标题取 Cursor 给会话起的名字，没有时取第一条提示。
+- 每一步的状态：Cursor 记录的完成 → 成功；出错 → 失败；终端命令退出码不为 0 → 失败；被用户拒绝执行 → 已拒绝；已取消、所在轮次结束时仍未完成、会话被中止 → 失败（详情里注明原因）。
+- 会话状态只有运行中和空闲；“已结束”只在装了 hooks 且 Cursor 发出会话结束事件时出现。超过 15 分钟没有活动的“运行中”显示为“长时间无活动”。
+- 更新延迟：不装 hooks 时取决于轮询间隔和 Cursor 多久把内容写进数据库，通常几秒。
+
+### Cursor hooks（可选）
+
+不装也能用。装上后，“开始运行”和“一轮结束”在 1 秒内到达，并且每次事件会立即催一次读库。
+
+```
+node packages/server/dist/cli.js hooks install --cursor      # 写入 ~/.cursor/hooks.json（不存在时新建）
+node packages/server/dist/cli.js hooks uninstall --cursor    # 只移除本安装、本端口的那几条
+```
+
+- 只装 5 个观察类事件：`sessionStart`、`beforeSubmitPrompt`、`stop`、`subagentStop`、`sessionEnd`。每条的形状是 `{ "command": "…", "timeout": 5 }`。
+- **不装任何能拦住操作的 hook**。Cursor 的权限类 hook（`preToolUse`、`beforeShellExecution` 等）在转发程序输出异常时会阻止 Cursor 的动作，所以这里一个都不装。代价是 Cursor 会话没有“等待权限确认”状态，工具开始执行的时刻靠读库得到。
+- 选项和另外两个工具的一样：`--port <n>`、`--yes`（非交互终端必须加）、`--settings <file>`；环境变量 `CLAUDE_CANVAS_CURSOR_HOOKS_FILE` 改默认路径。`~/.cursor` 目录不存在时视为没装 Cursor，不做任何改动。文件里已有 `version` 且不是 1 时拒绝写入。
+- 命令用绝对路径指向当前的 `node` 和这份 `cli.js`。Windows 上 Cursor 用 PowerShell 执行，命令写成 `& "<node>" "<cli.js>" hook-forward --origin cursor --port <n>`；其他平台是普通命令行。
+- Cursor 监视 `hooks.json`，保存后自动生效，不需要确认信任；没生效时重启 Cursor。
+- **移动、升级或删除 claude-canvas 之前，先运行 `hooks uninstall --cursor`**。否则 hook 命令指向不存在的文件，每次触发都会报错；这种情况下 Cursor 是否照常继续，还没有用真实的 Cursor 验证过。换了 node 之后重新运行一次 `hooks install --cursor`，它会把过期的条目换成新的。
+- 这些 hook 是同步的：每次触发 Cursor 会等转发命令结束（启动一次 node，约 0.25 秒，Windows 上再加 PowerShell 的启动时间；服务没响应时最多约 1.3 秒）。5 个事件每轮各触发至多一次。
+- 转发命令永远以退出码 0 结束，不读写文件；只在 `beforeSubmitPrompt` 时向 Cursor 输出 `{"continue":true}`（明确放行），其他事件不输出。
+- hooks 只给出会话状态，不建、不改节点；节点一律来自数据库。存下来的 hook 内容不含你的邮箱（载荷里的 `user_email` 会被去掉），但包含提示正文，和另外两个工具的 hook 一样。
+
 ## Hooks（可选）
 
 不装 hooks 也能用：服务只靠 transcript 就能工作。区别是：
@@ -210,8 +244,10 @@ claude-canvas 没有运行时，HTTP hook 连接失败会立刻报错，而 Clau
 | `CLAUDE_CANVAS_PROJECTS_DIR` | `~/.claude/projects` | 读取 transcript 的目录 |
 | `CLAUDE_CANVAS_DATA_DIR` | `~/.claude-canvas` | 数据目录，数据库文件为 `data.db` |
 | `CLAUDE_CANVAS_CODEX_DIR` | `~/.codex/sessions` | 读取 Codex 会话文件的目录；空字符串表示不读取 |
+| `CLAUDE_CANVAS_CURSOR_DB` | Cursor 的 `state.vscdb`（按平台，见“Cursor”一节） | Cursor 的本地数据库，只读打开；空字符串表示不读取 |
 | `CLAUDE_CANVAS_SETTINGS_FILE` | `~/.claude/settings.json` | `hooks install` / `hooks uninstall` 修改的 settings 文件 |
 | `CLAUDE_CANVAS_CODEX_HOOKS_FILE` | `~/.codex/hooks.json` | `hooks install --codex` / `hooks uninstall --codex` 修改的文件 |
+| `CLAUDE_CANVAS_CURSOR_HOOKS_FILE` | `~/.cursor/hooks.json` | `hooks install --cursor` / `hooks uninstall --cursor` 修改的文件 |
 
 ## rebuild
 
@@ -243,6 +279,12 @@ node packages/server/dist/cli.js rebuild
 - Windows 是经过测试的平台。
 - 后台派出的子代理：派发节点在子代理真正结束时才结算，耗时是从派出到结束。结束信号有：主线收到的任务通知（同时给出成功或失败）、SubagentStop hook、子代理记录里的 end_turn / 交回调用 / 中断。多个信号以任意先后到达结果都一样：有失败信号就记为失败并取失败的时间，否则取最早的时间。没有自己的结束信号时：同一个子代理之后又被后台派出过，就算在那次派出开始时结束；否则派出之后会话结束过，就记为失败（之后恢复会话也不会让它回来，原来的进程已经没了），都不是则保持“执行中”。同一个子代理被后台派出多次时，每次派出只认自己时间段里的信号。
 - 以上信号都没有、会话也没有结束时（例如进程被直接杀掉），派发节点的状态仍是“执行中”。主线不再推进时（会话已结束、空闲、等待输入，或运行中但超过 15 分钟没有动静），主线上仍在执行的步骤显示为“未结束”；后台工作（子代理的步骤和派发节点）多留 5 分钟：只要会话没结束、最近 5 分钟内还有记录，就仍算在进行，因为主线空闲时后台子代理可能还在工作。复盘视角显示的是历史，不受此影响。显示为“未结束”时，画布、瀑布图和详情抽屉都用虚线、无动效的样式，不再声称正在进行。
+
+- Cursor：数据库的格式没有公开文档，是按实际观察到的形状读的；Cursor 升级后可能出现未识别的记录（诊断页的 Cursor 一栏可见），需要跟着更新。
+- Cursor：没有“等待权限确认”状态；思考内容只有 Cursor 存下来的那部分文本；不显示 token 用量。
+- Cursor：一条记录的内容改回到和之前某一版完全相同时，不会再存一次；重建后该节点停在中间那一版，直到它下一次变化。
+- Cursor hooks 的载荷字段和 Windows 上的调用方式取自官方文档，还没有用真实的 Cursor 核对过。
+- Cursor：会话很长（上万步）时，第一次导入需要一段时间，在后台进行。
 
 ## 开发
 
