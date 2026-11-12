@@ -63,10 +63,10 @@ describe('aggregateProjectFiles', () => {
     expect(r.files).toHaveLength(1);
     expect(r.files[0]).toEqual({
       path: 'D:/w/shop/x.ts', relativePath: 'x.ts', sessionCount: 2, reads: 1, changes: 3, created: true, deleted: false,
-      lastAt: iso(NOW - 1000), lastOrigin: 'cursor', sessionsTruncated: false,
+      lastAt: iso(NOW - 1000), lastOrigin: 'cursor', sessionsTruncated: false, failed: 0,
       sessions: [
-        { sessionId: 'b', origin: 'cursor', title: 'title b', reads: 0, changes: 2, lastAt: iso(NOW - 1000) },
-        { sessionId: 'a', origin: 'claude', title: 'title a', reads: 1, changes: 1, lastAt: iso(NOW - 4000) },
+        { sessionId: 'b', origin: 'cursor', title: 'title b', reads: 0, changes: 2, failed: 0, lastAt: iso(NOW - 1000) },
+        { sessionId: 'a', origin: 'claude', title: 'title a', reads: 1, changes: 1, failed: 0, lastAt: iso(NOW - 4000) },
       ],
     });
     expect(r).toMatchObject({ projectId: 'p1', projectName: 'shop', projectDir: 'D:\\w\\shop', totalFiles: 1, truncated: false });
@@ -205,5 +205,55 @@ describe('aggregateProjectFiles', () => {
       const f = run(order).files[0]!;
       expect(f).toMatchObject({ lastOrigin: 'codex', path: 'D:/w/shop/X.ts' });
     }
+  });
+  test('failed / denied touches: not counted, no times; a session that only failed is a row with its failed count', () => {
+    const r = run([
+      [session('a'), [[NOW - 5000, [edit('D:/w/shop/x.ts')]]]],
+      [session('b', { origin: 'cursor' }), [[NOW - 1000, [edit('D:/w/shop/x.ts'), write('D:/w/shop/x.ts')], { status: 'failed' }]]],
+    ]);
+    expect(r.files[0]).toMatchObject({
+      reads: 0, changes: 1, failed: 2, created: false, sessionCount: 2, lastAt: iso(NOW - 5000), lastOrigin: 'claude',
+    });
+    expect(r.files[0]!.sessions).toEqual([
+      { sessionId: 'b', origin: 'cursor', title: 'title b', reads: 0, changes: 0, failed: 2, lastAt: iso(NOW - 1000) },
+      { sessionId: 'a', origin: 'claude', title: 'title a', reads: 0, changes: 1, failed: 0, lastAt: iso(NOW - 5000) },
+    ]);
+  });
+
+  test('a file touched only by failed calls: listed with zero counts (not with changedOnly), times from the failures', () => {
+    const specs: Spec[] = [[session('a'), [
+      [NOW - 3000, [edit('D:/w/shop/bad.ts')], { status: 'failed' }],
+      [NOW - 2000, [edit('D:/w/shop/bad.ts')], { status: 'denied' }],
+      [NOW - 9000, [edit('D:/w/shop/good.ts')]],
+    ]]];
+    const all = run(specs);
+    expect(all.files.find((f) => f.relativePath === 'bad.ts')).toMatchObject({
+      reads: 0, changes: 0, failed: 2, created: false, deleted: false, sessionCount: 1, lastAt: iso(NOW - 2000), lastOrigin: 'claude',
+    });
+    expect(all.files.map((f) => f.relativePath)).toEqual(['bad.ts', 'good.ts']);
+    expect(run(specs, { changedOnly: true }).files.map((f) => f.relativePath)).toEqual(['good.ts']);
+    expect(run(specs, { sort: 'changes' }).files.map((f) => f.relativePath)).toEqual(['good.ts', 'bad.ts']);
+  });
+
+  test('range membership: failed touches count only for a file without any successful touch', () => {
+    const from = rangeStartMs('7d', NOW)!;
+    const specs: Spec[] = [[session('a'), [
+      [from - DAY, [edit('D:/w/shop/old-ok.ts')]],
+      [from + 1000, [edit('D:/w/shop/old-ok.ts')], { status: 'failed' }],
+      [from + 2000, [edit('D:/w/shop/new-bad.ts')], { status: 'failed' }],
+      [from - DAY, [edit('D:/w/shop/old-bad.ts')], { status: 'failed' }],
+    ]]];
+    const r = run(specs, { fromMs: from });
+    expect(r.files.map((f) => [f.relativePath, f.changes, f.failed])).toEqual([['new-bad.ts', 0, 1]]);
+    expect(run(specs).files.map((f) => f.relativePath).sort()).toEqual(['new-bad.ts', 'old-bad.ts', 'old-ok.ts']);
+  });
+
+  test('sorting: a failed late touch does not lift a file in recent order', () => {
+    const r = run([[session('a'), [
+      [NOW - 5000, [edit('D:/w/shop/a.ts')]],
+      [NOW - 3000, [edit('D:/w/shop/b.ts')]],
+      [NOW - 1000, [edit('D:/w/shop/a.ts')], { status: 'failed' }],
+    ]]]);
+    expect(r.files.map((f) => f.relativePath)).toEqual(['b.ts', 'a.ts']);
   });
 });

@@ -104,6 +104,18 @@ export function sessionFilesEmpty(files: readonly SessionFile[], v: SessionFileV
   return 'noMatch';
 }
 
+/** The muted "失败 N" marker of a file or session row; null when nothing failed (or the server sends no count). */
+export function failedLabel(x: { failed?: number }): string | null {
+  return (x.failed ?? 0) > 0 ? `失败 ${x.failed}` : null;
+}
+
+/** The line under "没有改过的文件": what the switch hides (files only read, or whose changes all failed). */
+export function readOnlyNote(files: readonly SessionFile[]): string {
+  return files.some((f) => !f.changed && (f.failed ?? 0) > 0)
+    ? `${files.length} 个文件只读过，或改动没有成功。`
+    : `只读过 ${files.length} 个文件。`;
+}
+
 /** The file of the list that is the same file as `path` (spelling, separators and, on Windows, case aside). */
 export function findSessionFile<T extends { path: string }>(files: readonly T[], path: string): T | undefined {
   return files.find((f) => f.path === path) ?? files.find((f) => samePath(f.path, path));

@@ -2,7 +2,8 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import type { Origin, SessionFile, SessionFilesResponse } from '@agent-canvas/shared';
 import { api } from '../client';
 import {
-  ACTION_LABEL, CODEX_NOTE, FILES_SCOPE_NOTE, SESSION_FILE_SORTS, SESSION_FILE_VIEW_KEY, findSessionFile, groupTouches,
+  ACTION_LABEL, CODEX_NOTE, FILES_SCOPE_NOTE, SESSION_FILE_SORTS, SESSION_FILE_VIEW_KEY, failedLabel, findSessionFile, groupTouches,
+  readOnlyNote,
   parseSessionFileView, serializeSessionFileView, sessionFilesEmpty, splitPath, viewSessionFiles, type FileStep,
   type SessionFileView,
 } from '../files';
@@ -42,6 +43,12 @@ export function PathLabel({ path, full }: { path: string; full: string }) {
 }
 
 /** "写入" / "删除" markers of a file. */
+/** "失败 N" in muted text when some touches failed (they are not in the counts). */
+export function FailedMark({ x }: { x: { failed?: number } }) {
+  const label = failedLabel(x);
+  return label === null ? null : <span className="muted" title="失败或被拒绝的调用，不计入读 / 改次数">{label}</span>;
+}
+
 export function ChangeMarks({ created, deleted }: { created: boolean; deleted: boolean }) {
   return (
     <>
@@ -87,6 +94,7 @@ function FileRow({ file, expanded, now, pickedNode, onToggle, onPick, rowRef }: 
           {file.reads > 0 && <span className="file-count" title={`读了 ${file.reads} 次`}>读 {file.reads}</span>}
           {file.changes > 0 && <span className="file-count file-count-change" title={`改了 ${file.changes} 次（改、写入、删除合计）`}>改 {file.changes}</span>}
           <ChangeMarks created={file.created} deleted={file.deleted} />
+          <FailedMark x={file} />
         </span>
         <span className="file-when" title={fullTime(file.lastAt)}>{file.lastAt !== null ? relativeTime(file.lastAt, now) : ''}</span>
       </button>
@@ -252,7 +260,7 @@ export const FilePanel = memo(function FilePanel({ sessionId, origin, subscribe,
         {empty === 'readOnly' && (
           <div className="file-empty">
             <p className="file-empty-title">没有改过的文件</p>
-            <p className="muted">只读过 {files!.length} 个文件。</p>
+            <p className="muted">{readOnlyNote(files!)}</p>
             <button type="button" className="file-link-btn" onClick={() => setView({ ...view, changedOnly: false })}>看读过的文件</button>
           </div>
         )}

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { Origin, Project, ProjectFile, ProjectFilesResponse } from '@agent-canvas/shared';
 import { api } from '../client';
-import { ChangeMarks, PathLabel } from '../canvas/FilePanel';
+import { ChangeMarks, FailedMark, PathLabel } from '../canvas/FilePanel';
 import {
   CODEX_NOTE, DEFAULT_FILES_FILTER, FILES_FILTER_KEY, FILES_RANGE_OPTIONS, FILES_SCOPE_NOTE, FILES_SORT_OPTIONS,
   effectiveFilesFilter, filesQueryString, parseFilesFilter, serializeFilesFilter, type FilesFilter, type FilesOriginFilter,
@@ -93,6 +93,7 @@ function FileItem({ file, expanded, now, onToggle }: { file: ProjectFile; expand
           {file.reads > 0 && <span className="file-count">读 {file.reads}</span>}
           {file.changes > 0 && <span className="file-count file-count-change">改 {file.changes}</span>}
           <ChangeMarks created={file.created} deleted={file.deleted} />
+          <FailedMark x={file} />
         </span>
         <span className="file-when" title={fullTime(file.lastAt)}>
           {file.lastAt !== null ? relativeTime(file.lastAt, now) : ''}
@@ -110,6 +111,7 @@ function FileItem({ file, expanded, now, onToggle }: { file: ProjectFile; expand
                   <span className="file-counts">
                     {s.reads > 0 && <span className="file-count">读 {s.reads}</span>}
                     {s.changes > 0 && <span className="file-count file-count-change">改 {s.changes}</span>}
+                    <FailedMark x={s} />
                   </span>
                   <span className="file-when" title={fullTime(s.lastAt)}>{s.lastAt !== null ? relativeTime(s.lastAt, now) : ''}</span>
                 </a>

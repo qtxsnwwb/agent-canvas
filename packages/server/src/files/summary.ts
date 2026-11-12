@@ -22,10 +22,15 @@ import {
  *   differently spelled path stored by an older normalizer still lands on its file. An entry whose path is not a
  *   non-empty string, or whose action is not a FileAction, is ignored.
  * - A (path key, action) named more than once by one node counts once.
+ * - A touch on a node whose status is failed / denied is kept in the touches (marked `failed`) and counted in `failed`
+ *   only: not in `counts`, and its time sets firstMs / lastMs only when the file has no successful touch.
  * - The touches are kept in full here (the cache's memory bound counts them); sessionFilesResponse caps the list.
  */
 
 const ACTIONS = new Set<string>(FILE_ACTIONS);
+
+/** Whether a node status means the call did not happen (its touches are not counted). */
+export const isFailedStatus = (status: NodeStatus | null): boolean => status === 'failed' || status === 'denied';
 const WINDOWS_STYLE = /^(?:[A-Za-z]:|\/\/)/;
 
 /** A file's identity: the path lower-cased when Windows-style (drive letter or UNC root), else as is. */
@@ -48,14 +53,19 @@ export interface SummaryTouch {
   ms: number | null;
   status: NodeStatus | null;
   agentId: string | null;
+  /** status failed / denied. */
+  failed: boolean;
 }
 
 export interface SummaryFile {
   key: string;
   /** Spelling of the first touch seen (node order). */
   path: string;
+  /** Successful touches only. */
   counts: FileActionCounts;
-  /** Earliest / latest dated touch (null when none is dated). */
+  /** Failed / denied touches. */
+  failed: number;
+  /** Earliest / latest dated successful touch (of the failed ones when there is no successful touch; null when none). */
   firstMs: number | null;
   lastMs: number | null;
   /** Undated first, then by time; ties in node order. */
@@ -81,7 +91,8 @@ function compareFiles(a: SummaryFile, b: SummaryFile): number {
 }
 
 export function summarizeSessionFiles(session: Session, nodes: readonly GraphNode[]): SessionFilesSummary {
-  const files = new Map<string, { file: SummaryFile; order: number[] }>();
+  interface Slot { file: SummaryFile; order: number[]; ok: number; failFirst: number | null; failLast: number | null }
+  const files = new Map<string, Slot>();
   let touchCount = 0;
   let truncatedNodes = 0;
   let order = 0;
@@ -91,6 +102,7 @@ export function summarizeSessionFiles(session: Session, nodes: readonly GraphNod
     if (!Array.isArray(list) || list.length === 0) continue;
     const seen = new Set<string>();
     const ms = touchMs(node.timestamp);
+    const failed = isFailedStatus(node.status);
     for (const entry of list as unknown[]) {
       if (entry === null || typeof entry !== 'object') continue;
       const { path: raw, action } = entry as { path?: unknown; action?: unknown };
@@ -104,27 +116,42 @@ export function summarizeSessionFiles(session: Session, nodes: readonly GraphNod
       let slot = files.get(key);
       if (slot === undefined) {
         slot = {
-          file: { key, path, counts: { read: 0, edit: 0, write: 0, delete: 0 }, firstMs: null, lastMs: null, touches: [] },
-          order: [],
+          file: {
+            key, path, counts: { read: 0, edit: 0, write: 0, delete: 0 }, failed: 0, firstMs: null, lastMs: null, touches: [],
+          },
+          order: [], ok: 0, failFirst: null, failLast: null,
         };
         files.set(key, slot);
       }
       const f = slot.file;
-      f.counts[action as FileAction]++;
-      if (ms !== null) {
-        if (f.firstMs === null || ms < f.firstMs) f.firstMs = ms;
-        if (f.lastMs === null || ms > f.lastMs) f.lastMs = ms;
+      if (failed) {
+        f.failed++;
+        if (ms !== null) {
+          if (slot.failFirst === null || ms < slot.failFirst) slot.failFirst = ms;
+          if (slot.failLast === null || ms > slot.failLast) slot.failLast = ms;
+        }
+      } else {
+        f.counts[action as FileAction]++;
+        slot.ok++;
+        if (ms !== null) {
+          if (f.firstMs === null || ms < f.firstMs) f.firstMs = ms;
+          if (f.lastMs === null || ms > f.lastMs) f.lastMs = ms;
+        }
       }
       f.touches.push({
         nodeId: node.id, action: action as FileAction, toolName: node.toolName, at: node.timestamp, ms,
-        status: node.status, agentId: node.agentId,
+        status: node.status, agentId: node.agentId, failed,
       });
       slot.order.push(order++);
       touchCount++;
     }
   }
   const out: SummaryFile[] = [];
-  for (const { file, order: seq } of files.values()) {
+  for (const { file, order: seq, ok, failFirst, failLast } of files.values()) {
+    if (ok === 0) {
+      file.firstMs = failFirst;
+      file.lastMs = failLast;
+    }
     // Time order, undated first; ties keep node order (Array.prototype.sort is stable, touches were pushed in order).
     const indexed = file.touches.map((t, i) => ({ t, k: t.ms ?? -Infinity, i: seq[i]! }));
     indexed.sort((a, b) => a.k - b.k || a.i - b.i);
@@ -161,6 +188,7 @@ export function sessionFilesResponse(session: Session, summary: SessionFilesSumm
       changed: fileChanges > 0,
       created: c.write > 0,
       deleted: c.delete > 0,
+      failed: f.failed,
       firstAt: iso(f.firstMs),
       lastAt: iso(f.lastMs),
       touches: kept.map((t) => ({ nodeId: t.nodeId, action: t.action, toolName: t.toolName, at: t.at, status: t.status, agentId: t.agentId })),

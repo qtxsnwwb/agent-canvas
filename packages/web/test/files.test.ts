@@ -1,7 +1,7 @@
 import { expect, test } from 'vitest';
 import type { Project, SessionFile, SessionFileTouch } from '@agent-canvas/shared';
 import {
-  ACTION_LABEL, DEFAULT_FILES_FILTER, DEFAULT_SESSION_FILE_VIEW, effectiveFilesFilter, filesQueryString, findSessionFile,
+  ACTION_LABEL, DEFAULT_FILES_FILTER, failedLabel, readOnlyNote, DEFAULT_SESSION_FILE_VIEW, effectiveFilesFilter, filesQueryString, findSessionFile,
   groupTouches, parseFilesFilter, parseSessionFileView, serializeFilesFilter, serializeSessionFileView,
   sessionFilesEmpty, splitPath, viewSessionFiles,
 } from '../src/files';
@@ -131,4 +131,15 @@ test('filesQueryString：每个参数只出现一次，按接口的写法', () =
     .toBe('projectId=p&range=all&changedOnly=1&sort=recent&origin=cursor');
   expect(filesQueryString({ ...DEFAULT_FILES_FILTER, projectId: 'p', q: 'x'.repeat(300) })).toContain(`q=${'x'.repeat(200)}`);
   expect(filesQueryString({ ...DEFAULT_FILES_FILTER, projectId: 'p', q: 'x'.repeat(300) })).not.toContain('x'.repeat(201));
+});
+
+test('failedLabel：失败次数大于 0 才显示；旧服务没有 failed 字段时不显示', () => {
+  expect(failedLabel({ failed: 3 })).toBe('失败 3');
+  expect(failedLabel({ failed: 0 })).toBeNull();
+  expect(failedLabel({})).toBeNull();
+});
+
+test('readOnlyNote：只读过的文件；有改动全部失败的文件时一并说明', () => {
+  expect(readOnlyNote([file('a', { counts: c(2) }), file('b', { counts: c(1) })])).toBe('只读过 2 个文件。');
+  expect(readOnlyNote([file('a', { counts: c(2) }), file('b', { failed: 2 })])).toBe('2 个文件只读过，或改动没有成功。');
 });

@@ -177,4 +177,52 @@ describe('summarizeSessionFiles / sessionFilesResponse', () => {
     expect(r.files[0]!.relativePath).toBe('f0.ts'); // the changed file first
     expect(respond(session(), nodes.slice(0, 3))).toMatchObject({ totalFiles: 3, truncated: false });
   });
+  test('failed / denied touches are listed but not counted; they set no times when the file has a successful touch', () => {
+    const r = respond(session(), [
+      tool('ok1', 1, [read('D:/w/shop/mixed.ts')]),
+      tool('bad1', 5, [edit('D:/w/shop/mixed.ts')], { status: 'failed' }),
+      tool('bad2', 9, [write('D:/w/shop/mixed.ts'), del('D:/w/shop/mixed.ts')], { status: 'denied' }),
+    ]);
+    const f = r.files[0]!;
+    expect(f).toMatchObject({
+      counts: { read: 1, edit: 0, write: 0, delete: 0 }, reads: 1, changes: 0, failed: 3,
+      changed: false, created: false, deleted: false, firstAt: at(1), lastAt: at(1),
+    });
+    expect(f.touches.map((t) => [t.nodeId, t.status])).toEqual([
+      ['ok1', 'succeeded'], ['bad1', 'failed'], ['bad2', 'denied'], ['bad2', 'denied'],
+    ]);
+    expect(r.totals).toEqual({ files: 1, changedFiles: 0, reads: 1, changes: 0 });
+  });
+
+  test('a file touched only by failed calls: listed with zero counts, its times from the failed touches', () => {
+    const r = respond(session(), [
+      tool('ok', 1, [edit('D:/w/shop/good.ts')]),
+      tool('bad1', 3, [edit('D:/w/shop/only-failed.ts')], { status: 'failed' }),
+      tool('bad2', 7, [edit('D:/w/shop/only-failed.ts')], { status: 'failed' }),
+    ]);
+    const f = r.files.find((x) => x.relativePath === 'only-failed.ts')!;
+    expect(f).toMatchObject({ reads: 0, changes: 0, failed: 2, changed: false, firstAt: at(3), lastAt: at(7) });
+    expect(f.touches).toHaveLength(2);
+    // sorted after the changed file (0 changes)
+    expect(r.files.map((x) => x.relativePath)).toEqual(['good.ts', 'only-failed.ts']);
+    expect(r.totals).toMatchObject({ files: 2, changedFiles: 1, changes: 1 });
+  });
+
+  test('running and awaiting-permission touches count (they settle later); failed: 0 otherwise', () => {
+    const r = respond(session(), [
+      tool('n1', 1, [edit('D:/w/shop/a.ts')], { status: 'running' }),
+      tool('n2', 2, [edit('D:/w/shop/a.ts')], { status: 'awaiting_permission' }),
+      tool('n3', 3, [edit('D:/w/shop/a.ts')], { status: null }),
+    ]);
+    expect(r.files[0]).toMatchObject({ changes: 3, failed: 0, changed: true, lastAt: at(3) });
+  });
+
+  test('order uses successful counts and times: a failed late edit does not lift a file', () => {
+    const r = respond(session(), [
+      tool('a1', 1, [edit('D:/w/shop/a.ts')]),
+      tool('b1', 2, [edit('D:/w/shop/b.ts')]),
+      tool('a2', 9, [edit('D:/w/shop/a.ts')], { status: 'failed' }),
+    ]);
+    expect(r.files.map((x) => x.relativePath)).toEqual(['b.ts', 'a.ts']);
+  });
 });

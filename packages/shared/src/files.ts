@@ -13,6 +13,11 @@ import type { FileAction, NodeStatus, Origin } from './model.js';
  * - A touch is one (file, action) of one node: a node naming the same file and action twice counts once; a node that
  *   reads and edits a file counts one read and one edit.
  * - reads = read touches; changes = edit + write + delete touches.
+ * - Failed touches: a touch whose node status is `failed` or `denied` did not happen. It is still listed among a file's
+ *   touches (with its status) and counted in `failed`, but it counts toward no read / change count, sets none of
+ *   changed / created / deleted, and sets no first / last time (so it neither sorts a file nor puts it in a range),
+ *   unless the file has no successful touch at all (in scope): then the file is still listed, with zero counts and
+ *   changed false, and its times come from the failed touches. Touches still running or awaiting permission count.
  * - Times are ISO 8601 strings, a node's `timestamp` as stored. A touch whose timestamp is unparseable or not after
  *   1970-01-01T00:00:00Z is undated: it counts in range `all` only and never sets a first / last time (null when a
  *   file has no dated touch).
@@ -76,7 +81,9 @@ export interface SessionFile {
   created: boolean;
   /** Any delete. */
   deleted: boolean;
-  /** Earliest / latest dated touch time (null when none is dated). */
+  /** Failed / denied touches (listed in `touches`, counted nowhere else). Optional for compatibility; always set. */
+  failed?: number;
+  /** Earliest / latest dated successful touch time (failed ones only when there is no successful touch; null when none is dated). */
   firstAt: string | null;
   lastAt: string | null;
   /** In time order (undated first, then by time; ties in node order); at most FILE_TOUCHES_MAX, the latest kept. */
@@ -121,7 +128,12 @@ export interface ProjectFileSession {
   title: string | null;
   reads: number;
   changes: number;
-  /** Latest dated touch in range by this session; null when none is dated. */
+  /** Failed / denied touches in range. Optional for compatibility; always set. */
+  failed?: number;
+  /**
+   * Latest dated successful touch in range by this session; when the session has none in range, its latest failed
+   * one; null when none is dated.
+   */
   lastAt: string | null;
 }
 
@@ -130,14 +142,21 @@ export interface ProjectFile {
   path: string;
   /** `path` relative to the project directory when inside it, else `path` in full. */
   relativePath: string;
-  /** Sessions with a touch of it in range (all of them, not only those listed in `sessions`). */
+  /**
+   * Sessions with a touch of it in range, failed ones included (all of them, not only those listed in `sessions`).
+   */
   sessionCount: number;
   reads: number;
   changes: number;
-  /** Any write / delete in range. */
+  /** Any successful write / delete in range. */
   created: boolean;
   deleted: boolean;
-  /** Latest dated touch in range, and the origin of the session that made it; null when none is dated. */
+  /** Failed / denied touches in range. Optional for compatibility; always set. */
+  failed?: number;
+  /**
+   * Latest dated successful touch in range (failed ones only for a file without any successful touch), and the origin
+   * of the session that made it; null when none is dated.
+   */
   lastAt: string | null;
   lastOrigin: Origin | null;
   /** lastAt descending (undated last), then session id; at most FILE_SESSIONS_MAX. */
