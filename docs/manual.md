@@ -18,9 +18,24 @@ agent-canvas 是一个本地服务：它读取 Claude Code 的 transcript 文件
 ## 环境要求
 
 - Node ≥ 22
-- pnpm（可选：没有全局安装时用 `npx --yes pnpm@10` 代替 `pnpm`）
+- 从源码运行时还需要 pnpm（可选：没有全局安装时用 `npx --yes pnpm@10` 代替 `pnpm`）
 
-## 安装、构建、启动
+## 安装与启动
+
+### 从 npm 安装（推荐）
+
+```
+npx @qtxsnwwb/agent-canvas                 # 临时运行，不安装
+npm install -g @qtxsnwwb/agent-canvas      # 或者全局安装，之后用 agent-canvas 命令
+agent-canvas
+```
+
+- 不带参数等同于 `start`；`agent-canvas --port 4400` 换端口；`agent-canvas --version` 打印版本；`agent-canvas --help` 打印用法。
+- 下文里的 `node packages/server/dist/cli.js <命令>` 是从源码运行时的写法；从 npm 安装后一律换成 `agent-canvas <命令>`（或 `npx @qtxsnwwb/agent-canvas <命令>`）。
+- **用 `npx` 临时运行时不能安装 Codex 和 Cursor 的 hooks**：这两种 hooks 里写的是程序的绝对路径，`npx` 的缓存位置随时可能变。这时 `hooks install --codex` / `--cursor` 会拒绝并提示先全局安装。Claude Code 的 hooks 指向端口地址，不受影响。
+- 全局安装后升级（`npm install -g @qtxsnwwb/agent-canvas@latest`）路径不变，hooks 不需要重装。
+
+### 从源码运行
 
 已安装 pnpm：
 

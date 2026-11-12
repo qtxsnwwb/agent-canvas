@@ -1,6 +1,6 @@
 {
   "name": "agent-canvas",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@10.34.9",
@@ -11,9 +11,11 @@
     "build": "pnpm -r build",
     "start": "node packages/server/dist/cli.js start",
     "test": "vitest run",
-    "typecheck": "pnpm -r exec tsc --noEmit"
+    "typecheck": "pnpm -r exec tsc --noEmit",
+    "release": "pnpm build && node scripts/pack.mjs"
   },
   "devDependencies": {
+    "esbuild": "^0.28.2",
     "typescript": "^5.6.0",
     "vitest": "^3.2.0"
   },

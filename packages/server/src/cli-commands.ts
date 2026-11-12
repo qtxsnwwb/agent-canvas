@@ -39,7 +39,9 @@ export interface Running {
 }
 
 const USAGE = `Usage:
+  agent-canvas [--port <n>]         Same as start
   agent-canvas start [--port <n>]   Watch transcripts and serve the canvas
+  agent-canvas --version            Print the version
   agent-canvas rebuild              Re-derive the graph from the stored raw log
   agent-canvas hooks install [--port <n>] [--yes] [--settings <file>]
                                      Add the agent-canvas hooks to Claude Code's settings.json
@@ -62,11 +64,48 @@ export function defaultCliPath(): string {
   return path.join(path.dirname(fileURLToPath(import.meta.url)), 'cli.js');
 }
 
-/** packages/web/dist next to this package (works from both src/ and dist/); null while it is not built. */
-function defaultWebDist(): string | null {
-  const dir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'web', 'dist');
-  return fs.existsSync(dir) && fs.statSync(dir).isDirectory() ? dir : null;
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Where the built web app may be, given the directory this module runs from: `web/` next to `dist/` in the published
+ * package, then `packages/web/dist` in the repository (from both src/ and dist/).
+ */
+export function webDistCandidates(here: string = HERE): string[] {
+  return [path.resolve(here, '..', 'web'), path.resolve(here, '..', '..', 'web', 'dist')];
 }
+
+/** The first candidate that holds a built page; null while the web app is not built. */
+function defaultWebDist(): string | null {
+  for (const dir of webDistCandidates()) {
+    try {
+      if (fs.statSync(path.join(dir, 'index.html')).isFile()) return dir;
+    } catch {
+      // not there: try the next one
+    }
+  }
+  return null;
+}
+
+/** Version of the package this module belongs to (the package.json one level above dist/ or src/); 'unknown' when unreadable. */
+export function packageVersion(here: string = HERE): string {
+  try {
+    const pkg: unknown = JSON.parse(fs.readFileSync(path.resolve(here, '..', 'package.json'), 'utf8'));
+    const version = (pkg as { version?: unknown } | null)?.version;
+    return typeof version === 'string' && version !== '' ? version : 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+/**
+ * True when the path lies in npx's download cache (`…/_npx/<hash>/node_modules/…`): such an installation can vanish or
+ * move at any time, so its path must not be written into another tool's configuration.
+ */
+export function isNpxPath(p: string): boolean {
+  return /[\\/]_npx[\\/][^\\/]+[\\/]node_modules[\\/]/.test(p);
+}
+
+export const PACKAGE_NAME = '@qtxsnwwb/agent-canvas';
 
 /**
  * The session-file directories read for this configuration: Claude Code's projects directory, and Codex's sessions
@@ -220,6 +259,13 @@ async function hooksCommand(args: string[], env: NodeJS.ProcessEnv, io: HooksCli
     const port = values.port === undefined ? loadConfig(env).port : Number(values.port);
     if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`invalid --port: ${values.port}`);
     if (values.codex === true && values.cursor === true) throw new Error('--codex and --cursor cannot be used together');
+    if (sub === 'install' && (values.codex === true || values.cursor === true) && isNpxPath(cliPath)) {
+      // Codex and Cursor run a command line that names this cli.js; npx's cache is not a stable place for it.
+      throw new Error(
+        `${values.codex === true ? 'Codex' : 'Cursor'} 的 hooks 里要写入本程序的绝对路径，而现在是用 npx 临时运行的（${cliPath}），这个路径随时可能失效。\n`
+        + `请先全局安装：npm install -g ${PACKAGE_NAME}\n然后运行：agent-canvas hooks install ${values.codex === true ? '--codex' : '--cursor'}`,
+      );
+    }
     if (values.cursor === true) {
       const opts = { settingsFile: values.settings ?? defaultCursorHooksFile(env), port, yes: values.yes === true, nodePath: process.execPath, cliPath };
       return await (sub === 'install' ? runCursorHooksInstall(opts, io) : runCursorHooksUninstall(opts, io));
@@ -247,7 +293,16 @@ export interface MainDeps {
 }
 
 export async function main(argv: string[], deps: MainDeps = {}): Promise<number> {
-  const [command, ...rest] = argv;
+  // No command (or only options) means `start`: `npx @qtxsnwwb/agent-canvas` just runs the service.
+  const [command, ...rest] = argv.length === 0 || (argv[0]!.startsWith('--') && argv[0] !== '--version' && argv[0] !== '--help') ? ['start', ...argv] : argv;
+  if (command === '--version' || command === '-v') {
+    console.log(packageVersion());
+    return 0;
+  }
+  if (command === '--help' || command === '-h') {
+    console.log(USAGE.trimEnd());
+    return 0;
+  }
   if (command === 'hook-forward') return runHookForward(rest, { stdin: deps.stdin ?? process.stdin });
   if (command === 'hooks') return hooksCommand(rest, deps.env ?? process.env, deps.hooksIo ?? terminalIo(), deps.cliPath ?? defaultCliPath());
   try {
