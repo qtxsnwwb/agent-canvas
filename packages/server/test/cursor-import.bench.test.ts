@@ -19,14 +19,14 @@ import { openStore } from '../src/store/store.js';
  * params / result, turns of ~60 bubbles, task_v2 dispatches with their subagent conversations).
  *
  * Skipped by default. Run:
- *   CLAUDE_CANVAS_BENCH=1 npx --yes pnpm@10 vitest run packages/server/test/cursor-import.bench.test.ts
- * Sizes (main-conversation bubbles; one 300-bubble subagent per 500 main bubbles): CLAUDE_CANVAS_BENCH_SIZES=5000,10000,20000
- * Hard limits (only with CLAUDE_CANVAS_BENCH_ASSERT=1): 20k first import < 60 s, longest event-loop stall < 200 ms.
+ *   AGENT_CANVAS_BENCH=1 npx --yes pnpm@10 vitest run packages/server/test/cursor-import.bench.test.ts
+ * Sizes (main-conversation bubbles; one 300-bubble subagent per 500 main bubbles): AGENT_CANVAS_BENCH_SIZES=5000,10000,20000
+ * Hard limits (only with AGENT_CANVAS_BENCH_ASSERT=1): 20k first import < 60 s, longest event-loop stall < 200 ms.
  */
 
-const BENCH = process.env.CLAUDE_CANVAS_BENCH === '1';
-const ASSERT = process.env.CLAUDE_CANVAS_BENCH_ASSERT === '1';
-const SIZES = (process.env.CLAUDE_CANVAS_BENCH_SIZES ?? '5000,10000,20000').split(',').map((s) => Number(s.trim()));
+const BENCH = process.env.AGENT_CANVAS_BENCH === '1';
+const ASSERT = process.env.AGENT_CANVAS_BENCH_ASSERT === '1';
+const SIZES = (process.env.AGENT_CANVAS_BENCH_SIZES ?? '5000,10000,20000').split(',').map((s) => Number(s.trim()));
 const SUB_BUBBLES = 300;
 const TURN = 60;
 const T0 = Date.parse('2026-11-01T08:00:00.000Z');
@@ -332,7 +332,7 @@ describe.skipIf(!BENCH)('cursor import benchmark', () => {
           const config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, cursorDbPath: null });
           fs.mkdirSync(config.dataDir, { recursive: true });
 
-          const prof = process.env.CLAUDE_CANVAS_BENCH_PROF;
+          const prof = process.env.AGENT_CANVAS_BENCH_PROF;
           const inspector = prof ? new Session() : null;
           if (inspector) {
             inspector.connect();

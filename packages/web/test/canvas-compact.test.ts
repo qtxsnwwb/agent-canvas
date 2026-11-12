@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import type { Graph, GraphEdge, GraphNode, NodeKind } from '@claude-canvas/shared';
+import type { Graph, GraphEdge, GraphNode, NodeKind } from '@agent-canvas/shared';
 import { compactGraph, createCompactor, isRunId, runIdOf, RUN_MIN } from '../src/canvas/compact';
 import { buildView } from '../src/canvas/view';
 

@@ -67,7 +67,7 @@ test.skipIf(!canSymlink)('符号链接的 settings 文件：链接保留，目�
   expect(fs.lstatSync(file).isSymbolicLink()).toBe(true);
   expect(readJson(real).theme).toBe('dark');
   expect(Object.keys(readJson(real).hooks)).toEqual([...HOOK_EVENTS]);
-  expect(fs.readdirSync(path.dirname(real)).some((n) => n.startsWith('settings.json.bak-claude-canvas-'))).toBe(true);
+  expect(fs.readdirSync(path.dirname(real)).some((n) => n.startsWith('settings.json.bak-agent-canvas-'))).toBe(true);
 });
 
 test.skipIf(!canSymlink)('指向不存在目标的符号链接：拒绝写入，返回 1', async () => {

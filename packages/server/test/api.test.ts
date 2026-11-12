@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import WebSocket from 'ws';
 import type { FastifyInstance } from 'fastify';
-import type { Change, GraphNode, SeqChange, ServerMessage } from '@claude-canvas/shared';
+import type { Change, GraphNode, SeqChange, ServerMessage } from '@agent-canvas/shared';
 import { buildServer, CSP, isAllowedRequest } from '../src/api/server.js';
 import { NORMALIZER_VERSION } from '../src/normalize/version.js';
 import { loadConfig, type Config } from '../src/config.js';

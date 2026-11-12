@@ -13,19 +13,19 @@ const TIMING = '**/*.timing.test.ts';
 export default defineConfig({
   resolve: {
     alias: {
-      '@claude-canvas/shared': fileURLToPath(new URL('./packages/shared/src/index.ts', import.meta.url)),
+      '@agent-canvas/shared': fileURLToPath(new URL('./packages/shared/src/index.ts', import.meta.url)),
     },
   },
   test: {
     // Never the real Cursor database: a test that wants one passes a temp path (cursorDbPath override or stubbed env).
-    env: { CLAUDE_CANVAS_CURSOR_DB: '' },
+    env: { AGENT_CANVAS_CURSOR_DB: '' },
     projects: [
       ...readdirSync(packagesDir, { withFileTypes: true })
         .filter((d) => d.isDirectory())
         .map((d) => ({
           extends: true as const,
           test: {
-            name: `@claude-canvas/${d.name}`,
+            name: `@agent-canvas/${d.name}`,
             root: `${root}packages/${d.name}`,
             exclude: ['**/node_modules/**', '**/dist/**', TIMING],
           },

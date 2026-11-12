@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import type { GraphSnapshot } from '@claude-canvas/shared';
+import type { GraphSnapshot } from '@agent-canvas/shared';
 import { rebuildReason } from '../src/cli.js';
 import { loadConfig, type Config } from '../src/config.js';
 import { NORMALIZER_VERSION } from '../src/normalize/version.js';

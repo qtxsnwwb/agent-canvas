@@ -1,4 +1,4 @@
-import type { Change } from '@claude-canvas/shared';
+import type { Change } from '@agent-canvas/shared';
 import type { RawEvent } from '../store/store.js';
 
 export interface NormalizeResult {

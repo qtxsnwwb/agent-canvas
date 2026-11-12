@@ -44,7 +44,7 @@ afterEach(() => {
 const NOW = new Date(2026, 10, 12, 9, 5, 7);
 const STAMP = '20261112-090507';
 const NODE = 'C:\\Program Files\\nodejs\\node.exe';
-const CLI = 'D:\\claude canvas\\packages\\server\\dist\\cli.js';
+const CLI = 'D:\\agent canvas\\packages\\server\\dist\\cli.js';
 
 interface FakeIo extends HooksCliIo { outs: string[]; errs: string[]; questions: string[] }
 function fakeIo(over: { interactive?: boolean; answer?: boolean } = {}): FakeIo {
@@ -72,8 +72,8 @@ const seed = (content: string): void => fs.writeFileSync(file, content);
 const COMMAND = cursorForwardCommand({ nodePath: NODE, cliPath: CLI, port: 4317, platform: 'win32' });
 
 test('defaultCursorHooksFile：环境变量优先，否则 ~/.cursor/hooks.json（只用假 env 断言，不读写）', () => {
-  expect(defaultCursorHooksFile({ CLAUDE_CANVAS_CURSOR_HOOKS_FILE: '/x/hooks.json' })).toBe('/x/hooks.json');
-  expect(defaultCursorHooksFile({ CLAUDE_CANVAS_CURSOR_HOOKS_FILE: '' })).toBe(REAL_DEFAULT);
+  expect(defaultCursorHooksFile({ AGENT_CANVAS_CURSOR_HOOKS_FILE: '/x/hooks.json' })).toBe('/x/hooks.json');
+  expect(defaultCursorHooksFile({ AGENT_CANVAS_CURSOR_HOOKS_FILE: '' })).toBe(REAL_DEFAULT);
   expect(defaultCursorHooksFile({})).toBe(REAL_DEFAULT);
 });
 
@@ -106,7 +106,7 @@ test('已有 hooks.json：备份（逐字节相同）后写入，已有内容保
   seed(original);
   const io = fakeIo();
   expect(await runCursorHooksInstall(opts(), io)).toBe(0);
-  const backup = path.join(cursorDir, `hooks.json.bak-claude-canvas-${STAMP}`);
+  const backup = path.join(cursorDir, `hooks.json.bak-agent-canvas-${STAMP}`);
   expect(fs.readFileSync(backup, 'utf8')).toBe(original);
   const j = readJson();
   expect(j.version).toBe(1);
@@ -208,10 +208,10 @@ test('cli：hooks install / uninstall --cursor 经 --settings 走通；命令指
   expect(readJson()).toEqual({ version: 1 });
 });
 
-test('cli：CLAUDE_CANVAS_CURSOR_HOOKS_FILE 指定的路径被使用（假 env）；--codex 和 --cursor 不能同时用', async () => {
+test('cli：AGENT_CANVAS_CURSOR_HOOKS_FILE 指定的路径被使用（假 env）；--codex 和 --cursor 不能同时用', async () => {
   const codexFile = path.join(dir, 'codex', 'hooks.json');
   const claudeFile = path.join(dir, 'claude', 'settings.json');
-  const env = { CLAUDE_CANVAS_CURSOR_HOOKS_FILE: file, CLAUDE_CANVAS_CODEX_HOOKS_FILE: codexFile, CLAUDE_CANVAS_SETTINGS_FILE: claudeFile };
+  const env = { AGENT_CANVAS_CURSOR_HOOKS_FILE: file, AGENT_CANVAS_CODEX_HOOKS_FILE: codexFile, AGENT_CANVAS_SETTINGS_FILE: claudeFile };
   expect(await main(['hooks', 'install', '--cursor', '--yes'], { hooksIo: fakeIo(), env })).toBe(0);
   expect(Object.keys(readJson().hooks)).toEqual([...CURSOR_HOOK_EVENTS]);
   const io = fakeIo();
@@ -223,7 +223,7 @@ test('cli：CLAUDE_CANVAS_CURSOR_HOOKS_FILE 指定的路径被使用（假 env�
 
 test('cli：用法里列出 --cursor 和 hook-forward 的 cursor 来源', async () => {
   const io = fakeIo();
-  expect(await main(['hooks', 'nope'], { hooksIo: io, env: { CLAUDE_CANVAS_CURSOR_HOOKS_FILE: file } })).toBe(1);
+  expect(await main(['hooks', 'nope'], { hooksIo: io, env: { AGENT_CANVAS_CURSOR_HOOKS_FILE: file } })).toBe(1);
   expect(io.errs.join('\n')).toContain('--cursor');
   expect(io.errs.join('\n')).toContain('claude|codex|cursor');
 });

@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import type { GraphSnapshot, SeqChange } from '@claude-canvas/shared';
+import type { GraphSnapshot, SeqChange } from '@agent-canvas/shared';
 import { fileSources } from '../src/cli.js';
 import { loadConfig, type Config } from '../src/config.js';
 import { NORMALIZER_VERSION } from '../src/normalize/version.js';
@@ -68,7 +68,7 @@ describe('pipeline', () => {
     const d = loadConfig({});
     expect(d).toMatchObject({ host: '127.0.0.1', port: 4317, rescanMs: 3000, webDist: null });
     expect(d.dbPath).toBe(path.join(d.dataDir, 'data.db'));
-    const e = loadConfig({ CLAUDE_CANVAS_DATA_DIR: '/d', CLAUDE_CANVAS_PROJECTS_DIR: '/p' }, { projectsDir: '/o' });
+    const e = loadConfig({ AGENT_CANVAS_DATA_DIR: '/d', AGENT_CANVAS_PROJECTS_DIR: '/p' }, { projectsDir: '/o' });
     expect(e.projectsDir).toBe('/o');
     expect(e.dataDir).toBe('/d');
     expect(e.dbPath).toBe(path.join('/d', 'data.db'));

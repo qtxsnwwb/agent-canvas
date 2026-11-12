@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from 'vitest';
-import { applyChanges, emptyGraph, type Change, type GraphNode } from '@claude-canvas/shared';
+import { applyChanges, emptyGraph, type Change, type GraphNode } from '@agent-canvas/shared';
 import { CodexNormalizer } from '../src/normalize/codex.js';
 import type { RawEvent } from '../src/store/store.js';
 import { CodexThread, interleave, run, titleMeta, type RunResult } from './codex-fixtures.js';

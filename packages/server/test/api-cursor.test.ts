@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, expect, test } from 'vitest';
 import type { FastifyInstance } from 'fastify';
-import type { Diagnostics } from '@claude-canvas/shared';
+import type { Diagnostics } from '@agent-canvas/shared';
 import { buildServer } from '../src/api/server.js';
 import { loadConfig, type Config } from '../src/config.js';
 import { Pipeline } from '../src/pipeline.js';

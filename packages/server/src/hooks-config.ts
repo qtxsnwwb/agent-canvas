@@ -1,7 +1,7 @@
 import { parseForwardArgs } from './hook-forward.js';
 
 /**
- * Pure planning of the changes `claude-canvas hooks install/uninstall` makes to a Claude Code settings object, and
+ * Pure planning of the changes `agent-canvas hooks install/uninstall` makes to a Claude Code settings object, and
  * (`--codex`) to Codex's `hooks.json`. Both files have the same `hooks` shape (event -> matcher groups -> handlers);
  * one core plans both, given a HookTarget: the events, the matcher group to append, and how to recognise our handler.
  */
@@ -22,7 +22,7 @@ export interface HookTarget {
   flat?: boolean;
 }
 
-/** The hook events claude-canvas listens to; same order as docs/hooks-snippet.json. */
+/** The hook events agent-canvas listens to; same order as docs/hooks-snippet.json. */
 export const HOOK_EVENTS: readonly string[] = [
   'SessionStart',
   'UserPromptSubmit',
@@ -194,7 +194,7 @@ export function planUninstall(settings: unknown, port: number): UninstallPlan {
 
 // ---------------------------------------------------------------- Codex
 
-/** The Codex hook events claude-canvas listens to (spec 7.2; not PreModelRequest, PostModelRequest, PreCompact). */
+/** The Codex hook events agent-canvas listens to (spec 7.2; not PreModelRequest, PostModelRequest, PreCompact). */
 export const CODEX_HOOK_EVENTS: readonly string[] = [
   'SessionStart',
   'SessionEnd',
@@ -364,7 +364,7 @@ export function codexHookTarget(spec: CodexForwardSpec): HookTarget {
 
 // ---------------------------------------------------------------- Cursor
 
-/** The Cursor hook events claude-canvas installs (spec 7.2): observation-only, never a permission hook. */
+/** The Cursor hook events agent-canvas installs (spec 7.2): observation-only, never a permission hook. */
 export const CURSOR_HOOK_EVENTS: readonly string[] = ['sessionStart', 'beforeSubmitPrompt', 'stop', 'subagentStop', 'sessionEnd'];
 
 export const CURSOR_HOOK_TIMEOUT_SECONDS = 5;

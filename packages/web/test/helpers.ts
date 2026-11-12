@@ -1,4 +1,4 @@
-import type { GraphNode, GraphSnapshot, Session } from '@claude-canvas/shared';
+import type { GraphNode, GraphSnapshot, Session } from '@agent-canvas/shared';
 
 export const baseSession: Session = {
   id: 's1', projectId: 'p1', origin: 'claude', cwd: null, title: null, gitBranch: null, status: 'running',

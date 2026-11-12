@@ -13,7 +13,7 @@ import {
   type SearchHit,
   type SeqChange,
   type ServerMessage,
-} from '@claude-canvas/shared';
+} from '@agent-canvas/shared';
 import type { Config } from '../config.js';
 import { cursorHookConversationId, cursorHookWorkspaceRoot, sanitizeCursorHookPayload } from '../normalize/cursor-hooks.js';
 import { NORMALIZER_VERSION } from '../normalize/version.js';
@@ -295,7 +295,7 @@ export function buildServer(deps: { store: Store; pipeline: Pipeline; config: Co
     });
     instance.post<{ Querystring: { origin?: unknown } }>('/hooks', { bodyLimit: HOOK_BODY_LIMIT }, (req, reply) => {
       const text = typeof req.body === 'string' ? req.body : '';
-      // `?origin=codex|cursor` comes from `claude-canvas hook-forward`; anything else (none: Claude Code's http hooks) is
+      // `?origin=codex|cursor` comes from `agent-canvas hook-forward`; anything else (none: Claude Code's http hooks) is
       // Claude.
       const q = req.query.origin;
       const origin: Origin = typeof q === 'string' && (ORIGINS as readonly string[]).includes(q) ? (q as Origin) : 'claude';

@@ -1,4 +1,4 @@
-import type { Origin } from '@claude-canvas/shared';
+import type { Origin } from '@agent-canvas/shared';
 
 /** One record a poll source read: stored as a transcript raw event's line, with its record type. */
 export interface PollRecord {

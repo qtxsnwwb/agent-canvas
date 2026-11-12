@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import type { Session } from '@claude-canvas/shared';
+import type { Session } from '@agent-canvas/shared';
 import { CursorNormalizer } from '../src/normalize/cursor.js';
 import { parseCursorHook, sanitizeCursorHookPayload } from '../src/normalize/cursor-hooks.js';
 import type { RawEvent } from '../src/store/store.js';

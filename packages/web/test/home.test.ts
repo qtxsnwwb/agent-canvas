@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import type { Project } from '@claude-canvas/shared';
+import type { Project } from '@agent-canvas/shared';
 import { effectiveOriginFilter, filterEmptyMessage, heroTotals, matchesOrigin, ORIGIN_FILTER_KEY, ORIGIN_FILTER_OPTIONS, originLook, parseOriginFilter, pickProject, projectCountsExact, projectLook, projectName, relativeTime, shownProjectId, showOriginFilter, stripProjects, visibleProjects } from '../src/home';
 
 const project = (id: string, sessionCount: number, activeSessionCount: number): Project => ({ id, cwd: null, sessionCount, activeSessionCount, origins: ['claude'] });
@@ -40,7 +40,7 @@ const mixed = (id: string, origins: Project['origins'], sessionCount = 1, active
   ({ id, cwd: null, sessionCount, activeSessionCount, origins });
 
 test('parseOriginFilter：认得的值原样返回，其余（含 null）为 all', () => {
-  expect(ORIGIN_FILTER_KEY).toBe('claude-canvas.origin');
+  expect(ORIGIN_FILTER_KEY).toBe('agent-canvas.origin');
   expect(parseOriginFilter('claude')).toBe('claude');
   expect(parseOriginFilter('codex')).toBe('codex');
   expect(parseOriginFilter('all')).toBe('all');

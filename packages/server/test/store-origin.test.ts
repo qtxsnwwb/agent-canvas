@@ -4,7 +4,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { afterEach, beforeEach, expect, test } from 'vitest';
-import type { Change, Origin, Session } from '@claude-canvas/shared';
+import type { Change, Origin, Session } from '@agent-canvas/shared';
 import { openStore, type Store } from '../src/store/store.js';
 import { SCHEMA_SQL_V13 } from './schema-v13.js';
 

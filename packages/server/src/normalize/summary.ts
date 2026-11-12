@@ -1,4 +1,4 @@
-import { SUMMARY_MAX } from '@claude-canvas/shared';
+import { SUMMARY_MAX } from '@agent-canvas/shared';
 
 /** One-line preview of any value: whitespace collapsed, capped at SUMMARY_MAX characters. */
 export function summarize(value: unknown): string {

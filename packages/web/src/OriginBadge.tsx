@@ -1,4 +1,4 @@
-import type { Origin } from '@claude-canvas/shared';
+import type { Origin } from '@agent-canvas/shared';
 import { originLook } from './home';
 
 /** A tiny line picture per origin, drawn in the badge's text colour. */

@@ -4,12 +4,12 @@ import path from 'node:path';
 export interface Config {
   projectsDir: string;
   /**
-   * Codex rollout files (`CLAUDE_CANVAS_CODEX_DIR`, default `~/.codex/sessions`); null = Codex is not read (the
+   * Codex rollout files (`AGENT_CANVAS_CODEX_DIR`, default `~/.codex/sessions`); null = Codex is not read (the
    * variable set to the empty string).
    */
   codexSessionsDir: string | null;
   /**
-   * Cursor's state database (`CLAUDE_CANVAS_CURSOR_DB`, default defaultCursorDbPath()); null = Cursor is not read (the
+   * Cursor's state database (`AGENT_CANVAS_CURSOR_DB`, default defaultCursorDbPath()); null = Cursor is not read (the
    * variable set to the empty string). Only ever opened read-only.
    */
   cursorDbPath: string | null;
@@ -48,9 +48,9 @@ export function defaultCursorDbPath(
 
 /** Explicit overrides win over environment variables, which win over defaults. */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env, overrides: Partial<Config> = {}): Config {
-  const dataDir = overrides.dataDir ?? env.CLAUDE_CANVAS_DATA_DIR ?? path.join(os.homedir(), '.claude-canvas');
-  const projectsDir = overrides.projectsDir ?? env.CLAUDE_CANVAS_PROJECTS_DIR ?? path.join(os.homedir(), '.claude', 'projects');
-  const codexEnv = env.CLAUDE_CANVAS_CODEX_DIR;
+  const dataDir = overrides.dataDir ?? env.AGENT_CANVAS_DATA_DIR ?? path.join(os.homedir(), '.agent-canvas');
+  const projectsDir = overrides.projectsDir ?? env.AGENT_CANVAS_PROJECTS_DIR ?? path.join(os.homedir(), '.claude', 'projects');
+  const codexEnv = env.AGENT_CANVAS_CODEX_DIR;
   const codexSessionsDir =
     overrides.codexSessionsDir !== undefined
       ? overrides.codexSessionsDir
@@ -59,7 +59,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, overrides: Part
         : codexEnv === ''
           ? null
           : codexEnv;
-  const cursorEnv = env.CLAUDE_CANVAS_CURSOR_DB;
+  const cursorEnv = env.AGENT_CANVAS_CURSOR_DB;
   const cursorDbPath =
     overrides.cursorDbPath !== undefined
       ? overrides.cursorDbPath

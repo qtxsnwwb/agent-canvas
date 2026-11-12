@@ -1,4 +1,4 @@
-import { applyChange, emptyGraph, type Change, type Graph } from '@claude-canvas/shared';
+import { applyChange, emptyGraph, type Change, type Graph } from '@agent-canvas/shared';
 import type { Normalizer } from '../src/normalize/normalizer.js';
 import type { RawEvent } from '../src/store/store.js';
 

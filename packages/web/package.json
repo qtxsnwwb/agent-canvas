@@ -1,5 +1,5 @@
 {
-  "name": "@claude-canvas/web",
+  "name": "@agent-canvas/web",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -8,7 +8,7 @@
     "build": "tsc --noEmit && vite build"
   },
   "dependencies": {
-    "@claude-canvas/shared": "workspace:*",
+    "@agent-canvas/shared": "workspace:*",
     "@xyflow/react": "^12.12.1",
     "elkjs": "^0.12.1",
     "react": "^18.3.1",

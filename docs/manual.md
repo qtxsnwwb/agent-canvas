@@ -1,9 +1,19 @@
-# claude-canvas 使用手册
+# agent-canvas 使用手册
 
 > 这里是完整的参考说明。想快速上手请看[项目首页](../README.md)。
 
-claude-canvas 是一个本地服务：它读取 Claude Code 的 transcript 文件、OpenAI Codex 的会话文件和 Cursor 的本地数据库，并接收 hook 事件，在固定的本地网址上用网页展示每个会话正在做什么。两种工具的会话用同一套页面展示（Codex 见下文“Codex”）。
+agent-canvas 是一个本地服务：它读取 Claude Code 的 transcript 文件、OpenAI Codex 的会话文件和 Cursor 的本地数据库，并接收 hook 事件，在固定的本地网址上用网页展示每个会话正在做什么。两种工具的会话用同一套页面展示（Codex 见下文“Codex”）。
 每个会话显示为一张实时更新的画布。默认的“概览”视角只画骨架（每个轮次一张卡片，下面挂它派出的子代理），选中一个轮次或子代理，它的执行过程在下方以瀑布图列出。另有逐步、拓扑、因果、复盘四个视角（见下文“画布”）。首页可以检索会话，诊断页给出服务和 hooks 的运行情况。
+
+## 从 claude-canvas 升级
+
+这个项目原名 claude-canvas，接入 Codex 和 Cursor 之后改名为 Agent Canvas。新版本**不认任何旧名字**，从旧版本升级时需要手动做一次：
+
+1. 停掉旧服务。
+2. 数据目录改名：把 `~/.claude-canvas` 改成 `~/.agent-canvas`（不改的话新版本会从空库开始，重新导入全部会话）。
+3. 环境变量改名：`CLAUDE_CANVAS_*` 一律改成 `AGENT_CANVAS_*`，名字的其余部分不变。
+4. 如果移动或改名了项目文件夹：Codex 和 Cursor 的 hooks 里写的是 `cli.js` 的绝对路径，需要在旧位置先 `hooks uninstall --codex` / `--cursor`，再在新位置重新安装（Codex 还要重新确认信任）。Claude Code 的 hooks 指向的是端口地址，不受影响。
+5. 浏览器里记住的首页筛选和精简模式会回到默认值，重新选一次即可。
 
 ## 环境要求
 
@@ -31,7 +41,7 @@ npx --yes pnpm@10 start
 启动后终端会打印：
 
 ```
-claude-canvas listening on http://127.0.0.1:4317
+agent-canvas listening on http://127.0.0.1:4317
 ```
 
 在浏览器打开 <http://127.0.0.1:4317> 即可。按 Ctrl+C（SIGINT）停止服务。
@@ -40,9 +50,9 @@ claude-canvas listening on http://127.0.0.1:4317
 
 首次启动会导入 `~/.claude/projects` 下全部已有的 transcript；历史很多时需要一段时间，导入在后台进行，页面在此期间已可使用（`GET /api/diagnostics` 的 `importing` 为 `true`，诊断页上显示“正在导入：是”）。在一份真实数据上测得（340 MB、612 个文件）：导入约 2 分钟，导入完成后数据库约为 transcript 总量的 1.6 倍；导入期间 WAL 文件会临时增长到 transcript 总量的数倍，之后收缩到 64 MB 以内，请为数据目录预留空间。之后服务会持续监视 transcript 的变化。
 
-同一个数据目录只能运行一个服务：启动时会创建锁文件 `<数据目录>/claude-canvas.lock`（记录 pid 和启动时间）。若已有服务在运行，第二次 `start` 会打印 `claude-canvas is already running with this data directory (pid N); lock file: …` 并以退出码 1 退出。上一次进程异常退出留下的锁会被自动接管。
+同一个数据目录只能运行一个服务：启动时会创建锁文件 `<数据目录>/agent-canvas.lock`（记录 pid 和启动时间）。若已有服务在运行，第二次 `start` 会打印 `agent-canvas is already running with this data directory (pid N); lock file: …` 并以退出码 1 退出。上一次进程异常退出留下的锁会被自动接管。
 
-升级 claude-canvas 后，如果推导规则的版本变了（或上次重建被中断），`start` 会在开始监听前自动重建派生数据，先打印 `claude-canvas rebuilding derived data (reason: …)`，再打印正常的监听地址。2026-11-10 在一份真实数据上测得：升级时有 14 个会话被自动重新推导（这是一次测量，不是保证）。
+升级 agent-canvas 后，如果推导规则的版本变了（或上次重建被中断），`start` 会在开始监听前自动重建派生数据，先打印 `agent-canvas rebuilding derived data (reason: …)`，再打印正常的监听地址。2026-11-10 在一份真实数据上测得：升级时有 14 个会话被自动重新推导（这是一次测量，不是保证）。
 
 ## 首页与检索
 
@@ -111,7 +121,7 @@ claude-canvas listening on http://127.0.0.1:4317
 ## Codex
 
 - 服务启动时会自动读取 `~/.codex/sessions` 下的 Codex 会话文件（Codex 桌面应用和 CLI 写的都是这里），并持续监视。目录不存在时跳过，不报错。
-- 用环境变量 `CLAUDE_CANVAS_CODEX_DIR` 指定别的目录；设为空字符串表示不读取 Codex。
+- 用环境变量 `AGENT_CANVAS_CODEX_DIR` 指定别的目录；设为空字符串表示不读取 Codex。
 - 会话标题取自 `~/.codex/session_index.jsonl`（Codex 给会话起的名字），没有时取第一条提示。
 - 同一个工作目录下的 Claude Code 会话和 Codex 会话属于同一个项目。
 - 首页会话卡片、检索结果和会话页信息栏上标明来源（Claude Code 或 Codex）。两种来源都有的项目，项目卡片上有两个小标记。
@@ -122,7 +132,7 @@ claude-canvas listening on http://127.0.0.1:4317
 
 不装 hooks 也能用：服务靠监视会话文件得到 Codex 会话，延迟几秒。装上后多了两样，接近实时（1 秒内）：会话状态的变化（开始运行、结束、已退出），以及等待权限确认（会话显示“等待权限确认”，该轮次里最新一个还在执行的工具节点也显示等待确认）。hooks 不新建节点，也不决定节点的结果：步骤一律来自会话文件，所以工具节点并不会因为装了 hooks 而更早出现；除了等待权限确认期间那个临时的“等待确认”标记，有没有 hooks 画出来的图完全一样。
 
-Codex 的 hook 只能运行命令，不能直接发 HTTP，所以 claude-canvas 提供一个转发命令：`node <claude-canvas>/packages/server/dist/cli.js hook-forward --origin codex --port 4317`。它从标准输入读 Codex 给的 JSON，原样发给本机服务的 `/hooks?origin=codex`，然后退出。
+Codex 的 hook 只能运行命令，不能直接发 HTTP，所以 agent-canvas 提供一个转发命令：`node <agent-canvas>/packages/server/dist/cli.js hook-forward --origin codex --port 4317`。它从标准输入读 Codex 给的 JSON，原样发给本机服务的 `/hooks?origin=codex`，然后退出。
 
 安装与移除（流程和 Claude Code 的 hooks 一样：先列出改动、确认、备份、只追加）：
 
@@ -132,9 +142,9 @@ node packages/server/dist/cli.js hooks uninstall --codex    # 只移除本安装
 ```
 
 - 写入 11 个事件：`SessionStart`、`SessionEnd`、`UserPromptSubmit`、`PreToolUse`、`PermissionRequest`、`PostToolUse`、`SubagentStart`、`SubagentStop`、`Stop`、`PostCompact`、`Interrupt`。每条都是 `async: true`（后台运行，不改变 Codex 的结果），`command` 和 `commandWindows` 都写，用绝对路径指向当前的 `node` 和这份 `cli.js`。超时：`SessionEnd`、`Interrupt` 是 3 秒（Codex 对这两个事件最多允许 3 秒），其余 5 秒。
-- 选项和 Claude Code 的一样：`--port <n>`、`--yes`（非交互终端必须加）、`--settings <file>`（写别的文件）；环境变量 `CLAUDE_CANVAS_CODEX_HOOKS_FILE` 改默认路径。`~/.codex` 目录不存在时视为没装 Codex，不做任何改动。
-- **装完要在 Codex 里确认信任这些 hooks 才会运行**：桌面应用在“设置 → Hooks”，CLI 里输入 `/hooks`。没确认时 claude-canvas 只靠会话文件工作，诊断页的 Codex 一栏会显示“尚未收到 Codex 的 hook”。
-- Codex 的信任绑定在 hook 的内容上。移动或升级 claude-canvas 后命令里的路径会变：先 `hooks uninstall --codex`（在旧位置运行）或手动删掉旧的几条，再在新位置 `hooks install --codex`，并重新确认信任。
+- 选项和 Claude Code 的一样：`--port <n>`、`--yes`（非交互终端必须加）、`--settings <file>`（写别的文件）；环境变量 `AGENT_CANVAS_CODEX_HOOKS_FILE` 改默认路径。`~/.codex` 目录不存在时视为没装 Codex，不做任何改动。
+- **装完要在 Codex 里确认信任这些 hooks 才会运行**：桌面应用在“设置 → Hooks”，CLI 里输入 `/hooks`。没确认时 agent-canvas 只靠会话文件工作，诊断页的 Codex 一栏会显示“尚未收到 Codex 的 hook”。
+- Codex 的信任绑定在 hook 的内容上。移动或升级 agent-canvas 后命令里的路径会变：先 `hooks uninstall --codex`（在旧位置运行）或手动删掉旧的几条，再在新位置 `hooks install --codex`，并重新确认信任。
 - 换了 node（例如用 nvm / fnm 升级后旧路径失效）时，再运行一次 `hooks install --codex`：它认得出本安装的旧条目、说明它们已过期，并在同一次写入里换成当前 `node` 的命令（之后同样要在 Codex 里重新确认信任）。判断“本安装的条目”时按命令解析出 `cli.js` 的路径比较（Windows 上不分大小写），端口写成 `--port 4317`、`--port=4317` 或不写（默认 4317）都认。
 - 失败行为：转发命令永远以退出码 0 结束、不输出任何内容、不读写文件；服务没启动时立刻退出（连接被拒），服务不回应时 1 秒后放弃。Codex 的行为不受影响。每个 hook 事件会启动一次 node（本机实测转发命令从启动到退出约 0.25 秒，和空跑 `node` 差不多）。大多数事件因为是 `async` 在后台运行，不拖慢 Codex；但 `SessionEnd`（以及 `Interrupt`）即使写了 `async: true`，Codex 也同步运行它，所以退出（或打断）时会多等一次转发：通常约 0.25 秒，服务卡住时最多约 1.3 秒（转发命令自己的 1 秒上限加启动），无论如何不超过 3 秒的超时。
 - hooks 只给出会话状态和权限等待，节点、状态、开始和结束时间都以会话文件为准。会话状态由会话文件里主线程的轮次和 hook 留下的标记一起算出，与两者到达的先后无关：子代理线程的 hook（带 `agent_id`，或它的轮次已在会话文件里归到子线程）不会把已经结束的会话改回运行中；同一轮次在 `Stop` 之后又收到 `UserPromptSubmit` 或 `PermissionRequest`，说明这一轮还在继续，会重新算作运行中；`Stop` 先于或晚于会话文件里的轮次结束到达，结果一样。
@@ -156,9 +166,9 @@ node packages/server/dist/cli.js hooks uninstall --codex    # 只移除本安装
 
 - 服务启动时会自动只读地打开 Cursor 的本地状态数据库，并每 3 秒查一次哪些会话变了。数据库不存在时视为没装 Cursor，跳过，不报错。
   - 默认位置：Windows `%APPDATA%\Cursor\User\globalStorage\state.vscdb`；macOS `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`；Linux `~/.config/Cursor/User/globalStorage/state.vscdb`。
-  - 用环境变量 `CLAUDE_CANVAS_CURSOR_DB` 指定别的位置；设为空字符串表示不读取 Cursor。
+  - 用环境变量 `AGENT_CANVAS_CURSOR_DB` 指定别的位置；设为空字符串表示不读取 Cursor。
 - 对 Cursor 没有影响：数据库以只读方式打开，只做按主键的短查询，不写入、不持有长事务；数据库被占用或出错时这一轮放弃，下一轮重试，错误显示在诊断页。
-- 读到的记录会裁剪后存进 claude-canvas 自己的数据库（文本、工具参数、工具结果各截到 64 KB）。之后的重建只用这份记录，不需要再读 Cursor 的数据库；Cursor 归档或删掉会话后，已采集的内容仍可看。
+- 读到的记录会裁剪后存进 agent-canvas 自己的数据库（文本、工具参数、工具结果各截到 64 KB）。之后的重建只用这份记录，不需要再读 Cursor 的数据库；Cursor 归档或删掉会话后，已采集的内容仍可看。
 - 导入范围：未归档、至少有一条消息的 Agent 会话。**不导入**：已归档会话、没发过消息的空会话、云端 / 后台 Agent、Tab 补全。会话在 Cursor 里被归档或删除后，这里显示为“源文件已删除”。
 - 子代理：Cursor 的子代理是单独的会话，这里显示在派出它的那一步（`task_v2`）下面，展开后是它内部的步骤。从同一个会话分叉出来的两个会话各自显示它们共用的子代理。
 - 项目归属：按会话的工作目录归到项目，和同目录的 Claude Code、Codex 会话在同一个项目下；取不到工作目录时归到“Cursor（未知目录）”。
@@ -178,10 +188,10 @@ node packages/server/dist/cli.js hooks uninstall --cursor    # 只移除本安�
 
 - 只装 5 个观察类事件：`sessionStart`、`beforeSubmitPrompt`、`stop`、`subagentStop`、`sessionEnd`。每条的形状是 `{ "command": "…", "timeout": 5 }`。
 - **不装任何能拦住操作的 hook**。Cursor 的权限类 hook（`preToolUse`、`beforeShellExecution` 等）在转发程序输出异常时会阻止 Cursor 的动作，所以这里一个都不装。代价是 Cursor 会话没有“等待权限确认”状态，工具开始执行的时刻靠读库得到。
-- 选项和另外两个工具的一样：`--port <n>`、`--yes`（非交互终端必须加）、`--settings <file>`；环境变量 `CLAUDE_CANVAS_CURSOR_HOOKS_FILE` 改默认路径。`~/.cursor` 目录不存在时视为没装 Cursor，不做任何改动。文件里已有 `version` 且不是 1 时拒绝写入。
+- 选项和另外两个工具的一样：`--port <n>`、`--yes`（非交互终端必须加）、`--settings <file>`；环境变量 `AGENT_CANVAS_CURSOR_HOOKS_FILE` 改默认路径。`~/.cursor` 目录不存在时视为没装 Cursor，不做任何改动。文件里已有 `version` 且不是 1 时拒绝写入。
 - 命令用绝对路径指向当前的 `node` 和这份 `cli.js`。Windows 上 Cursor 用 PowerShell 执行，命令写成 `& "<node>" "<cli.js>" hook-forward --origin cursor --port <n>`；其他平台是普通命令行。
 - Cursor 监视 `hooks.json`，保存后自动生效，不需要确认信任；没生效时重启 Cursor。
-- **移动、升级或删除 claude-canvas 之前，先运行 `hooks uninstall --cursor`**。否则 hook 命令指向不存在的文件，每次触发都会报错；这种情况下 Cursor 是否照常继续，还没有用真实的 Cursor 验证过。换了 node 之后重新运行一次 `hooks install --cursor`，它会把过期的条目换成新的。
+- **移动、升级或删除 agent-canvas 之前，先运行 `hooks uninstall --cursor`**。否则 hook 命令指向不存在的文件，每次触发都会报错；这种情况下 Cursor 是否照常继续，还没有用真实的 Cursor 验证过。换了 node 之后重新运行一次 `hooks install --cursor`，它会把过期的条目换成新的。
 - 这些 hook 是同步的：每次触发 Cursor 会等转发命令结束（启动一次 node，约 0.25 秒，Windows 上再加 PowerShell 的启动时间；服务没响应时最多约 1.3 秒）。5 个事件每轮各触发至多一次。
 - 转发命令永远以退出码 0 结束，不读写文件；只在 `beforeSubmitPrompt` 时向 Cursor 输出 `{"continue":true}`（明确放行），其他事件不输出。
 - hooks 只给出会话状态，不建、不改节点；节点一律来自数据库。存下来的 hook 内容不含你的邮箱（载荷里的 `user_email` 会被去掉），但包含提示正文，和另外两个工具的 hook 一样。
@@ -204,9 +214,9 @@ node packages/server/dist/cli.js hooks install
 node packages/server/dist/cli.js hooks uninstall
 ```
 
-- 可选参数：`--port <n>`（hook 指向的端口，默认 4317）、`--yes`（不询问直接写入）、`--settings <文件>`（要修改的 settings 文件，默认 `~/.claude/settings.json`，也可用环境变量 `CLAUDE_CANVAS_SETTINGS_FILE` 指定）。
+- 可选参数：`--port <n>`（hook 指向的端口，默认 4317）、`--yes`（不询问直接写入）、`--settings <文件>`（要修改的 settings 文件，默认 `~/.claude/settings.json`，也可用环境变量 `AGENT_CANVAS_SETTINGS_FILE` 指定）。
 - 写入前会列出 settings 文件路径、hook 地址、将要添加（或移除）的事件和备份文件名，并询问是否继续；输入 `y` 才写入。在非交互终端（脚本、管道）里必须加 `--yes`，否则不做任何改动并以退出码 1 退出。
-- 原文件存在时，先复制一份备份 `settings.json.bak-claude-canvas-<YYYYMMDD-HHMMSS>`（同名已存在时加序号，不覆盖已有备份），再写入。
+- 原文件存在时，先复制一份备份 `settings.json.bak-agent-canvas-<YYYYMMDD-HHMMSS>`（同名已存在时加序号，不覆盖已有备份），再写入。
 - install 只追加：缺的事件加上，已有事件的数组末尾追加一项，不改动、不删除已有的条目和其他设置；已经全部装好时不写文件。uninstall 只移除 url 指向本端口 `/hooks` 的条目。写回时保留原文件的 BOM、换行符（CRLF / LF）和缩进。
 - 遇到不寻常的文件会拒绝写入，原文件保持不变（退出码 1）：不是合法 JSON、顶层不是对象、`hooks` 的形状不对、指向不存在目标的符号链接、含有 JSON 读写后会变的数字（例如超过 2^53 的整数）、重复的键或读写后会被重新排序的键（例如与其他键混在一起的 "0"、"10" 这类整数键）、确认期间文件被别的程序修改。
 - 改了服务端口时，install 和 uninstall 都要带上同一个 `--port`，例如 `hooks install --port 4400`。
@@ -225,7 +235,7 @@ node packages/server/dist/cli.js hooks uninstall
 
 ### 失败行为
 
-claude-canvas 没有运行时，HTTP hook 连接失败会立刻报错，而 Claude Code 把它当作不阻塞的错误，继续正常工作，不受影响。超时设为 2 秒也是为了避免服务卡住时拖慢 Claude Code（HTTP hook 默认超时是 600 秒）。
+agent-canvas 没有运行时，HTTP hook 连接失败会立刻报错，而 Claude Code 把它当作不阻塞的错误，继续正常工作，不受影响。超时设为 2 秒也是为了避免服务卡住时拖慢 Claude Code（HTTP hook 默认超时是 600 秒）。
 
 ## 诊断页
 
@@ -241,13 +251,13 @@ claude-canvas 没有运行时，HTTP hook 连接失败会立刻报错，而 Clau
 
 | 变量 | 默认值 | 含义 |
 | --- | --- | --- |
-| `CLAUDE_CANVAS_PROJECTS_DIR` | `~/.claude/projects` | 读取 transcript 的目录 |
-| `CLAUDE_CANVAS_DATA_DIR` | `~/.claude-canvas` | 数据目录，数据库文件为 `data.db` |
-| `CLAUDE_CANVAS_CODEX_DIR` | `~/.codex/sessions` | 读取 Codex 会话文件的目录；空字符串表示不读取 |
-| `CLAUDE_CANVAS_CURSOR_DB` | Cursor 的 `state.vscdb`（按平台，见“Cursor”一节） | Cursor 的本地数据库，只读打开；空字符串表示不读取 |
-| `CLAUDE_CANVAS_SETTINGS_FILE` | `~/.claude/settings.json` | `hooks install` / `hooks uninstall` 修改的 settings 文件 |
-| `CLAUDE_CANVAS_CODEX_HOOKS_FILE` | `~/.codex/hooks.json` | `hooks install --codex` / `hooks uninstall --codex` 修改的文件 |
-| `CLAUDE_CANVAS_CURSOR_HOOKS_FILE` | `~/.cursor/hooks.json` | `hooks install --cursor` / `hooks uninstall --cursor` 修改的文件 |
+| `AGENT_CANVAS_PROJECTS_DIR` | `~/.claude/projects` | 读取 transcript 的目录 |
+| `AGENT_CANVAS_DATA_DIR` | `~/.agent-canvas` | 数据目录，数据库文件为 `data.db` |
+| `AGENT_CANVAS_CODEX_DIR` | `~/.codex/sessions` | 读取 Codex 会话文件的目录；空字符串表示不读取 |
+| `AGENT_CANVAS_CURSOR_DB` | Cursor 的 `state.vscdb`（按平台，见“Cursor”一节） | Cursor 的本地数据库，只读打开；空字符串表示不读取 |
+| `AGENT_CANVAS_SETTINGS_FILE` | `~/.claude/settings.json` | `hooks install` / `hooks uninstall` 修改的 settings 文件 |
+| `AGENT_CANVAS_CODEX_HOOKS_FILE` | `~/.codex/hooks.json` | `hooks install --codex` / `hooks uninstall --codex` 修改的文件 |
+| `AGENT_CANVAS_CURSOR_HOOKS_FILE` | `~/.cursor/hooks.json` | `hooks install --cursor` / `hooks uninstall --cursor` 修改的文件 |
 
 ## rebuild
 
@@ -255,14 +265,14 @@ claude-canvas 没有运行时，HTTP hook 连接失败会立刻报错，而 Clau
 node packages/server/dist/cli.js rebuild
 ```
 
-它根据数据库里保存的原始事件重新推导出图相关的表，进度打印到 stderr，成功时打印 `claude-canvas rebuild complete`。通常不需要手动运行：升级后 `start` 会按需自动重建。它与运行中的服务共用锁文件，服务在运行时会以“already running”报错退出，先停止服务再运行。
+它根据数据库里保存的原始事件重新推导出图相关的表，进度打印到 stderr，成功时打印 `agent-canvas rebuild complete`。通常不需要手动运行：升级后 `start` 会按需自动重建。它与运行中的服务共用锁文件，服务在运行时会以“already running”报错退出，先停止服务再运行。
 
 ## 安全说明
 
 - 只监听 `127.0.0.1`，不对局域网开放。
 - 没有任何认证。为防止网页跨站访问，`Host` 或 `Origin` 不是回环地址的请求会被拒绝（`/hooks` 仍返回空的 200，但内容不会被采纳）。
 - 数据库含有你的对话和工具输出的明文，请像对待对话记录本身一样对待数据目录（不要同步到云盘、不要分享）。
-- 服务对 transcript 只读；使用默认数据目录（`~/.claude-canvas`）时，服务不会往 `~/.claude` 下写任何东西（若把 `CLAUDE_CANVAS_DATA_DIR` 设到 `~/.claude` 之下，数据库和锁文件当然会写在那里）。只有你运行 `hooks install` / `hooks uninstall` 时才会修改 settings 文件（并先备份）。
+- 服务对 transcript 只读；使用默认数据目录（`~/.agent-canvas`）时，服务不会往 `~/.claude` 下写任何东西（若把 `AGENT_CANVAS_DATA_DIR` 设到 `~/.claude` 之下，数据库和锁文件当然会写在那里）。只有你运行 `hooks install` / `hooks uninstall` 时才会修改 settings 文件（并先备份）。
 
 ## 状态与错误在哪里看
 
@@ -291,7 +301,7 @@ node packages/server/dist/cli.js rebuild
 ```
 pnpm test        # vitest run
 pnpm typecheck
-pnpm --filter @claude-canvas/web dev   # web 开发服务器（vite），把 /api 和 /ws 代理到 127.0.0.1:4317，需先启动服务
+pnpm --filter @agent-canvas/web dev   # web 开发服务器（vite），把 /api 和 /ws 代理到 127.0.0.1:4317，需先启动服务
 ```
 
 没有 pnpm 时同样用 `npx --yes pnpm@10 <命令>`。

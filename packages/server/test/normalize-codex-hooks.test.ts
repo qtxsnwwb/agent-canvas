@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from 'vitest';
-import { applyChanges, emptyGraph, type Change, type GraphNode, type Session } from '@claude-canvas/shared';
+import { applyChanges, emptyGraph, type Change, type GraphNode, type Session } from '@agent-canvas/shared';
 import { CodexNormalizer } from '../src/normalize/codex.js';
 import { parseCodexHook } from '../src/normalize/codex-hooks.js';
 import { NORMALIZER_VERSION } from '../src/normalize/version.js';

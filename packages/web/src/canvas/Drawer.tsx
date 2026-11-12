@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import type { GraphNode, NodeDetail } from '@claude-canvas/shared';
+import type { GraphNode, NodeDetail } from '@agent-canvas/shared';
 import { api } from '../client';
 import { NODE_STATUS_LABEL } from '../labels';
 import type { UpstreamChain } from './chain';

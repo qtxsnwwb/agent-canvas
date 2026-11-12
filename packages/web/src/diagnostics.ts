@@ -1,6 +1,6 @@
-import { ORIGINS, type Diagnostics, type Origin } from '@claude-canvas/shared';
+import { ORIGINS, type Diagnostics, type Origin } from '@agent-canvas/shared';
 
-/** The hook events `claude-canvas hooks install` registers. Kept in step with docs/hooks-snippet.json by a test. */
+/** The hook events `agent-canvas hooks install` registers. Kept in step with docs/hooks-snippet.json by a test. */
 export const EXPECTED_HOOK_EVENTS: readonly string[] = [
   'SessionStart',
   'UserPromptSubmit',
@@ -35,7 +35,7 @@ export interface DiagnosticsSummary {
   unknownTotal: number;
 }
 
-/** The hook events `claude-canvas hooks install --codex` registers in `~/.codex/hooks.json`. */
+/** The hook events `agent-canvas hooks install --codex` registers in `~/.codex/hooks.json`. */
 export const EXPECTED_CODEX_HOOK_EVENTS: readonly string[] = [
   'SessionStart',
   'SessionEnd',
@@ -50,7 +50,7 @@ export const EXPECTED_CODEX_HOOK_EVENTS: readonly string[] = [
   'Interrupt',
 ];
 
-/** The hook events `claude-canvas hooks install --cursor` registers in `~/.cursor/hooks.json`. */
+/** The hook events `agent-canvas hooks install --cursor` registers in `~/.cursor/hooks.json`. */
 export const EXPECTED_CURSOR_HOOK_EVENTS: readonly string[] = ['sessionStart', 'beforeSubmitPrompt', 'stop', 'subagentStop', 'sessionEnd'];
 
 export const EXPECTED_HOOK_EVENTS_BY_ORIGIN: Record<Origin, readonly string[]> = {

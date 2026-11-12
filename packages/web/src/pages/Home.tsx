@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
-import { SEARCH_MIN_CHARS, type Project, type SearchField, type SearchHit, type Session } from '@claude-canvas/shared';
+import { SEARCH_MIN_CHARS, type Project, type SearchField, type SearchHit, type Session } from '@agent-canvas/shared';
 import { api, openLiveSessions } from '../client';
 import { sessionStatusView } from '../labels';
 import {

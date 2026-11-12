@@ -1,7 +1,7 @@
 import http from 'node:http';
 
 /*
- * `claude-canvas hook-forward --origin <claude|codex|cursor> --port <n>`: what a Codex or Cursor command hook runs.
+ * `agent-canvas hook-forward --origin <claude|codex|cursor> --port <n>`: what a Codex or Cursor command hook runs.
  * Their hooks cannot send HTTP themselves; this reads the hook's JSON from stdin and POSTs it unchanged to the local
  * server's `/hooks?origin=<origin>`.
  *
@@ -17,7 +17,7 @@ import http from 'node:http';
  *
  * What it cannot control: when node or cli.js is gone (moved, upgraded, deleted), the hook command fails before any of
  * this runs (an error on stderr, nothing on stdout, a non-zero exit). How Cursor treats that is to be checked at
- * acceptance; the documented remedy is `hooks uninstall --cursor` before moving or deleting claude-canvas.
+ * acceptance; the documented remedy is `hooks uninstall --cursor` before moving or deleting agent-canvas.
  */
 
 export type ForwardOrigin = 'claude' | 'codex' | 'cursor';

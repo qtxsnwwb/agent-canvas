@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import WebSocket from 'ws';
-import { applyChange, emptyGraph, type Change, type GraphEdge, type GraphNode, type Session } from '@claude-canvas/shared';
+import { applyChange, emptyGraph, type Change, type GraphEdge, type GraphNode, type Session } from '@agent-canvas/shared';
 import { rebuild, start, type Running } from '../src/cli.js';
 import type { RawEvent } from '../src/store/store.js';
 import { assistantBlock, toolResult, userPrompt } from './fixtures.js';
@@ -64,7 +64,7 @@ function collect(ws: WebSocket): () => Change[] {
 }
 
 beforeEach(async () => {
-  vi.stubEnv('CLAUDE_CANVAS_CODEX_DIR', ''); // never the real ~/.codex/sessions: no Codex source
+  vi.stubEnv('AGENT_CANVAS_CODEX_DIR', ''); // never the real ~/.codex/sessions: no Codex source
   tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-e2e-'));
   projectsDir = path.join(tmp, 'projects');
   dataDir = path.join(tmp, 'data');

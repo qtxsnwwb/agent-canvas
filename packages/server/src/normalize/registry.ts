@@ -1,4 +1,4 @@
-import { ORIGINS, type Origin } from '@claude-canvas/shared';
+import { ORIGINS, type Origin } from '@agent-canvas/shared';
 import type { RawEvent } from '../store/store.js';
 import { CodexNormalizer } from './codex.js';
 import { CursorNormalizer } from './cursor.js';

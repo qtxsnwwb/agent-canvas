@@ -23,7 +23,7 @@ import {
   type SearchMatch,
   type SeqChange,
   type Session,
-} from '@claude-canvas/shared';
+} from '@agent-canvas/shared';
 import { DERIVED_TABLES, MIGRATIONS, SCHEMA_SQL } from './schema.js';
 
 /**
@@ -248,7 +248,7 @@ export const HOOK_STAT_BACKFILL_SELECT = `SELECT event_name, COUNT(*), MAX(recei
   WHERE source = 'hook' AND event_name IS NOT NULL AND received_at IS NOT NULL
   GROUP BY event_name`;
 /** Printed (through StoreOptions.log) when opening a database runs that backfill. */
-export const HOOK_STAT_BACKFILL_NOTICE = 'claude-canvas counting stored hook events (one-time)…';
+export const HOOK_STAT_BACKFILL_NOTICE = 'agent-canvas counting stored hook events (one-time)…';
 
 interface RawRow {
   ingest_id: number;

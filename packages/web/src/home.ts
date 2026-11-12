@@ -1,4 +1,4 @@
-import { ORIGINS, type Origin, type Project } from '@claude-canvas/shared';
+import { ORIGINS, type Origin, type Project } from '@agent-canvas/shared';
 
 /** How an origin is shown: its name and the CSS class that colours its badge (styles.css, `.origin-badge`). */
 export const ORIGIN_LOOK: Record<Origin, { label: string; className: string }> = {
@@ -14,7 +14,7 @@ export function originLook(origin: Origin): { label: string; className: string }
 /** The home page's origin filter. */
 export type OriginFilter = 'all' | Origin;
 /** The viewer's filter choice, remembered in this browser (like the density switch). */
-export const ORIGIN_FILTER_KEY = 'claude-canvas.origin';
+export const ORIGIN_FILTER_KEY = 'agent-canvas.origin';
 export const ORIGIN_FILTER_OPTIONS: readonly { value: OriginFilter; label: string }[] = [
   { value: 'all', label: '全部' },
   ...ORIGINS.map((o) => ({ value: o, label: ORIGIN_LOOK[o].label })),

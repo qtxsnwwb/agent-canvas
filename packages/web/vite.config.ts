@@ -9,7 +9,7 @@ export default defineConfig({
   plugins: [react()],
   resolve: {
     alias: {
-      '@claude-canvas/shared': fileURLToPath(new URL('../shared/src/index.ts', import.meta.url)),
+      '@agent-canvas/shared': fileURLToPath(new URL('../shared/src/index.ts', import.meta.url)),
     },
   },
   server: {

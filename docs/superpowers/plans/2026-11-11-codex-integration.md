@@ -2,23 +2,23 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task.
 
-**Goal:** Show OpenAI Codex sessions in claude-canvas next to Claude Code sessions, through the same graph model, views and API.
+**Goal:** Show OpenAI Codex sessions in agent-canvas next to Claude Code sessions, through the same graph model, views and API.
 
 **Architecture:** Add an *origin* dimension (`claude` | `codex`) to raw events, file offsets and sessions. Each origin has a file source (how files are found and which session / thread a file belongs to) and a normalizer (records → the shared `Change` stream). Everything downstream of the normalizer (store, API, websocket, web views) is shared.
 
 **Tech Stack:** unchanged — TypeScript, pnpm workspace (`npx --yes pnpm@10 <cmd>`), Fastify, better-sqlite3, chokidar, React, Vitest.
 
-**Spec:** `docs/superpowers/specs/2026-11-11-codex-integration-design.md` (binding; section numbers below refer to it). The earlier spec `2026-11-10-claude-canvas-design.md` still governs everything not changed here.
+**Spec:** `docs/superpowers/specs/2026-11-11-codex-integration-design.md` (binding; section numbers below refer to it). The earlier spec `2026-11-10-agent-canvas-design.md` still governs everything not changed here.
 
 ## Global Constraints
 
 - Claude Code behaviour must not change: every existing test keeps passing unmodified, except where a shared type gains a required field (then only the fixture literal is updated).
 - TDD for logic: failing test first. Vitest, node environment, no jsdom, no component tests. `*.timing.test.ts` stay in the serial project.
-- Tests and any server you start use temp dirs only: `CLAUDE_CANVAS_PROJECTS_DIR`, `CLAUDE_CANVAS_DATA_DIR`, `CLAUDE_CANVAS_CODEX_DIR`. Never read or write the real `~/.claude/settings.json` or `~/.codex/hooks.json`. Never open real session files under `~/.claude` or `~/.codex` for their content; to see the real Codex record *structure* (types, ids, field names only) run `node .superpowers/sdd/2026-11-11-codex-integration/codex-shape.mjs`.
+- Tests and any server you start use temp dirs only: `AGENT_CANVAS_PROJECTS_DIR`, `AGENT_CANVAS_DATA_DIR`, `AGENT_CANVAS_CODEX_DIR`. Never read or write the real `~/.claude/settings.json` or `~/.codex/hooks.json`. Never open real session files under `~/.claude` or `~/.codex` for their content; to see the real Codex record *structure* (types, ids, field names only) run `node .superpowers/sdd/2026-11-11-codex-integration/codex-shape.mjs`.
 - Fixtures are synthetic: shaped like real records, with invented text.
 - Commits: English Conventional Commits, ending with `Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>`. Commit only your own paths. Do not push.
 - Before each commit: `npx --yes pnpm@10 test`, `npx --yes pnpm@10 typecheck`, `npx --yes pnpm@10 build` all pass.
-- Names fixed across tasks (do not rename): type `Origin = 'claude' | 'codex'` in `@claude-canvas/shared`; `Session.origin`; `Project.origins`; config field `codexSessionsDir: string | null` (env `CLAUDE_CANVAS_CODEX_DIR`, default `~/.codex/sessions`, empty string = disabled); file-key prefix `codex:` for Codex files in `raw_event.file` / `file_offset.file`; interface `AgentNormalizer` in `packages/server/src/normalize/types.ts`; class `CodexNormalizer` in `packages/server/src/normalize/codex.ts`; interface `FileSource` in `packages/server/src/sources/source.ts`; `POST /hooks?origin=codex`; CLI `hook-forward --origin <o> --port <n>`, `hooks install|uninstall --codex`.
+- Names fixed across tasks (do not rename): type `Origin = 'claude' | 'codex'` in `@agent-canvas/shared`; `Session.origin`; `Project.origins`; config field `codexSessionsDir: string | null` (env `AGENT_CANVAS_CODEX_DIR`, default `~/.codex/sessions`, empty string = disabled); file-key prefix `codex:` for Codex files in `raw_event.file` / `file_offset.file`; interface `AgentNormalizer` in `packages/server/src/normalize/types.ts`; class `CodexNormalizer` in `packages/server/src/normalize/codex.ts`; interface `FileSource` in `packages/server/src/sources/source.ts`; `POST /hooks?origin=codex`; CLI `hook-forward --origin <o> --port <n>`, `hooks install|uninstall --codex`.
 
 ## Review Focus
 
@@ -42,7 +42,7 @@
 - `Config.codexSessionsDir` (not used yet beyond being loaded and tested).
 - `NORMALIZER_VERSION` bumped (sessions gain `origin`).
 
-**Steps:** tests first for: migration from a previous-version database (build one with the old schema SQL in the test); `origin` on sessions and in `listProjects().origins`; hook stats per origin; pipeline with the Claude source behaves exactly as before (existing pipeline tests untouched); config parsing of `CLAUDE_CANVAS_CODEX_DIR` (unset → default path, empty → null). Then implement, run everything, commit.
+**Steps:** tests first for: migration from a previous-version database (build one with the old schema SQL in the test); `origin` on sessions and in `listProjects().origins`; hook stats per origin; pipeline with the Claude source behaves exactly as before (existing pipeline tests untouched); config parsing of `AGENT_CANVAS_CODEX_DIR` (unset → default path, empty → null). Then implement, run everything, commit.
 
 ### Task 2: Codex file source
 

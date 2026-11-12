@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import { emptyGraph, type Graph, type GraphEdge, type GraphNode, type NodeKind } from '@claude-canvas/shared';
+import { emptyGraph, type Graph, type GraphEdge, type GraphNode, type NodeKind } from '@agent-canvas/shared';
 import { buildView, forkSources, PRELUDE_TURN, TURN_FOLD_THRESHOLD, TURN_TAIL_NODES } from '../src/canvas/view';
 
 const EPOCH = Date.parse('2026-01-01T00:00:00Z');

@@ -50,7 +50,7 @@ function seed(content: string | Buffer): void {
 }
 
 test('defaultSettingsFile：环境变量优先，否则 ~/.claude/settings.json（只用假 env 断言）', () => {
-  expect(defaultSettingsFile({ CLAUDE_CANVAS_SETTINGS_FILE: '/x/y.json' })).toBe('/x/y.json');
+  expect(defaultSettingsFile({ AGENT_CANVAS_SETTINGS_FILE: '/x/y.json' })).toBe('/x/y.json');
   expect(defaultSettingsFile({})).toBe(path.join(os.homedir(), '.claude', 'settings.json'));
 });
 
@@ -68,7 +68,7 @@ test('已有 settings + --yes：先备份（内容与原文件逐字节相同）
   seed(original);
   const io = fakeIo();
   expect(await runHooksInstall(opts(), io)).toBe(0);
-  const backup = path.join(path.dirname(file), `settings.json.bak-claude-canvas-${STAMP}`);
+  const backup = path.join(path.dirname(file), `settings.json.bak-agent-canvas-${STAMP}`);
   expect(fs.readFileSync(backup, 'utf8')).toBe(original);
   expect(Buffer.compare(fs.readFileSync(backup), Buffer.from(original))).toBe(0);
   const next = readJson();
@@ -104,7 +104,7 @@ test('展示将要做的事：路径、地址、事件、备份路径', async ()
   expect(text).toContain('http://127.0.0.1:4317/hooks');
   for (const e of HOOK_EVENTS) expect(text).toContain(e);
   expect(text).toContain('不会改动已有的其他内容');
-  expect(text).toContain(`.bak-claude-canvas-${STAMP}`);
+  expect(text).toContain(`.bak-agent-canvas-${STAMP}`);
 });
 
 test('非交互且没有 --yes：返回 1，文件未变，stderr 提到 --yes', async () => {
@@ -151,7 +151,7 @@ test('空白文件视为 {}，并备份原文件', async () => {
   seed('  \n');
   expect(await runHooksInstall(opts(), fakeIo())).toBe(0);
   expect(Object.keys(readJson().hooks)).toEqual([...HOOK_EVENTS]);
-  expect(listDir()).toContain(`settings.json.bak-claude-canvas-${STAMP}`);
+  expect(listDir()).toContain(`settings.json.bak-agent-canvas-${STAMP}`);
 });
 
 test('带 BOM、CRLF 的文件：写回保留 BOM 和 CRLF，且是合法 JSON', async () => {
@@ -274,7 +274,7 @@ test('LF 文件写回仍是 LF', async () => {
 
 test('备份名冲突时加序号，不覆盖已有备份', async () => {
   seed('{"v":1}');
-  const first = path.join(path.dirname(file), `settings.json.bak-claude-canvas-${STAMP}`);
+  const first = path.join(path.dirname(file), `settings.json.bak-agent-canvas-${STAMP}`);
   fs.writeFileSync(first, 'older backup');
   fs.writeFileSync(`${first}-2`, 'older backup 2');
   expect(await runHooksInstall(opts(), fakeIo())).toBe(0);
@@ -301,7 +301,7 @@ test('uninstall：只移除本端口的 hooks，备份后写入；没有可移�
   expect(next.hooks.Stop).toHaveLength(2); // the command hook and the port 4400 hook remain
   expect(JSON.stringify(next)).not.toContain('4317');
   expect(JSON.stringify(next)).toContain('4400');
-  const backups = listDir().filter((n) => n.includes('.bak-claude-canvas-'));
+  const backups = listDir().filter((n) => n.includes('.bak-agent-canvas-'));
   expect(backups.some((n) => fs.readFileSync(path.join(path.dirname(file), n), 'utf8') === beforeUninstall)).toBe(true);
 
   const again = fakeIo();
@@ -342,8 +342,8 @@ test('cli：hooks install / uninstall 经 --settings 走通', async () => {
   expect(readJson()).toEqual({});
 });
 
-test('cli：CLAUDE_CANVAS_SETTINGS_FILE 指定的路径被使用（假 env）', async () => {
-  expect(await main(['hooks', 'install', '--yes'], { hooksIo: fakeIo(), env: { CLAUDE_CANVAS_SETTINGS_FILE: file } })).toBe(0);
+test('cli：AGENT_CANVAS_SETTINGS_FILE 指定的路径被使用（假 env）', async () => {
+  expect(await main(['hooks', 'install', '--yes'], { hooksIo: fakeIo(), env: { AGENT_CANVAS_SETTINGS_FILE: file } })).toBe(0);
   expect(fs.existsSync(file)).toBe(true);
 });
 
@@ -357,7 +357,7 @@ test('cli：非法 --port 返回 1，不写', async () => {
 test('cli：`hooks` 后跟未知子命令时返回 1 并打印用法', async () => {
   for (const argv of [['hooks', 'frobnicate'], ['hooks']]) {
     const io = fakeIo();
-    expect(await main(argv, { hooksIo: io, env: { CLAUDE_CANVAS_SETTINGS_FILE: file } })).toBe(1);
+    expect(await main(argv, { hooksIo: io, env: { AGENT_CANVAS_SETTINGS_FILE: file } })).toBe(1);
     expect(io.errs.join('\n')).toContain('hooks install');
     expect(io.errs.join('\n')).toContain('hooks uninstall');
   }

@@ -1,4 +1,4 @@
-import type { GraphNode } from '@claude-canvas/shared';
+import type { GraphNode } from '@agent-canvas/shared';
 import type { UpstreamChain } from './chain';
 import type { CanvasView } from './view';
 

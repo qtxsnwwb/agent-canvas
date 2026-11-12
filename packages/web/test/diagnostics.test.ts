@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { afterEach, expect, test, vi } from 'vitest';
-import type { Diagnostics } from '@claude-canvas/shared';
+import type { Diagnostics } from '@agent-canvas/shared';
 import { createPoller, EXPECTED_CODEX_HOOK_EVENTS, EXPECTED_HOOK_EVENTS, EXPECTED_HOOK_EVENTS_BY_ORIGIN, fileOrigin, formatAge, hooksByOrigin, hookState, summarizeDiagnostics, truncateSample, SAMPLE_DISPLAY_MAX } from '../src/diagnostics';
 
 const NOW = Date.parse('2026-01-01T12:00:00.000Z');

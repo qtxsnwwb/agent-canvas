@@ -47,7 +47,7 @@ test('部分已存在：只补缺的事件', () => {
   expect(p.added).toEqual(HOOK_EVENTS.filter((e) => e !== 'Stop'));
   expect((p.next.hooks as any).Stop).toHaveLength(1);
 });
-test('另一个端口的 claude-canvas hook 不算已存在，也不被改动', () => {
+test('另一个端口的 agent-canvas hook 不算已存在，也不被改动', () => {
   const other = planInstall({}, 4400).next;
   const p = planInstall(other, 4317);
   expect(p.added).toEqual([...HOOK_EVENTS]);

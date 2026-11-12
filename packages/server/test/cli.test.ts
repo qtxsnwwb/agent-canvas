@@ -34,7 +34,7 @@ function deadPid(): number {
 }
 
 beforeEach(async () => {
-  vi.stubEnv('CLAUDE_CANVAS_CODEX_DIR', ''); // never the real ~/.codex/sessions: no Codex source
+  vi.stubEnv('AGENT_CANVAS_CODEX_DIR', ''); // never the real ~/.codex/sessions: no Codex source
   tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-cli-'));
   projectsDir = path.join(tmp, 'projects');
   dataDir = path.join(tmp, 'data');
@@ -107,7 +107,7 @@ test.each([
   s.close();
   const lines: string[] = [];
   const app = await launch((l) => lines.push(l));
-  expect(lines[0]).toMatch(/^claude-canvas rebuilding derived data \(reason: /);
+  expect(lines[0]).toMatch(/^agent-canvas rebuilding derived data \(reason: /);
   expect(lines[0]).toMatch(reason);
   const res = await fetch(`${app.url}/api/sessions/s1/graph`);
   expect(res.status).toBe(200);
@@ -130,7 +130,7 @@ test('rebuild 报告进度', async () => {
   expect(progress.at(-1)).toEqual([1, 1]);
 });
 
-test('CLAUDE_CANVAS_CODEX_DIR 指向存在的目录时 start 读取 Codex 会话文件并推导出 codex 会话', async () => {
+test('AGENT_CANVAS_CODEX_DIR 指向存在的目录时 start 读取 Codex 会话文件并推导出 codex 会话', async () => {
   const codexDir = path.join(tmp, 'codex', 'sessions');
   const rel = rolloutRel('019a0000-0000-7000-8000-00000000000a');
   await fs.mkdir(path.join(codexDir, ...rel.split('/').slice(0, -1)), { recursive: true });
@@ -138,7 +138,7 @@ test('CLAUDE_CANVAS_CODEX_DIR 指向存在的目录时 start 读取 Codex 会话
     path.join(codexDir, ...rel.split('/')),
     rollout(sessionMetaLine({ id: '019a0000-0000-7000-8000-00000000000a', cwd: path.join(tmp, 'work') }), taskStarted('t1')),
   );
-  vi.stubEnv('CLAUDE_CANVAS_CODEX_DIR', codexDir);
+  vi.stubEnv('AGENT_CANVAS_CODEX_DIR', codexDir);
   const app = await launch();
   await vi.waitFor(
     async () => {

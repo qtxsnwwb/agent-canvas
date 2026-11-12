@@ -1,4 +1,4 @@
-# claude-canvas 里程碑 4（因果视角）实现计划
+# agent-canvas 里程碑 4（因果视角）实现计划
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -8,7 +8,7 @@
 
 **Tech Stack:** 无新增依赖。
 
-**Spec:** `docs/superpowers/specs/2026-11-10-claude-canvas-design.md`（7.3 的"因果"一行、12 节第 4 项、13 节关于思考文本的风险）
+**Spec:** `docs/superpowers/specs/2026-11-10-agent-canvas-design.md`（7.3 的"因果"一行、12 节第 4 项、13 节关于思考文本的风险）
 
 **已核实的数据事实（2026-11-10，本机真实数据，只统计结构）：** 6352 个思考节点里只有 217 个（约 3%）带文本，6350 个带耗时。Claude Code 的 transcript 多数情况下不保存思考原文，这不是本项目能补回的。因此因果链以"回复文本 + 思考耗时"为主，思考原文有则显示。
 

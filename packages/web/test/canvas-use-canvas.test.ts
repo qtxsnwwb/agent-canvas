@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import type { Graph, GraphEdge, GraphNode } from '@claude-canvas/shared';
+import type { Graph, GraphEdge, GraphNode } from '@agent-canvas/shared';
 import { createCanvasModel } from '../src/canvas/useCanvas';
 import type { LayoutClient } from '../src/canvas/layoutClient';
 import type { TurnLayout, TurnLayoutInput } from '../src/canvas/layout';

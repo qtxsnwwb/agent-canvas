@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import type { Graph, GraphEdge, GraphNode, NodeKind } from '@claude-canvas/shared';
+import type { Graph, GraphEdge, GraphNode, NodeKind } from '@agent-canvas/shared';
 import { buildView } from '../src/canvas/view';
 import { edgeZ, groupDepths, HEADER_Z, nodeZ, Z_PER_DEPTH } from '../src/canvas/stacking';
 

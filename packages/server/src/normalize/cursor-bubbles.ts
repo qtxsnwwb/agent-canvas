@@ -1,4 +1,4 @@
-import type { NodeDetail, Usage } from '@claude-canvas/shared';
+import type { NodeDetail, Usage } from '@agent-canvas/shared';
 import { promptTitle } from './codex.js';
 import { summarize } from './summary.js';
 

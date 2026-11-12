@@ -1,4 +1,4 @@
-import type { SessionStatus, Usage } from '@claude-canvas/shared';
+import type { SessionStatus, Usage } from '@agent-canvas/shared';
 
 /** A parsed JSON transcript record. */
 export type TranscriptRecord = Record<string, unknown> & { type: string; uuid: string };

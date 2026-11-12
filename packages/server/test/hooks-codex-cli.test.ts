@@ -43,7 +43,7 @@ afterEach(() => {
 const NOW = new Date(2026, 10, 11, 9, 5, 7);
 const STAMP = '20261111-090507';
 const NODE = '/usr/bin/node';
-const CLI = '/opt/claude canvas/dist/cli.js';
+const CLI = '/opt/agent canvas/dist/cli.js';
 
 interface FakeIo extends HooksCliIo { outs: string[]; errs: string[]; questions: string[] }
 function fakeIo(over: { interactive?: boolean; answer?: boolean } = {}): FakeIo {
@@ -70,8 +70,8 @@ const listDir = (): string[] => fs.readdirSync(codexDir).sort();
 const seed = (content: string): void => fs.writeFileSync(file, content);
 
 test('defaultCodexHooksFile：环境变量优先，否则 ~/.codex/hooks.json（只用假 env 断言，不读写）', () => {
-  expect(defaultCodexHooksFile({ CLAUDE_CANVAS_CODEX_HOOKS_FILE: '/x/hooks.json' })).toBe('/x/hooks.json');
-  expect(defaultCodexHooksFile({ CLAUDE_CANVAS_CODEX_HOOKS_FILE: '' })).toBe(REAL_DEFAULT);
+  expect(defaultCodexHooksFile({ AGENT_CANVAS_CODEX_HOOKS_FILE: '/x/hooks.json' })).toBe('/x/hooks.json');
+  expect(defaultCodexHooksFile({ AGENT_CANVAS_CODEX_HOOKS_FILE: '' })).toBe(REAL_DEFAULT);
   expect(defaultCodexHooksFile({})).toBe(REAL_DEFAULT);
   expect(REAL_DEFAULT.startsWith(os.homedir())).toBe(true);
 });
@@ -106,7 +106,7 @@ test('已有 hooks.json：备份（逐字节相同）后写入，已有内容保
   seed(original);
   const io = fakeIo();
   expect(await runCodexHooksInstall(opts(), io)).toBe(0);
-  const backup = path.join(codexDir, `hooks.json.bak-claude-canvas-${STAMP}`);
+  const backup = path.join(codexDir, `hooks.json.bak-agent-canvas-${STAMP}`);
   expect(fs.readFileSync(backup, 'utf8')).toBe(original);
   expect(readJson().hooks.Stop[0]).toEqual({ hooks: [{ type: 'command', command: 'notify' }] });
   expect(readJson().hooks.Stop).toHaveLength(2);
@@ -229,9 +229,9 @@ test('cli：hooks install / uninstall --codex 经 --settings 走通；命令指�
   expect(readJson()).toEqual({});
 });
 
-test('cli：CLAUDE_CANVAS_CODEX_HOOKS_FILE 指定的路径被使用（假 env）；不加 --codex 时仍是 Claude 的文件', async () => {
+test('cli：AGENT_CANVAS_CODEX_HOOKS_FILE 指定的路径被使用（假 env）；不加 --codex 时仍是 Claude 的文件', async () => {
   const claudeFile = path.join(dir, 'claude', 'settings.json');
-  const env = { CLAUDE_CANVAS_CODEX_HOOKS_FILE: file, CLAUDE_CANVAS_SETTINGS_FILE: claudeFile };
+  const env = { AGENT_CANVAS_CODEX_HOOKS_FILE: file, AGENT_CANVAS_SETTINGS_FILE: claudeFile };
   expect(await main(['hooks', 'install', '--codex', '--yes'], { hooksIo: fakeIo(), env })).toBe(0);
   expect(Object.keys(readJson().hooks)).toEqual([...CODEX_HOOK_EVENTS]);
   expect(fs.existsSync(claudeFile)).toBe(false);
@@ -241,7 +241,7 @@ test('cli：CLAUDE_CANVAS_CODEX_HOOKS_FILE 指定的路径被使用（假 env）
 
 test('cli：用法里列出 --codex 和 hook-forward', async () => {
   const io = fakeIo();
-  expect(await main(['hooks', 'nope'], { hooksIo: io, env: { CLAUDE_CANVAS_CODEX_HOOKS_FILE: file } })).toBe(1);
+  expect(await main(['hooks', 'nope'], { hooksIo: io, env: { AGENT_CANVAS_CODEX_HOOKS_FILE: file } })).toBe(1);
   expect(io.errs.join('\n')).toContain('--codex');
   expect(io.errs.join('\n')).toContain('hook-forward');
 });

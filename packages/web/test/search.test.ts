@@ -1,5 +1,5 @@
 import { afterEach, expect, test, vi } from 'vitest';
-import { SEARCH_MAX_CHARS, type SearchHit } from '@claude-canvas/shared';
+import { SEARCH_MAX_CHARS, type SearchHit } from '@agent-canvas/shared';
 import { createSearcher, highlightParts } from '../src/search';
 import { baseSession } from './helpers';
 
