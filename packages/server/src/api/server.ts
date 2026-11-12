@@ -9,6 +9,8 @@ import {
   type Change,
   type ClientMessage,
   type Diagnostics,
+  type NotificationSettingsResponse,
+  type NotificationTestResponse,
   type Origin,
   type SearchHit,
   type SeqChange,
@@ -17,6 +19,7 @@ import {
 import type { Config } from '../config.js';
 import { cursorHookConversationId, cursorHookWorkspaceRoot, sanitizeCursorHookPayload } from '../normalize/cursor-hooks.js';
 import { NORMALIZER_VERSION } from '../normalize/version.js';
+import type { NotificationService } from '../notify/service.js';
 import type { Pipeline } from '../pipeline.js';
 import { KEY_PREFIXES } from '../sources/source.js';
 import type { Store } from '../store/store.js';
@@ -146,8 +149,12 @@ function parseClientMessage(raw: string): ClientMessage | null {
   return null;
 }
 
-export function buildServer(deps: { store: Store; pipeline: Pipeline; config: Config }): FastifyInstance {
-  const { store, pipeline, config } = deps;
+/**
+ * `notifications`: the desktop notification service (`start` only). With it come the /api/notifications routes and the
+ * diagnostics' `notifications` block, and hook events are shown to it before they are ingested.
+ */
+export function buildServer(deps: { store: Store; pipeline: Pipeline; config: Config; notifications?: NotificationService }): FastifyInstance {
+  const { store, pipeline, config, notifications } = deps;
   const app = Fastify();
   const connections = new Set<Connection>();
 
@@ -282,9 +289,21 @@ export function buildServer(deps: { store: Store; pipeline: Pipeline; config: Co
           lastError: cursorPoll?.lastError ?? null,
           hasData: store.transcriptKeys(KEY_PREFIXES.cursor).length > 0,
         },
+        ...(notifications !== undefined ? { notifications: notifications.diagnostics() } : {}),
       };
     },
   );
+
+  if (notifications !== undefined) {
+    app.get('/api/notifications/settings', async (): Promise<NotificationSettingsResponse> => notifications.getSettings());
+    app.put('/api/notifications/settings', async (req, reply) => {
+      const result = notifications.putSettings(req.body);
+      if (!result.ok) return reply.code(400).send({ error: result.error });
+      return result.response;
+    });
+    // Always 200: a delivery failure is not a client error.
+    app.post('/api/notifications/test', async (): Promise<NotificationTestResponse> => notifications.test());
+  }
 
   // Encapsulated so its catch-all parser and error handler only affect /hooks: whatever arrives, the answer is an empty 200.
   void app.register(async (instance) => {
@@ -312,6 +331,11 @@ export function buildServer(deps: { store: Store; pipeline: Pipeline; config: Co
           const eventName = typeof obj.hook_event_name === 'string' ? obj.hook_event_name : 'unknown';
           const sessionId = typeof obj.session_id === 'string' ? obj.session_id : null;
           const transcriptPath = typeof obj.transcript_path === 'string' ? obj.transcript_path : null;
+          if (notifications !== undefined) {
+            // Before ingesting: Claude Code's StopFailure must be known when the status change it causes arrives.
+            const agentId = typeof obj.agent_id === 'string' && obj.agent_id !== '' ? obj.agent_id : null;
+            notifications.handleHook(origin, eventName, sessionId, agentId);
+          }
           if (origin === 'claude') pipeline.ingestHook(eventName, sessionId, text, transcriptPath);
           else if (origin === 'cursor') {
             // Cursor: the conversation id is the session id; the payload is stored without the user's e-mail address.

@@ -54,6 +54,16 @@
 
 同一轮既出错又变为空闲时，只发“出错中断”，不再发“一轮跑完”。
 
+“出错中断”实际使用的标记（实现时按三个归一化器的输出确定，只看主线，子代理里的不算）：
+
+| 来源 | 标记 |
+|---|---|
+| Claude Code | `system` 节点，`systemSubtype = 'interrupt'`（用户中断：`[Request interrupted by user…]` 记录）；`StopFailure` hook（它不产生节点，服务在入库前把它交给引擎，会话随后变为空闲时发） |
+| Codex | `system` 节点，`systemSubtype = 'interrupt'`：标题 “Turn failed”（`task_complete` 带 `error`）或 “Interrupted”（`turn_aborted`） |
+| Cursor | 工具节点变为 `failed` 且其说明是“已中止：对话停止时工具仍在运行。”（会话被中止时仍在运行的调用；说明不在变更流里，引擎按节点 id 查一次） |
+
+限制：Claude Code 转录里的接口报错记录（assistant 消息）在归一化后没有可区分的标记，只能靠 `StopFailure` hook（需要装 hooks）；Cursor 中止时如果没有正在运行的调用，看不出是中止，按“一轮跑完”处理。
+
 ### 3.1 不该弹的情况
 
 - **历史数据**：服务启动后的首次导入、自动重建、轮询来源的第一轮期间，一律不发。

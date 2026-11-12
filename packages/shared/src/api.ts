@@ -1,5 +1,6 @@
 import type { SeqChange } from './change.js';
 import type { GraphEdge, GraphNode, Origin, Session } from './model.js';
+import type { NotificationKind } from './notifications.js';
 
 export interface GraphSnapshot { session: Session; nodes: GraphNode[]; edges: GraphEdge[]; seq: number }
 export interface Diagnostics {
@@ -30,6 +31,19 @@ export interface Diagnostics {
    * hasData: whether any Cursor records are stored (absent from servers before it existed).
    */
   cursor: { dbPath: string | null; dbExists: boolean; lastPollAt: string | null; lastError: string | null; hasData?: boolean };
+  /**
+   * Desktop notifications (see NotificationStatus): enabled = the master switch. Present whenever the service runs
+   * (`agent-canvas start`); absent from servers built without notifications (and from servers before it existed).
+   */
+  notifications?: {
+    enabled: boolean;
+    available: boolean;
+    lastSentAt: string | null;
+    lastSentKind: NotificationKind | 'test' | null;
+    lastError: string | null;
+    lastErrorAt: string | null;
+    settingsError: string | null;
+  };
 }
 
 export type SearchField = 'title' | 'id' | 'branch' | 'cwd' | 'prompt';

@@ -36,7 +36,8 @@ const EPOCH = '1970-01-01T00:00:00.000Z';
 // Notes shown with a call's detail (the drawer's 文本 section): Simplified Chinese, like the rest of the UI.
 const CANCELLED_NOTE = '已在 Cursor 中取消。';
 const REJECTED_NOTE = '用户拒绝了这次调用。';
-const ABORTED_NOTE = '已中止：对话停止时工具仍在运行。';
+/** Note of a call failed because its conversation was aborted (the notification engine recognises an abort by it). */
+export const ABORTED_NOTE = '已中止：对话停止时工具仍在运行。';
 const NEVER_FINISHED_NOTE = '未完成：本轮结束时工具仍在运行。';
 const exitCodeNote = (code: number): string => `命令以退出码 ${code} 结束。`;
 /** A derivation saves a scan checkpoint before every CHECKPOINT_EVERY-th bubble of a thread. */
