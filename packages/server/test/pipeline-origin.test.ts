@@ -86,7 +86,7 @@ describe('ClaudeFileSource', () => {
   });
 
   test('键属于哪个来源由前缀决定：Claude 的键不带前缀，Codex 的键以 codex: 开头', () => {
-    expect(KEY_PREFIXES).toEqual({ claude: '', codex: 'codex:' });
+    expect(KEY_PREFIXES).toEqual({ claude: '', codex: 'codex:', cursor: 'cursor:' });
     expect(originOfKey('proj/abc.jsonl')).toBe('claude');
     expect(originOfKey('codex:2026/11/11/rollout-x.jsonl')).toBe('codex');
   });

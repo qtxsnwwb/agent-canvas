@@ -11,6 +11,7 @@ export type NormalizerFactories = Readonly<Record<Origin, (() => AgentNormalizer
 export const NORMALIZER_FACTORIES: NormalizerFactories = {
   claude: () => new Normalizer(),
   codex: () => new CodexNormalizer(),
+  cursor: null, // CursorNormalizer comes later: until then Cursor raw events are stored only
 };
 
 const originOf = (event: RawEvent): Origin => event.origin ?? 'claude';

@@ -9,7 +9,7 @@ export interface Diagnostics {
   hookEvents: { origin: Origin; eventName: string; count: number; lastAt: string }[];
   /**
    * path is the file's store key: relative to the projects directory with `/` separators (Codex files, later:
-   * `codex:` + the path relative to the Codex sessions directory).
+   * `codex:` + the path relative to the Codex sessions directory; Cursor conversations: `cursor:<composerId>`).
    */
   files: { path: string; offset: number; size: number }[];
   /** Files (relative path) and hook sessions (`hook:<sessionId>`) whose last ingest attempt failed. */
@@ -20,6 +20,11 @@ export interface Diagnostics {
   dbEpoch: string;
   /** Codex's sessions directory as configured (null: Codex disabled) and whether it exists (stat only). */
   codex: { sessionsDir: string | null; sessionsDirExists: boolean };
+  /**
+   * Cursor's state database as configured (null: Cursor disabled) and whether it exists (stat only); lastPollAt /
+   * lastError: the Cursor poll source's last completed poll and last error (null when none ran or none failed).
+   */
+  cursor: { dbPath: string | null; dbExists: boolean; lastPollAt: string | null; lastError: string | null };
 }
 
 export type SearchField = 'title' | 'id' | 'branch' | 'cwd' | 'prompt';

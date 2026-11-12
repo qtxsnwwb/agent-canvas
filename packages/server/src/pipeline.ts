@@ -1,11 +1,12 @@
 import fsp from 'node:fs/promises';
 import { STALE_AFTER_MS, type Change, type Origin, type SeqChange } from '@claude-canvas/shared';
 import type { Config } from './config.js';
-import { NormalizerRegistry } from './normalize/registry.js';
+import { NORMALIZER_FACTORIES, NormalizerRegistry, type NormalizerFactories } from './normalize/registry.js';
 import { NORMALIZER_VERSION } from './normalize/version.js';
 import { ClaudeFileSource } from './sources/claude.js';
 import { encodeProjectId } from './sources/codex/source.js';
-import { isPromise, originOfKey, type FileClass, type FileSource, type MaybePromise } from './sources/source.js';
+import type { PollBatch, PollSink, PollSource, PollStatus } from './sources/poll.js';
+import { isPromise, KEY_PREFIXES, originOfKey, type FileClass, type FileSource, type MaybePromise } from './sources/source.js';
 import { readNewLines } from './sources/transcript/reader.js';
 import type { RawEvent, Store, StoredRawEvent } from './store/store.js';
 
@@ -27,6 +28,13 @@ export interface PipelineOptions {
   log?: (line: string) => void;
   /** The directories of session files to read; default: Claude Code's projectsDir only (defaultSources). */
   sources?: readonly FileSource[];
+  /**
+   * Sources whose data is polled (Cursor's database), at most one per origin: started after the initial scan, stopped
+   * by close(), poked when a hook of their origin arrives. Default: none.
+   */
+  pollSources?: readonly PollSource[];
+  /** The normalizer of each origin (tests); default NORMALIZER_FACTORIES. */
+  normalizers?: NormalizerFactories;
 }
 
 /** The sources a pipeline reads when none are given: Claude Code's projects directory. */
@@ -65,8 +73,16 @@ function topLevelType(text: string): string {
 
 export class Pipeline {
   /** One normalizer per origin; replaced wholesale by a rebuild (hydration checks identity to notice). */
-  private normalizer = new NormalizerRegistry();
+  private normalizer: NormalizerRegistry;
+  private readonly factories: NormalizerFactories;
   private readonly sources: readonly FileSource[];
+  private readonly polls: readonly PollSource[];
+  private pollsStarted = false;
+  private closed = false;
+  /** ingestRecords calls in flight (importing()). */
+  private pollIngests = 0;
+  /** Poll store key -> offset of its next transcript raw event (seeded from the store on first use). */
+  private readonly pollOffsets = new Map<string, number>();
   private readonly listeners = new Set<Listener>();
   private readonly resyncListeners = new Set<ResyncListener>();
   /**
@@ -110,6 +126,9 @@ export class Pipeline {
   ) {
     this.log = options.log ?? (() => {});
     this.sources = options.sources ?? defaultSources(config);
+    this.polls = options.pollSources ?? [];
+    this.factories = options.normalizers ?? NORMALIZER_FACTORIES;
+    this.normalizer = this.newNormalizer();
     this.dirty = new Set(store.dirtySessionIds());
   }
 
@@ -118,9 +137,30 @@ export class Pipeline {
     return this.sources;
   }
 
-  /** True while the initial full scan or a rebuild is running. */
+  /** The poll sources this pipeline drives. */
+  pollSources(): readonly PollSource[] {
+    return this.polls;
+  }
+
+  /** Status of the poll source of `origin`, or null when there is none. */
+  pollStatus(origin: Origin): PollStatus | null {
+    return this.pollSourceFor(origin)?.status() ?? null;
+  }
+
+  /** True while the initial full scan or a rebuild is running, or a poll source's records are being ingested. */
   importing(): boolean {
-    return this.importDepth > 0;
+    return this.importDepth > 0 || this.pollIngests > 0;
+  }
+
+  /**
+   * Stops the poll sources (a pipeline closed before its initial scan never starts them). Pending ingestion is left to
+   * idle().
+   */
+  async close(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
+    if (!this.pollsStarted) return;
+    await Promise.allSettled(this.polls.map((p) => p.stop()));
   }
 
   /**
@@ -220,6 +260,7 @@ export class Pipeline {
           ? source.projectOfTranscript(transcriptPath)
           : null;
     const event: RawEvent = { source: 'hook', origin, receivedAt, eventName, sessionId, payload, projectId };
+    this.pokePoll(origin, sessionId);
     this.seed();
     if (this.lastHook === null || receivedAt > this.lastHook) this.lastHook = receivedAt;
     const key = `hook:${sessionId}`;
@@ -272,7 +313,10 @@ export class Pipeline {
     try {
       await this.fullScan();
     } finally {
-      if (initial) this.importDepth -= 1;
+      if (initial) {
+        this.importDepth -= 1;
+        this.startPolls();
+      }
     }
   }
 
@@ -325,7 +369,7 @@ export class Pipeline {
       if (now - touched > this.config.evictAfterMs) continue;
       for (const file of this.filesBySession.get(id) ?? []) targets.add(file);
     }
-    for (const key of this.failures.keys()) if (!isNonFileKey(key)) targets.add(key);
+    for (const key of this.failures.keys()) if (!isNonFileKey(key) && !this.isPollKey(key)) targets.add(key);
     for (const file of [...targets].sort()) {
       if (await this.unchanged(file)) continue;
       await this.safeIngest(file);
@@ -360,12 +404,12 @@ export class Pipeline {
   private rebuildAll(progress?: (done: number, total: number) => void): void {
     this.store.setMeta(REBUILD_FLAG, '1');
     this.store.clearDerived();
-    this.normalizer = new NormalizerRegistry();
+    this.normalizer = this.newNormalizer();
     this.lastTouch.clear();
     const ids = this.store.allSessionIdsInRaw();
     try {
       ids.forEach((id, i) => {
-        this.normalizer = new NormalizerRegistry();
+        this.normalizer = this.newNormalizer();
         const changes: Change[] = [];
         const unknown: [string, string][] = [];
         let after = 0;
@@ -385,12 +429,12 @@ export class Pipeline {
           for (const [type, sample] of unknown) this.store.bumpUnknown(type, sample);
           return changes;
         });
-        this.normalizer = new NormalizerRegistry(); // release this session before the next one
+        this.normalizer = this.newNormalizer(); // release this session before the next one
         if ((i + 1) % REBUILD_PROGRESS_EVERY === 0 || i + 1 === ids.length) progress?.(i + 1, ids.length);
       });
     } finally {
       // Sessions are re-hydrated on demand; leave nothing loaded-but-untracked.
-      this.normalizer = new NormalizerRegistry();
+      this.normalizer = this.newNormalizer();
       this.lastTouch.clear();
     }
     this.store.setMeta(NORMALIZER_VERSION_KEY, String(NORMALIZER_VERSION));
@@ -407,6 +451,108 @@ export class Pipeline {
   async listFiles(): Promise<string[]> {
     const lists = await Promise.all(this.sources.map((s) => s.listFiles()));
     return lists.flat().sort();
+  }
+
+  // ---------------------------------------------------------------- poll sources
+
+  private newNormalizer(): NormalizerRegistry {
+    return new NormalizerRegistry(this.factories);
+  }
+
+  private pollSourceFor(origin: Origin): PollSource | null {
+    return this.polls.find((p) => p.origin === origin) ?? null;
+  }
+
+  /** True for a store key of a polled origin: its failures are not files the rescan could re-read. */
+  private isPollKey(key: string): boolean {
+    return this.polls.length > 0 && this.pollSourceFor(originOfKey(key)) !== null;
+  }
+
+  /** Starts each poll source once, after the initial scan, unless the pipeline was closed. */
+  private startPolls(): void {
+    if (this.pollsStarted || this.closed) return;
+    this.pollsStarted = true;
+    for (const source of this.polls) {
+      try {
+        source.start(this.sinkFor(source));
+      } catch (err) {
+        this.reportFailure(`${KEY_PREFIXES[source.origin]}poll`, err);
+      }
+    }
+  }
+
+  /** A hook of `origin` arrived for a session: the poll source of that origin (if any) polls it soon. */
+  private pokePoll(origin: Origin, sessionId: string | null): void {
+    if (sessionId === null) return;
+    const source = this.pollSourceFor(origin);
+    if (source === null) return;
+    try {
+      source.poke(sessionId);
+    } catch {
+      // a failing source must not break hook ingestion
+    }
+  }
+
+  /** What `source` may ask of the pipeline, bound to its origin. */
+  private sinkFor(source: PollSource): PollSink {
+    return {
+      ingestRecords: (batch) => this.ingestPolled(source.origin, batch),
+      markSourceDeleted: (sessionId) => this.markSourceDeleted(sessionId),
+      clearSourceDeleted: (sessionId) => this.clearSourceDeleted(sessionId),
+      reportFailure: (key, err) => this.reportFailure(key, err),
+    };
+  }
+
+  /**
+   * PollSink.ingestRecords: one transaction per batch, in the session's work chain. Each record not stored yet under the
+   * key becomes a transcript raw event whose offset is the key's next sequence number (0, 1, 2, ... in ingestion order,
+   * continuing after the highest one stored), so a key's offsets follow ingest order as a file's byte offsets do.
+   */
+  private async ingestPolled(origin: Origin, batch: PollBatch): Promise<void> {
+    if (batch.records.length === 0) return;
+    const { key, sessionId, agentId, projectId } = batch;
+    this.pollIngests += 1;
+    try {
+      await this.enqueue(sessionId, () => {
+        let next = this.pollOffsets.get(key) ?? (this.store.maxTranscriptOffset(key) ?? -1) + 1;
+        this.atomically(
+          sessionId,
+          () => {
+            const changes: Change[] = [];
+            for (const { recordType, line } of batch.records) {
+              const event: RawEvent = { source: 'transcript', origin, file: key, offset: next, line, recordType, sessionId, agentId, projectId };
+              if (this.store.insertRaw(event) === null) continue;
+              next += 1;
+              const out = this.normalizer.apply(event, projectId);
+              changes.push(...out.changes);
+              if (out.unknownRecordType !== undefined) this.store.bumpUnknown(out.unknownRecordType, line);
+            }
+            return changes;
+          },
+          () => this.pollOffsets.set(key, next),
+        );
+      });
+      this.failures.delete(key);
+    } catch (err) {
+      this.reportFailure(key, err);
+      throw err;
+    } finally {
+      this.pollIngests -= 1;
+    }
+  }
+
+  /** PollSink.markSourceDeleted: the session is flagged, and stays flagged in every later change of it. */
+  private async markSourceDeleted(sessionId: string): Promise<void> {
+    this.deleted.add(sessionId);
+    const session = this.store.getSession(sessionId);
+    if (session && !session.sourceDeleted) this.commit([{ type: 'session_upserted', session: { ...session, sourceDeleted: true } }]);
+  }
+
+  /** PollSink.clearSourceDeleted: also clears a flag stored by an earlier run (no longer in `deleted`). */
+  private async clearSourceDeleted(sessionId: string): Promise<void> {
+    this.deleted.delete(sessionId);
+    const session = this.store.getSession(sessionId);
+    if (session?.sourceDeleted) this.commit([{ type: 'session_upserted', session: { ...session, sourceDeleted: false } }]);
   }
 
   // ---------------------------------------------------------------- internals

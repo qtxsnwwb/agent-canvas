@@ -12,6 +12,7 @@ const base: Diagnostics = {
   normalizerVersion: 1,
   dbEpoch: 'e',
   codex: { sessionsDir: null, sessionsDirExists: false },
+  cursor: { dbPath: null, dbExists: false, lastPollAt: null, lastError: null },
 };
 
 test('hooksByOrigin：Codex 会话目录存在（即使还没有文件、也没收到 hook）就列出 codex', () => {

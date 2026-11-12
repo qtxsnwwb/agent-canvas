@@ -3,6 +3,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyStatic from '@fastify/static';
 import fastifyWebsocket from '@fastify/websocket';
 import {
+  ORIGINS,
   SEARCH_DEFAULT_LIMIT,
   SEARCH_MAX_LIMIT,
   type Change,
@@ -97,6 +98,16 @@ export function isAllowedRequest(headers: {
     }
   }
   return true;
+}
+
+/** Whether the path names an existing file (only stat'ed, never opened). */
+function isFile(file: string | null): boolean {
+  if (file === null || file === '') return false;
+  try {
+    return fs.statSync(file).isFile();
+  } catch {
+    return false;
+  }
 }
 
 /** Whether the path names an existing directory (only stat'ed, never read). */
@@ -258,6 +269,12 @@ export function buildServer(deps: { store: Store; pipeline: Pipeline; config: Co
       normalizerVersion: NORMALIZER_VERSION,
       dbEpoch: store.epoch(),
       codex: { sessionsDir: config.codexSessionsDir, sessionsDirExists: isDirectory(config.codexSessionsDir) },
+      cursor: {
+        dbPath: config.cursorDbPath,
+        dbExists: isFile(config.cursorDbPath),
+        lastPollAt: pipeline.pollStatus('cursor')?.lastPollAt ?? null,
+        lastError: pipeline.pollStatus('cursor')?.lastError ?? null,
+      },
     }),
   );
 
@@ -270,8 +287,10 @@ export function buildServer(deps: { store: Store; pipeline: Pipeline; config: Co
     });
     instance.post<{ Querystring: { origin?: unknown } }>('/hooks', { bodyLimit: HOOK_BODY_LIMIT }, (req, reply) => {
       const text = typeof req.body === 'string' ? req.body : '';
-      // `?origin=codex` comes from `claude-canvas hook-forward`; anything else (none: Claude Code's http hooks) is Claude.
-      const origin: Origin = req.query.origin === 'codex' ? 'codex' : 'claude';
+      // `?origin=codex|cursor` comes from `claude-canvas hook-forward`; anything else (none: Claude Code's http hooks) is
+      // Claude.
+      const q = req.query.origin;
+      const origin: Origin = typeof q === 'string' && (ORIGINS as readonly string[]).includes(q) ? (q as Origin) : 'claude';
       void reply.code(200).send();
       setImmediate(() => {
         try {

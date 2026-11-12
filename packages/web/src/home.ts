@@ -4,6 +4,7 @@ import { ORIGINS, type Origin, type Project } from '@claude-canvas/shared';
 export const ORIGIN_LOOK: Record<Origin, { label: string; className: string }> = {
   claude: { label: 'Claude Code', className: 'origin-claude' },
   codex: { label: 'Codex', className: 'origin-codex' },
+  cursor: { label: 'Cursor', className: 'origin-cursor' },
 };
 
 export function originLook(origin: Origin): { label: string; className: string } {

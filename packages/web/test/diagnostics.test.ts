@@ -15,6 +15,7 @@ const base: Diagnostics = {
   normalizerVersion: 1,
   dbEpoch: 'e',
   codex: { sessionsDir: null, sessionsDirExists: false },
+  cursor: { dbPath: null, dbExists: false, lastPollAt: null, lastError: null },
 };
 const at = (msAgo: number): string => new Date(NOW - msAgo).toISOString();
 

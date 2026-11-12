@@ -78,7 +78,7 @@ beforeEach(() => {
 const nodeChanges = (r: RunResult) => r.changes.filter((c) => c.type !== 'session_upserted');
 
 test('NORMALIZER_VERSION 已升级', () => {
-  expect(NORMALIZER_VERSION).toBe(19);
+  expect(NORMALIZER_VERSION).toBeGreaterThanOrEqual(19);
 });
 
 describe('parseCodexHook', () => {

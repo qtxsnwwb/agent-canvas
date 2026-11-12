@@ -142,6 +142,7 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
       closing ??= (async () => {
         try {
           await watcher!.close();
+          await pipeline.close();
           await server.close();
           await pipeline.idle();
           openedStore.close();

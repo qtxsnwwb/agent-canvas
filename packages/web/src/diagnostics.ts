@@ -53,11 +53,12 @@ export const EXPECTED_CODEX_HOOK_EVENTS: readonly string[] = [
 export const EXPECTED_HOOK_EVENTS_BY_ORIGIN: Record<Origin, readonly string[]> = {
   claude: EXPECTED_HOOK_EVENTS,
   codex: EXPECTED_CODEX_HOOK_EVENTS,
+  cursor: [], // Cursor hooks come later
 };
 
-/** The origin of a file by its store key: Codex files are `codex:`-prefixed. */
+/** The origin of a file by its store key: Codex files are `codex:`-prefixed, Cursor conversations `cursor:`-prefixed. */
 export function fileOrigin(path: string): Origin {
-  return path.startsWith('codex:') ? 'codex' : 'claude';
+  return path.startsWith('codex:') ? 'codex' : path.startsWith('cursor:') ? 'cursor' : 'claude';
 }
 
 /** Whether hooks were received, and how long ago, from the time of the last one (null: never). */

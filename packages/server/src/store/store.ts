@@ -127,6 +127,8 @@ export interface Store {
   transaction<T>(fn: () => T): T;
   /** Returns the ingestId, or null for a duplicate transcript line. */
   insertRaw(event: RawEvent): number | null;
+  /** Highest `offset` of the transcript raw events stored under `file`, or null when there is none. */
+  maxTranscriptOffset(file: string): number | null;
   /** 0 when the file has no recorded offset. */
   getOffset(file: string): number;
   setOffset(file: string, offset: number, size: number): void;
@@ -375,6 +377,9 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   const insertRawMeta = db.prepare(
     `INSERT INTO raw_event (source, origin, file, session_id, agent_id, project_id, body)
      VALUES ('meta', @origin, @file, @sessionId, @agentId, @projectId, @payload)`,
+  );
+  const selectMaxTranscriptOffset = db.prepare(
+    `SELECT MAX("offset") AS off FROM raw_event WHERE source = 'transcript' AND file = ?`,
   );
   const selectOffset = db.prepare(`SELECT "offset" AS off FROM file_offset WHERE file = ?`);
   const upsertOffset = db.prepare(
@@ -638,6 +643,9 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
       }
       if (event.source === 'hook') return insertHookTx(event);
       return Number(insertRawMeta.run({ ...event, origin: event.origin ?? 'claude', projectId: event.projectId ?? null }).lastInsertRowid);
+    },
+    maxTranscriptOffset(file) {
+      return (selectMaxTranscriptOffset.get(file) as { off: number | null }).off;
     },
     getOffset(file) {
       const row = selectOffset.get(file) as { off: number } | undefined;

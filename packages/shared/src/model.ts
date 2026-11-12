@@ -3,9 +3,9 @@ export type NodeStatus = 'running' | 'awaiting_permission' | 'succeeded' | 'fail
 export type SessionStatus = 'running' | 'awaiting_input' | 'awaiting_permission' | 'idle' | 'ended';
 export type EdgeKind = 'sequence' | 'fork' | 'spawn';
 /** Which agent a session (and every raw event, file and hook behind it) comes from. */
-export type Origin = 'claude' | 'codex';
+export type Origin = 'claude' | 'codex' | 'cursor';
 /** Every origin, in the order lists of origins are given in (Project.origins, diagnostics). */
-export const ORIGINS: readonly Origin[] = ['claude', 'codex'];
+export const ORIGINS: readonly Origin[] = ['claude', 'codex', 'cursor'];
 export const TERMINAL_STATUSES: readonly NodeStatus[] = ['succeeded', 'failed', 'denied'];
 export const SUMMARY_MAX = 200;
 
