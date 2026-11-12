@@ -29,7 +29,7 @@ const detailOf = (r: RunResult, id: string): Record<string, unknown> => {
   return d;
 };
 const session = (r: RunResult, id = ROOT) => r.sessions.get(id)!;
-/** The graph without the edge map, for comparisons across arrival orders. */
+/** The whole graph (nodes, edges) and the session, for comparisons across arrival orders. */
 const shape = (r: RunResult) => ({ nodes: r.graph.nodes, edges: r.graph.edges, session: r.sessions.get(ROOT) });
 
 describe('sessions (composer records)', () => {
@@ -187,7 +187,8 @@ describe('nodes from bubbles', () => {
 
     const d = new CursorConv({ id: ROOT });
     const r2 = go([d.composer(), d.user('u1', 'go', 0), d.tool('t1', 'read_file', 'loading', 1), d.turnEnd('end', 9)]);
-    expect(nodeOf(r2, d.node('t1'))).toMatchObject({ status: 'failed', endedAt: iso(at(9) + 100) });
+    // Without completedAtMs it ends where the next bubble starts (fix round 1, I2).
+    expect(nodeOf(r2, d.node('t1'))).toMatchObject({ status: 'failed', endedAt: iso(at(9)) });
     // A loading tool of the open last turn stays running.
     const e = new CursorConv({ id: ROOT });
     expect(nodeOf(go([e.user('u1', 'go', 0), e.tool('t1', 'read_file', 'loading', 1)]), e.node('t1')).status).toBe('running');
@@ -497,7 +498,7 @@ describe('arrival order independence', () => {
     for (let seed = 1; seed <= 60; seed++) expect(shape(go(interleave([root, sub1, sub2], seed)))).toEqual(ref);
   });
 
-  test('bubbles of one conversation in any order: same nodes; every edge of the final graph is present', () => {
+  test('bubbles of one conversation in any order: the same graph, edges included', () => {
     const c = new CursorConv({ id: ROOT });
     const events = [
       c.composer(),
@@ -515,11 +516,11 @@ describe('arrival order independence', () => {
       const r = go(shuffled);
       expect(r.graph.nodes).toEqual(ref.graph.nodes);
       expect(r.sessions.get(ROOT)).toEqual(ref.sessions.get(ROOT));
-      for (const id of Object.keys(ref.graph.edges)) expect(r.graph.edges[id]).toEqual(ref.graph.edges[id]);
+      expect(r.graph.edges).toEqual(ref.graph.edges);
     }
   });
 
-  test('a long conversation updated in place and partly re-ordered: same nodes as its final records alone, every final edge present', () => {
+  test('a long conversation updated in place and partly re-ordered: the same graph as its final records alone', () => {
     const c = new CursorConv({ id: ROOT });
     const events: RawEvent[] = [c.composer({ status: 'none' })];
     const finals = new Map<string, RawEvent>();
@@ -562,7 +563,7 @@ describe('arrival order independence', () => {
     const finalOnly = go([c.composer({ status: 'completed' }), ...inOrder]);
     expect(live.graph.nodes).toEqual(finalOnly.graph.nodes);
     expect(live.sessions.get(ROOT)).toEqual(finalOnly.sessions.get(ROOT));
-    for (const id of Object.keys(finalOnly.graph.edges)) expect(live.graph.edges[id]).toEqual(finalOnly.graph.edges[id]);
+    expect(live.graph.edges).toEqual(finalOnly.graph.edges);
     expect(nodeOf(live, c.node('p5c'))).toMatchObject({ status: 'failed' }); // never finished
     expect(nodeOf(live, c.node('p11c')).status).toBe('running'); // last turn still open
     expect(nodeOf(live, c.node('a3')).parentId).toBe(c.node('u3')); // moved to just after its prompt

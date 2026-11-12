@@ -169,7 +169,13 @@ export class CursorConv {
   }
 
   /** A task_v2 dispatch bubble. */
-  task(bubbleId: string, toolCallId: string, status: 'completed' | 'error' | 'loading' | 'cancelled', sec: number, opts: { durSec?: number; over?: BubbleInit } = {}): RawEvent {
+  task(
+    bubbleId: string,
+    toolCallId: string,
+    status: 'completed' | 'error' | 'loading' | 'cancelled',
+    sec: number,
+    opts: { durSec?: number; over?: BubbleInit; result?: unknown } = {},
+  ): RawEvent {
     return this.tool(bubbleId, 'task_v2', status, sec, {
       toolCallId,
       params: { description: `look into ${bubbleId}`, prompt: 'find the thing and report back', subagentType: 'explore' },

@@ -1,8 +1,18 @@
-import type { Change, GraphEdge, GraphNode, NodeDetail, Session, Usage } from '@claude-canvas/shared';
+import type { Change, GraphEdge, GraphNode, NodeDetail, Session } from '@claude-canvas/shared';
 import { CURSOR_RECORD_TYPES } from '../sources/cursor/records.js';
 import type { RawEvent } from '../store/store.js';
-import { promptTitle } from './codex.js';
-import { summarize } from './summary.js';
+import {
+  bubbleView,
+  composerFacts,
+  isObject,
+  isoOf,
+  lowerBound,
+  maxOf,
+  minOf,
+  str,
+  type BubbleView,
+  type ComposerFacts,
+} from './cursor-bubbles.js';
 import type { AgentNormalizer, NormalizeResult } from './types.js';
 
 /*
@@ -11,113 +21,38 @@ import type { AgentNormalizer, NormalizeResult } from './types.js';
  *
  * Unlike the append-only transcripts of the other origins, a Cursor bubble is rewritten in place (a later record of
  * the same bubbleId supersedes the earlier one) and a conversation's records may arrive in any interleaving with its
- * subagents' records. So nothing here is incremental: the normalizer keeps the latest record of every bubble, derives
- * each conversation's part of the graph from them (`deriveThread`), and emits the difference to what it emitted before
- * (new nodes, changed node fields, new or changed edges). Node fields and the session are therefore a function of the
- * records read so far, whatever their order. Edges cannot be removed (there is no such Change): when a bubble moves,
- * its new edges are added and the old ones stay; for records that arrive in their conversation's order (as the source
- * sends them) the edge set is the derived one too.
+ * subagents' records. So nothing here is incremental in the Codex sense: the normalizer keeps the latest view of every
+ * bubble, derives each conversation's part of the graph from them (`deriveThread`), and emits the difference to what it
+ * emitted before: new nodes, changed node fields, new or changed edges, and `edge_removed` for every edge a node no
+ * longer produces. Nodes, edges and the session are therefore a function of the records read so far, whatever their
+ * order. (One exception, kept on purpose: a bubble whose newer record has a shape that makes no node keeps the node of
+ * its last recognised shape; nodes are never removed.)
  */
 
 const EPOCH = '1970-01-01T00:00:00.000Z';
-const TASK_TOOL = 'task_v2';
 const CANCELLED_NOTE = 'Cancelled in Cursor.';
+const REJECTED_NOTE = 'Rejected by the user.';
+const ABORTED_NOTE = 'Aborted: the conversation was stopped while the tool was still running.';
 const NEVER_FINISHED_NOTE = 'Never finished: the turn ended while the tool was still running.';
-/** `params` keys naming a call's main argument, most telling first (Cursor's camelCase and snake_case spellings). */
-const MAIN_ARG_KEYS = [
-  'command',
-  'targetFile',
-  'target_file',
-  'relativeWorkspacePath',
-  'relative_workspace_path',
-  'filePath',
-  'file_path',
-  'path',
-  'targetDirectory',
-  'target_directory',
-  'query',
-  'pattern',
-  'globPattern',
-  'glob_pattern',
-  'searchTerm',
-  'search_term',
-  'url',
-  'description',
-  'prompt',
-  'explanation',
-];
-const TASK_ARG_KEYS = ['description', 'prompt'];
-const AGENT_TYPE_KEYS = ['subagentTypeName', 'subagentType', 'subagent_type'];
-
-type Obj = Record<string, unknown>;
-const isObject = (v: unknown): v is Obj => typeof v === 'object' && v !== null && !Array.isArray(v);
-const str = (v: unknown): string | null => (typeof v === 'string' && v !== '' ? v : null);
-const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
-function isoOf(ms: number | null): string | null {
-  if (ms === null) return null;
-  const d = new Date(ms);
-  return Number.isNaN(d.getTime()) ? null : d.toISOString();
-}
-function msOfIso(v: unknown): number | null {
-  if (typeof v !== 'string') return null;
-  const ms = Date.parse(v);
-  return Number.isNaN(ms) ? null : ms;
-}
-const maxOf = (a: number | null, b: number | null): number | null => (a === null ? b : b === null ? a : Math.max(a, b));
-const minOf = (a: number | null, b: number | null): number | null => (a === null ? b : b === null ? a : Math.min(a, b));
-
-/** A conversation's composer facts the graph needs. */
-interface ComposerFacts {
-  name: string | null;
-  status: string | null;
-  createdAt: number | null;
-  cwd: string | null;
-  /** Subagents: the task_v2 call that dispatched it. */
-  toolCallId: string | null;
-  subagentTypeName: string | null;
-}
-
-type BubbleKind = 'prompt' | 'text' | 'thinking' | 'tool' | 'subagent';
-
-/** What the graph needs of the latest record of one bubble (the large texts go to `SessionState.pending`). */
-interface BubbleView {
-  bubbleId: string;
-  nodeId: string;
-  /** Index in the conversation's list; Infinity when the record had none. */
-  order: number;
-  createdMs: number | null;
-  /** startedAtMs, else createdAt. */
-  startMs: number | null;
-  endMs: number | null;
-  /** Latest of its times (session activity). */
-  latestMs: number | null;
-  hasTurnDuration: boolean;
-  /** null: a shape that makes no node. */
-  kind: BubbleKind | null;
-  title: string;
-  summary: string;
-  promptTitle: string | null;
-  thinkingMs: number | null;
-  usage: Usage | null;
-  toolName: string | null;
-  toolStatus: string | null;
-  toolCallId: string | null;
-  /** task_v2: the subagent type named in its params. */
-  agentType: string | null;
-}
+/** A derivation saves a scan checkpoint before every CHECKPOINT_EVERY-th bubble of a thread. */
+const CHECKPOINT_EVERY = 32;
 
 interface Turn {
   /** The prompt node that opened it; null for bubbles before the thread's first prompt. */
   promptNodeId: string | null;
   /** Index of its first bubble in the thread's sorted list. */
   startIndex: number;
-  /** A bubble with turnDurationMs is in it, or a later prompt exists. */
+  /** A bubble with turnDurationMs is in it, a later prompt exists, or the conversation was aborted in it. */
   ended: boolean;
   hasTurnDuration: boolean;
+  /** Ended by the composer status `aborted` (last turn only). */
+  aborted: boolean;
   /** A tool / dispatch bubble of it is not in a terminal raw status. */
   hasRunning: boolean;
-  /** End time: the turnDurationMs bubble's end, else the next prompt's start. */
+  /** End time: the turnDurationMs bubble's end, else the next prompt's start; aborted: its latest bubble time. */
   endMs: number | null;
+  /** Latest bubble time in it. */
+  maxMs: number | null;
 }
 
 /** Everything derived from one thread's own records (cached per thread version). */
@@ -130,10 +65,10 @@ interface Analysis {
   open: boolean;
   minMs: number | null;
   maxMs: number | null;
-  /** Title from the first prompt; undefined when the thread has no prompt. */
-  firstPromptTitle: string | null | undefined;
-  /** task_v2 bubbles with a toolCallId, in thread order, with their index in `sorted`. */
-  dispatches: { nodeId: string; callId: string; index: number }[];
+  /** Title from the first prompt with a usable text. */
+  firstPromptTitle: string | null;
+  /** task_v2 bubbles, in thread order, with their index in `sorted`. */
+  dispatches: { nodeId: string; callId: string | null; agentId: string | null; index: number }[];
 }
 
 /** The state of a thread's derivation scan just before one bubble (see deriveThread). */
@@ -154,8 +89,10 @@ interface ThreadState {
   sorted: BubbleView[];
   /** Lowest index in `sorted` changed since the thread was last derived (Infinity: none). */
   dirtyFrom: number;
-  /** Scan state before each prompt bubble (by node id), saved by the last derivation that passed it. */
+  /** Scan state before a bubble (by bubble id), saved by the last derivation that passed it. */
   checkpoints: Map<string, Scan>;
+  /** Per turn (prompt node id, '' before the first prompt): the turn facts nodes depend on, at the last derivation. */
+  turnFacts: Map<string, string>;
   version: number;
   analysis: Analysis | null;
   analysisVersion: number;
@@ -171,6 +108,10 @@ interface SessionState {
   notes: Map<string, string | null>;
   /** Edge id -> `from>to>kind` as emitted. */
   edges: Map<string, string>;
+  /** Edge id -> the bubble node whose derivation step produced it, as emitted. */
+  edgeProducer: Map<string, string>;
+  /** Bubble node id -> the edge ids its derivation step produced, as emitted. */
+  produced: Map<string, string[]>;
   /** Detail of a bubble's latest record, until it has been emitted (held subagent threads keep theirs). */
   pending: Map<string, Partial<NodeDetail>>;
   /** Shown threads -> the dispatch node they hang off (null for the main conversation), as last derived. */
@@ -181,6 +122,13 @@ interface DerivedNode {
   node: GraphNode;
   note: string | null;
   isCall: boolean;
+}
+
+interface Derived {
+  nodes: DerivedNode[];
+  edges: GraphEdge[];
+  /** Every bubble (node or not) the derivation passed -> the edge ids its step produced. */
+  producers: Map<string, string[]>;
 }
 
 /** Thread links: which threads are shown and where they hang. */
@@ -194,165 +142,6 @@ interface Links {
 }
 
 const isRunningRaw = (status: string | null): boolean => status !== 'completed' && status !== 'error' && status !== 'cancelled';
-
-/** Pass-through of JSON text: parsed when it parses, else the text itself. */
-function parseJsonText(text: string | null, cut: boolean): unknown {
-  if (text === null) return null;
-  if (cut) return text;
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    return text;
-  }
-}
-
-/** The main argument of a call as a one-line summary: a known key, else the first string value, else the whole input. */
-function mainArg(input: unknown, keys: readonly string[]): string {
-  if (isObject(input)) {
-    for (const k of keys) {
-      const v = str(input[k]);
-      if (v !== null && v.trim() !== '') return summarize(v.trim());
-    }
-    for (const v of Object.values(input)) {
-      if (typeof v === 'string' && v.trim() !== '') return summarize(v.trim());
-    }
-  }
-  return input === null ? '' : summarize(input);
-}
-
-function firstString(input: unknown, keys: readonly string[]): string | null {
-  if (!isObject(input)) return null;
-  for (const k of keys) {
-    const v = str(input[k]);
-    if (v !== null) return v;
-  }
-  return null;
-}
-
-function usageOf(v: unknown): Usage | null {
-  if (!isObject(v)) return null;
-  const inputTokens = num(v.inputTokens) ?? 0;
-  const outputTokens = num(v.outputTokens) ?? 0;
-  return inputTokens === 0 && outputTokens === 0 ? null : { inputTokens, outputTokens };
-}
-
-function composerFacts(rec: Obj): ComposerFacts {
-  const info = isObject(rec.subagentInfo) ? rec.subagentInfo : null;
-  return {
-    name: str(rec.name),
-    status: str(rec.status),
-    createdAt: num(rec.createdAt),
-    cwd: str(rec.cwd),
-    toolCallId: info === null ? null : str(info.toolCallId),
-    subagentTypeName: info === null ? null : str(info.subagentTypeName),
-  };
-}
-
-/** The view of a bubble record, its detail, and the shape label when it makes no node. */
-function bubbleView(rec: Obj, bubbleId: string, nodeId: string): { view: BubbleView; detail: Partial<NodeDetail>; unknown?: string } {
-  const type = num(rec.type);
-  const cap = num(rec.capabilityType);
-  const text = str(rec.text);
-  const thinking = isObject(rec.thinking) ? rec.thinking : null;
-  const tfd = isObject(rec.toolFormerData) ? rec.toolFormerData : null;
-  const truncated = Array.isArray(rec.truncated) ? rec.truncated.filter((x): x is string => typeof x === 'string') : [];
-  const createdMs = msOfIso(rec.createdAt);
-  const startedAtMs = num(rec.startedAtMs);
-  const endMs = num(rec.completedAtMs);
-  const startMs = startedAtMs ?? createdMs;
-  let kind: BubbleKind | null = null;
-  if (type === 1) kind = 'prompt';
-  else if (type === 2) {
-    if (tfd !== null) kind = str(tfd.name) === TASK_TOOL ? 'subagent' : 'tool';
-    else if (thinking !== null || cap === 30) kind = 'thinking';
-    else if (text !== null) kind = 'text';
-  }
-  const view: BubbleView = {
-    bubbleId,
-    nodeId,
-    order: num(rec.order) ?? Number.POSITIVE_INFINITY,
-    createdMs,
-    startMs,
-    endMs,
-    latestMs: maxOf(maxOf(createdMs, startedAtMs), endMs),
-    hasTurnDuration: num(rec.turnDurationMs) !== null,
-    kind,
-    title: '',
-    summary: '',
-    promptTitle: null,
-    thinkingMs: null,
-    usage: usageOf(rec.tokenCount),
-    toolName: null,
-    toolStatus: null,
-    toolCallId: null,
-    agentType: null,
-  };
-  let detail: Partial<NodeDetail> = {};
-  switch (kind) {
-    case 'prompt':
-      view.title = 'Prompt';
-      view.summary = summarize(text ?? '');
-      view.promptTitle = text === null ? null : promptTitle(text);
-      detail = { input: null, output: null, text: text ?? '', raw: null };
-      break;
-    case 'text':
-      view.title = 'Text';
-      view.summary = summarize(text ?? '');
-      detail = { input: null, output: null, text: text ?? '', raw: null };
-      break;
-    case 'thinking': {
-      const t = thinking === null ? null : str(thinking.text);
-      view.title = 'Thinking';
-      view.summary = summarize(t ?? '');
-      view.thinkingMs = num(rec.thinkingDurationMs);
-      detail = { input: null, output: null, text: t ?? '', raw: null };
-      break;
-    }
-    case 'tool':
-    case 'subagent': {
-      const t = tfd!;
-      const name = str(t.name) ?? 'unknown';
-      const params = str(t.params);
-      const input = parseJsonText(params, truncated.includes('params'));
-      const output = parseJsonText(str(t.result), truncated.includes('result'));
-      view.toolName = name;
-      view.title = name;
-      view.toolStatus = str(t.status);
-      view.toolCallId = str(t.toolCallId);
-      view.summary = kind === 'subagent' ? mainArg(input, TASK_ARG_KEYS) : mainArg(input, MAIN_ARG_KEYS);
-      if (kind === 'subagent') view.agentType = firstString(input, AGENT_TYPE_KEYS);
-      detail = { input, output, raw: { status: view.toolStatus, toolCallId: view.toolCallId, truncated } };
-      break;
-    }
-    case null:
-      return {
-        view,
-        detail,
-        unknown: type === 2 ? `bubble:type2/cap${cap ?? 'null'}/empty` : `bubble:type${type ?? 'null'}/cap${cap ?? 'null'}`,
-      };
-  }
-  return { view, detail };
-}
-
-function compareBubbles(a: BubbleView, b: BubbleView): number {
-  if (a.order !== b.order) return a.order < b.order ? -1 : 1;
-  const ac = a.createdMs ?? Number.POSITIVE_INFINITY;
-  const bc = b.createdMs ?? Number.POSITIVE_INFINITY;
-  if (ac !== bc) return ac < bc ? -1 : 1;
-  return a.bubbleId < b.bubbleId ? -1 : a.bubbleId > b.bubbleId ? 1 : 0;
-}
-
-/** First index of `list` (sorted by compareBubbles) whose bubble does not sort before `v`. */
-function lowerBound(list: BubbleView[], v: BubbleView): number {
-  let lo = 0;
-  let hi = list.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1;
-    if (compareBubbles(list[mid]!, v) < 0) lo = mid + 1;
-    else hi = mid;
-  }
-  return lo;
-}
 
 /** Stores the latest view of a bubble, keeping `sorted` in order; marks the thread dirty from the lowest index moved. */
 function upsertBubble(thread: ThreadState, view: BubbleView): void {
@@ -374,9 +163,10 @@ function upsertBubble(thread: ThreadState, view: BubbleView): void {
 
 /**
  * The thread's own facts: order, turns, times, dispatch calls. A turn ends at a bubble with turnDurationMs or at the
- * next prompt. The last turn is open unless it has a turnDurationMs bubble, and it is open when it has a tool still in
- * a non-terminal status, or the thread's last bubble is its prompt, or the composer status is neither 'completed' nor
- * 'aborted' (Cursor's 'none' while generating, or no composer record yet).
+ * next prompt. When the composer status is `aborted`, the last turn counts as ended too (unless the thread's last bubble
+ * is a prompt: a new turn started after the abort). The last turn is open unless it has ended that way, and it is open
+ * when it has a tool still in a non-terminal status, or the thread's last bubble is its prompt, or the composer status
+ * is neither 'completed' nor 'aborted' (Cursor's 'none' while generating, or no composer record yet).
  */
 function analyze(thread: ThreadState): Analysis {
   if (thread.analysis !== null && thread.analysisVersion === thread.version) return thread.analysis;
@@ -385,8 +175,18 @@ function analyze(thread: ThreadState): Analysis {
   const turnOf: number[] = [];
   let minMs: number | null = null;
   let maxMs: number | null = null;
-  let firstPromptTitle: string | null | undefined;
+  let firstPromptTitle: string | null = null;
   const dispatches: Analysis['dispatches'] = [];
+  const newTurn = (promptNodeId: string | null, startIndex: number): Turn => ({
+    promptNodeId,
+    startIndex,
+    ended: false,
+    hasTurnDuration: false,
+    aborted: false,
+    hasRunning: false,
+    endMs: null,
+    maxMs: null,
+  });
   for (let i = 0; i < sorted.length; i++) {
     const b = sorted[i]!;
     if (b.kind === 'prompt') {
@@ -395,10 +195,10 @@ function analyze(thread: ThreadState): Analysis {
         prev.ended = true;
         prev.endMs = b.startMs;
       }
-      turns.push({ promptNodeId: b.nodeId, startIndex: i, ended: false, hasTurnDuration: false, hasRunning: false, endMs: null });
-      if (firstPromptTitle === undefined) firstPromptTitle = b.promptTitle;
+      turns.push(newTurn(b.nodeId, i));
+      if (firstPromptTitle === null) firstPromptTitle = b.promptTitle;
     } else if (turns.length === 0) {
-      turns.push({ promptNodeId: null, startIndex: 0, ended: false, hasTurnDuration: false, hasRunning: false, endMs: null });
+      turns.push(newTurn(null, 0));
     }
     const turn = turns[turns.length - 1]!;
     turnOf.push(turns.length - 1);
@@ -408,31 +208,44 @@ function analyze(thread: ThreadState): Analysis {
       turn.endMs = b.endMs ?? b.startMs;
     }
     if ((b.kind === 'tool' || b.kind === 'subagent') && isRunningRaw(b.toolStatus)) turn.hasRunning = true;
-    if (b.kind === 'subagent' && b.toolCallId !== null) dispatches.push({ nodeId: b.nodeId, callId: b.toolCallId, index: i });
+    if (b.kind === 'subagent') dispatches.push({ nodeId: b.nodeId, callId: b.toolCallId, agentId: b.resultAgentId, index: i });
+    turn.maxMs = maxOf(turn.maxMs, b.latestMs);
     minMs = minOf(minMs, b.startMs);
     maxMs = maxOf(maxMs, b.latestMs);
   }
   const last = turns[turns.length - 1];
-  let open = false;
-  if (last !== undefined && !last.hasTurnDuration) {
-    const status = thread.composer?.status ?? null;
-    open = last.hasRunning || sorted[sorted.length - 1]!.kind === 'prompt' || !(status === 'completed' || status === 'aborted');
+  const status = thread.composer?.status ?? null;
+  const lastIsPrompt = sorted.length > 0 && sorted[sorted.length - 1]!.kind === 'prompt';
+  if (last !== undefined && !last.ended && status === 'aborted' && !lastIsPrompt) {
+    last.ended = true;
+    last.aborted = true;
+    last.endMs = last.maxMs;
   }
+  let open = false;
+  if (last !== undefined && !last.ended) open = last.hasRunning || lastIsPrompt || !(status === 'completed' || status === 'aborted');
   const analysis: Analysis = { sorted, turns, turnOf, open, minMs, maxMs, firstPromptTitle, dispatches };
   thread.analysis = analysis;
   thread.analysisVersion = thread.version;
   return analysis;
 }
 
-/** A tool's status from its raw status: a non-terminal one in a turn that has ended never finished. */
-function toolStatus(raw: string | null, turnEnded: boolean): { status: GraphNode['status']; note: string | null; neverFinished: boolean } {
-  if (raw === 'completed') return { status: 'succeeded', note: null, neverFinished: false };
-  if (raw === 'error') return { status: 'failed', note: null, neverFinished: false };
-  if (raw === 'cancelled') return { status: 'failed', note: CANCELLED_NOTE, neverFinished: false };
-  return turnEnded ? { status: 'failed', note: NEVER_FINISHED_NOTE, neverFinished: true } : { status: 'running', note: null, neverFinished: false };
+/** The facts of a turn the nodes in it depend on (statuses and ends of calls). */
+const turnSig = (t: Turn): string => `${t.ended}|${t.endMs}|${t.aborted}`;
+
+/**
+ * A call's own status: rejected → denied; completed → succeeded; error → failed; cancelled → failed noting it; any
+ * other (loading) → running, or failed when its turn has ended (never finished / aborted).
+ */
+function callStatus(b: BubbleView, turn: Turn): { status: GraphNode['status']; note: string | null; settled: boolean } {
+  if (b.rejected && b.toolStatus !== 'loading') return { status: 'denied', note: REJECTED_NOTE, settled: false };
+  if (b.toolStatus === 'completed') return { status: 'succeeded', note: null, settled: false };
+  if (b.toolStatus === 'error') return { status: 'failed', note: null, settled: false };
+  if (b.toolStatus === 'cancelled') return { status: 'failed', note: CANCELLED_NOTE, settled: false };
+  if (!turn.ended) return { status: 'running', note: null, settled: false };
+  return { status: 'failed', note: turn.aborted ? ABORTED_NOTE : NEVER_FINISHED_NOTE, settled: true };
 }
 
-/** Same node? (every field the normalizer sets) */
+/** The fields of an emitted node that differ in `next`. */
 function nodePatch(old: GraphNode, next: GraphNode): Partial<GraphNode> {
   const patch: Partial<GraphNode> = {};
   const keys: (keyof GraphNode)[] = [
@@ -459,6 +272,12 @@ function nodePatch(old: GraphNode, next: GraphNode): Partial<GraphNode> {
 
 export class CursorNormalizer implements AgentNormalizer {
   private readonly sessions = new Map<string, SessionState>();
+  private readonly checkpointEvery: number;
+
+  /** `checkpointEvery` (tests): checkpoint spacing; Infinity derives every changed thread in full. */
+  constructor(options: { checkpointEvery?: number } = {}) {
+    this.checkpointEvery = options.checkpointEvery ?? CHECKPOINT_EVERY;
+  }
 
   apply(event: RawEvent, projectId: string): NormalizeResult {
     // Hooks are Task 5 (session-level marks); meta events are not produced for Cursor.
@@ -507,31 +326,38 @@ export class CursorNormalizer implements AgentNormalizer {
     } catch {
       return `${recordType}:invalid-json`;
     }
-    if (!isObject(parsed)) return `${recordType}:invalid-json`;
+    if (!isObject(parsed)) return `${recordType}:not-an-object`;
     const threadId = event.agentId ?? event.sessionId;
-    let unknown: string | undefined;
-    let pendingView: { view: BubbleView; detail: Partial<NodeDetail> } | null = null;
+    let bubble: { view: BubbleView; detail: Partial<NodeDetail> } | null = null;
     if (recordType === CURSOR_RECORD_TYPES.bubble) {
       const bubbleId = str(parsed.bubbleId);
       if (bubbleId === null) return 'bubble:missing-id';
-      const out = bubbleView(parsed, bubbleId, `bubble:${threadId}:${bubbleId}`);
-      unknown = out.unknown;
-      pendingView = out;
+      bubble = bubbleView(parsed, bubbleId, `bubble:${threadId}:${bubbleId}`);
     }
 
     const created = !this.sessions.has(event.sessionId);
     const state = this.stateFor(event.sessionId, projectId);
     if (projectId !== 'unknown' && (event.agentId === null || state.projectId === 'unknown')) state.projectId = projectId;
     const thread = this.threadFor(state, threadId, event.agentId);
-    if (pendingView === null) {
+    let unknown: string | undefined;
+    if (bubble === null) {
       thread.composer = composerFacts(parsed);
       thread.version += 1;
-      thread.dirtyFrom = 0; // its createdAt is the time of untimed leading nodes
+      thread.dirtyFrom = 0; // its createdAt is the time of untimed leading nodes; its status ends turns
     } else {
-      const { view, detail } = pendingView;
+      const old = thread.bubbles.get(bubble.view.bubbleId);
+      let view = bubble.view;
+      if (view.unknown !== null) {
+        // Counted once per shape change of a bubble, not once per version.
+        if (old?.unknown !== view.unknown) unknown = view.unknown;
+        // A bubble seen with a recognised shape keeps that node (nodes are never removed); its order and times follow.
+        if (old !== undefined && old.kind !== null) {
+          view = { ...old, unknown: view.unknown, order: view.order, createdMs: view.createdMs, startMs: view.startMs, endMs: view.endMs, latestMs: view.latestMs, hasTurnDuration: view.hasTurnDuration };
+        }
+      }
       upsertBubble(thread, view);
       if (view.kind === null) state.pending.delete(view.nodeId);
-      else state.pending.set(view.nodeId, detail);
+      else if (bubble.view.kind !== null) state.pending.set(view.nodeId, bubble.detail);
     }
     this.refresh(state, threadId, changes);
     this.commitSession(state, this.deriveSession(state), changes, created);
@@ -559,6 +385,8 @@ export class CursorNormalizer implements AgentNormalizer {
         nodes: new Map(),
         notes: new Map(),
         edges: new Map(),
+        edgeProducer: new Map(),
+        produced: new Map(),
         pending: new Map(),
         links: new Map(),
       };
@@ -578,6 +406,7 @@ export class CursorNormalizer implements AgentNormalizer {
         sorted: [],
         dirtyFrom: Number.POSITIVE_INFINITY,
         checkpoints: new Map(),
+        turnFacts: new Map(),
         version: 0,
         analysis: null,
         analysisVersion: -1,
@@ -590,9 +419,9 @@ export class CursorNormalizer implements AgentNormalizer {
   // ---- session ----
 
   /**
-   * The session as a function of the records: title = the root composer's name, else its first prompt; cwd from the
-   * root composer; created = the root composer's createdAt, else the earliest bubble; last activity = the latest
-   * bubble time of any thread; status = running while the root conversation's last turn is open, else idle.
+   * The session as a function of the records: title = the root composer's name, else its first prompt with text; cwd
+   * from the root composer; created = the root composer's createdAt, else the earliest bubble; last activity = the
+   * latest bubble time of any thread; status = running while the root conversation's last turn is open, else idle.
    */
   private deriveSession(state: SessionState): Session {
     const rootId = state.session.id;
@@ -635,9 +464,11 @@ export class CursorNormalizer implements AgentNormalizer {
   // ---- links between conversations ----
 
   /**
-   * Which threads are shown: the main conversation, and (breadth-first from it) every subagent conversation whose
-   * composer's subagentInfo.toolCallId equals the toolCallId of a task_v2 bubble in a shown thread. Several candidates
-   * for one call: the smallest composer id. A subagent without such a dispatch is held (not shown).
+   * Which threads are shown: the main conversation, and (breadth-first from it) every subagent conversation linked to
+   * a task_v2 bubble of a shown thread. Link: a subagent whose composer's subagentInfo.toolCallId equals the bubble's
+   * toolCallId (several: the smallest composer id); when there is none, the conversation the bubble's result names
+   * (`agentId`), unless that conversation's own toolCallId names another task_v2 call (toolCallId wins). A subagent
+   * without a link is held (not shown).
    */
   private links(state: SessionState): Links {
     const rootId = state.session.id;
@@ -650,17 +481,25 @@ export class CursorNormalizer implements AgentNormalizer {
       byCall.set(call, list);
     }
     for (const list of byCall.values()) list.sort();
+    const calls = new Set<string>();
+    for (const t of state.threads.values()) for (const d of analyze(t).dispatches) if (d.callId !== null) calls.add(d.callId);
     const shown = new Map<string, string | null>([[rootId, null]]);
     const childOf = new Map<string, string>();
     const ownerOf = new Map<string, string>();
     const queue = [rootId];
-    while (queue.length > 0) {
-      const id = queue.shift()!;
+    for (let q = 0; q < queue.length; q++) {
+      const id = queue[q]!;
       const t = state.threads.get(id);
       if (!t) continue;
       for (const d of analyze(t).dispatches) {
-        const child = byCall.get(d.callId)?.find((c) => !shown.has(c));
-        if (child === undefined || childOf.has(d.nodeId)) continue;
+        if (childOf.has(d.nodeId)) continue;
+        let child = d.callId === null ? undefined : byCall.get(d.callId)?.find((c) => !shown.has(c));
+        if (child === undefined && d.agentId !== null && d.agentId !== id && !shown.has(d.agentId)) {
+          const named = state.threads.get(d.agentId);
+          const ownCall = named?.composer?.toolCallId ?? null;
+          if (named !== undefined && named.agentId !== null && (ownCall === null || ownCall === d.callId || !calls.has(ownCall))) child = named.id;
+        }
+        if (child === undefined) continue;
         shown.set(child, d.nodeId);
         childOf.set(d.nodeId, child);
         ownerOf.set(child, id);
@@ -673,8 +512,8 @@ export class CursorNormalizer implements AgentNormalizer {
   /**
    * Re-derives what may have changed: the touched thread from its first changed bubble on, every thread whose link
    * changed (newly shown, or hanging off another dispatch) in full, and for each of those the thread holding its
-   * dispatch node from that node's turn on (a dispatch's status, end and title follow its subagent). A thread that is
-   * not shown is not derived; its changes wait in `dirtyFrom`. Parents are derived before their subagents.
+   * dispatch node from that node on (a dispatch's status, end and title follow its subagent). A thread that is not
+   * shown is not derived; its changes wait in `dirtyFrom`. Parents are derived before their subagents.
    */
   private refresh(state: SessionState, touched: string, changes: Change[]): void {
     const links = this.links(state);
@@ -707,57 +546,77 @@ export class CursorNormalizer implements AgentNormalizer {
   // ---- one thread's graph ----
 
   /**
+   * The first bubble whose derived node or edges can differ from the last derivation, given that bubbles from `from`
+   * on changed: no later than `from`; the start of every turn whose facts (ended, end time, aborted) changed, since
+   * its calls' statuses and ends follow them; and the nearest timed bubble before that, since the end of a call without
+   * completedAtMs is the next bubble's start.
+   */
+  private firstAffected(thread: ThreadState, a: Analysis, from: number): number {
+    let s = from;
+    const facts = new Map<string, string>();
+    for (const t of a.turns) {
+      const key = t.promptNodeId ?? '';
+      const sig = turnSig(t);
+      facts.set(key, sig);
+      if (thread.turnFacts.get(key) !== sig) s = Math.min(s, t.startIndex);
+    }
+    thread.turnFacts = facts;
+    if (s >= a.sorted.length) return s;
+    let p = s - 1;
+    while (p >= 0 && a.sorted[p]!.startMs === null) p--;
+    return Math.max(0, Math.min(s, p));
+  }
+
+  /**
    * The thread's nodes and edges. Bubbles are chained in order (prompt / text / thinking / tool / dispatch; unknown
    * shapes make no node but still end turns). Parallel rule: a tool or dispatch bubble that starts before the end of
    * the run of calls just before it joins that run — every member hangs off the run's parent (fork), and the next
-   * node hangs off the last member with an edge from every member (join); a call's end is completedAtMs, else
-   * (completed) the next bubble's start, else (still running, error or cancelled without an end) open. A subagent
-   * thread's first node hangs off its dispatch node (spawn edge).
+   * node hangs off the last member with an edge from every member (join). A call's end for this rule is the end its
+   * node shows: completedAtMs; else, while it is still running, open; else (finished or settled without an end) the
+   * next bubble's start, which never overlaps the next call. A subagent thread's first node hangs off its dispatch node
+   * (spawn edge).
    *
-   * Only the part that can differ is derived: from the start of the turn before the one holding bubble `from` (a
-   * bubble can change its own turn's statuses and, being a prompt, end the previous turn), resuming the scan from the
-   * checkpoint saved before that turn's prompt. Without a usable checkpoint (or when that prompt has no time, so an
-   * earlier node's end could depend on later bubbles) the whole thread is derived.
+   * Only the part that can differ is derived (`firstAffected`), resuming the scan from the latest checkpoint saved at or
+   * before it (one every CHECKPOINT_EVERY bubbles); without one, the whole thread is derived.
    */
-  private deriveThread(
-    state: SessionState,
-    thread: ThreadState,
-    dispatch: string | null,
-    links: Links,
-    from: number,
-  ): { nodes: DerivedNode[]; edges: GraphEdge[] } {
+  private deriveThread(state: SessionState, thread: ThreadState, dispatch: string | null, links: Links, from: number): Derived {
     const a = analyze(thread);
     const sid = state.session.id;
     const nodes: DerivedNode[] = [];
     const edges: GraphEdge[] = [];
+    const producers = new Map<string, string[]>();
+    let producing: string[] = [];
     const edge = (from: string, to: string, kind: GraphEdge['kind'], suffix = ''): void => {
-      edges.push({ id: `${from}->${to}${suffix}`, sessionId: sid, from, to, kind });
+      const id = `${from}->${to}${suffix}`;
+      edges.push({ id, sessionId: sid, from, to, kind });
+      producing.push(id);
     };
     let prevNode: string | null = null;
     let prevTs: string | null = null;
     let batch: Scan['batch'] = null;
     const fallbackTs = isoOf(thread.composer?.createdAt ?? null) ?? EPOCH;
+    const copyBatch = (b: Scan['batch']): Scan['batch'] => (b === null ? null : { ...b, members: [...b.members] });
 
+    const affected = from <= 0 ? 0 : this.firstAffected(thread, a, from);
+    if (from <= 0) this.firstAffected(thread, a, 0); // records the turn facts
     let start = 0;
-    if (from > 0 && a.sorted.length > 0) {
-      const turnIndex = a.turnOf[Math.min(from, a.sorted.length - 1)]!;
-      const s = a.turns[Math.max(0, turnIndex - 1)]!.startIndex;
-      const head = a.sorted[s]!;
-      const cp = s > 0 && head.startMs !== null ? thread.checkpoints.get(head.nodeId) : undefined;
-      if (cp !== undefined) {
-        start = s;
-        prevNode = cp.prevNode;
-        prevTs = cp.prevTs;
-        batch = cp.batch === null ? null : { ...cp.batch, members: [...cp.batch.members] };
-      }
+    for (let i = Math.min(affected, a.sorted.length - 1); i > 0; i--) {
+      const cp = thread.checkpoints.get(a.sorted[i]!.bubbleId);
+      if (cp === undefined) continue;
+      start = i;
+      prevNode = cp.prevNode;
+      prevTs = cp.prevTs;
+      batch = copyBatch(cp.batch);
+      break;
     }
 
     for (let i = start; i < a.sorted.length; i++) {
       const b = a.sorted[i]!;
+      if (i > 0 && i % this.checkpointEvery === 0) thread.checkpoints.set(b.bubbleId, { prevNode, prevTs, batch: copyBatch(batch) });
+      else if (i > start) thread.checkpoints.delete(b.bubbleId); // a stale one from another position
+      producing = [];
+      producers.set(b.nodeId, producing);
       if (b.kind === null) continue;
-      if (b.kind === 'prompt') {
-        thread.checkpoints.set(b.nodeId, { prevNode, prevTs, batch: batch === null ? null : { ...batch, members: [...batch.members] } });
-      }
       const turn = a.turns[a.turnOf[i]!]!;
       const ts: string = isoOf(b.startMs) ?? prevTs ?? fallbackTs;
       const startMs = Date.parse(ts);
@@ -771,36 +630,39 @@ export class CursorNormalizer implements AgentNormalizer {
       let durationMs: number | null = null;
       let childAgentId: string | null = null;
       let title = b.title;
+      let runEnd = Number.NEGATIVE_INFINITY;
       if (isCall) {
-        const own = toolStatus(b.toolStatus, turn.ended);
+        const own = callStatus(b, turn);
+        // Without completedAtMs a finished or settled call ends where the next bubble starts (the turn's end when last).
+        const ownEnd = b.endMs ?? nextStart ?? (own.settled ? turn.endMs : null);
         const child = b.kind === 'subagent' ? links.childOf.get(b.nodeId) : undefined;
         const childThread = child === undefined ? undefined : state.threads.get(child);
         if (b.kind === 'subagent') {
           childAgentId = child ?? null;
           title = childThread?.composer?.subagentTypeName ?? b.agentType ?? b.title;
         }
-        if (childThread !== undefined) {
-          // A dispatch follows its subagent: running while its last turn is open, then the task_v2 call's own status.
-          const ca = analyze(childThread);
-          if (ca.sorted.length === 0 || ca.open) status = 'running';
-          else {
-            status = own.status === 'running' ? 'succeeded' : own.status;
-            note = own.note;
-            endedMs = b.endMs ?? ca.maxMs;
-          }
+        const ca = childThread === undefined ? null : analyze(childThread);
+        if (ca !== null && ca.sorted.length > 0 && !ca.open) {
+          // The subagent finished: the task_v2 call's own status (still loading: it did its job).
+          status = own.status === 'running' ? 'succeeded' : own.status;
+          note = own.note;
+          endedMs = b.endMs ?? ca.maxMs;
+        } else if (ca !== null && !turn.ended) {
+          status = 'running'; // follows its subagent while the parent's turn goes on
         } else {
+          // No subagent, or the parent's turn ended without the subagent showing it finished: the call's own status.
           status = own.status;
           note = own.note;
-          if (status !== 'running') endedMs = b.endMs ?? (own.neverFinished ? (turn.endMs ?? nextStart) : nextStart);
+          if (status !== 'running') endedMs = ownEnd;
         }
         if (endedMs !== null && !Number.isNaN(startMs)) durationMs = Math.max(0, endedMs - startMs);
+        runEnd = b.endMs ?? (status === 'running' ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY);
       } else if (b.kind === 'thinking') {
         durationMs = b.thinkingMs;
       }
 
       // Placement.
       let parentId: string | null;
-      const runEnd = b.endMs ?? (b.toolStatus === 'completed' ? Number.NEGATIVE_INFINITY : Number.POSITIVE_INFINITY);
       if (isCall && batch !== null && b.startMs !== null && b.startMs < batch.maxEnd) {
         parentId = batch.parent;
         batch.members.push(b.nodeId);
@@ -847,11 +709,14 @@ export class CursorNormalizer implements AgentNormalizer {
       prevNode = b.nodeId;
       prevTs = ts;
     }
-    return { nodes, edges };
+    return { nodes, edges, producers };
   }
 
-  /** Emits what differs from what was emitted before: new nodes, changed fields / details, new or changed edges. */
-  private emit(state: SessionState, derived: { nodes: DerivedNode[]; edges: GraphEdge[] }, changes: Change[]): void {
+  /**
+   * Emits what differs from what was emitted before: new nodes, changed fields / details, new or changed edges, and the
+   * removal of every edge whose producing bubble was re-derived without producing it again.
+   */
+  private emit(state: SessionState, derived: Derived, changes: Change[]): void {
     const sid = state.session.id;
     for (const { node, note, isCall } of derived.nodes) {
       const old = state.nodes.get(node.id);
@@ -873,6 +738,18 @@ export class CursorNormalizer implements AgentNormalizer {
       state.notes.set(node.id, note);
       changes.push({ type: 'node_updated', sessionId: sid, id: node.id, patch, ...(detail !== undefined ? { detail } : {}) });
     }
+    const fresh = new Set(derived.edges.map((e) => e.id));
+    for (const [producer, ids] of derived.producers) {
+      for (const id of state.produced.get(producer) ?? []) {
+        if (fresh.has(id) || state.edgeProducer.get(id) !== producer) continue;
+        state.edges.delete(id);
+        state.edgeProducer.delete(id);
+        changes.push({ type: 'edge_removed', sessionId: sid, id });
+      }
+      if (ids.length === 0) state.produced.delete(producer);
+      else state.produced.set(producer, ids);
+    }
+    for (const [producer, ids] of derived.producers) for (const id of ids) state.edgeProducer.set(id, producer);
     for (const e of derived.edges) {
       const sig = `${e.from}>${e.to}>${e.kind}`;
       if (state.edges.get(e.id) === sig) continue;
