@@ -21,13 +21,16 @@
   --pink: #f15bb5;
   --grape: #b892ff;
   --peach: #ffb38a;
-  /* Origins (badge background / inner edge / text): Claude Code a soft apricot, Codex a soft periwinkle. */
+  /* Origins (badge background / inner edge / text): Claude Code a soft apricot, Codex a soft periwinkle, Cursor a soft mint. */
   --claude-soft: #ffe6d8;
   --claude-edge: #f6c6ad;
   --claude-ink: #a24a22;
   --codex-soft: #e2e5ff;
   --codex-edge: #c3c9f5;
   --codex-ink: #3f49a6;
+  --cursor-soft: #d9f5e0;
+  --cursor-edge: #aee3bb;
+  --cursor-ink: #1f7a3d;
   --font: "Microsoft YaHei UI", "PingFang SC", "Hiragino Sans GB", system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-fun: "Baloo 2", "Nunito", ui-rounded, "SF Pro Rounded", "Yuanti SC", "YouYuan", "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif;
   --mono: ui-monospace, "Cascadia Code", SFMono-Regular, Consolas, monospace;
@@ -122,6 +125,7 @@ pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
 }
 .origin-claude { --origin-bg: var(--claude-soft); --origin-edge: var(--claude-edge); --origin-fg: var(--claude-ink); }
 .origin-codex { --origin-bg: var(--codex-soft); --origin-edge: var(--codex-edge); --origin-fg: var(--codex-ink); }
+.origin-cursor { --origin-bg: var(--cursor-soft); --origin-edge: var(--cursor-edge); --origin-fg: var(--cursor-ink); }
 .origin-icon { flex: none; }
 .origin-badge-dot { padding: 0; width: 18px; height: 18px; justify-content: center; }
 .origin-dots { display: inline-flex; gap: 4px; }
@@ -131,6 +135,7 @@ pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
 .view-switch[aria-label="来源"] button[aria-pressed="true"][data-origin="all"] { background: var(--paper-deep); }
 .view-switch[aria-label="来源"] button[aria-pressed="true"][data-origin="claude"] { background: var(--claude-soft); color: var(--claude-ink); }
 .view-switch[aria-label="来源"] button[aria-pressed="true"][data-origin="codex"] { background: var(--codex-soft); color: var(--codex-ink); }
+.view-switch[aria-label="来源"] button[aria-pressed="true"][data-origin="cursor"] { background: var(--cursor-soft); color: var(--cursor-ink); }
 
 /* Session page: a one-line info bar, then the canvas filling the rest of the viewport. */
 .session-loading { padding: 12px 18px; }

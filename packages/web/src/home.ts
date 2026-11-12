@@ -25,9 +25,9 @@ export function parseOriginFilter(value: string | null): OriginFilter {
   return value === 'all' || (ORIGINS as readonly string[]).includes(value ?? '') ? (value as OriginFilter) : 'all';
 }
 
-/** The filter is offered only once some project has Codex sessions (a Claude-only install looks as before). */
+/** The filter is offered only once some project has Codex or Cursor sessions (a Claude-only install looks as before). */
 export function showOriginFilter(projects: readonly Project[]): boolean {
-  return projects.some((p) => p.origins.includes('codex'));
+  return projects.some((p) => p.origins.some((o) => o !== 'claude'));
 }
 
 /** The filter in force: the chosen one while the filter is offered, `all` otherwise. */

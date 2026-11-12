@@ -218,3 +218,41 @@ test('hookState：和 summarizeDiagnostics 的 hooks / hookAgeMs 同一规则', 
   expect(hookState(at(600_001), NOW)).toEqual({ hooks: 'quiet', hookAgeMs: 600_001 });
   expect(hookState('garbage', NOW)).toEqual({ hooks: 'quiet', hookAgeMs: null });
 });
+
+// ---- Cursor block ----
+import { cursorBlockVisible, cursorHooks, cursorPollLine, cursorUnknownRecords } from '../src/diagnostics';
+
+const cursorHook = { origin: 'cursor' as const, eventName: 'stop', count: 2, lastAt: at(1) };
+
+test('cursorBlockVisible：库存在，或有 Cursor 的 hook / 文件 / 未识别记录时显示，否则不显示', () => {
+  expect(cursorBlockVisible(base)).toBe(false);
+  // A configured path alone says nothing (the default path is configured even where Cursor is not installed).
+  expect(cursorBlockVisible({ ...base, cursor: { ...base.cursor, dbPath: '/x/state.vscdb' } })).toBe(false);
+  expect(cursorBlockVisible({ ...base, cursor: { ...base.cursor, dbExists: true } })).toBe(true);
+  expect(cursorBlockVisible({ ...base, hookEvents: [cursorHook] })).toBe(true);
+  expect(cursorBlockVisible({ ...base, files: [{ path: 'cursor:abc', offset: 1, size: 1 }] })).toBe(true);
+  expect(cursorBlockVisible({ ...base, unknownRecords: [{ recordType: 'bubble:type9/cap3', count: 1, sample: '' }] })).toBe(true);
+  expect(cursorBlockVisible({ ...base, unknownRecords: [{ recordType: 'foo', count: 1, sample: '' }] })).toBe(false);
+});
+
+test('cursorUnknownRecords：只取 Cursor 气泡形状（bubble: 或 cursor: 开头）', () => {
+  const u = [
+    { recordType: 'bubble:type9/cap3', count: 2, sample: 's' },
+    { recordType: 'cursor:composer', count: 1, sample: '' },
+    { recordType: 'weird', count: 4, sample: '' },
+  ];
+  expect(cursorUnknownRecords({ ...base, unknownRecords: u }).map((r) => r.recordType)).toEqual(['bubble:type9/cap3', 'cursor:composer']);
+});
+
+test('cursorPollLine：相对时间，null 是“尚未轮询”', () => {
+  expect(cursorPollLine(null, NOW)).toBe('尚未轮询');
+  expect(cursorPollLine(at(90_000), NOW)).toBe('1 分钟前');
+  expect(cursorPollLine('nonsense', NOW)).toBe('时间无法识别');
+});
+
+test('cursorHooks：Cursor 的事件、最近时间；没有 hook 时 events 为空', () => {
+  expect(cursorHooks(base)).toEqual({ origin: 'cursor', events: [], missing: [], lastAt: null });
+  const h = cursorHooks({ ...base, hookEvents: [{ origin: 'claude', eventName: 'Stop', count: 1, lastAt: at(5) }, cursorHook] });
+  expect(h.events.map((e) => e.eventName)).toEqual(['stop']);
+  expect(h.lastAt).toBe(at(1));
+});

@@ -10,6 +10,9 @@ function OriginIcon({ origin }: { origin: Origin }) {
         <g stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
           <path d="M6 1.2v9.6M1.2 6h9.6M2.6 2.6l6.8 6.8M9.4 2.6l-6.8 6.8" />
         </g>
+      ) : origin === 'cursor' ? (
+        // A pointer arrow.
+        <path d="M2.2 1.6l7.6 3.7-3.2 1.1-1.1 3.3z" fill="currentColor" stroke="currentColor" strokeWidth="1" strokeLinejoin="round" />
       ) : (
         // A terminal prompt.
         <g fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">

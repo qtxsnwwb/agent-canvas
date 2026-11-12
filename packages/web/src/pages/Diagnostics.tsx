@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import type { Diagnostics as DiagnosticsData, Origin } from '@claude-canvas/shared';
 import { api } from '../client';
 import {
-  codexDirLine, createPoller, fileOrigin, formatAge, hookState, hooksByOrigin, summarizeDiagnostics, truncateSample, FILES_BEHIND_MAX,
+  codexDirLine, createPoller, cursorBlockVisible, cursorHooks, cursorPollLine, cursorUnknownRecords, fileOrigin, formatAge, hookState, hooksByOrigin, summarizeDiagnostics, truncateSample, FILES_BEHIND_MAX,
   type OriginHooks,
 } from '../diagnostics';
 import { OriginBadge } from '../OriginBadge';
@@ -24,6 +24,8 @@ function HookStatus({ origin, lastAt }: { origin: Origin; lastAt: string | null 
       <p>最近一次收到：{st.hookAgeMs === null ? (st.hooks === 'never' ? '从未' : '时间无法识别') : formatAge(st.hookAgeMs)}</p>
       {st.hooks === 'never' && (origin === 'codex'
         ? <p className="diag-warn">尚未收到 Codex 的 hook：Codex hooks 还没有安装，或还没有在 Codex 里确认信任。不装也能用，只靠会话文件</p>
+        : origin === 'cursor'
+        ? <p className="diag-warn">尚未收到 Cursor 的 hook。不装也能用，只靠 Cursor 的本地数据库</p>
         : <p className="diag-warn">尚未收到任何 hook。运行 <code>claude-canvas hooks install</code> 安装；新开的会话才会生效</p>)}
       {st.hooks === 'quiet' && <p className="diag-warn">超过 10 分钟没有收到 hook</p>}
     </>
@@ -59,9 +61,52 @@ function OriginHookSection({ hooks, lastAt, titled, codex }: {
   );
 }
 
-/** A file's store key, with the origin shown for Codex files (Claude Code paths look as before). */
+/** A file's store key, with the origin shown for Codex and Cursor files (Claude Code paths look as before). */
 function FilePath({ path }: { path: string }) {
-  return fileOrigin(path) === 'codex' ? <><OriginBadge origin="codex" /> {path}</> : <>{path}</>;
+  const origin = fileOrigin(path);
+  return origin === 'claude' ? <>{path}</> : <><OriginBadge origin={origin} /> {path}</>;
+}
+
+/** Owns the 1-second tick for the "last poll" age. */
+function CursorPoll({ lastPollAt }: { lastPollAt: string | null }) {
+  const now = useNow(1000);
+  return <p>上次轮询：{cursorPollLine(lastPollAt, now)}</p>;
+}
+
+/** Shown when Cursor's database exists or any Cursor data is known. */
+function CursorSection({ data }: { data: DiagnosticsData }) {
+  const c = data.cursor;
+  const unknown = cursorUnknownRecords(data);
+  const hooks = cursorHooks(data);
+  return (
+    <section>
+      <h2><OriginBadge origin="cursor" /></h2>
+      <p>数据库路径：{c.dbPath === null ? '未启用' : <code>{c.dbPath}</code>}</p>
+      <p>数据库{c.dbExists ? '存在' : '不存在，Cursor 似乎没有安装'}</p>
+      <CursorPoll lastPollAt={c.lastPollAt} />
+      {c.lastError !== null && <p className="error">上次错误：{c.lastError}</p>}
+      <h3>Hooks</h3>
+      <OriginHookSection hooks={hooks} lastAt={hooks.lastAt} titled={false} codex={data.codex} />
+      <h3>未识别的气泡形状</h3>
+      {unknown.length === 0 ? (
+        <p className="muted">无</p>
+      ) : (
+        <ul>
+          {unknown.map((r) => (
+            <li key={r.recordType}>
+              <div>{r.recordType}：{r.count} 次</div>
+              {r.sample !== '' && (
+                <details>
+                  <summary>样例</summary>
+                  <pre>{truncateSample(r.sample)}</pre>
+                </details>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
 }
 
 export function Diagnostics() {
@@ -89,7 +134,8 @@ export function Diagnostics() {
   }
 
   const sum = summarizeDiagnostics(data, 0); // only the time-independent fields are used here
-  const hooks = hooksByOrigin(data);
+  // Cursor's hooks live in its own block.
+  const hooks = hooksByOrigin(data).filter((h) => h.origin !== 'cursor');
   // With only Claude Code hooks the server's own "last hook" time is used, exactly as before the Codex split.
   const onlyClaude = data.hookEvents.every((e) => e.origin === 'claude');
   return (
@@ -110,6 +156,8 @@ export function Diagnostics() {
             lastAt={h.origin === 'claude' && onlyClaude ? data.lastHookAt : h.lastAt} />
         ))}
       </section>
+
+      {cursorBlockVisible(data) && <CursorSection data={data} />}
 
       <section>
         <h2>导入失败</h2>

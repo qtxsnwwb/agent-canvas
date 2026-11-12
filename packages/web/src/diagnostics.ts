@@ -87,10 +87,11 @@ export interface OriginHooks {
  */
 export function hooksByOrigin(d: Diagnostics): OriginHooks[] {
   const codexKnown = d.codex.sessionsDirExists || d.files.some((f) => fileOrigin(f.path) === 'codex');
+  const cursorKnown = d.cursor.dbExists || d.files.some((f) => fileOrigin(f.path) === 'cursor');
   const out: OriginHooks[] = [];
   for (const origin of ORIGINS) {
     const events = d.hookEvents.filter((e) => e.origin === origin);
-    if (origin !== 'claude' && events.length === 0 && !(origin === 'codex' && codexKnown)) continue;
+    if (origin !== 'claude' && events.length === 0 && !(origin === 'codex' && codexKnown) && !(origin === 'cursor' && cursorKnown)) continue;
     const seen = new Set(events.map((e) => e.eventName));
     let lastAt: string | null = null;
     for (const e of events) {
@@ -102,6 +103,32 @@ export function hooksByOrigin(d: Diagnostics): OriginHooks[] {
     out.push({ origin, events, missing: EXPECTED_HOOK_EVENTS_BY_ORIGIN[origin].filter((e) => !seen.has(e)), lastAt });
   }
   return out;
+}
+
+/** Whether the page shows the Cursor block: the database exists, or any Cursor data is known (a configured path alone says nothing). */
+export function cursorBlockVisible(d: Diagnostics): boolean {
+  return d.cursor.dbExists
+    || d.hookEvents.some((e) => e.origin === 'cursor')
+    || d.files.some((f) => fileOrigin(f.path) === 'cursor')
+    || cursorUnknownRecords(d).length > 0;
+}
+
+/** Unknown records that come from Cursor: bubble shapes the normalizer does not know (`bubble:...`) or `cursor:...` types. */
+export function cursorUnknownRecords(d: Diagnostics): Diagnostics['unknownRecords'] {
+  return d.unknownRecords.filter((r) => r.recordType.startsWith('bubble:') || r.recordType.startsWith('cursor:'));
+}
+
+/** The Cursor block's "last poll" text. */
+export function cursorPollLine(lastPollAt: string | null, nowMs: number): string {
+  if (lastPollAt === null) return '尚未轮询';
+  const t = Date.parse(lastPollAt);
+  return Number.isNaN(t) ? '时间无法识别' : formatAge(nowMs - t);
+}
+
+/** Cursor's hook events for the Cursor block (always an entry, empty when none arrived). */
+export function cursorHooks(d: Diagnostics): OriginHooks {
+  return hooksByOrigin({ ...d, cursor: { ...d.cursor, dbExists: true } }).find((h) => h.origin === 'cursor')
+    ?? { origin: 'cursor', events: [], missing: [], lastAt: null };
 }
 
 /** The Codex block's line about the sessions directory. */
