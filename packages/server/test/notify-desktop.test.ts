@@ -37,6 +37,8 @@ describe('修复轮 1：程序路径、无网址、字符清理、强制重试�
 
   test('Windows 脚本：先把输出编码设为 UTF-8；没有网址时不设点击目标', () => {
     expect(WINDOWS_TOAST_SCRIPT.split('\r\n')[0]).toContain('[Console]::OutputEncoding = [System.Text.Encoding]::UTF8');
+    // The banner stays about 25 s instead of the default 5 s.
+    expect(WINDOWS_TOAST_SCRIPT).toContain("$toast.SetAttribute('duration', 'long')");
     expect(WINDOWS_TOAST_SCRIPT).toMatch(/if \(\[string\]\$data\.url -ne ''\) \{\r\n {2}\$toast\.SetAttribute\('activationType', 'protocol'\)/);
   });
 

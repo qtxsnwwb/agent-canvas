@@ -50,6 +50,8 @@ export const WINDOWS_TOAST_SCRIPT = [
   '[void][Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime]',
   '$xml = New-Object System.Xml.XmlDocument',
   "$toast = $xml.CreateElement('toast')",
+  // The default banner stays about 5 s, easy to miss while looking elsewhere; 'long' keeps it about 25 s.
+  "$toast.SetAttribute('duration', 'long')",
   // No URL (refused by the service): a toast without a click target.
   'if ([string]$data.url -ne \'\') {',
   "  $toast.SetAttribute('activationType', 'protocol')",
