@@ -185,6 +185,21 @@ export class CursorConv {
   }
 
   /** An empty assistant bubble ending the turn (`turnDurationMs` set). */
+  /**
+   * A notice Cursor injects as a type-1 bubble when a background task / subagent finishes: an optional
+   * `<timestamp>` then a `<system_notification>` block with `<task>` and optionally a high-level summary.
+   */
+  notification(bubbleId: string, sec: number, opts: { task?: string; summary?: string; timestamp?: boolean; over?: BubbleInit } = {}): RawEvent {
+    const parts = [
+      opts.timestamp === false ? '' : '<timestamp>Thursday, November 12, 2026, 8:00 AM (UTC)</timestamp>\n',
+      '<system_notification>\nA background task you started has finished.\n',
+      `<task>${opts.task ?? 'Index the repository'}</task>\n`,
+      opts.summary === undefined ? '' : `<user_visible_high_level_summary>${opts.summary}</user_visible_high_level_summary>\n`,
+      '</system_notification>',
+    ];
+    return this.user(bubbleId, parts.join(''), sec, opts.over ?? {});
+  }
+
   turnEnd(bubbleId: string, sec: number, over: BubbleInit = {}): RawEvent {
     const ms = at(sec);
     return this.bubble({ bubbleId, type: 2, text: 'Done.', createdAt: iso(ms), startedAtMs: ms, completedAtMs: ms + 100, turnDurationMs: 30_000, ...over });

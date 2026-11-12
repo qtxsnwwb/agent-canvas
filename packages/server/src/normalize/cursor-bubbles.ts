@@ -51,7 +51,39 @@ export function composerFacts(rec: Obj): ComposerFacts {
   };
 }
 
-export type BubbleKind = 'prompt' | 'text' | 'thinking' | 'tool' | 'subagent';
+/** `notification`: a type-1 bubble that is a notice Cursor injected (a system node), not a user prompt. */
+export type BubbleKind = 'prompt' | 'notification' | 'text' | 'thinking' | 'tool' | 'subagent';
+
+/** A notice: the text starts with `<system_notification>`, optionally after a leading `<timestamp>…</timestamp>`. */
+const NOTIFICATION_START = /^(?:<timestamp>[\s\S]*?<\/timestamp>\s*)?<system_notification>/;
+const LEADING_TIMESTAMP = /^<timestamp>[\s\S]*?<\/timestamp>\s*/;
+const USER_QUERY = /^<user_query>([\s\S]*)<\/user_query>$/;
+
+export function isNotification(text: string): boolean {
+  return NOTIFICATION_START.test(text.trim());
+}
+
+/** The text inside the first `<tag>…</tag>`, whitespace collapsed; null when absent or empty. */
+function tagText(text: string, tag: string): string | null {
+  const m = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`).exec(text);
+  const inner = m === null ? '' : m[1]!.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+  return inner === '' ? null : inner;
+}
+
+/** A notice's summary: its high-level summary, else its task, else the notification's text without tags. */
+export function notificationSummary(text: string): string {
+  const body = text.trim().replace(LEADING_TIMESTAMP, '');
+  const inner = tagText(body, 'system_notification') ?? body.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+  return summarize(tagText(body, 'user_visible_high_level_summary') ?? tagText(body, 'task') ?? inner);
+}
+
+/** A prompt as shown (summary, title): a leading `<timestamp>` dropped; exactly `<user_query>…</user_query>` unwrapped. */
+export function promptText(text: string): string {
+  const trimmed = text.trim();
+  const query = USER_QUERY.exec(trimmed);
+  if (query !== null) return query[1]!.trim();
+  return LEADING_TIMESTAMP.test(trimmed) ? trimmed.replace(LEADING_TIMESTAMP, '') : text;
+}
 
 /** What the graph needs of the latest record of one bubble (the large texts go to the normalizer's pending details). */
 export interface BubbleView {
@@ -217,7 +249,7 @@ export function bubbleView(rec: Obj, bubbleId: string, nodeId: string): { view: 
   const startedAtMs = num(rec.startedAtMs);
   const endMs = num(rec.completedAtMs);
   let kind: BubbleKind | null = null;
-  if (type === 1) kind = 'prompt';
+  if (type === 1) kind = text !== null && isNotification(text) ? 'notification' : 'prompt';
   else if (type === 2) {
     if (tfd !== null) kind = str(tfd.name) === TASK_TOOL ? 'subagent' : 'tool';
     else if (thinking !== null || cap === 30) kind = 'thinking';
@@ -249,10 +281,17 @@ export function bubbleView(rec: Obj, bubbleId: string, nodeId: string): { view: 
   };
   let detail: Partial<NodeDetail> = {};
   switch (kind) {
-    case 'prompt':
+    case 'prompt': {
+      const shown = text === null ? null : promptText(text);
       view.title = 'Prompt';
-      view.summary = summarize(text ?? '');
-      view.promptTitle = text === null ? null : promptTitle(text);
+      view.summary = summarize(shown ?? '');
+      view.promptTitle = shown === null ? null : promptTitle(shown);
+      detail = { input: null, output: null, text: text ?? '', raw: null };
+      break;
+    }
+    case 'notification':
+      view.title = 'Task notification';
+      view.summary = notificationSummary(text ?? '');
       detail = { input: null, output: null, text: text ?? '', raw: null };
       break;
     case 'text':

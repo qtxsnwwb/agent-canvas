@@ -404,6 +404,11 @@ function scenario(seed: number): Scenario {
         if (later.length > 0 && r() < 0.4) later.splice(Math.floor(r() * later.length), 1)[0]!();
       }
       if (r() < 0.5) add(`e${t}`, conv.turnEnd(`e${t}`, (sec += 2)));
+      // A background-task notice (a type-1 bubble that is not a prompt), sometimes followed by more activity.
+      if (r() < 0.3) {
+        add(`n${t}`, conv.notification(`n${t}`, (sec += 2), r() < 0.5 ? { summary: 'all done' } : { timestamp: r() < 0.7 }));
+        if (r() < 0.5) add(`na${t}`, conv.text(`na${t}`, 'about that task', (sec += 2)));
+      }
     }
     for (const f of later.splice(0)) f();
     // An order swap of two adjacent bubbles (the list is not append-only).

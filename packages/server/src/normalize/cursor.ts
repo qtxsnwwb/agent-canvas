@@ -68,12 +68,21 @@ interface Turn {
   promptNodeId: string | null;
   /** Index of its first bubble in the thread's sorted list. */
   startIndex: number;
-  /** A bubble with turnDurationMs is in it, a later prompt exists, or the conversation was aborted in it. */
+  /**
+   * The turn is over: a later prompt exists, or it was aborted, or it has a bubble with turnDurationMs and no activity
+   * after the last one (a background-task notice alone is no activity; assistant bubbles after it reopen the turn).
+   */
   ended: boolean;
-  hasTurnDuration: boolean;
+  /** A later (real) prompt exists. */
+  endedByPrompt: boolean;
+  /** Index (in `sorted`) and id of its last bubble with turnDurationMs; -1 / '' when none. */
+  lastDurationIndex: number;
+  lastDurationId: string;
+  /** A bubble other than a notice comes after its last turnDurationMs bubble. */
+  activityAfterDuration: boolean;
   /** Ended by the composer status `aborted` (last turn only). */
   aborted: boolean;
-  /** A tool / dispatch bubble of it is not in a terminal raw status. */
+  /** A tool / dispatch bubble after its last turnDurationMs bubble is not in a terminal raw status. */
   hasRunning: boolean;
   /** End time: the turnDurationMs bubble's end, else the next prompt's start; aborted: its latest bubble time. */
   endMs: number | null;
@@ -212,11 +221,14 @@ function upsertBubble(thread: ThreadState, view: BubbleView): void {
 }
 
 /**
- * The thread's own facts: order, turns, times, dispatch calls. A turn ends at a bubble with turnDurationMs or at the
- * next prompt. When the composer status is `aborted`, the last turn counts as ended too (unless the thread's last bubble
- * is a prompt: a new turn started after the abort). The last turn is open unless it has ended that way, and it is open
- * when it has a tool still in a non-terminal status, or the thread's last bubble is its prompt, or the composer status
- * is neither 'completed' nor 'aborted' (Cursor's 'none' while generating, or no composer record yet).
+ * The thread's own facts: order, turns, times, dispatch calls. A turn starts at a real prompt (a background-task notice
+ * is a system node that stays in the current turn) and ends at the next prompt, or at a bubble with turnDurationMs that
+ * no assistant activity follows (activity after a notice reopens it until the next turnDurationMs). When the composer
+ * status is `aborted`, the last turn counts as ended too (unless the thread's last bubble other than a notice is a
+ * prompt: a new turn started after the abort). The last turn is open unless it has ended that way, and it is open when
+ * it has a tool still in a non-terminal status after its last turnDurationMs bubble, or the thread's last bubble other
+ * than a notice is its prompt, or the composer status is neither 'completed' nor 'aborted' (Cursor's 'none' while
+ * generating, or no composer record yet).
  */
 function analyze(thread: ThreadState): Analysis {
   if (thread.analysis !== null && thread.analysisVersion === thread.version) return thread.analysis;
@@ -231,19 +243,25 @@ function analyze(thread: ThreadState): Analysis {
     promptNodeId,
     startIndex,
     ended: false,
-    hasTurnDuration: false,
+    endedByPrompt: false,
+    lastDurationIndex: -1,
+    lastDurationId: '',
+    activityAfterDuration: false,
     aborted: false,
     hasRunning: false,
     endMs: null,
     maxMs: null,
   });
+  const closedByDuration = (t: Turn): boolean => t.lastDurationIndex >= 0 && !t.activityAfterDuration;
+  // The thread's last bubble other than a notice (a trailing notice leaves the status as it was).
+  let lastReal: BubbleView | undefined;
   for (let i = 0; i < sorted.length; i++) {
     const b = sorted[i]!;
     if (b.kind === 'prompt') {
       const prev = turns[turns.length - 1];
-      if (prev !== undefined && !prev.ended) {
-        prev.ended = true;
-        prev.endMs = b.startMs;
+      if (prev !== undefined) {
+        if (!closedByDuration(prev)) prev.endMs = b.startMs;
+        prev.endedByPrompt = true;
       }
       turns.push(newTurn(b.nodeId, i));
       if (firstPromptTitle === null) firstPromptTitle = b.promptTitle;
@@ -253,19 +271,25 @@ function analyze(thread: ThreadState): Analysis {
     const turn = turns[turns.length - 1]!;
     turnOf.push(turns.length - 1);
     if (b.hasTurnDuration) {
-      turn.ended = true;
-      turn.hasTurnDuration = true;
+      turn.lastDurationIndex = i;
+      turn.lastDurationId = b.bubbleId;
+      turn.activityAfterDuration = false;
+      turn.hasRunning = false; // calls before it are settled (never finished)
       turn.endMs = b.endMs ?? b.startMs;
+    } else if (turn.lastDurationIndex >= 0 && b.kind !== null && b.kind !== 'notification' && b.kind !== 'prompt') {
+      turn.activityAfterDuration = true;
     }
     if ((b.kind === 'tool' || b.kind === 'subagent') && isRunningRaw(b.toolStatus)) turn.hasRunning = true;
     if (b.kind === 'subagent') dispatches.push({ nodeId: b.nodeId, callId: b.toolCallId, agentId: b.resultAgentId, index: i });
+    if (b.kind !== 'notification') lastReal = b;
     turn.maxMs = maxOf(turn.maxMs, b.latestMs);
     minMs = minOf(minMs, b.startMs);
     maxMs = maxOf(maxMs, b.latestMs);
   }
+  for (const t of turns) t.ended = t.endedByPrompt || closedByDuration(t);
   const last = turns[turns.length - 1];
   const status = thread.composer?.status ?? null;
-  const lastIsPrompt = sorted.length > 0 && sorted[sorted.length - 1]!.kind === 'prompt';
+  const lastIsPrompt = lastReal?.kind === 'prompt';
   if (last !== undefined && !last.ended && status === 'aborted' && !lastIsPrompt) {
     last.ended = true;
     last.aborted = true;
@@ -280,20 +304,26 @@ function analyze(thread: ThreadState): Analysis {
 }
 
 /** The facts of a turn the nodes in it depend on (statuses and ends of calls). */
-const turnSig = (t: Turn): string => `${t.ended}|${t.endMs}|${t.aborted}`;
+const turnSig = (t: Turn): string => `${t.ended}|${t.endedByPrompt}|${t.lastDurationId}|${t.endMs}|${t.aborted}`;
+
+/**
+ * Whether the call at `index` of a turn is past its turn: the turn ended by a later prompt or an abort, or a
+ * turnDurationMs bubble comes after it (activity resumed after a notice does not reopen earlier calls).
+ */
+const settledAt = (t: Turn, index: number): boolean => t.endedByPrompt || t.aborted || index < t.lastDurationIndex;
 
 /**
  * A call's own status: rejected → denied; completed → succeeded, or failed noting the exit code when a terminal call's
  * result has a non-zero one; error → failed; cancelled → failed noting it; any other (loading) → running, or failed
  * when its turn has ended (never finished / aborted).
  */
-function callStatus(b: BubbleView, turn: Turn): { status: GraphNode['status']; note: string | null; settled: boolean } {
+function callStatus(b: BubbleView, turn: Turn, past: boolean): { status: GraphNode['status']; note: string | null; settled: boolean } {
   if (b.rejected && b.toolStatus !== 'loading') return { status: 'denied', note: REJECTED_NOTE, settled: false };
   if (b.toolStatus === 'completed' && b.exitCode !== null && b.exitCode !== 0) return { status: 'failed', note: exitCodeNote(b.exitCode), settled: false };
   if (b.toolStatus === 'completed') return { status: 'succeeded', note: null, settled: false };
   if (b.toolStatus === 'error') return { status: 'failed', note: null, settled: false };
   if (b.toolStatus === 'cancelled') return { status: 'failed', note: CANCELLED_NOTE, settled: false };
-  if (!turn.ended) return { status: 'running', note: null, settled: false };
+  if (!past) return { status: 'running', note: null, settled: false };
   return { status: 'failed', note: turn.aborted ? ABORTED_NOTE : NEVER_FINISHED_NOTE, settled: true };
 }
 
@@ -846,6 +876,7 @@ export class CursorNormalizer implements AgentNormalizer {
       let nextStart: number | null = null;
       for (let j = i + 1; j < a.sorted.length && nextStart === null; j++) nextStart = a.sorted[j]!.startMs;
       const isCall = b.kind === 'tool' || b.kind === 'subagent';
+      const past = settledAt(turn, i);
       const child = b.kind === 'subagent' ? links.childOf.get(b.nodeId) : undefined;
       const childThread = child === undefined ? undefined : state.threads.get(child);
       const ca = childThread === undefined ? null : analyze(childThread);
@@ -855,7 +886,7 @@ export class CursorNormalizer implements AgentNormalizer {
       let before: Scan | null = null;
       if (!this.reference) {
         const childFacts = ca === null ? `${child ?? ''}` : `${child}|${childThread!.composer?.subagentTypeName ?? ''}|${ca.sorted.length}|${ca.open}|${ca.maxMs}`;
-        inputs = `${turn.promptNodeId}|${turnSig(turn)}|${nextStart}|${childFacts}|${dispatch}|${fallbackTs}`;
+        inputs = `${turn.promptNodeId}|${turnSig(turn)}|${past}|${nextStart}|${childFacts}|${dispatch}|${fallbackTs}`;
         const memo = thread.memo.get(b.bubbleId);
         if (memo !== undefined && memo.view === b && memo.inputs === inputs && sameScan(memo.before, { prevNode, prevTs, batch })) {
           prevNode = memo.after.prevNode;
@@ -878,7 +909,7 @@ export class CursorNormalizer implements AgentNormalizer {
       let title = b.title;
       let runEnd = Number.NEGATIVE_INFINITY;
       if (isCall) {
-        const own = callStatus(b, turn);
+        const own = callStatus(b, turn, past);
         // Without completedAtMs a finished or settled call ends where the next bubble starts (the turn's end when last).
         const ownEnd = b.endMs ?? nextStart ?? (own.settled ? turn.endMs : null);
         if (b.kind === 'subagent') {
@@ -890,7 +921,7 @@ export class CursorNormalizer implements AgentNormalizer {
           status = own.status === 'running' ? 'succeeded' : own.status;
           note = own.note;
           endedMs = b.endMs ?? ca.maxMs;
-        } else if (ca !== null && !turn.ended) {
+        } else if (ca !== null && !past) {
           status = 'running'; // follows its subagent while the parent's turn goes on
         } else {
           // No subagent, or the parent's turn ended without the subagent showing it finished: the call's own status.
@@ -934,7 +965,7 @@ export class CursorNormalizer implements AgentNormalizer {
           agentId: thread.agentId,
           childAgentId,
           parentId,
-          kind: b.kind,
+          kind: b.kind === 'notification' ? 'system' : b.kind,
           status,
           timestamp: ts,
           confirmed: true,
@@ -946,7 +977,7 @@ export class CursorNormalizer implements AgentNormalizer {
           durationMs,
           endedAt: isCall ? isoOf(endedMs) : null,
           usage: b.usage,
-          systemSubtype: null,
+          systemSubtype: b.kind === 'notification' ? 'task_notification' : null,
         },
       });
       prevNode = b.nodeId;
