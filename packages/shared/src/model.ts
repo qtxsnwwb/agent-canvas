@@ -41,7 +41,8 @@ export interface GraphNode {
   systemSubtype: string | null;
   /**
    * Files this tool call read or changed, from tools that name a file in a structured way (never guessed from command
-   * lines). Absent when the node touches no file. At most MAX_FILES_PER_NODE entries; one entry per (path, action).
+   * lines). Absent or empty when the node touches no file (a node that had files and lost them carries an empty list).
+   * At most MAX_FILES_PER_NODE entries; one entry per (path, action).
    */
   files?: FileTouch[];
   /** True when the call named more files than MAX_FILES_PER_NODE and the rest were dropped. */
