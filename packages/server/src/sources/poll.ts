@@ -45,6 +45,11 @@ export interface PollSink {
    * reads and ingests cleanly again. No-op when there is none.
    */
   clearFailure(key: string): void;
+  /**
+   * Distinct session ids of the transcript records stored under this origin's key prefix, by any run (so a source can
+   * re-assert "source deleted" marks after a restart or rebuild, which do not keep them). Read-only.
+   */
+  storedSessionIds(): string[];
 }
 
 /**

@@ -1,6 +1,9 @@
 import fsp from 'node:fs/promises';
 import path from 'node:path';
+import { ProjectIdResolver } from '../project-ids.js';
 import { KEY_PREFIXES, type FileClass, type FileSource, type IndexEntry, type MaybePromise } from '../source.js';
+
+export { encodeProjectId } from '../project-ids.js';
 
 const PREFIX = KEY_PREFIXES.codex;
 /** Name of Codex's thread-title index, next to (not under) the sessions directory. */
@@ -39,9 +42,6 @@ interface Thread {
   projectId: string;
 }
 
-/** Claude Code's encoding of a working directory into a project id: every non-alphanumeric character becomes `-`. */
-export const encodeProjectId = (cwd: string): string => cwd.replace(/[^A-Za-z0-9]/g, '-');
-
 /**
  * Codex's `~/.codex/sessions`: one file per thread, `YYYY/MM/DD/rollout-<time>-<thread id>.jsonl`, whose first line
  * (`session_meta`) says which session (root thread) the thread belongs to and in which directory it ran. Keys are
@@ -58,14 +58,15 @@ export class CodexFileSource implements FileSource {
   private readonly files = new Map<string, Thread>();
   /** Root thread ids seen (from a first line or the store) -> project. */
   private readonly roots = new Map<string, string>();
-  /** Lower-cased project id -> the project id in use. */
-  private readonly projects = new Map<string, string>();
+  /** Project ids in use, reused when a cwd differs only in letter case. */
+  private readonly projects: ProjectIdResolver;
 
   constructor(
     readonly rootDir: string,
     private readonly lookup: CodexLookup = NO_LOOKUP,
   ) {
     this.indexPath = path.join(path.dirname(path.resolve(rootDir)), INDEX_NAME);
+    this.projects = new ProjectIdResolver(() => this.lookup.knownProjectIds());
   }
 
   indexFiles(): readonly string[] {
@@ -187,8 +188,7 @@ export class CodexFileSource implements FileSource {
     const existing = this.files.get(key);
     if (existing !== undefined) return existing; // a concurrent read got there first
     this.files.set(key, thread);
-    const lower = thread.projectId.toLowerCase();
-    if (!this.projects.has(lower)) this.projects.set(lower, thread.projectId);
+    this.projects.note(thread.projectId);
     if (thread.agentId === null && !this.roots.has(thread.sessionId)) this.roots.set(thread.sessionId, thread.projectId);
     return thread;
   }
@@ -261,20 +261,7 @@ export class CodexFileSource implements FileSource {
 
   /** The encoded cwd, or a project id already in use that differs from it only in letter case. */
   private projectFor(cwd: string | null): string {
-    if (cwd === null) return UNKNOWN_PROJECT;
-    const id = encodeProjectId(cwd);
-    const lower = id.toLowerCase();
-    let hit = this.projects.get(lower);
-    if (hit === undefined) {
-      for (const known of this.lookup.knownProjectIds()) {
-        const l = known.toLowerCase();
-        if (!this.projects.has(l)) this.projects.set(l, known);
-      }
-      hit = this.projects.get(lower);
-    }
-    if (hit !== undefined) return hit;
-    this.projects.set(lower, id);
-    return id;
+    return cwd === null ? UNKNOWN_PROJECT : this.projects.forCwd(cwd);
   }
 }
 

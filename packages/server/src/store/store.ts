@@ -182,6 +182,11 @@ export interface Store {
   /** Distinct project ids of the derived sessions, ascending. */
   sessionProjectIds(): string[];
   allSessionIdsInRaw(): string[];
+  /**
+   * Distinct session ids of the transcript raw events whose store key starts with `keyPrefix` (non-empty, e.g.
+   * `cursor:`), ascending. A range over the transcript dedupe index's key column.
+   */
+  transcriptSessionIds(keyPrefix: string): string[];
   /** Clears derived tables, the change log and unknown_stat; keeps raw_event, file_offset and meta. */
   clearDerived(): void;
   /**
@@ -489,6 +494,12 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   const selectRawSessionIds = db.prepare(
     `SELECT DISTINCT session_id AS id FROM raw_event WHERE session_id IS NOT NULL ORDER BY session_id`,
   );
+  const selectTranscriptSessionIds = db
+    .prepare(
+      `SELECT DISTINCT session_id FROM raw_event
+       WHERE source = 'transcript' AND file >= ? AND file < ? AND session_id IS NOT NULL ORDER BY session_id`,
+    )
+    .pluck();
   const upsertUnknown = db.prepare(
     `INSERT INTO unknown_stat (record_type, count, sample) VALUES (?, 1, ?)
      ON CONFLICT(record_type) DO UPDATE SET count = count + 1`,
@@ -782,6 +793,11 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     },
     allSessionIdsInRaw() {
       return (selectRawSessionIds.all() as { id: string }[]).map((r) => r.id);
+    },
+    transcriptSessionIds(keyPrefix) {
+      if (keyPrefix === '') throw new Error('transcriptSessionIds: empty key prefix');
+      const end = keyPrefix.slice(0, -1) + String.fromCharCode(keyPrefix.charCodeAt(keyPrefix.length - 1) + 1);
+      return selectTranscriptSessionIds.all(keyPrefix, end) as string[];
     },
     clearDerived() {
       clearDerivedTx();

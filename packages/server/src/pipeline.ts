@@ -516,6 +516,7 @@ export class Pipeline {
       clearFailure: (key) => {
         this.failures.delete(key);
       },
+      storedSessionIds: () => this.store.transcriptSessionIds(KEY_PREFIXES[source.origin]),
     };
   }
 

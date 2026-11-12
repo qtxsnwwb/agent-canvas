@@ -22,6 +22,8 @@ import { NORMALIZER_VERSION_KEY, Pipeline, REBUILD_FLAG } from './pipeline.js';
 import { ClaudeFileSource } from './sources/claude.js';
 import { storeLookup } from './sources/codex/lookup.js';
 import { CodexFileSource } from './sources/codex/source.js';
+import { CursorSource } from './sources/cursor/source.js';
+import type { PollSource } from './sources/poll.js';
 import type { FileSource } from './sources/source.js';
 import { startWatcher } from './sources/transcript/watcher.js';
 import { openStore, type Store } from './store/store.js';
@@ -77,6 +79,16 @@ export function fileSources(config: Config, store?: Store): FileSource[] {
   return sources;
 }
 
+/**
+ * The polled sources of this configuration (used by `start` only; rebuild never reads Cursor's database): Cursor's
+ * state database when `cursorDbPath` is set (a missing file is "Cursor not installed": polled, nothing read, no error).
+ */
+export function pollSources(config: Config, store?: Store): PollSource[] {
+  if (config.cursorDbPath === null || config.cursorDbPath === '') return [];
+  const lookup = store ? storeLookup(store, config.projectsDir) : null;
+  return [new CursorSource({ dbPath: config.cursorDbPath, ...(lookup ? { knownProjectIds: () => lookup.knownProjectIds() } : {}) })];
+}
+
 function resolveConfig(overrides: Partial<Config>): Config {
   const config = loadConfig(process.env, { webDist: defaultWebDist(), ...overrides });
   fs.mkdirSync(config.dataDir, { recursive: true });
@@ -114,7 +126,11 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
   let pipeline: Pipeline;
   try {
     store = openStore(config.dbPath, options.log ? { log: options.log } : {});
-    pipeline = new Pipeline(store, config, { log: (line) => process.stderr.write(`${line}\n`), sources: fileSources(config, store) });
+    pipeline = new Pipeline(store, config, {
+      log: (line) => process.stderr.write(`${line}\n`),
+      sources: fileSources(config, store),
+      pollSources: pollSources(config, store),
+    });
     const reason = rebuildReason(store);
     if (reason !== null) {
       options.log?.(`claude-canvas rebuilding derived data (reason: ${reason})`);

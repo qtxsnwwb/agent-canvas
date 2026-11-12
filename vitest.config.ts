@@ -17,6 +17,8 @@ export default defineConfig({
     },
   },
   test: {
+    // Never the real Cursor database: a test that wants one passes a temp path (cursorDbPath override or stubbed env).
+    env: { CLAUDE_CANVAS_CURSOR_DB: '' },
     projects: [
       ...readdirSync(packagesDir, { withFileTypes: true })
         .filter((d) => d.isDirectory())

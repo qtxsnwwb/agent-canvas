@@ -1,0 +1,572 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, expect, test } from 'vitest';
+import type { PollBatch, PollSink } from '../src/sources/poll.js';
+import { openCursorDb, type CursorDbReader, type DbResult } from '../src/sources/cursor/db.js';
+import { fileUriToPath, workspaceStorageDir } from '../src/sources/cursor/project.js';
+import type { CursorBubbleRecord, CursorComposerRecord } from '../src/sources/cursor/records.js';
+import { CursorSource, RECENT_MS, type CursorSourceOptions, type PollTimers } from '../src/sources/cursor/source.js';
+import { bubbleRecord, capUtf8, trimBubble, trimComposer } from '../src/sources/cursor/trim.js';
+import { CursorDbFixture, T0, textBubble, thinkingBubble, toolBubble, userBubble } from './cursor-fixtures.js';
+
+// Temp dirs and a synthetic database only: the real Cursor database is never opened.
+
+class FakeSink implements PollSink {
+  readonly batches: PollBatch[] = [];
+  readonly calls: string[] = [];
+  readonly failures = new Map<string, string>();
+  stored: string[] = [];
+  /** Rejects ingestRecords while set. */
+  failIngest: Error | null = null;
+  async ingestRecords(batch: PollBatch): Promise<void> {
+    if (this.failIngest) throw this.failIngest;
+    this.batches.push(batch);
+    this.calls.push(`ingest ${batch.key} ${batch.records.map((r) => r.recordType).join(',')}`);
+  }
+  async markSourceDeleted(sessionId: string): Promise<void> {
+    this.calls.push(`deleted ${sessionId}`);
+  }
+  async clearSourceDeleted(sessionId: string): Promise<void> {
+    this.calls.push(`undeleted ${sessionId}`);
+  }
+  reportFailure(key: string, err: unknown): void {
+    this.failures.set(key, err instanceof Error ? err.message : String(err));
+  }
+  clearFailure(key: string): void {
+    this.failures.delete(key);
+  }
+  storedSessionIds(): string[] {
+    return this.stored;
+  }
+  /** Records of all batches so far, parsed. */
+  records(): { key: string; sessionId: string; agentId: string | null; projectId: string; recordType: string; value: Record<string, unknown> }[] {
+    return this.batches.flatMap((b) =>
+      b.records.map((r) => ({ key: b.key, sessionId: b.sessionId, agentId: b.agentId, projectId: b.projectId, recordType: r.recordType, value: JSON.parse(r.line) })),
+    );
+  }
+  reset(): void {
+    this.batches.length = 0;
+    this.calls.length = 0;
+  }
+}
+
+/** Timers that never fire on their own. */
+class ManualTimers implements PollTimers {
+  readonly pending: { fn: () => void; ms: number }[] = [];
+  set(fn: () => void, ms: number): unknown {
+    const t = { fn, ms };
+    this.pending.push(t);
+    return t;
+  }
+  clear(handle: unknown): void {
+    const i = this.pending.indexOf(handle as { fn: () => void; ms: number });
+    if (i !== -1) this.pending.splice(i, 1);
+  }
+  fire(): void {
+    const t = this.pending.shift();
+    t?.fn();
+  }
+}
+
+let tmp: string;
+let fx: CursorDbFixture;
+let sink: FakeSink;
+let clock: number;
+let reads: string[];
+let sources: CursorSource[];
+
+/** Opens the fixture through the real reader, logging each KV lookup. */
+const tracingOpen = (dbPath: string): DbResult<CursorDbReader> => {
+  const opened = openCursorDb(dbPath);
+  if (!opened.ok) return opened;
+  const db = opened.value;
+  return {
+    ok: true,
+    value: {
+      headers: () => db.headers(),
+      composerData: (id) => {
+        reads.push(`composerData:${id}`);
+        return db.composerData(id);
+      },
+      bubble: (id, b) => {
+        reads.push(`bubble:${id}:${b}`);
+        return db.bubble(id, b);
+      },
+      close: () => db.close(),
+    },
+  };
+};
+
+function source(extra: Partial<CursorSourceOptions> = {}): CursorSource {
+  const s = new CursorSource({ dbPath: fx.dbPath, now: () => clock, timers: new ManualTimers(), openDb: tracingOpen, ...extra });
+  sources.push(s);
+  return s;
+}
+async function started(extra: Partial<CursorSourceOptions> = {}, target: FakeSink = sink): Promise<CursorSource> {
+  const s = source(extra);
+  s.start(target);
+  return s;
+}
+
+beforeEach(() => {
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-cursor-'));
+  fx = new CursorDbFixture(path.join(tmp, 'Cursor'));
+  sink = new FakeSink();
+  clock = T0 + 60 * 60 * 1000; // an hour after the fixtures' times: nothing is "recently active" by default
+  reads = [];
+  sources = [];
+});
+
+afterEach(async () => {
+  for (const s of sources) await s.stop();
+  fx.close();
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+describe('trim', () => {
+  test('a tool bubble keeps the fields of spec 5.3 only, in a fixed order; equal content gives equal lines', () => {
+    const raw = { ...toolBubble('b1', 'read_file', 'completed', T0, { toolCallId: 'tc-1', params: { target: 'a.txt' } }), codebaseContextChunks: [], turnDurationMs: 900 };
+    const line = trimBubble(raw);
+    const rec = JSON.parse(line) as CursorBubbleRecord;
+    expect(Object.keys(rec)).toEqual([
+      'bubbleId', 'type', 'capabilityType', 'createdAt', 'startedAtMs', 'completedAtMs', 'turnDurationMs', 'text', 'thinking',
+      'thinkingDurationMs', 'tokenCount', 'toolFormerData', 'truncated',
+    ]);
+    expect(rec.toolFormerData).toEqual({ name: 'read_file', status: 'completed', toolCallId: 'tc-1', params: '{"target":"a.txt"}', result: '{"ok":true}' });
+    expect(rec.text).toBeNull(); // empty string → null
+    expect(rec.turnDurationMs).toBe(900);
+    expect(line).not.toContain('toolCallBinary');
+    expect(line).not.toContain('rawArgs');
+    expect(line).not.toContain('codebaseContextChunks');
+    // key order of the input does not matter
+    const shuffled = Object.fromEntries(Object.entries(raw).reverse());
+    expect(trimBubble(shuffled)).toBe(line);
+  });
+
+  test('thinking, user and text bubbles; missing fields are null', () => {
+    const t = bubbleRecord(thinkingBubble('t1', 'pondering'));
+    expect(t.thinking).toEqual({ text: 'pondering' });
+    expect(t.thinkingDurationMs).toBe(1200);
+    expect(JSON.stringify(t)).not.toContain('sig-xyz');
+    const u = bubbleRecord({ bubbleId: 'u1', type: 1, text: 'hello' });
+    expect(u).toMatchObject({ bubbleId: 'u1', type: 1, capabilityType: null, createdAt: null, completedAtMs: null, thinking: null, tokenCount: null, toolFormerData: null, truncated: [] });
+    expect(bubbleRecord({ type: 2, text: 'x' }, 'from-key').bubbleId).toBe('from-key');
+  });
+
+  test('text, thinking, params and result are cut to 64 KB of UTF-8 and named in truncated', () => {
+    const big = 'é'.repeat(40_000); // 80 000 bytes
+    const rec = bubbleRecord({
+      bubbleId: 'b',
+      type: 2,
+      text: big,
+      thinking: { text: big },
+      toolFormerData: { name: 'x', status: 'completed', params: big, result: 'small' },
+    });
+    expect(Buffer.byteLength(rec.text!, 'utf8')).toBe(64 * 1024);
+    expect(rec.text!.endsWith('é')).toBe(true);
+    expect(rec.truncated).toEqual(['text', 'thinking.text', 'params']);
+    expect(capUtf8('abc')).toEqual({ text: 'abc', cut: false });
+    expect(capUtf8('a😀', 3)).toEqual({ text: 'a', cut: true });
+  });
+
+  test('composer record: fields, ordered bubble ids, subagent info, header fallbacks', () => {
+    const line = trimComposer(
+      {
+        composerId: 'ignored',
+        name: 'Fix the widget',
+        status: 'none',
+        createdAt: 1000,
+        unifiedMode: 'agent',
+        modelConfig: { modelName: 'm-1' },
+        subagentInfo: { subagentType: 2, subagentTypeName: 'explore', parentComposerId: 'p', rootParentConversationId: 'r', toolCallId: 'tc', conversationLengthAtSpawn: 4 },
+        fullConversationHeadersOnly: [{ bubbleId: 'b2', type: 1 }, { type: 2 }, { bubbleId: 'b1', type: 2 }],
+      },
+      { composerId: 'c1', workspaceId: 'ws', headerCreatedAt: 1, headerLastUpdatedAt: 2000, headerUnifiedMode: 'chat', cwd: 'd:\\w' },
+    );
+    const rec = JSON.parse(line) as CursorComposerRecord;
+    expect(rec).toEqual({
+      composerId: 'c1',
+      name: 'Fix the widget',
+      status: 'none',
+      createdAt: 1000,
+      lastUpdatedAt: 2000,
+      modelName: 'm-1',
+      unifiedMode: 'agent',
+      workspaceId: 'ws',
+      cwd: 'd:\\w',
+      subagentInfo: { parentComposerId: 'p', rootParentConversationId: 'r', toolCallId: 'tc', subagentTypeName: 'explore', subagentType: 2 },
+      bubbleIds: ['b2', 'b1'],
+    });
+  });
+});
+
+describe('project', () => {
+  test('file URIs become local paths', () => {
+    expect(fileUriToPath('file:///d%3A/work/x')).toBe('d:\\work\\x');
+    expect(fileUriToPath('file:///home/u/my%20dir')).toBe('/home/u/my dir');
+    expect(fileUriToPath('file://server/share/x')).toBe('\\\\server\\share\\x');
+    expect(fileUriToPath('vscode-remote://ssh-remote+h/x')).toBeNull();
+    expect(fileUriToPath('file:///bad%E0')).toBeNull();
+  });
+
+  test('workspaceStorage is the sibling of globalStorage', () => {
+    expect(workspaceStorageDir(fx.dbPath)).toBe(fx.workspaceStorage);
+  });
+
+  test('cwd: composerData fsPath, then the header fsPath, then workspace.json; project id encoded, case-insensitively reused, else cursor-<workspaceId>', async () => {
+    fx.put({ id: 'a', dataFsPath: 'd:\\work\\alpha', headerFsPath: 'd:\\other', bubbles: [userBubble('a1', 'hi')] });
+    fx.put({ id: 'b', workspaceId: 'ws-b', headerFsPath: 'd:\\work\\beta', bubbles: [userBubble('b1', 'hi')] });
+    fx.put({ id: 'c', workspaceId: 'ws-c', bubbles: [userBubble('c1', 'hi')] });
+    fx.writeWorkspaceJson('ws-c', { folder: 'file:///d%3A/work/gamma' });
+    fx.put({ id: 'd', workspaceId: 'ws-d', bubbles: [userBubble('d1', 'hi')] });
+    fx.writeWorkspaceJson('ws-d', { workspace: 'file:///d%3A/x.code-workspace' });
+    fx.put({ id: 'e', workspaceId: '..', bubbles: [userBubble('e1', 'hi')] });
+    const s = await started({ knownProjectIds: () => ['D--work-alpha'] });
+    await s.pollOnce();
+    const composers = new Map(sink.records().filter((r) => r.recordType === 'composer').map((r) => [r.value.composerId as string, r]));
+    expect(composers.get('a')!.value.cwd).toBe('d:\\work\\alpha');
+    expect(composers.get('a')!.projectId).toBe('D--work-alpha'); // reused, differs only in case
+    expect(composers.get('b')!.value.cwd).toBe('d:\\work\\beta');
+    expect(composers.get('b')!.projectId).toBe('d--work-beta');
+    expect(composers.get('c')!.value.cwd).toBe('d:\\work\\gamma');
+    expect(composers.get('d')!.value.cwd).toBeNull();
+    expect(composers.get('d')!.projectId).toBe('cursor-ws-d');
+    expect(composers.get('e')!.projectId).toBe('cursor-..');
+    expect(composers.get('e')!.value.cwd).toBeNull();
+  });
+});
+
+describe('database problems', () => {
+  test('no database file: no reads, no error, no poll time', async () => {
+    const s = await started({ dbPath: path.join(tmp, 'missing', 'state.vscdb') });
+    await s.pollOnce();
+    expect(sink.calls).toEqual([]);
+    expect(s.status()).toEqual({ lastPollAt: null, lastError: null });
+  });
+
+  test('a missing table or column is a database-level error: round skipped, retried and cleared next round', async () => {
+    fx.put({ id: 'a', bubbles: [userBubble('a1', 'hi')] });
+    fx.exec('ALTER TABLE composerHeaders RENAME COLUMN isSubagent TO isSub');
+    const s = await started();
+    await s.pollOnce();
+    expect(s.status().lastError).toMatch(/isSubagent/);
+    expect(s.status().lastPollAt).toBeNull();
+    expect(sink.calls).toEqual([]);
+    fx.exec('ALTER TABLE composerHeaders RENAME COLUMN isSub TO isSubagent');
+    await s.pollOnce();
+    expect(s.status()).toEqual({ lastPollAt: new Date(clock).toISOString(), lastError: null });
+    expect(sink.calls).toEqual(['ingest cursor:a composer,bubble']);
+  });
+
+  test('a file that is not a database: lastError, nothing thrown', async () => {
+    const bad = path.join(tmp, 'bad.vscdb');
+    fs.writeFileSync(bad, 'not sqlite at all, just some invented text'.repeat(200));
+    const s = await started({ dbPath: bad });
+    await s.pollOnce();
+    expect(s.status().lastError).toMatch(/Cursor/);
+  });
+
+  test('opening never creates a missing database file', () => {
+    const missing = path.join(tmp, 'nope.vscdb');
+    const opened = openCursorDb(missing);
+    expect(opened.ok).toBe(false);
+    expect(fs.existsSync(missing)).toBe(false);
+  });
+
+  test('the handle is read-only: the reader leaves the database unchanged', async () => {
+    fx.put({ id: 'c', bubbles: [userBubble('u1', 'go')] });
+    const before = fs.readFileSync(fx.dbPath);
+    const s = await started();
+    await s.pollOnce();
+    await s.pollOnce();
+    expect(sink.calls).toEqual(['ingest cursor:c composer,bubble']);
+    expect(fs.readFileSync(fx.dbPath).equals(before)).toBe(true);
+  });
+});
+
+describe('selection and records', () => {
+  test('unarchived non-draft main conversations and the subagents of picked roots; composer first, then bubbles', async () => {
+    fx.put({ id: 'main', name: 'Main one', bubbles: [userBubble('m1', 'do it'), toolBubble('m2', 'task_v2', 'completed', T0 + 1, { toolCallId: 'tc-sub' }), textBubble('m3', 'done')] });
+    fx.put({ id: 'arch', isArchived: true, bubbles: [userBubble('x1', 'old')] });
+    fx.put({ id: 'draft', isDraft: true, bubbles: [] });
+    fx.put({
+      id: 'sub',
+      isSubagent: true,
+      subagentInfo: { subagentType: 1, subagentTypeName: 'explore', parentComposerId: 'main', rootParentConversationId: 'main', toolCallId: 'tc-sub' },
+      bubbles: [userBubble('s1', 'look around'), thinkingBubble('s2', 'hmm')],
+    });
+    fx.put({
+      id: 'sub-of-arch',
+      isSubagent: true,
+      subagentInfo: { parentComposerId: 'arch', rootParentConversationId: 'arch', toolCallId: 'tc-x' },
+      bubbles: [userBubble('z1', 'nope')],
+    });
+    const s = await started();
+    await s.pollOnce();
+    expect(sink.calls).toEqual(['ingest cursor:main composer,bubble,bubble,bubble', 'ingest cursor:sub composer,bubble,bubble']);
+    const main = sink.batches[0]!;
+    expect(main).toMatchObject({ key: 'cursor:main', sessionId: 'main', agentId: null, projectId: 'cursor-ws-1' });
+    const sub = sink.batches[1]!;
+    expect(sub).toMatchObject({ key: 'cursor:sub', sessionId: 'main', agentId: 'sub', projectId: 'cursor-ws-1' });
+    const composer = JSON.parse(main.records[0]!.line) as CursorComposerRecord;
+    expect(composer).toMatchObject({ composerId: 'main', name: 'Main one', status: 'completed', lastUpdatedAt: T0, modelName: 'synthetic-model', bubbleIds: ['m1', 'm2', 'm3'], subagentInfo: null });
+    expect((JSON.parse(sub.records[0]!.line) as CursorComposerRecord).subagentInfo).toMatchObject({ rootParentConversationId: 'main', toolCallId: 'tc-sub' });
+    expect(main.records.slice(1).map((r) => (JSON.parse(r.line) as CursorBubbleRecord).bubbleId)).toEqual(['m1', 'm2', 'm3']);
+    expect(reads).not.toContain('bubble:arch:x1');
+    expect(reads.filter((r) => r.startsWith('composerData:arch'))).toEqual([]);
+    expect(sink.failures.size).toBe(0);
+  });
+
+  test('a conversation archived by value only is not imported; text values are decoded too', async () => {
+    fx.put({ id: 'a', bubbles: [userBubble('a1', 'hi')] });
+    fx.exec(`UPDATE composerHeaders SET value = json_set(value, '$.isArchived', json('true')) WHERE composerId = 'a'`);
+    fx.put({ id: 'b', bubbles: [] });
+    fx.setKv('bubbleId:b:t', JSON.stringify(userBubble('t', 'as text')), true);
+    fx.setKv('composerData:b', JSON.stringify({ composerId: 'b', fullConversationHeadersOnly: [{ bubbleId: 't', type: 1 }] }), true);
+    const s = await started();
+    await s.pollOnce();
+    expect(sink.calls).toEqual(['ingest cursor:b composer,bubble']);
+  });
+
+  test('a conversation without composerData stores nothing and is not a failure', async () => {
+    fx.put({ id: 'empty', withData: false });
+    const s = await started();
+    await s.pollOnce();
+    expect(sink.calls).toEqual([]);
+    expect(sink.failures.size).toBe(0);
+  });
+
+  test('a subagent without a root id is a failure of that conversation only', async () => {
+    fx.put({ id: 'main', bubbles: [userBubble('m1', 'go')] });
+    fx.put({ id: 'lost', isSubagent: true, bubbles: [userBubble('l1', 'x')] });
+    const s = await started();
+    await s.pollOnce();
+    expect(sink.calls).toEqual(['ingest cursor:main composer,bubble']);
+    expect(sink.failures.get('cursor:lost')).toMatch(/root/);
+    reads = [];
+    await s.pollOnce();
+    expect(reads).toEqual([]); // not re-read until it changes
+    expect(sink.failures.get('cursor:lost')).toMatch(/root/);
+  });
+});
+
+describe('incremental reads', () => {
+  function setup(): void {
+    const bubbles = [userBubble('u1', 'start')];
+    for (let i = 0; i < 30; i += 1) bubbles.push(toolBubble(`t${i}`, 'read_file', 'completed', T0 + i));
+    bubbles.push(toolBubble('live', 'run_terminal_cmd', 'loading', T0 + 100));
+    fx.put({ id: 'c', lastUpdatedAt: T0, bubbles });
+  }
+
+  test('unchanged and not recent: nothing read, nothing stored', async () => {
+    setup();
+    const s = await started();
+    await s.pollOnce();
+    reads = [];
+    sink.reset();
+    await s.pollOnce();
+    expect(reads).toEqual([]);
+    expect(sink.calls).toEqual([]);
+  });
+
+  test('changed: reads only unseen, unfinished and the last 20 bubbles; stores only what changed', async () => {
+    setup();
+    const s = await started();
+    await s.pollOnce();
+    reads = [];
+    sink.reset();
+    fx.update('c', { lastUpdatedAt: T0 + 5000 });
+    // the loading tool completes, a new bubble arrives
+    fx.setBubble('c', toolBubble('live', 'run_terminal_cmd', 'completed', T0 + 100, { toolCallId: 'call-live' }));
+    fx.setBubble('c', textBubble('new', 'all done', T0 + 200));
+    fx.exec(
+      `UPDATE cursorDiskKV SET value = json_set(CAST(value AS TEXT), '$.fullConversationHeadersOnly', json_insert(json_extract(CAST(value AS TEXT), '$.fullConversationHeadersOnly'), '$[#]', json('{"bubbleId":"new","type":2}'))) WHERE key = 'composerData:c'`,
+    );
+    await s.pollOnce();
+    const bubbleReads = reads.filter((r) => r.startsWith('bubble:')).map((r) => r.split(':')[2]);
+    // tail of 20 over 33 ids: t12..t29, live, new; plus nothing else (u1, t0..t11 are finished and not in the tail)
+    expect(bubbleReads).toEqual([...Array.from({ length: 18 }, (_, i) => `t${i + 12}`), 'live', 'new']);
+    const stored = sink.records();
+    expect(stored.map((r) => (r.recordType === 'composer' ? 'composer' : (r.value.bubbleId as string)))).toEqual(['composer', 'live', 'new']);
+    expect((stored[1]!.value as unknown as CursorBubbleRecord).toolFormerData?.status).toBe('completed');
+    expect((stored[0]!.value as unknown as CursorComposerRecord).lastUpdatedAt).toBe(T0 + 5000);
+  });
+
+  test('an unfinished bubble outside the tail is re-read until it finishes', async () => {
+    const bubbles = [userBubble('u1', 'start'), toolBubble('slow', 'run_terminal_cmd', 'loading', T0)];
+    for (let i = 0; i < 25; i += 1) bubbles.push(textBubble(`x${i}`, `line ${i}`, T0 + i));
+    fx.put({ id: 'c', bubbles });
+    const s = await started();
+    await s.pollOnce();
+    fx.update('c', { lastUpdatedAt: T0 + 1 });
+    reads = [];
+    await s.pollOnce();
+    expect(reads).toContain('bubble:c:slow');
+    expect(reads).not.toContain('bubble:c:u1');
+  });
+
+  test('recently active: processed every round even when lastUpdatedAt did not move', async () => {
+    fx.put({ id: 'c', lastUpdatedAt: T0, bubbles: [userBubble('u1', 'go'), toolBubble('t1', 'grep', 'loading', T0)] });
+    clock = T0 + RECENT_MS - 60_000;
+    const s = await started();
+    await s.pollOnce();
+    reads = [];
+    sink.reset();
+    fx.setBubble('c', toolBubble('t1', 'grep', 'completed', T0, { toolCallId: 'call-t1' }));
+    await s.pollOnce();
+    expect(reads).toContain('composerData:c');
+    expect(sink.records().map((r) => r.value.bubbleId ?? 'composer')).toEqual(['t1']);
+    clock = T0 + RECENT_MS + 120_000; // our last observed change was at T0 + RECENT_MS - 60_000: still recent
+    reads = [];
+    await s.pollOnce();
+    expect(reads).toContain('composerData:c');
+    clock += RECENT_MS;
+    reads = [];
+    await s.pollOnce();
+    expect(reads).toEqual([]);
+  });
+
+  test('records are remembered only once stored: a rejected batch is sent again next round', async () => {
+    fx.put({ id: 'c', bubbles: [userBubble('u1', 'go')] });
+    const s = await started();
+    sink.failIngest = new Error('disk full');
+    await s.pollOnce();
+    expect(sink.failures.get('cursor:c')).toBe('disk full');
+    sink.failIngest = null;
+    await s.pollOnce();
+    expect(sink.calls).toEqual(['ingest cursor:c composer,bubble']);
+    expect(sink.failures.size).toBe(0);
+  });
+
+  test('a bubble that does not parse: the others are stored, the failure is visible, it is retried and cleared', async () => {
+    fx.put({ id: 'c', bubbles: [userBubble('u1', 'go'), textBubble('b2', 'ok')] });
+    fx.put({ id: 'other', bubbles: [userBubble('o1', 'fine')] });
+    fx.setBubbleRaw('c', 'u1', '{"bubbleId": "u1", broken');
+    const s = await started();
+    await s.pollOnce();
+    expect(sink.calls).toEqual(['ingest cursor:c composer,bubble', 'ingest cursor:other composer,bubble']);
+    expect(sink.failures.get('cursor:c')).toMatch(/u1/);
+    fx.setBubble('c', userBubble('u1', 'go'));
+    sink.reset();
+    await s.pollOnce();
+    expect(sink.calls).toEqual(['ingest cursor:c bubble']);
+    expect(sink.failures.size).toBe(0);
+  });
+
+  test('composerData that does not parse fails that conversation only', async () => {
+    fx.put({ id: 'c', bubbles: [userBubble('u1', 'go')] });
+    fx.put({ id: 'd', bubbles: [userBubble('d1', 'go')] });
+    fx.setKv('composerData:c', '{nope');
+    const s = await started();
+    await s.pollOnce();
+    expect(sink.calls).toEqual(['ingest cursor:d composer,bubble']);
+    expect(sink.failures.get('cursor:c')).toMatch(/not JSON/);
+    expect(s.status().lastError).toBeNull();
+  });
+
+  test('lines are deterministic: a fresh source over the same data produces the same lines', async () => {
+    fx.put({ id: 'c', bubbles: [userBubble('u1', 'go'), toolBubble('t1', 'grep', 'completed'), thinkingBubble('k', 'hm')] });
+    const a = await started();
+    await a.pollOnce();
+    const first = sink.batches.flatMap((b) => b.records.map((r) => r.line));
+    const other = new FakeSink();
+    clock += 12_345;
+    const b = await started({}, other);
+    await b.pollOnce();
+    expect(other.batches.flatMap((x) => x.records.map((r) => r.line))).toEqual(first);
+  });
+});
+
+describe('archive, disappearance, restart', () => {
+  test('archived after collection: marked once, never read again; unarchived: flag cleared and read again', async () => {
+    fx.put({ id: 'c', bubbles: [userBubble('u1', 'go')] });
+    fx.put({ id: 's', isSubagent: true, subagentInfo: { rootParentConversationId: 'c', parentComposerId: 'c', toolCallId: 'tc' }, bubbles: [userBubble('s1', 'x')] });
+    const s = await started();
+    await s.pollOnce();
+    sink.reset();
+    fx.update('c', { isArchived: true, lastUpdatedAt: T0 + 10 });
+    fx.update('s', { lastUpdatedAt: T0 + 10 });
+    reads = [];
+    await s.pollOnce();
+    await s.pollOnce();
+    expect(sink.calls).toEqual(['deleted c']);
+    expect(reads).toEqual([]);
+    fx.update('c', { isArchived: false, lastUpdatedAt: T0 + 20 });
+    await s.pollOnce();
+    expect(sink.calls).toEqual(['deleted c', 'undeleted c', 'ingest cursor:c composer,bubble', 'ingest cursor:s composer,bubble']);
+  });
+
+  test('gone from composerHeaders: marked "source deleted"', async () => {
+    fx.put({ id: 'c', bubbles: [userBubble('u1', 'go')] });
+    const s = await started();
+    await s.pollOnce();
+    sink.reset();
+    fx.remove('c');
+    await s.pollOnce();
+    expect(sink.calls).toEqual(['deleted c']);
+  });
+
+  test('after a restart, stored sessions now archived or gone are marked; picked ones are cleared and re-read', async () => {
+    fx.put({ id: 'live', bubbles: [userBubble('u1', 'go')] });
+    fx.put({ id: 'arch', isArchived: true, bubbles: [userBubble('a1', 'old')] });
+    sink.stored = ['arch', 'gone', 'live'];
+    const s = await started();
+    await s.pollOnce();
+    expect(sink.calls).toEqual(['deleted arch', 'deleted gone', 'undeleted live', 'ingest cursor:live composer,bubble']);
+    sink.reset();
+    await s.pollOnce();
+    expect(sink.calls).toEqual([]);
+  });
+
+  test('a conversation never collected is not marked when archived', async () => {
+    fx.put({ id: 'c', isArchived: true, bubbles: [userBubble('u1', 'go')] });
+    const s = await started();
+    await s.pollOnce();
+    expect(sink.calls).toEqual([]);
+  });
+});
+
+describe('loop', () => {
+  test('start schedules an immediate round, then one every interval; stop cancels', async () => {
+    fx.put({ id: 'c', bubbles: [userBubble('u1', 'go')] });
+    const timers = new ManualTimers();
+    const s = source({ timers, intervalMs: 3000 });
+    s.start(sink);
+    expect(timers.pending.map((t) => t.ms)).toEqual([0]);
+    timers.fire();
+    await s.pollOnce(); // waits for the fired round
+    expect(sink.calls).toEqual(['ingest cursor:c composer,bubble']);
+    expect(timers.pending.map((t) => t.ms)).toEqual([3000]);
+    await s.stop();
+    expect(timers.pending).toEqual([]);
+    await s.pollOnce();
+    expect(s.status().lastPollAt).not.toBeNull();
+  });
+
+  test('poke: an extra round that processes the poked session even when unchanged', async () => {
+    fx.put({ id: 'c', bubbles: [userBubble('u1', 'go')] });
+    fx.put({ id: 's', isSubagent: true, subagentInfo: { rootParentConversationId: 'c', toolCallId: 'tc' }, bubbles: [userBubble('s1', 'x')] });
+    fx.put({ id: 'd', bubbles: [userBubble('d1', 'go')] });
+    const s = await started();
+    await s.pollOnce();
+    reads = [];
+    s.poke('c');
+    s.poke('c');
+    await s.pollOnce();
+    expect(reads).toEqual(['composerData:c', 'bubble:c:u1', 'composerData:s', 'bubble:s:s1']);
+  });
+
+  test('poke before start or after stop does nothing', async () => {
+    fx.put({ id: 'c', bubbles: [userBubble('u1', 'go')] });
+    const s = source();
+    s.poke('c');
+    await s.pollOnce();
+    expect(reads).toEqual([]);
+    s.start(sink);
+    await s.stop();
+    s.poke('c');
+    await s.pollOnce();
+    expect(reads).toEqual([]);
+  });
+});
