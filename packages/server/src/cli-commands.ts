@@ -21,6 +21,8 @@ import {
 } from './hooks-cli.js';
 import { acquireLock } from './lock.js';
 import { NORMALIZER_VERSION } from './normalize/version.js';
+import { DesktopNotifier } from './notify/desktop.js';
+import { NotificationService, type ServiceNotifier } from './notify/service.js';
 import { NORMALIZER_VERSION_KEY, Pipeline, REBUILD_FLAG } from './pipeline.js';
 import { ClaudeFileSource } from './sources/claude.js';
 import { storeLookup } from './sources/codex/lookup.js';
@@ -161,6 +163,8 @@ export interface StartOptions {
   log?: (line: string) => void;
   /** Rebuild progress, when a rebuild runs before listening. */
   progress?: (done: number, total: number) => void;
+  /** Delivery of desktop notifications (tests); default: the system's own (DesktopNotifier). */
+  notifier?: ServiceNotifier;
 }
 
 export async function start(overrides: Partial<Config> = {}, options: StartOptions = {}): Promise<Running> {
@@ -169,6 +173,7 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
   let store: Store | null = null;
   let app: ReturnType<typeof buildServer> | null = null;
   let watcher: ReturnType<typeof startWatcher> | null = null;
+  let notifications: NotificationService | null = null;
   let pipeline: Pipeline;
   try {
     store = openStore(config.dbPath, options.log ? { log: options.log } : {});
@@ -182,11 +187,20 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
       options.log?.(`agent-canvas rebuilding derived data (reason: ${reason})`);
       pipeline.rebuild(options.progress);
     }
-    app = buildServer({ store, pipeline, config });
+    notifications = new NotificationService({
+      store,
+      pipeline,
+      notifier: options.notifier ?? new DesktopNotifier(),
+      log: (line) => process.stderr.write(`${line}\n`),
+    });
+    app = buildServer({ store, pipeline, config, notifications });
     await app.listen({ port: config.port, host: config.host });
+    // After the (automatic) rebuild above, before the initial scan: its changes arrive while importing() holds.
+    notifications.start(`http://${config.host}:${(app.server.address() as AddressInfo).port}`);
     // The initial scan runs in the background; the server is already answering requests.
     watcher = startWatcher(pipeline, config);
   } catch (err) {
+    await notifications?.close().catch(() => undefined);
     await app?.close().catch(() => undefined);
     store?.close();
     lock.release();
@@ -197,16 +211,20 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
   let closing: Promise<void> | null = null;
   const openedStore = store;
   const server = app;
+  const service = notifications!;
   return {
     url,
     address: { address: bound.address, port: bound.port },
     close() {
       closing ??= (async () => {
         try {
+          // Unsubscribes and stops the timer at once; deliveries in flight end within their timeout meanwhile.
+          const notificationsClosed = service.close();
           await watcher!.close();
           await pipeline.close();
           await server.close();
           await pipeline.idle();
+          await notificationsClosed;
           openedStore.close();
         } finally {
           lock.release();

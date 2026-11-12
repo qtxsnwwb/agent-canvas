@@ -5,6 +5,9 @@ import {
   type Graph,
   type GraphSnapshot,
   type NodeDetail,
+  type NotificationSettings,
+  type NotificationSettingsResponse,
+  type NotificationTestResponse,
   type Project,
   type SeqChange,
   type SearchHit,
@@ -25,6 +28,24 @@ async function getJson<T>(path: string): Promise<T> {
   return (await res.json()) as T;
 }
 
+/** Sends JSON; a non-2xx answer throws an Error whose message is the server's `error` text when it has one. */
+async function sendJson<T>(method: 'PUT' | 'POST', path: string, body?: unknown): Promise<T> {
+  const res = await fetch(path, {
+    method,
+    ...(body === undefined ? {} : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
+  });
+  if (!res.ok) {
+    let message = `${path}: HTTP ${res.status}`;
+    try {
+      const j = (await res.json()) as { error?: unknown; message?: unknown };
+      if (typeof j.error === 'string' && j.error !== '') message = j.error;
+      else if (typeof j.message === 'string' && j.message !== '') message = j.message;
+    } catch { /* keep the generic text */ }
+    throw Object.assign(new Error(message), { status: res.status }) as HttpError;
+  }
+  return (await res.json()) as T;
+}
+
 const enc = encodeURIComponent;
 
 export const api = {
@@ -34,6 +55,10 @@ export const api = {
   nodeDetail: (sessionId: string, nodeId: string) =>
     getJson<NodeDetail>(`/api/sessions/${enc(sessionId)}/nodes/${enc(nodeId)}`),
   diagnostics: () => getJson<Diagnostics>('/api/diagnostics'),
+  notificationSettings: () => getJson<NotificationSettingsResponse>('/api/notifications/settings'),
+  saveNotificationSettings: (settings: NotificationSettings) =>
+    sendJson<NotificationSettingsResponse>('PUT', '/api/notifications/settings', settings),
+  testNotification: () => sendJson<NotificationTestResponse>('POST', '/api/notifications/test'),
   search: (q: string) => getJson<SearchHit[]>(`/api/search?q=${enc(q)}`),
 };
 
