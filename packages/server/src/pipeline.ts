@@ -283,8 +283,8 @@ export class Pipeline {
   /**
    * `transcriptPath` is the payload's `transcript_path`: when the source of `origin` knows it as a session or agent
    * transcript, its project is stored with the raw event (so replay reproduces it) and used for a new session.
-   * Cursor: `sessionId` is the payload's conversation id and `from.cwd` its first workspace root; a known subagent
-   * conversation's hook is filed under (and pokes) its root session (cursorHookTarget).
+   * Cursor: `sessionId` is the payload's conversation id and `from.cwd` its first workspace root; the hook of a stored
+   * subagent conversation is filed under its owning session and pokes every session owning it (cursorHookTarget).
    */
   ingestHook(
     eventName: string,
@@ -297,7 +297,8 @@ export class Pipeline {
     const receivedAt = new Date().toISOString();
     const source = this.sourceFor(origin);
     let projectId: string | null;
-    if (origin === 'cursor') ({ sessionId, projectId } = this.cursorHookTarget(sessionId, from.cwd));
+    let pokes: (string | null)[] = [sessionId];
+    if (origin === 'cursor') ({ sessionId, projectId, pokes } = this.cursorHookTarget(sessionId, from.cwd));
     else
       projectId =
         origin === 'codex'
@@ -306,7 +307,7 @@ export class Pipeline {
             ? source.projectOfTranscript(transcriptPath)
             : null;
     const event: RawEvent = { source: 'hook', origin, receivedAt, eventName, sessionId, payload, projectId };
-    this.pokePoll(origin, sessionId);
+    for (const id of pokes) this.pokePoll(origin, id);
     this.seed();
     if (this.lastHook === null || receivedAt > this.lastHook) this.lastHook = receivedAt;
     const key = `hook:${sessionId}`;
@@ -704,21 +705,35 @@ export class Pipeline {
   }
 
   /**
-   * Session and project of a Cursor hook, decided once on arrival and stored with the raw event (replay uses the stored
-   * values). Session: the conversation id, or — when the store already holds records of that conversation as a subagent
-   * (`cursor:<id>` owned by another session) — its root session. Project: the session's own when the store knows the
-   * session (a hook never moves it); else the first workspace root encoded as the Cursor source encodes a working
-   * directory (reusing a known project id that differs only in letter case); else null.
+   * Session, project and pokes of a Cursor hook, decided once on arrival and stored with the raw event (replay uses the
+   * stored values). A main conversation (`cursor:<id>` stored) is its own session. A subagent conversation stored under
+   * `cursor:<session>/<id>` belongs to every such session (forks share subagents): the hook is filed under the lowest
+   * of their ids and pokes each of them. Otherwise (nothing stored yet) the session is the conversation id. Project:
+   * the session's own when the store knows the session (a hook never moves it); else the one stored with the records;
+   * else the first workspace root encoded as the Cursor source encodes a working directory (reusing a known project id
+   * that differs only in letter case); else null.
    */
-  private cursorHookTarget(conversationId: string | null, workspaceRoot: string | null): { sessionId: string | null; projectId: string | null } {
-    if (conversationId === null) return { sessionId: null, projectId: null };
-    const owner = this.store.transcriptFileOwner(`${KEY_PREFIXES.cursor}${conversationId}`);
-    const sessionId = owner?.sessionId ?? conversationId;
+  private cursorHookTarget(
+    conversationId: string | null,
+    workspaceRoot: string | null,
+  ): { sessionId: string | null; projectId: string | null; pokes: (string | null)[] } {
+    if (conversationId === null) return { sessionId: null, projectId: null, pokes: [] };
+    const prefix = KEY_PREFIXES.cursor;
+    let owner = this.store.transcriptFileOwner(`${prefix}${conversationId}`);
+    let owners = owner === null ? [] : [conversationId];
+    if (owner === null) {
+      const suffix = `/${conversationId}`;
+      const keys = this.store.transcriptKeys(prefix).filter((k) => k.endsWith(suffix) && k.indexOf('/') === k.length - suffix.length);
+      owners = [...new Set(keys.map((k) => k.slice(prefix.length, k.length - suffix.length)))].sort();
+      if (owners.length > 0) owner = this.store.transcriptFileOwner(`${prefix}${owners[0]}${suffix}`);
+    }
+    const sessionId = owners[0] ?? conversationId;
+    const pokes = owners.length > 0 ? owners : [conversationId];
     const stored = this.store.getSession(sessionId)?.projectId ?? null;
-    if (stored !== null && stored !== UNKNOWN_PROJECT) return { sessionId, projectId: stored };
-    if (owner?.projectId != null && owner.projectId !== UNKNOWN_PROJECT) return { sessionId, projectId: owner.projectId };
+    if (stored !== null && stored !== UNKNOWN_PROJECT) return { sessionId, projectId: stored, pokes };
+    if (owner?.projectId != null && owner.projectId !== UNKNOWN_PROJECT) return { sessionId, projectId: owner.projectId, pokes };
     const cwd = workspaceRoot === null ? null : cursorRootPath(workspaceRoot);
-    return { sessionId, projectId: cwd === null ? null : this.cursorProjects.forCwd(cwd) };
+    return { sessionId, projectId: cwd === null ? null : this.cursorProjects.forCwd(cwd), pokes };
   }
 
   /**

@@ -737,6 +737,18 @@ describe('loop', () => {
     expect(reads).toEqual(['composerData:c', 'bubble:c:u1', 'composerData:s', 'bubble:s:s1']);
   });
 
+  test('poke with a subagent conversation id processes the session owning it (fix wave I1)', async () => {
+    fx.put({ id: 'c', subagentComposerIds: ['s'], bubbles: [userBubble('u1', 'go')] });
+    fx.put({ id: 's', isSubagent: true, subagentInfo: { parentComposerId: 'c', toolCallId: 'tc' }, bubbles: [userBubble('s1', 'x')] });
+    fx.put({ id: 'd', bubbles: [userBubble('d1', 'go')] });
+    const s = await started();
+    await s.pollOnce();
+    reads = [];
+    s.poke('s');
+    await s.pollOnce();
+    expect(reads).toEqual(['composerData:c', 'bubble:c:u1', 'composerData:s', 'bubble:s:s1']);
+  });
+
   test('poke before start or after stop does nothing', async () => {
     fx.put({ id: 'c', bubbles: [userBubble('u1', 'go')] });
     const s = source();

@@ -8,6 +8,8 @@ import { summarize } from './summary.js';
  */
 
 export const TASK_TOOL = 'task_v2';
+/** Cursor's terminal tool: its result carries the command's `exitCode`. */
+export const TERMINAL_TOOL = 'run_terminal_command_v2';
 
 export type Obj = Record<string, unknown>;
 export const isObject = (v: unknown): v is Obj => typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -78,6 +80,8 @@ export interface BubbleView {
   toolCallId: string | null;
   /** The call's result says the user rejected it (`rejected: true`). */
   rejected: boolean;
+  /** The terminal tool's `exitCode` from a result that was not cut; null otherwise. */
+  exitCode: number | null;
   /** task_v2: the subagent type named in its params. */
   agentType: string | null;
   /** task_v2: the subagent conversation named in its result (`agentId`). */
@@ -239,6 +243,7 @@ export function bubbleView(rec: Obj, bubbleId: string, nodeId: string): { view: 
     toolStatus: null,
     toolCallId: null,
     rejected: false,
+    exitCode: null,
     agentType: null,
     resultAgentId: null,
   };
@@ -275,6 +280,7 @@ export function bubbleView(rec: Obj, bubbleId: string, nodeId: string): { view: 
       view.toolCallId = str(t.toolCallId);
       view.summary = toolSummary(name, input);
       view.rejected = isObject(output) && output.rejected === true;
+      if (name === TERMINAL_TOOL && isObject(output)) view.exitCode = num(output.exitCode);
       if (kind === 'subagent') {
         view.agentType = firstString(input, AGENT_TYPE_KEYS);
         view.resultAgentId = isObject(output) ? str(output.agentId) : null;

@@ -1,6 +1,6 @@
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { Readable } from 'node:stream';
+import { PassThrough, Readable } from 'node:stream';
 import { afterEach, expect, test } from 'vitest';
 import { FORWARD_TIMEOUT_MS, parseForwardArgs, runHookForward } from '../src/hook-forward.js';
 
@@ -124,4 +124,36 @@ test('stdout 写入抛错：仍返回 0', async () => {
     },
   };
   expect(await runHookForward(['--origin', 'cursor', '--port', String(await deadPort())], { stdin: stdinOf(payload('beforeSubmitPrompt')), stdout })).toBe(0);
+});
+
+// Fix wave I3: stdin that is never closed. The answer comes from what was read by the stdin timeout.
+test('stdin left open: a complete beforeSubmitPrompt payload is answered at the stdin timeout and forwarded', async () => {
+  const { port, received } = await listen();
+  const stdin = new PassThrough();
+  stdin.write(payload('beforeSubmitPrompt'));
+  const out = sink();
+  const t0 = performance.now();
+  await runHookForward(['--origin', 'cursor', '--port', String(port)], { stdin, stdout: out.stdout, stdinTimeoutMs: 150 });
+  expect(out.text()).toBe('{"continue":true}');
+  expect(received).toHaveLength(1);
+  expect(performance.now() - t0).toBeLessThan(150 + FORWARD_TIMEOUT_MS + 500);
+});
+
+test('stdin left open: a cut payload naming beforeSubmitPrompt is answered; one whose event cannot be told prints nothing', async () => {
+  const { port, received } = await listen();
+  const cut = new PassThrough();
+  cut.write('{"conversation_id":"c1","hook_event_name":"beforeSubmitPrompt","prompt":"half a pro');
+  const a = sink();
+  await runHookForward(['--origin', 'cursor', '--port', String(port)], { stdin: cut, stdout: a.stdout, stdinTimeoutMs: 100 });
+  expect(a.text()).toBe('{"continue":true}');
+  const unknown = new PassThrough();
+  unknown.write('{"conversation_id":"c1","hook_event_na');
+  const b = sink();
+  await runHookForward(['--origin', 'cursor', '--port', String(port)], { stdin: unknown, stdout: b.stdout, stdinTimeoutMs: 100 });
+  expect(b.text()).toBe('');
+  expect(received).toHaveLength(0); // a cut payload is not sent: the server could not parse it
+  const silent = new PassThrough();
+  const c = sink();
+  await runHookForward(['--origin', 'cursor', '--port', String(port)], { stdin: silent, stdout: c.stdout, stdinTimeoutMs: 100 });
+  expect(c.text()).toBe('');
 });

@@ -129,8 +129,8 @@ describe('cursor origin', () => {
     expect(originOfKey('proj/abc.jsonl')).toBe('claude');
   });
 
-  test('NORMALIZER_VERSION bumped for the cursor origin', () => {
-    expect(NORMALIZER_VERSION).toBe(23);
+  test('NORMALIZER_VERSION bumped for the cursor origin (and once for the fix wave)', () => {
+    expect(NORMALIZER_VERSION).toBe(24);
   });
 
   test('without a cursor normalizer (factory null) a cursor raw event yields no changes', () => {

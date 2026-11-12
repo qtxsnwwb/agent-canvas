@@ -192,6 +192,8 @@ export interface Store {
    * index seek per key, whatever the number of records.
    */
   transcriptSessionIds(keyPrefix: string): string[];
+  /** The store keys of transcript raw events that start with `keyPrefix` (non-empty), ascending; one seek per key. */
+  transcriptKeys(keyPrefix: string): string[];
   /** Clears derived tables, the change log and unknown_stat; keeps raw_event, file_offset and meta. */
   clearDerived(): void;
   /**
@@ -708,6 +710,15 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   };
 
   const lastSeq = (): number => (selectSeqCounter.get() as number | undefined) ?? 0;
+  const transcriptKeys = (keyPrefix: string): string[] => {
+    if (keyPrefix === '') throw new Error('transcriptKeys: empty key prefix');
+    const end = keyPrefix.slice(0, -1) + String.fromCharCode(keyPrefix.charCodeAt(keyPrefix.length - 1) + 1);
+    const keys: string[] = [];
+    if (selectTranscriptOwner.get(keyPrefix) !== undefined) keys.push(keyPrefix); // `file > prefix` misses the prefix itself
+    let file: string | null = keyPrefix;
+    while ((file = (selectNextTranscriptFile.get(file, end) as string | null | undefined) ?? null) !== null) keys.push(file);
+    return keys;
+  };
   const lastHookAt = (): string | null => (selectMeta.get('last_hook_at') as string | undefined) ?? null;
   const listOffsets = (): { path: string; offset: number; size: number }[] =>
     (selectFiles.all() as { file: string; offset: number; size: number }[]).map((r) => ({
@@ -873,17 +884,14 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     },
     transcriptSessionIds(keyPrefix) {
       if (keyPrefix === '') throw new Error('transcriptSessionIds: empty key prefix');
-      const end = keyPrefix.slice(0, -1) + String.fromCharCode(keyPrefix.charCodeAt(keyPrefix.length - 1) + 1);
       const ids = new Set<string>();
-      const add = (file: string): void => {
+      for (const file of transcriptKeys(keyPrefix)) {
         const sessionId = (selectTranscriptOwner.get(file) as { sessionId: string | null } | undefined)?.sessionId;
         if (sessionId != null) ids.add(sessionId);
-      };
-      add(keyPrefix); // `file > prefix` below misses a key equal to the prefix itself
-      let file: string | null = keyPrefix;
-      while ((file = (selectNextTranscriptFile.get(file, end) as string | null | undefined) ?? null) !== null) add(file);
+      }
       return [...ids].sort();
     },
+    transcriptKeys,
     clearDerived() {
       clearDerivedTx();
     },

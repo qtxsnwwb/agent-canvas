@@ -147,7 +147,7 @@ describe('I3: a dispatch after its parent turn ended', () => {
     const d = new CursorConv({ id: ROOT });
     const r2 = go([d.user('u', 'go', 0), d.task('t', 'tc1', 'loading', 1), s.subagentComposer('tc1'), d.user('u2', 'next', 20)]);
     expect(nodeOf(r2, d.node('t'))).toMatchObject({ status: 'failed', endedAt: iso(at(20)) });
-    expect(String(detailOf(r2, d.node('t')).text)).toMatch(/never finished/i);
+    expect(String(detailOf(r2, d.node('t')).text)).toBe('未完成：本轮结束时工具仍在运行。');
   });
 
   test('while the parent turn goes on, an unfinished subagent keeps the dispatch running', () => {
@@ -166,7 +166,7 @@ describe('abort rule', () => {
     expect(r.sessions.get(ROOT)!.status).toBe('idle');
     expect(nodeOf(r, c.node('t1'))).toMatchObject({ status: 'failed' });
     expect(nodeOf(r, c.node('t2'))).toMatchObject({ status: 'failed' });
-    expect(String(detailOf(r, c.node('t1')).text)).toMatch(/aborted/i);
+    expect(String(detailOf(r, c.node('t1')).text)).toBe('已中止：对话停止时工具仍在运行。');
     // Settled without an end, a call ends at the next bubble's start (I2 ruling): the two are drawn one after the other.
     expect(nodeOf(r, c.node('t1'))).toMatchObject({ endedAt: iso(at(2)) });
     expect(nodeOf(r, c.node('t2')).parentId).toBe(c.node('t1'));
@@ -243,7 +243,7 @@ describe('tool summaries and statuses from real parameter names', () => {
     expect(nodeOf(r, c.node('p'))).toMatchObject({ title: 'create_issue', toolName: 'mcp-github-create_issue' });
     expect(summary('a')).toBe('');
     expect(nodeOf(r, c.node('j')).status).toBe('denied');
-    expect(String(detailOf(r, c.node('j')).text)).toMatch(/rejected/i);
+    expect(String(detailOf(r, c.node('j')).text)).toBe('用户拒绝了这次调用。');
     expect(nodeOf(r, c.node('x')).status).toBe('succeeded');
   });
 });
@@ -496,4 +496,71 @@ describe('fix wave: a batch gives what its records applied one by one give', () 
       expect(go(live, { checkpointEvery: 2 }).changes, `seed ${seed}`).toEqual(go(live, { checkpointEvery: Number.POSITIVE_INFINITY }).changes);
     }
   }, 60_000);
+});
+
+describe('fix wave I2: a finished terminal call with a non-zero exit code is failed', () => {
+  const term = (c: CursorConv, id: string, result: unknown, over: Record<string, unknown> = {}): RawEvent =>
+    c.tool(id, 'run_terminal_command_v2', 'completed', 2, { params: { command: 'npm test' }, result, over });
+
+  test('exit code 1 → failed, the note names it; 0 or none → succeeded; a rejection stays denied', () => {
+    const c = new CursorConv({ id: ROOT });
+    const r = go([
+      c.composer(),
+      c.user('u', 'go', 1),
+      term(c, 'bad', { exitCode: 1, output: 'boom' }),
+      term(c, 'ok', { exitCode: 0, output: 'fine' }),
+      term(c, 'plain', { output: 'no code' }),
+      term(c, 'no', { rejected: true, exitCode: 1 }),
+      c.turnEnd('e', 9),
+    ]);
+    expect(nodeOf(r, c.node('bad')).status).toBe('failed');
+    expect(detailOf(r, c.node('bad')).text).toBe('命令以退出码 1 结束。');
+    expect(nodeOf(r, c.node('ok')).status).toBe('succeeded');
+    expect(detailOf(r, c.node('ok')).text).toBeNull();
+    expect(nodeOf(r, c.node('plain')).status).toBe('succeeded');
+    expect(nodeOf(r, c.node('no')).status).toBe('denied');
+  });
+
+  test('only the terminal tool, only a result that was not cut, only once finished; it follows the latest record', () => {
+    const c = new CursorConv({ id: ROOT });
+    const events = [
+      c.composer({ status: 'none' }),
+      c.user('u', 'go', 1),
+      c.tool('other', 'read_file_v2', 'completed', 2, { result: { exitCode: 3 } }),
+      term(c, 'cut', '{"exitCode":2,"output":"xx', { truncated: ['result'] }),
+      c.tool('run', 'run_terminal_command_v2', 'loading', 3),
+    ];
+    let r = go(events);
+    expect(nodeOf(r, c.node('other')).status).toBe('succeeded');
+    expect(nodeOf(r, c.node('cut')).status).toBe('succeeded');
+    expect(nodeOf(r, c.node('run')).status).toBe('running');
+    events.push(c.update('run', { completedAtMs: Date.parse('2026-11-12T08:00:05.000Z'), toolFormerData: { status: 'completed', result: '{"exitCode":127}' } }));
+    r = go(events);
+    expect(nodeOf(r, c.node('run')).status).toBe('failed');
+    events.push(c.update('run', { toolFormerData: { result: '{"exitCode":0}' } }));
+    r = go(events);
+    expect(nodeOf(r, c.node('run')).status).toBe('succeeded');
+    expect(detailOf(r, c.node('run')).text).toBeNull();
+  });
+});
+
+describe('fix wave M5: node notes are Simplified Chinese', () => {
+  test('cancelled, rejected, never finished and aborted calls', () => {
+    const c = new CursorConv({ id: ROOT });
+    const r = go([
+      c.composer({ status: 'completed' }),
+      c.user('u', 'go', 1),
+      c.tool('x', 'grep', 'cancelled', 2),
+      c.tool('j', 'run_terminal_command_v2', 'completed', 3, { result: { rejected: true } }),
+      c.tool('l', 'grep', 'loading', 4),
+      c.turnEnd('e', 9),
+      c.user('u2', 'again', 10),
+      c.tool('l2', 'grep', 'loading', 11),
+      c.composer({ status: 'aborted' }),
+    ]);
+    expect(detailOf(r, c.node('x')).text).toBe('已在 Cursor 中取消。');
+    expect(detailOf(r, c.node('j')).text).toBe('用户拒绝了这次调用。');
+    expect(detailOf(r, c.node('l')).text).toBe('未完成：本轮结束时工具仍在运行。');
+    expect(detailOf(r, c.node('l2')).text).toBe('已中止：对话停止时工具仍在运行。');
+  });
 });

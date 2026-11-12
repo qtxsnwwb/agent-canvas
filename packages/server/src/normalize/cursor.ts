@@ -33,10 +33,12 @@ import type { AgentNormalizer, BatchItem, BatchResult, NormalizeResult } from '.
  */
 
 const EPOCH = '1970-01-01T00:00:00.000Z';
-const CANCELLED_NOTE = 'Cancelled in Cursor.';
-const REJECTED_NOTE = 'Rejected by the user.';
-const ABORTED_NOTE = 'Aborted: the conversation was stopped while the tool was still running.';
-const NEVER_FINISHED_NOTE = 'Never finished: the turn ended while the tool was still running.';
+// Notes shown with a call's detail (the drawer's 文本 section): Simplified Chinese, like the rest of the UI.
+const CANCELLED_NOTE = '已在 Cursor 中取消。';
+const REJECTED_NOTE = '用户拒绝了这次调用。';
+const ABORTED_NOTE = '已中止：对话停止时工具仍在运行。';
+const NEVER_FINISHED_NOTE = '未完成：本轮结束时工具仍在运行。';
+const exitCodeNote = (code: number): string => `命令以退出码 ${code} 结束。`;
 /** A derivation saves a scan checkpoint before every CHECKPOINT_EVERY-th bubble of a thread. */
 const CHECKPOINT_EVERY = 32;
 /** How many sessions that exist only as hook marks (no record, no session yet) are remembered (as for Codex). */
@@ -281,11 +283,13 @@ function analyze(thread: ThreadState): Analysis {
 const turnSig = (t: Turn): string => `${t.ended}|${t.endMs}|${t.aborted}`;
 
 /**
- * A call's own status: rejected → denied; completed → succeeded; error → failed; cancelled → failed noting it; any
- * other (loading) → running, or failed when its turn has ended (never finished / aborted).
+ * A call's own status: rejected → denied; completed → succeeded, or failed noting the exit code when a terminal call's
+ * result has a non-zero one; error → failed; cancelled → failed noting it; any other (loading) → running, or failed
+ * when its turn has ended (never finished / aborted).
  */
 function callStatus(b: BubbleView, turn: Turn): { status: GraphNode['status']; note: string | null; settled: boolean } {
   if (b.rejected && b.toolStatus !== 'loading') return { status: 'denied', note: REJECTED_NOTE, settled: false };
+  if (b.toolStatus === 'completed' && b.exitCode !== null && b.exitCode !== 0) return { status: 'failed', note: exitCodeNote(b.exitCode), settled: false };
   if (b.toolStatus === 'completed') return { status: 'succeeded', note: null, settled: false };
   if (b.toolStatus === 'error') return { status: 'failed', note: null, settled: false };
   if (b.toolStatus === 'cancelled') return { status: 'failed', note: CANCELLED_NOTE, settled: false };

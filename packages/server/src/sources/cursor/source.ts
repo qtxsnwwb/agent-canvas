@@ -424,6 +424,10 @@ export class CursorSource implements PollSource {
 
     const poked = new Set(this.pokes);
     this.pokes.clear();
+    // A poked subagent conversation (a hook of it before its records were stored) pokes every session owning it.
+    if (poked.size > 0) {
+      for (const [sessionId, subs] of this.reach(selected, byId)) if (subs.some((id) => poked.has(id))) poked.add(sessionId);
+    }
 
     // 1. Main conversations.
     for (const h of roots) {

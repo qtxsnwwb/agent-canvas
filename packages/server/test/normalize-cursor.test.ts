@@ -174,7 +174,7 @@ describe('nodes from bubbles', () => {
     expect(nodeOf(r, c.node('ok')).status).toBe('succeeded');
     expect(nodeOf(r, c.node('bad')).status).toBe('failed');
     expect(nodeOf(r, c.node('stop')).status).toBe('failed');
-    expect(String(detailOf(r, c.node('stop')).text)).toMatch(/cancel/i);
+    expect(String(detailOf(r, c.node('stop')).text)).toBe('已在 Cursor 中取消。');
     expect(detailOf(r, c.node('bad')).text).toBeNull();
     expect(nodeOf(r, c.node('run'))).toMatchObject({ status: 'running', endedAt: null, durationMs: null });
   });
@@ -183,7 +183,7 @@ describe('nodes from bubbles', () => {
     const c = new CursorConv({ id: ROOT });
     const r1 = go([c.composer(), c.user('u1', 'go', 0), c.tool('t1', 'read_file', 'loading', 1), c.user('u2', 'again', 20)]);
     expect(nodeOf(r1, c.node('t1'))).toMatchObject({ status: 'failed', endedAt: iso(at(20)), durationMs: 19_000 });
-    expect(String(detailOf(r1, c.node('t1')).text)).toMatch(/never finished/i);
+    expect(String(detailOf(r1, c.node('t1')).text)).toBe('未完成：本轮结束时工具仍在运行。');
 
     const d = new CursorConv({ id: ROOT });
     const r2 = go([d.composer(), d.user('u1', 'go', 0), d.tool('t1', 'read_file', 'loading', 1), d.turnEnd('end', 9)]);

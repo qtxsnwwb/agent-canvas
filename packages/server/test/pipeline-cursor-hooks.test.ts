@@ -9,6 +9,7 @@ import { loadConfig, type Config } from '../src/config.js';
 import { Pipeline } from '../src/pipeline.js';
 import { ClaudeFileSource } from '../src/sources/claude.js';
 import type { PollSink, PollSource } from '../src/sources/poll.js';
+import { cursorKey } from '../src/sources/cursor/source.js';
 import { openStore, type RawEvent, type Store } from '../src/store/store.js';
 import { at, CursorConv, iso } from './cursor-records.js';
 
@@ -78,7 +79,8 @@ async function ingest(conv: CursorConv, events: RawEvent[]): Promise<void> {
     if (e.source !== 'transcript') throw new Error('records only');
     return { recordType: e.recordType, line: e.line };
   });
-  await fake.sink!.ingestRecords({ key: `cursor:${conv.id}`, projectId: conv.projectId, sessionId: conv.sessionId, agentId: conv.agentId, records });
+  // The keys CursorSource uses: `cursor:<session>` for a main conversation, `cursor:<session>/<subagent>` for a subagent.
+  await fake.sink!.ingestRecords({ key: cursorKey(conv.sessionId, conv.agentId), projectId: conv.projectId, sessionId: conv.sessionId, agentId: conv.agentId, records });
 }
 
 async function post(body: Record<string, unknown>): Promise<void> {
@@ -144,6 +146,27 @@ test('a hook of a known subagent conversation is filed under its root session an
   expect(hooksOf('c-root')[0]).toMatchObject({ projectId: 'p-root' });
   expect(fake.pokes).toEqual(['c-root']);
   expect(store.getSession('c-root')!.status).toBe('idle');
+});
+
+test('a subagent shared by two forks: filed under the lowest owning session, every owner poked; nested subagentStop too', async () => {
+  const a = new CursorConv({ id: 'c-b-fork', projectId: 'p-root' });
+  const b = new CursorConv({ id: 'c-a-fork', projectId: 'p-root' });
+  await ingest(a, finishedTurn(a));
+  await ingest(b, finishedTurn(b));
+  for (const owner of ['c-b-fork', 'c-a-fork']) {
+    const sub = new CursorConv({ id: 'c-sub', sessionId: owner, projectId: 'p-root' });
+    await ingest(sub, [sub.subagentComposer('tc1', owner), sub.user('su', 'task', 0)]);
+  }
+  await post(payload('stop', 'c-sub', { status: 'completed' }));
+  expect(hooksOf('c-sub')).toEqual([]);
+  expect(hooksOf('c-a-fork')).toHaveLength(1);
+  expect(hooksOf('c-b-fork')).toEqual([]);
+  expect(fake.pokes).toEqual(['c-a-fork', 'c-b-fork']);
+  // A nested subagent's subagentStop carries its parent subagent's id: the sessions owning that one are poked.
+  fake.pokes.length = 0;
+  await post(payload('subagentStop', 'c-sub', { subagent_type: 'explorer', status: 'completed' }));
+  expect(fake.pokes).toEqual(['c-a-fork', 'c-b-fork']);
+  expect(store.getSession('c-a-fork')!.status).toBe('idle');
 });
 
 test('subagentStop (parent conversation_id) pokes the parent and leaves the status alone', async () => {
