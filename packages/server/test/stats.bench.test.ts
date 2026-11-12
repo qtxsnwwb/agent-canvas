@@ -4,15 +4,15 @@ import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { describe, expect, test } from 'vitest';
 import type { Change, GraphNode, Origin, Session } from '@agent-canvas/shared';
-import { StatsService, storeStatsSource } from '../src/stats/service.js';
+import { StatsService, storeStatsSource, type StatsSource } from '../src/stats/service.js';
 import { summarizeSession } from '../src/stats/summary.js';
 import { openStore } from '../src/store/store.js';
 
 /*
- * Benchmark of GET /api/stats's computation on a temp database of about 200,000 derived nodes in 40 sessions (one large
- * session of 40,000 nodes, 39 of about 4,100): the first request (every summary built), a request after one session
- * changed (only it rebuilt), and a request with nothing changed (a filter switch). Reports wall time and the longest
- * event-loop stall during each.
+ * Benchmark of GET /api/stats's computation on temp databases: (1) about 200,000 derived nodes in 40 sessions (one large
+ * session of 40,000 nodes, 39 of about 4,100), (2) 3,000 small sessions (about 250,000 nodes): the first request (every
+ * summary built), a request after one session changed (only it re-read), and a request with nothing changed (a filter
+ * switch, no session read). Reports wall time and the longest event-loop stall during each.
  *
  * Skipped by default. Run:
  *   AGENT_CANVAS_BENCH=1 npx --yes pnpm@10 vitest run packages/server/test/stats.bench.test.ts
@@ -41,11 +41,11 @@ function rng(seed: number): () => number {
 
 const iso = (ms: number): string => new Date(ms).toISOString();
 
-function sessionChanges(index: number, count: number): Change[] {
+function sessionChanges(index: number, count: number, startMs?: number): Change[] {
   const r = rng(index + 1);
   const id = `bench-s${String(index).padStart(3, '0')}`;
   const origin = ORIGIN_OF[index % 3]!;
-  const start = T0 + index * 24 * 3600_000;
+  const start = startMs ?? T0 + index * 24 * 3600_000;
   const nodes: GraphNode[] = [];
   let turnId = '';
   let agent: string | null = null;
@@ -96,6 +96,29 @@ async function measured<T>(fn: () => Promise<T>): Promise<{ result: T; ms: numbe
   }
 }
 
+const line = (name: string, m: { ms: number; stallMs: number }): string =>
+  `${name}: ${m.ms.toFixed(0)} ms (longest stall ${m.stallMs.toFixed(0)} ms)`;
+
+/** The store source, counting session reads. */
+function countingSource(store: ReturnType<typeof openStore>): { source: StatsSource; reads: () => number } {
+  const base = storeStatsSource(store);
+  let reads = 0;
+  return {
+    source: { ...base, readSession: (id) => { reads++; return base.readSession(id); } },
+    reads: () => reads,
+  };
+}
+
+/** Adds one main-thread tool call to `sessionId`'s first turn; returns the committed changes. */
+function oneMoreCall(store: ReturnType<typeof openStore>, sessionId: string): ReturnType<typeof store.applyChanges> {
+  const first = store.nodePage(sessionId, null, 1)[0]!.node;
+  return store.applyChanges([{
+    type: 'node_added',
+    node: { ...first, id: `${sessionId}-extra`, kind: 'tool', status: 'succeeded', toolName: 'Bash', agentId: null, turnId: `${sessionId}-turn0`, timestamp: iso(NOW - 1000) },
+    detail: {},
+  }]);
+}
+
 describe.skipIf(!BENCH)('stats benchmark', () => {
   test('200,000 nodes in 40 sessions: first request, after one change, unchanged', { timeout: 600_000 }, async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-stats-bench-'));
@@ -107,43 +130,72 @@ describe.skipIf(!BENCH)('stats benchmark', () => {
         store.applyChanges(sessionChanges(i, count));
         total += count;
       }
-      const svc = new StatsService(storeStatsSource(store), { now: () => NOW });
+      const { source, reads } = countingSource(store);
+      const svc = new StatsService(source, { now: () => NOW });
       const first = await measured(() => svc.get({ range: 'all', origin: null, projectId: null }));
-      const changed = store.applyChanges([{
-        type: 'node_added',
-        node: {
-          ...(store.getGraph('bench-s005')!.nodes[0]!), id: 'bench-extra', kind: 'tool', status: 'succeeded', toolName: 'Bash',
-          agentId: null, turnId: 'bench-s005-turn0', timestamp: iso(NOW - 1000),
-        },
-        detail: {},
-      }]);
-      svc.noteChanges(changed);
+      svc.noteChanges(oneMoreCall(store, 'bench-s005'));
+      const readsBefore = reads();
       const second = await measured(() => svc.get({ range: 'all', origin: null, projectId: null }));
+      const changedReads = reads() - readsBefore;
       const third = await measured(() => svc.get({ range: '30d', origin: 'claude', projectId: null }));
-      // The largest session on its own (read + summarize), for the in-session stall.
+      // The largest session on its own (paged read + summarize), for the in-session stall.
       const big = await measured(async () => {
         const fresh = new StatsService({ ...storeStatsSource(store), sessions: () => [store.getSession('bench-s000')!] });
         return fresh.get({ range: 'all', origin: null, projectId: null });
       });
       let t = performance.now();
-      const graph = store.getGraph('bench-s000')!;
+      const read = (await storeStatsSource(store).readSession('bench-s000'))!;
       const readMs = performance.now() - t;
       t = performance.now();
-      summarizeSession(graph.session, graph.nodes);
+      summarizeSession(read.session, read.nodes);
       const summarizeMs = performance.now() - t;
-      console.log(`  largest session split: read ${readMs.toFixed(0)} ms, summarize ${summarizeMs.toFixed(0)} ms`);
-      const line = (name: string, m: { ms: number; stallMs: number }): string =>
-        `${name}: ${m.ms.toFixed(0)} ms (longest stall ${m.stallMs.toFixed(0)} ms)`;
       console.log(
         `stats benchmark, ${total} nodes / 40 sessions, ${first.result.totals.toolCalls} tool calls, ${first.result.totals.turns} turns\n` +
-          `  ${line('first request', first)}\n  ${line('after one session changed', second)}\n` +
-          `  ${line('unchanged (filter switch)', third)}\n  ${line('largest session alone (40,000 nodes)', big)}`,
+          `  ${line('first request', first)}\n  ${line(`after one session changed (${changedReads} session read)`, second)}\n` +
+          `  ${line(`unchanged (filter switch, ${reads() - readsBefore - changedReads} session reads)`, third)}\n` +
+          `  ${line('largest session alone (40,000 nodes)', big)}\n` +
+          `  largest session split: paged read ${readMs.toFixed(0)} ms (yields between pages), summarize ${summarizeMs.toFixed(0)} ms`,
       );
       expect(second.result.totals.toolCalls).toBe(first.result.totals.toolCalls + 1);
+      expect(changedReads).toBe(1);
       if (ASSERT) {
         expect(first.ms).toBeLessThan(3000);
         expect(second.ms).toBeLessThan(1000);
       }
+    } finally {
+      store.close();
+      await fs.promises.rm(dir, { recursive: true, force: true, maxRetries: 20 }).catch(() => undefined);
+    }
+  });
+
+  test('3,000 small sessions: first request, unchanged, after one change', { timeout: 600_000 }, async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-stats-bench-'));
+    const store = openStore(path.join(dir, 'bench.db'));
+    try {
+      let total = 0;
+      for (let i = 0; i < 3000; i++) {
+        const count = 60 + (i % 5) * 12; // 60–108 nodes: one or two turns each
+        // Spread over the 25 days before NOW.
+        store.applyChanges(sessionChanges(i, count, NOW - 25 * 24 * 3600_000 + (i % 25) * 24 * 3600_000 + i * 1000));
+        total += count;
+      }
+      const { source, reads } = countingSource(store);
+      const svc = new StatsService(source, { now: () => NOW });
+      const first = await measured(() => svc.get({ range: 'all', origin: null, projectId: null }));
+      const afterFirst = reads();
+      const unchanged = await measured(() => svc.get({ range: '30d', origin: 'codex', projectId: null }));
+      const unchangedReads = reads() - afterFirst;
+      svc.noteChanges(oneMoreCall(store, 'bench-s1234'));
+      const changed = await measured(() => svc.get({ range: 'all', origin: null, projectId: null }));
+      const changedReads = reads() - afterFirst - unchangedReads;
+      console.log(
+        `stats benchmark, ${total} nodes / 3000 sessions, ${first.result.totals.toolCalls} tool calls\n` +
+          `  ${line('first request', first)}\n  ${line(`unchanged (filter switch, ${unchangedReads} session reads)`, unchanged)}\n` +
+          `  ${line(`after one session changed (${changedReads} session read)`, changed)}`,
+      );
+      expect(first.result.totals.sessions).toBe(3000);
+      expect(unchangedReads).toBe(0);
+      expect(changedReads).toBe(1);
     } finally {
       store.close();
       await fs.promises.rm(dir, { recursive: true, force: true, maxRetries: 20 }).catch(() => undefined);

@@ -323,3 +323,56 @@ test('origins appear in ORIGINS order in coverage.noTokenData', () => {
   const r = run(origins.map((o, i) => entry(mkSession(`s${i}`, { origin: o }), turn(NOW - H, 1000))));
   expect(r.coverage.noTokenData).toEqual(['codex', 'cursor']);
 });
+
+describe('undated turns', () => {
+  test('an unparseable or epoch start is in no day and no number, and is counted in coverage', () => {
+    const nodes = [
+      n(0, { kind: 'prompt', turnId: 'TB', timestamp: 'garbage' }),
+      n(0, { kind: 'tool', turnId: 'TB', status: 'succeeded', toolName: 'Bash', durationMs: 5 }),
+      n(0, { kind: 'prompt', turnId: 'TE', timestamp: '1970-01-01T00:00:00.000Z' }),
+      ...turn(NOW - H, 1000, [{}]),
+    ];
+    const orphan = [n(0, { kind: 'tool', agentId: 'ag', status: 'succeeded', toolName: 'Bash', timestamp: 'x' })];
+    const r = run([entry(mkSession('a'), nodes), entry(mkSession('b'), orphan)], { range: 'all' });
+    expect(r.totals.turns).toBe(1);
+    expect(r.totals.toolCalls).toBe(1);
+    expect(r.coverage.undatedTurns).toBe(3);
+    expect(r.coverage.firstActiveDay).toBe('2026-11-12');
+    expect(r.range.from).toBe('2026-11-12');
+    expect(r.coverage.byDayTruncated).toBe(false);
+    expect(r.byDay).toHaveLength(1);
+  });
+});
+
+describe('daylight saving time', () => {
+  // America/New_York: 2026-03-08 has 23 hours (02:00 EST → 03:00 EDT), 2026-11-01 has 25.
+  const withTz = <T>(tz: string, fn: () => T): T => {
+    const before = process.env.TZ;
+    process.env.TZ = tz;
+    try {
+      return fn();
+    } finally {
+      if (before === undefined) delete process.env.TZ;
+      else process.env.TZ = before;
+    }
+  };
+  test('local day keys around the transitions', () => {
+    withTz('America/New_York', () => {
+      expect(localDayKey(Date.parse('2026-03-08T04:59:00Z'))).toBe('2026-03-07'); // 23:59 EST
+      expect(localDayKey(Date.parse('2026-03-08T05:00:00Z'))).toBe('2026-03-08'); // 00:00 EST
+      expect(localDayKey(Date.parse('2026-03-09T03:59:00Z'))).toBe('2026-03-08'); // 23:59 EDT (the 23-hour day)
+      expect(localDayKey(Date.parse('2026-03-09T04:00:00Z'))).toBe('2026-03-09');
+      expect(localDayKey(Date.parse('2026-11-02T04:59:00Z'))).toBe('2026-11-01'); // 23:59 EST (the 25-hour day)
+      expect(localDayKey(Date.parse('2026-11-02T05:00:00Z'))).toBe('2026-11-02');
+    });
+  });
+  test('7 consecutive days across a 23-hour day; a turn late on that day stays on it', () => {
+    withTz('America/New_York', () => {
+      const now = Date.parse('2026-03-10T16:00:00Z');
+      const late = Date.parse('2026-03-09T03:30:00Z'); // 2026-03-08 23:30 EDT
+      const r = run([entry(mkSession('a', { lastActivityAt: iso(late) }), turn(late, 1000))], { nowMs: now, dayKey: localDayKey });
+      expect(r.byDay.map((d) => d.day)).toEqual(['2026-03-04', '2026-03-05', '2026-03-06', '2026-03-07', '2026-03-08', '2026-03-09', '2026-03-10']);
+      expect(r.byDay.find((d) => d.day === '2026-03-08')!.turns).toBe(1);
+    });
+  });
+});

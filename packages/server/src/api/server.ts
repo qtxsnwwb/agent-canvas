@@ -283,10 +283,13 @@ export function buildServer(deps: {
     return detail;
   });
   // Counts, durations, names and ids only (no conversation content). 400 for an unknown range / origin.
+  // coverage.importing: pipeline.importing() at answer time.
   app.get<{ Querystring: Record<string, unknown> }>('/api/stats', async (req, reply) => {
     const query = parseStatsQuery(req.query);
     if ('error' in query) return reply.code(400).send({ error: query.error });
-    return stats.get(query);
+    const result = await stats.get(query);
+    // Read at answer time: the numbers may still be filling in while the pipeline imports.
+    return { ...result, coverage: { ...result.coverage, importing: pipeline.importing() } };
   });
   app.get(
     '/api/diagnostics',

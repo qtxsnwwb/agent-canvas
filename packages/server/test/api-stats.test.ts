@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, test } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import type { Change, GraphNode, Session, StatsResponse } from '@agent-canvas/shared';
 import { buildServer } from '../src/api/server.js';
@@ -109,6 +109,12 @@ describe('GET /api/stats', () => {
     expect((await get('/api/stats', { host: '127.0.0.1:1', origin: 'https://evil.example' })).statusCode).toBe(403);
     expect((await get('/api/stats', { host: '127.0.0.1:1', 'sec-fetch-site': 'cross-site' })).statusCode).toBe(403);
     expect((await get('/api/stats', { host: '127.0.0.1:1' })).statusCode).toBe(200);
+  });
+
+  test('coverage.importing follows the pipeline (start-up import, rebuild, first poll round)', async () => {
+    expect(((await get('/api/stats')).json() as StatsResponse).coverage.importing).toBe(false);
+    vi.spyOn(pipeline, 'importing').mockReturnValue(true);
+    expect(((await get('/api/stats')).json() as StatsResponse).coverage.importing).toBe(true);
   });
 
   test('the response carries no conversation content', async () => {

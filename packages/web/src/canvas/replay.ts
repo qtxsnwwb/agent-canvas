@@ -1,4 +1,4 @@
-import type { Graph, GraphEdge, GraphNode, Usage } from '@agent-canvas/shared';
+import type { Graph, GraphEdge, GraphNode } from '@agent-canvas/shared';
 import { formatDuration } from './format';
 
 export interface ReplayRange { startMs: number; endMs: number }
@@ -73,21 +73,8 @@ export function turnMarks(graph: Graph): { turnId: string; ms: number }[] {
   return marks.sort((a, b) => a.ms - b.ms);
 }
 
-/** 按 messageId 去重求和；messageId 为空的节点各算一次；usage 为空的跳过。 */
-export function usageTotal(nodes: Iterable<GraphNode>): Usage {
-  const seen = new Set<string>();
-  const total: Usage = { inputTokens: 0, outputTokens: 0 };
-  for (const n of nodes) {
-    if (!n.usage) continue;
-    if (n.messageId) {
-      if (seen.has(n.messageId)) continue;
-      seen.add(n.messageId);
-    }
-    total.inputTokens += n.usage.inputTokens;
-    total.outputTokens += n.usage.outputTokens;
-  }
-  return total;
-}
+/** 按 messageId 去重求和；messageId 为空的节点各算一次；usage 为空的跳过。The rule lives in shared (the stats use it too). */
+export { usageTotal } from '@agent-canvas/shared';
 
 const trim = (x: number) => x.toFixed(1).replace(/\.0$/, '');
 

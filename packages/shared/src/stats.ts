@@ -1,4 +1,4 @@
-import type { GraphNode, Origin } from './model.js';
+import type { GraphNode, Origin, Usage } from './model.js';
 
 /**
  * Cross-session statistics (`GET /api/stats`). Every number is computed from derived nodes and sessions only; the
@@ -97,7 +97,7 @@ export interface StatsProject extends StatsMeasures {
 }
 
 /**
- * One (origin, toolName): toolName is the node's tool name as stored (its title when the node has none), never merged
+ * One (origin, toolName): toolName is the node's tool name as stored ('(unknown)' when the node has none), never merged
  * across origins. timedCalls: finished calls with a known duration; totalMs / medianMs / p95Ms are over those
  * (nearest-rank; null when timedCalls is 0). Ordered by totalMs descending (ties: calls descending, origin, name); at
  * most STATS_TOP_TOOLS.
@@ -115,7 +115,10 @@ export interface StatsTool {
   p95Ms: number | null;
 }
 
-/** One finished tool call with a known duration; startedAt is the node's timestamp (ISO 8601). */
+/**
+ * One finished tool call with a known duration; startedAt is the node's timestamp (ISO 8601, normalized to
+ * `YYYY-MM-DDTHH:mm:ss.sssZ`; '' when the node's timestamp is unparseable).
+ */
 export interface StatsSlowCall {
   sessionId: string;
   nodeId: string;
@@ -144,6 +147,10 @@ export interface StatsFailingTool {
  * - firstActiveDay: the local day of the earliest turn in scope (filters applied; any range), or null when none.
  * - byDayTruncated: `all` only: activity spans more than STATS_BY_DAY_MAX days, so byDay holds the most recent
  *   STATS_BY_DAY_MAX days only (the totals and every other list still cover everything).
+ * - undatedTurns (added in fix round 1; optional): turns (and orphan subagent nodes) in scope whose start time is
+ *   unparseable or not after 1970-01-01T00:00:00Z; they are in no day and no number of the response.
+ * - importing (added in fix round 1; optional): true while the service's start-up import, a rebuild or a poll source's
+ *   first round is still running: the numbers may still be filling in.
  */
 export interface StatsCoverage {
   sessionsByOrigin: { origin: Origin; sessions: number }[];
@@ -151,6 +158,8 @@ export interface StatsCoverage {
   failedSessions: number;
   firstActiveDay: string | null;
   byDayTruncated: boolean;
+  undatedTurns?: number;
+  importing?: boolean;
 }
 
 /**
@@ -216,4 +225,34 @@ export function groupTurns(nodes: Iterable<GraphNode>): NodeTurn[] {
     turn.nodes.push(x.node);
   }
   return [...groups.values()].sort((p, q) => p.startMs - q.startMs || (p.key < q.key ? -1 : p.key > q.key ? 1 : 0));
+}
+
+/**
+ * The nodes whose usage counts, as the session page totals tokens (web replay.ts usageTotal): `nodes` in the session
+ * snapshot's order (the store's node rowid order); a node without usage is skipped; a node with a non-empty messageId
+ * counts only if no earlier node (in that order) with usage had the same messageId; a null or empty messageId: each
+ * node counts.
+ */
+export function countedUsageNodes(nodes: Iterable<GraphNode>): GraphNode[] {
+  const seen = new Set<string>();
+  const out: GraphNode[] = [];
+  for (const n of nodes) {
+    if (!n.usage) continue;
+    if (n.messageId) {
+      if (seen.has(n.messageId)) continue;
+      seen.add(n.messageId);
+    }
+    out.push(n);
+  }
+  return out;
+}
+
+/** 按 messageId 去重求和；messageId 为空的节点各算一次；usage 为空的跳过（see countedUsageNodes）。 */
+export function usageTotal(nodes: Iterable<GraphNode>): Usage {
+  const total: Usage = { inputTokens: 0, outputTokens: 0 };
+  for (const n of countedUsageNodes(nodes)) {
+    total.inputTokens += n.usage!.inputTokens;
+    total.outputTokens += n.usage!.outputTokens;
+  }
+  return total;
 }

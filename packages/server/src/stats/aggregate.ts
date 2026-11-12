@@ -171,6 +171,8 @@ export function aggregateStats(input: AggregateInput): StatsResponse {
   const byDay = new Map<string, Map<Origin, Acc>>();
   const tools = new Map<string, ToolAcc>();
   const slow: StatsSlowCall[] = [];
+  /** Turns and extras in scope without a usable time: in no day, no range, no number. */
+  let undated = 0;
   /** Earliest active day in scope, any range (set inside `record`). */
   const active: { first: string | null } = { first: null };
 
@@ -196,6 +198,11 @@ export function aggregateStats(input: AggregateInput): StatsResponse {
     if (input.projectId !== null && session.projectId !== input.projectId) continue;
     const turnIn: boolean[] = [];
     for (const t of summary.turns) {
+      if (!t.dated) {
+        undated++;
+        turnIn.push(false);
+        continue;
+      }
       const day = dayKey(t.startMs);
       const duration = turnDurationMs(t, nowMs);
       const part: Part = { ...t, turns: 1, activeMs: duration };
@@ -207,9 +214,12 @@ export function aggregateStats(input: AggregateInput): StatsResponse {
         list.push(duration);
       }
     }
-    for (const x of summary.extras) record(session, dayKey(x.atMs), { ...x, turns: 0, activeMs: 0 }, 0, 0);
+    for (const x of summary.extras) {
+      if (x.dated) record(session, dayKey(x.atMs), { ...x, turns: 0, activeMs: 0 }, 0, 0);
+      else undated++;
+    }
     for (const c of summary.calls) {
-      if (!(c.turn >= 0 ? turnIn[c.turn] : inRange(dayKey(c.atMs)))) continue;
+      if (!(c.turn >= 0 ? turnIn[c.turn] : c.atMs > 0 && inRange(dayKey(c.atMs)))) continue;
       const key = `${session.origin}\u0000${c.toolName}`;
       let tool = tools.get(key);
       if (!tool) tools.set(key, (tool = { origin: session.origin, toolName: c.toolName, calls: 0, finished: 0, failed: 0, durations: [] }));
@@ -222,7 +232,7 @@ export function aggregateStats(input: AggregateInput): StatsResponse {
         if (slow.length < STATS_SLOWEST || c.durationMs >= slow[slow.length - 1]!.durationMs) {
           slow.push({
             sessionId: session.id, nodeId: c.nodeId, projectId: session.projectId, origin: session.origin, toolName: c.toolName,
-            durationMs: c.durationMs, startedAt: c.startedAt,
+            durationMs: c.durationMs, startedAt: Number.isFinite(c.atMs) ? new Date(c.atMs).toISOString() : '',
           });
           slow.sort(bySlowest);
           if (slow.length > STATS_SLOWEST) slow.pop();
@@ -327,6 +337,7 @@ export function aggregateStats(input: AggregateInput): StatsResponse {
       failedSessions: input.failedSessions,
       firstActiveDay: active.first,
       byDayTruncated,
+      undatedTurns: undated,
     },
   };
 }

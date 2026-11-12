@@ -15,6 +15,7 @@ import {
   STALE_AFTER_MS,
   type Change,
   type Diagnostics,
+  type GraphNode,
   type GraphSnapshot,
   type NodeDetail,
   type Origin,
@@ -167,6 +168,14 @@ export interface Store {
   getGraph(sessionId: string): GraphSnapshot | null;
   /** The GraphSnapshot already serialized, built from the stored bodies without parsing them. */
   getGraphJson(sessionId: string): string | null;
+  /**
+   * One page of a session's nodes in primary-key (id) order: ids strictly greater than `afterId` (null: from the start), at
+   * most `limit`, each with its rowid (rowid order = the snapshot's node order). Nodes only, no edges or detail; one index
+   * range read, nothing held open after the call (safe to page across event-loop turns).
+   */
+  nodePage(sessionId: string, afterId: string | null, limit: number): { rowid: number; node: GraphNode }[];
+  /** The last assigned change seq (the `seq` a snapshot taken now would carry); 0 before any change. */
+  lastSeq(): number;
   getNodeDetail(sessionId: string, nodeId: string): NodeDetail | null;
   /** Ascending; with `limit`, at most that many (session-scoped only). */
   changesSince(seq: number, sessionId?: string, limit?: number): SeqChange[];
@@ -553,6 +562,8 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
      LIMIT @limit`,
   );
   const selectNodeBodies = db.prepare(`SELECT body FROM node WHERE session_id = ? ORDER BY rowid`).pluck();
+  const selectNodePageFirst = db.prepare(`SELECT rowid, body FROM node WHERE session_id = ? ORDER BY id LIMIT ?`);
+  const selectNodePageAfter = db.prepare(`SELECT rowid, body FROM node WHERE session_id = ? AND id > ? ORDER BY id LIMIT ?`);
   const selectEdgeBodies = db.prepare(`SELECT body FROM edge WHERE session_id = ? ORDER BY rowid`).pluck();
   const selectChanges = db.prepare(`SELECT seq, body FROM change_log WHERE seq > ? ORDER BY seq`);
   const selectChangesForSession = db.prepare(
@@ -858,6 +869,14 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
       return json === null ? null : (JSON.parse(json) as GraphSnapshot);
     },
     getGraphJson,
+    nodePage(sessionId, afterId, limit) {
+      const rows = (afterId === null ? selectNodePageFirst.all(sessionId, limit) : selectNodePageAfter.all(sessionId, afterId, limit)) as {
+        rowid: number;
+        body: string;
+      }[];
+      return rows.map((r) => ({ rowid: r.rowid, node: JSON.parse(r.body) as GraphNode }));
+    },
+    lastSeq,
     getNodeDetail(sessionId, nodeId) {
       const row = selectNodeWithDetail.get(sessionId, nodeId) as { detail: string | null } | undefined;
       if (!row) return null;

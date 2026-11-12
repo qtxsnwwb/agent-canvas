@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { STALE_AFTER_MS, type GraphNode, type Session } from '@agent-canvas/shared';
+import { STALE_AFTER_MS, usageTotal, type GraphNode, type Session } from '@agent-canvas/shared';
 import { summarizeSession, turnDurationMs } from '../src/stats/summary.js';
 
 const T0 = Date.parse('2026-11-10T10:00:00.000Z');
@@ -160,13 +160,13 @@ describe('tool calls', () => {
     expect(turnDurationMs(s.turns[0]!, T0 + 999_999)).toBe(11_000);
   });
 
-  test('tool name as stored, else the node title', () => {
+  test('tool name as stored, else a fixed label (never the node title)', () => {
     const s = summarizeSession(session(), [
       prompt('p1', 0, 'T1'),
       tool('a', 1, 'T1', { toolName: 'exec' }),
       tool('b', 2, 'T1', { toolName: null, title: 'web_search' }),
     ]);
-    expect(s.calls.map((c) => c.toolName)).toEqual(['exec', 'web_search']);
+    expect(s.calls.map((c) => c.toolName)).toEqual(['exec', '(unknown)']);
   });
 
   test('a subagent-internal call counts in the turn that dispatched its agent, nested agents included', () => {
@@ -187,6 +187,19 @@ describe('tool calls', () => {
     expect(s.turns[0]!.lastActivityMs).toBe(T0 + 500_000);
   });
 
+  test('internal text / thinking nodes extend the dispatching turn last activity', () => {
+    const s = summarizeSession(session({ status: 'idle' }), [
+      prompt('p1', 0, 'T1'),
+      node('d1', 5, { kind: 'subagent', turnId: 'T1', status: 'running', childAgentId: 'ag1' }),
+      tool('i1', 10, null, { agentId: 'ag1' }),
+      node('txt', 900, { agentId: 'ag1', kind: 'text' }),
+      node('th', 950, { agentId: 'ag1', kind: 'thinking' }),
+      prompt('p2', 1000, 'T2'),
+    ]);
+    expect(s.turns[0]!.lastActivityMs).toBe(T0 + 950_000);
+    expect(turnDurationMs(s.turns[0]!, T0 + 100 * 3600_000)).toBe(950_000);
+  });
+
   test('an internal call whose dispatch is unknown falls back to the latest turn started at or before it', () => {
     const s = summarizeSession(session(), [
       prompt('p1', 0, 'T1'),
@@ -202,7 +215,7 @@ describe('tool calls', () => {
     expect(s.turns).toEqual([]);
     expect(s.calls.map((c) => c.turn)).toEqual([-1]);
     expect(s.extras).toEqual([
-      { atMs: T0 + 10_000, toolCalls: 1, finished: 1, failed: 0, toolMs: 0, inputTokens: 5, outputTokens: 1 },
+      { atMs: T0 + 10_000, dated: true, toolCalls: 1, finished: 1, failed: 0, toolMs: 0, inputTokens: 5, outputTokens: 1 },
     ]);
   });
 });
@@ -222,6 +235,30 @@ describe('tokens', () => {
     expect(s.usageNodes).toBe(5);
   });
 
+  test('the counted node of a shared messageId is the first in the given (snapshot) order, not in time order', () => {
+    // A hook-created tool node stored before the transcript's text block of the same message: snapshot order wins,
+    // exactly as on the session page (shared usageTotal).
+    const nodes = [
+      prompt('p1', 0, 'T1'),
+      tool('hook-tool', 5, 'T1', { messageId: 'm1', usage: { inputTokens: 50, outputTokens: 7 } }),
+      node('text', 3, { turnId: 'T1', messageId: 'm1', usage: { inputTokens: 40, outputTokens: 2 } }),
+    ];
+    const s = summarizeSession(session(), nodes);
+    expect([s.turns[0]!.inputTokens, s.turns[0]!.outputTokens]).toEqual([50, 7]);
+    expect(usageTotal(nodes)).toEqual({ inputTokens: 50, outputTokens: 7 });
+  });
+
+  test('an empty messageId is no id: each node counts (as on the session page)', () => {
+    const nodes = [
+      prompt('p1', 0, 'T1'),
+      node('a', 1, { turnId: 'T1', messageId: '', usage: { inputTokens: 3, outputTokens: 1 } }),
+      node('b', 2, { turnId: 'T1', messageId: '', usage: { inputTokens: 3, outputTokens: 1 } }),
+    ];
+    const s = summarizeSession(session(), nodes);
+    expect(s.turns[0]!.inputTokens).toBe(6);
+    expect(usageTotal(nodes).inputTokens).toBe(6);
+  });
+
   test('a session without usage has usageNodes 0', () => {
     expect(summarizeSession(session(), [prompt('p1', 0, 'T1')]).usageNodes).toBe(0);
   });
@@ -230,4 +267,20 @@ describe('tokens', () => {
 test('the summary carries no conversation content', () => {
   const s = summarizeSession(session(), [prompt('p1', 0, 'T1'), tool('a', 1, 'T1')]);
   expect(JSON.stringify(s)).not.toContain('secret prompt text');
+});
+
+describe('undated', () => {
+  test('a turn starting at an unparseable time or at the epoch is undated; a normal one is dated', () => {
+    const s = summarizeSession(session(), [
+      node('bad', 0, { turnId: 'TB', kind: 'prompt', timestamp: 'garbage' }),
+      node('epoch', 0, { turnId: 'TE', kind: 'prompt', timestamp: '1970-01-01T00:00:00.000Z' }),
+      prompt('p1', 10, 'T1'),
+    ]);
+    expect(s.turns.map((t) => [t.key, t.dated])).toEqual([['TB', false], ['TE', false], ['T1', true]]);
+  });
+  test('an extra with an unparseable time is undated', () => {
+    const s = summarizeSession(session(), [tool('i1', 0, null, { agentId: 'ag', timestamp: 'nope' })]);
+    expect(s.extras[0]!.dated).toBe(false);
+    expect(Number.isNaN(s.calls[0]!.atMs)).toBe(true);
+  });
 });

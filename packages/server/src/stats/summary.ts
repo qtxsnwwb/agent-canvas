@@ -1,4 +1,4 @@
-import { groupTurns, STALE_AFTER_MS, type GraphNode, type Origin, type Session } from '@agent-canvas/shared';
+import { countedUsageNodes, groupTurns, STALE_AFTER_MS, type GraphNode, type Origin, type Session } from '@agent-canvas/shared';
 
 /**
  * Per-session summary for the stats page: a pure function of a session record and its derived nodes, independent of
@@ -12,14 +12,17 @@ import { groupTurns, STALE_AFTER_MS, type GraphNode, type Origin, type Session }
  * - A subagent-internal node (agentId set) belongs to the turn that dispatched its agent: the earliest dispatch node
  *   whose childAgentId is that agent, followed up through nested agents to the main thread. When that cannot be
  *   resolved: the latest turn started at or before the node, else the first turn. With no turn at all, it is an extra
- *   (dated by its own timestamp).
- * - Tokens: node usage, each messageId counted once per session (the first node in time order carrying it), as the
- *   session page's totals do (web replay.ts usageTotal).
+ *   (dated by its own timestamp). Every internal node (calls, text, thinking, …) extends its turn's last activity.
+ * - Tokens: exactly the session page's rule (shared countedUsageNodes / usageTotal), applied to the nodes in the order
+ *   given, which must be the snapshot's node order (store rowid order).
+ * - Undated: a turn whose start, or an extra whose time, is unparseable or not after 1970-01-01T00:00:00Z (a source's
+ *   fallback) has `dated: false`; the aggregation leaves it out of every day and counts it in coverage.
  */
 
 export interface SummaryTurn {
   key: string;
   startMs: number;
+  dated: boolean;
   /** Latest end (endedAt, else timestamp) of the turn's main-thread nodes; at least startMs. */
   endMs: number;
   /**
@@ -40,9 +43,10 @@ export interface SummaryTurn {
   outputTokens: number;
 }
 
-/** Internal nodes of a session without any main-thread turn: one per node that is a call or carries usage. */
+/** Internal nodes of a session without any main-thread turn: one per node that is a call or carries counted usage. */
 export interface SummaryExtra {
   atMs: number;
+  dated: boolean;
   toolCalls: number;
   finished: number;
   failed: number;
@@ -51,12 +55,12 @@ export interface SummaryExtra {
   outputTokens: number;
 }
 
+/** Kept small (one per call, the bulk of a summary's memory): no strings but the node id and an interned tool name. */
 export interface SummaryCall {
   nodeId: string;
   toolName: string;
-  /** The node's timestamp (ms, 0 when unparseable) and as stored. */
+  /** The node's timestamp in ms; NaN when unparseable. */
   atMs: number;
-  startedAt: string;
   /** Index into turns; -1 for an extra. */
   turn: number;
   finished: boolean;
@@ -77,11 +81,25 @@ export interface SessionSummary {
   usageNodes: number;
 }
 
+/** The tool name of a call whose node has none (never the node title: a title could one day carry content). */
+export const UNKNOWN_TOOL = '(unknown)';
+
+/** Tool names are a handful of distinct strings repeated per call: share one copy (bounded table). */
+const INTERN_MAX = 10_000;
+const interned = new Map<string, string>();
+function intern(name: string): string {
+  const known = interned.get(name);
+  if (known !== undefined) return known;
+  if (interned.size < INTERN_MAX) interned.set(name, name);
+  return name;
+}
+
 function parseMs(ts: string | null): number | null {
   if (ts === null) return null;
   const ms = Date.parse(ts);
   return Number.isNaN(ms) ? null : ms;
 }
+const isDated = (ms: number): boolean => ms > 0;
 
 const isCall = (n: GraphNode): boolean => n.kind === 'tool' || n.kind === 'subagent';
 const isActive = (n: GraphNode): boolean => n.status === 'running' || n.status === 'awaiting_permission';
@@ -104,6 +122,7 @@ export function turnDurationMs(turn: SummaryTurn, nowMs: number): number {
   return Math.max(0, end - turn.startMs);
 }
 
+/** `nodes`: the session's nodes in snapshot order (store rowid order; getGraph's order) — it decides the token rule. */
 export function summarizeSession(session: Session, nodes: readonly GraphNode[]): SessionSummary {
   const grouped = groupTurns(nodes);
   const turns: SummaryTurn[] = grouped.map((g) => {
@@ -117,7 +136,10 @@ export function summarizeSession(session: Session, nodes: readonly GraphNode[]):
       if (Math.max(ts, end) > lastActivityMs) lastActivityMs = Math.max(ts, end);
       if (isActive(n)) open = true;
     }
-    return { key: g.key, startMs: g.startMs, endMs, open, lastActivityMs, toolCalls: 0, finished: 0, failed: 0, toolMs: 0, inputTokens: 0, outputTokens: 0 };
+    return {
+      key: g.key, startMs: g.startMs, dated: isDated(g.startMs), endMs, open, lastActivityMs,
+      toolCalls: 0, finished: 0, failed: 0, toolMs: 0, inputTokens: 0, outputTokens: 0,
+    };
   });
   const last = turns[turns.length - 1];
   if (last !== undefined && (session.status === 'running' || session.status === 'awaiting_permission')) {
@@ -131,9 +153,9 @@ export function summarizeSession(session: Session, nodes: readonly GraphNode[]):
   grouped.forEach((g, i) => {
     for (const n of g.nodes) turnOfMain.set(n.id, i);
   });
-  const sorted = [...nodes]
-    .map((node) => ({ node, ms: parseMs(node.timestamp) ?? 0 }))
-    .sort((a, b) => a.ms - b.ms || (a.node.id < b.node.id ? -1 : a.node.id > b.node.id ? 1 : 0));
+  const sorted = nodes
+    .map((node) => ({ node, ms: parseMs(node.timestamp) }))
+    .sort((a, b) => (a.ms ?? 0) - (b.ms ?? 0) || (a.node.id < b.node.id ? -1 : a.node.id > b.node.id ? 1 : 0));
   const dispatchOf = new Map<string, GraphNode>();
   for (const { node } of sorted) {
     if (node.kind === 'subagent' && node.childAgentId !== null && !dispatchOf.has(node.childAgentId)) dispatchOf.set(node.childAgentId, node);
@@ -163,35 +185,34 @@ export function summarizeSession(session: Session, nodes: readonly GraphNode[]):
     return found;
   };
 
+  const counted = new Set(countedUsageNodes(nodes));
   const extras: SummaryExtra[] = [];
   const calls: SummaryCall[] = [];
-  const seenMessages = new Set<string>();
   let usageNodes = 0;
   for (const { node, ms } of sorted) {
+    if (node.usage) usageNodes++;
     const call = isCall(node);
-    let input = 0;
-    let output = 0;
-    if (node.usage !== null) {
-      usageNodes++;
-      if (node.messageId === null || !seenMessages.has(node.messageId)) {
-        if (node.messageId !== null) seenMessages.add(node.messageId);
-        input = node.usage.inputTokens;
-        output = node.usage.outputTokens;
-      }
-    }
-    if (!call && node.usage === null) continue;
+    const counts = counted.has(node);
     let turn: number;
     if (node.agentId === null) turn = turnOfMain.get(node.id)!;
     else if (turns.length === 0) turn = -1;
-    else turn = resolveAgent(node.agentId) ?? turnByTime(ms);
-    const target: SummaryTurn | SummaryExtra =
-      turn >= 0 ? turns[turn]! : (extras[extras.length] = { atMs: ms, toolCalls: 0, finished: 0, failed: 0, toolMs: 0, inputTokens: 0, outputTokens: 0 });
-    target.inputTokens += input;
-    target.outputTokens += output;
-    if (turn >= 0 && node.agentId !== null) {
+    else {
+      turn = resolveAgent(node.agentId) ?? turnByTime(ms ?? 0);
+      // Any internal node is activity of the turn that dispatched it.
       const t = turns[turn]!;
-      const activity = Math.max(ms, parseMs(node.endedAt) ?? ms);
+      const activity = Math.max(ms ?? -Infinity, parseMs(node.endedAt) ?? -Infinity);
       if (activity > t.lastActivityMs) t.lastActivityMs = activity;
+    }
+    if (!call && !counts) continue;
+    const target: SummaryTurn | SummaryExtra =
+      turn >= 0
+        ? turns[turn]!
+        : (extras[extras.length] = {
+            atMs: ms ?? NaN, dated: ms !== null && isDated(ms), toolCalls: 0, finished: 0, failed: 0, toolMs: 0, inputTokens: 0, outputTokens: 0,
+          });
+    if (counts) {
+      target.inputTokens += node.usage!.inputTokens;
+      target.outputTokens += node.usage!.outputTokens;
     }
     if (!call) continue;
     const durationMs = callDuration(node);
@@ -200,7 +221,7 @@ export function summarizeSession(session: Session, nodes: readonly GraphNode[]):
     if (isFailed(node)) target.failed++;
     if (durationMs !== null) target.toolMs += durationMs;
     calls.push({
-      nodeId: node.id, toolName: node.toolName ?? node.title, atMs: ms, startedAt: node.timestamp, turn,
+      nodeId: node.id, toolName: intern(node.toolName ?? UNKNOWN_TOOL), atMs: ms ?? NaN, turn,
       finished: isFinished(node), failed: isFailed(node), durationMs,
     });
   }

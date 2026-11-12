@@ -43,7 +43,7 @@ class FakeSource implements StatsSource {
   sessions(): Session[] {
     return [...this.data.values()].map((d) => d.session);
   }
-  graph(sessionId: string) {
+  async readSession(sessionId: string) {
     this.reads.push(sessionId);
     if (this.failing.has(sessionId)) throw new Error('broken');
     if (this.delayMs > 0) {
@@ -59,8 +59,10 @@ class FakeSource implements StatsSource {
 }
 
 const Q = { range: '7d' as const, origin: null, projectId: null };
-const make = (source: StatsSource, capacity?: number) =>
-  new StatsService(source, { now: () => NOW, dayKey: utcDay, ...(capacity !== undefined ? { capacity } : {}) });
+const make = (source: StatsSource, capacity?: number, maxCalls?: number) =>
+  new StatsService(source, {
+    now: () => NOW, dayKey: utcDay, ...(capacity !== undefined ? { capacity } : {}), ...(maxCalls !== undefined ? { maxCalls } : {}),
+  });
 
 describe('StatsService', () => {
   test('first request summarizes every session; the next reuses the cache', async () => {
@@ -136,6 +138,38 @@ describe('StatsService', () => {
     src.reads = [];
     expect((await svc.get(Q)).totals.toolCalls).toBe(3);
     expect(src.reads).toEqual(['c']);
+  });
+
+  test('the cache is also bounded by retained calls; a session larger than the bound is never cached', async () => {
+    const src = new FakeSource();
+    src.add('a', 3);
+    src.add('b', 3);
+    src.add('c', 10);
+    const svc = make(src, undefined, 6);
+    expect((await svc.get(Q)).totals.toolCalls).toBe(16);
+    expect(svc.retainedCallCount()).toBe(6);
+    expect(svc.cacheSize()).toBe(2);
+    src.reads = [];
+    await svc.get(Q);
+    expect(src.reads).toEqual(['c']);
+    // A change frees and re-adds its calls: the count stays exact.
+    svc.noteChanges([src.addCall('a')]);
+    await svc.get(Q);
+    expect(svc.retainedCallCount()).toBeLessThanOrEqual(6);
+  });
+
+  test('defaults: 3,000 sessions all stay cached; an unchanged request reads nothing, a change reads only its session', async () => {
+    const src = new FakeSource();
+    for (let i = 0; i < 3000; i++) src.add(`s${i}`, 2);
+    const svc = make(src);
+    expect((await svc.get(Q)).totals.sessions).toBe(3000);
+    expect(svc.cacheSize()).toBe(3000);
+    src.reads = [];
+    await svc.get({ ...Q, range: 'all' });
+    expect(src.reads).toEqual([]);
+    svc.noteChanges([src.addCall('s1234')]);
+    await svc.get(Q);
+    expect(src.reads).toEqual(['s1234']);
   });
 
   test('a session whose summary fails is skipped and counted, and retried next time', async () => {

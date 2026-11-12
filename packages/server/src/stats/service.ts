@@ -16,19 +16,47 @@ import type { Store } from '../store/store.js';
 import { aggregateStats, localDayKey, type AggregateInput } from './aggregate.js';
 import { summarizeSession, type SessionSummary } from './summary.js';
 
-/** What the stats service reads: the session list, one session's derived graph, the projects (for names). */
+/** Gives the event loop a turn. */
+const turn = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
+/** What the stats service reads: the session list, one session's derived nodes, the projects (for names). */
 export interface StatsSource {
   sessions(): Session[];
-  /** `seq`: a change sequence number at least that of every change reflected in the returned nodes. */
-  graph(sessionId: string): { session: Session; nodes: GraphNode[]; seq: number } | null;
+  /**
+   * `nodes` in snapshot order (store rowid order). `seq`: a change seq taken before the read began; any change committed
+   * to the session during the read has a higher seq, so it marks the summary stale (noteChanges) for the next request.
+   */
+  readSession(sessionId: string): Promise<{ session: Session; nodes: GraphNode[]; seq: number } | null>;
   projects(): Pick<Project, 'id' | 'cwd'>[];
 }
 
-export function storeStatsSource(store: Store): StatsSource {
+/** Nodes per page of storeStatsSource's session read (one page ≈ 10 ms of the event loop for typical node bodies). */
+export const STATS_PAGE_SIZE = 5000;
+
+/**
+ * Reads a session in primary-key pages (store.nodePage: no edges, no rowid sort in SQL), giving the event loop a turn
+ * between pages; no statement or iterator stays open across a turn. The rows are put back in rowid (snapshot) order.
+ */
+export function storeStatsSource(store: Store, options: { pageSize?: number } = {}): StatsSource {
+  const pageSize = Math.max(1, options.pageSize ?? STATS_PAGE_SIZE);
   return {
     sessions: () => store.sessionProjectIds().flatMap((id) => store.listSessions(id)),
-    // getGraph's seq is the store's last assigned seq at read time (it reflects every change up to it).
-    graph: (sessionId) => store.getGraph(sessionId),
+    async readSession(sessionId) {
+      const seq = store.lastSeq();
+      const session = store.getSession(sessionId);
+      if (session === null) return null;
+      const rows: { rowid: number; node: GraphNode }[] = [];
+      let after: string | null = null;
+      for (;;) {
+        const page = store.nodePage(sessionId, after, pageSize);
+        for (const row of page) rows.push(row);
+        if (page.length < pageSize) break;
+        after = page[page.length - 1]!.node.id;
+        await turn();
+      }
+      rows.sort((a, b) => a.rowid - b.rowid);
+      return { session, nodes: rows.map((r) => r.node), seq };
+    },
     projects: () => store.listProjects(Date.now()),
   };
 }
@@ -55,13 +83,24 @@ export function parseStatsQuery(query: Record<string, unknown>): StatsQuery | { 
   };
 }
 
-export const STATS_CACHE_CAPACITY = 500;
+/**
+ * Most summaries kept: far above realistic session counts, so every session stays cached and only changed ones are
+ * recomputed. Memory is bounded by STATS_CACHE_MAX_CALLS.
+ */
+export const STATS_CACHE_CAPACITY = 20_000;
+/**
+ * Most per-call entries (SummaryCall, ≈100 B each) kept across all cached summaries: ≈100 MB worst case. The real
+ * 210,000-node dataset has ≈100,000 calls. Turns are per prompt and small.
+ */
+export const STATS_CACHE_MAX_CALLS = 1_000_000;
 /** Building summaries gives the event loop a turn once this much time has passed since the last one. */
 export const STATS_YIELD_AFTER_MS = 10;
 
 export interface StatsServiceOptions {
   /** Most session summaries kept (least recently used evicted). Default STATS_CACHE_CAPACITY. */
   capacity?: number;
+  /** Most SummaryCall entries kept over all summaries. Default STATS_CACHE_MAX_CALLS. */
+  maxCalls?: number;
   now?: () => number;
   dayKey?: (ms: number) => string;
   yieldAfterMs?: number;
@@ -84,7 +123,6 @@ function sessionIdOf(c: Change): string {
   }
 }
 
-const turn = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
 /**
  * Session summaries cached by session id, valid while no change newer than the graph they were built from has been
@@ -98,6 +136,8 @@ export class StatsService {
   /** Session id -> seq of the latest change reported for it. */
   private readonly changed = new Map<string, number>();
   private readonly capacity: number;
+  private readonly maxCalls: number;
+  private retainedCalls = 0;
   private readonly now: () => number;
   private readonly dayKey: (ms: number) => string;
   private readonly yieldAfterMs: number;
@@ -108,6 +148,7 @@ export class StatsService {
 
   constructor(private readonly source: StatsSource, options: StatsServiceOptions = {}) {
     this.capacity = Math.max(1, options.capacity ?? STATS_CACHE_CAPACITY);
+    this.maxCalls = Math.max(0, options.maxCalls ?? STATS_CACHE_MAX_CALLS);
     this.now = options.now ?? Date.now;
     this.dayKey = options.dayKey ?? localDayKey;
     this.yieldAfterMs = options.yieldAfterMs ?? STATS_YIELD_AFTER_MS;
@@ -178,10 +219,10 @@ export class StatsService {
         continue;
       }
       try {
-        const graph = this.source.graph(id);
-        if (graph === null) continue; // gone since the listing
-        const summary = summarizeSession(graph.session, graph.nodes);
-        this.remember(id, { seq: graph.seq, summary, pass });
+        const read = await this.source.readSession(id);
+        if (read === null) continue; // gone since the listing
+        const summary = summarizeSession(read.session, read.nodes);
+        this.remember(id, { seq: read.seq, summary, pass });
         entries.push({ session, summary });
       } catch {
         failed++;
@@ -190,14 +231,33 @@ export class StatsService {
     return { entries, failed, projects };
   }
 
+  /**
+   * Caches `entry`, evicting least recently used summaries while over capacity or over maxCalls; a summary used by the
+   * current refresh is never evicted for it (the new one is then not cached), nor is one larger than maxCalls cached.
+   */
   private remember(id: string, entry: CacheEntry): void {
-    this.cache.delete(id);
-    if (this.cache.size >= this.capacity) {
+    this.forget(id);
+    const calls = entry.summary.calls.length;
+    if (calls > this.maxCalls) return;
+    while (this.cache.size >= this.capacity || this.retainedCalls + calls > this.maxCalls) {
       const [oldestId, oldest] = this.cache.entries().next().value as [string, CacheEntry];
       if (oldest.pass === entry.pass) return; // everything cached was used by this refresh: keep it
-      this.cache.delete(oldestId);
+      this.forget(oldestId);
     }
     this.cache.set(id, entry);
+    this.retainedCalls += calls;
     if ((this.changed.get(id) ?? -Infinity) <= entry.seq) this.changed.delete(id);
+  }
+
+  private forget(id: string): void {
+    const old = this.cache.get(id);
+    if (old === undefined) return;
+    this.cache.delete(id);
+    this.retainedCalls -= old.summary.calls.length;
+  }
+
+  /** Calls retained over all cached summaries (for tests). */
+  retainedCallCount(): number {
+    return this.retainedCalls;
   }
 }
