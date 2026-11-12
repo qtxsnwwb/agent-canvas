@@ -130,7 +130,7 @@ describe('cursor origin', () => {
   });
 
   test('NORMALIZER_VERSION bumped for the cursor origin (and once for the fix wave)', () => {
-    expect(NORMALIZER_VERSION).toBe(28); // 28: files (path + action) on tool nodes
+    expect(NORMALIZER_VERSION).toBe(29); // 29: files fix round (patch-running tools only, cut Cursor params, turn cwd)
   });
 
   test('without a cursor normalizer (factory null) a cursor raw event yields no changes', () => {

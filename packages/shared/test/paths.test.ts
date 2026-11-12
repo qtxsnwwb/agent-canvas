@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { normalizeFilePath, relativeToDir, samePath } from '../src/index.js';
+import { isWindowsStylePath, normalizeFilePath, pathKey, relativeToDir, samePath } from '../src/index.js';
 
 describe('normalizeFilePath', () => {
   test('Windows absolute: separators, drive letter, dot segments, duplicate and trailing slashes', () => {
@@ -109,5 +109,46 @@ describe('samePath', () => {
   test('different files differ', () => {
     expect(samePath('D:/a/b.ts', 'D:/a/c.ts')).toBe(false);
     expect(samePath('', 'D:/a')).toBe(false);
+  });
+});
+
+describe('fix round 1', () => {
+  test('Win32 namespace prefixes normalise to the plain path', () => {
+    expect(normalizeFilePath(String.raw`\\?\C:\foo\bar.ts`, null)).toBe('C:/foo/bar.ts');
+    expect(normalizeFilePath('//?/c:/foo/bar.ts', null)).toBe('C:/foo/bar.ts');
+    expect(normalizeFilePath(String.raw`\\.\C:\foo`, null)).toBe('C:/foo');
+    expect(normalizeFilePath(String.raw`\\?\UNC\server\share\a.ts`, null)).toBe('//server/share/a.ts');
+    expect(samePath(String.raw`\\?\C:\foo\bar.ts`, 'c:/foo/bar.ts')).toBe(true);
+    expect(normalizeFilePath('a.ts', String.raw`\\?\D:\w`)).toBe('D:/w/a.ts');
+  });
+
+  test('a "." or ".." share is no share', () => {
+    expect(normalizeFilePath(String.raw`\\server\..\x`, null)).toBe('//server/x');
+    expect(normalizeFilePath('//server/./x', null)).toBe('//server/x');
+  });
+
+  test('surrounding whitespace is trimmed (path and cwd)', () => {
+    expect(normalizeFilePath(' D:/a/b.ts ', 'D:/w')).toBe('D:/a/b.ts');
+    expect(normalizeFilePath('\tsrc/a.ts\n', ' D:/w ')).toBe('D:/w/src/a.ts');
+  });
+
+  test('a path starting with ~ is not joined to the cwd', () => {
+    expect(normalizeFilePath('~/x.ts', 'D:/w')).toBe('~/x.ts');
+    expect(normalizeFilePath(String.raw`~\a\b.ts`, '/home/u')).toBe('~/a/b.ts');
+    expect(normalizeFilePath('~', '/home/u')).toBe('~');
+  });
+
+  test('relativeToDir normalizes the path too; a relative dir matches nothing', () => {
+    expect(relativeToDir(String.raw`d:\a\b.ts`, 'D:/a')).toBe('b.ts');
+    expect(relativeToDir('src/a.ts', 'src')).toBe('src/a.ts');
+  });
+
+  test('isWindowsStylePath and pathKey', () => {
+    expect(isWindowsStylePath('D:/a')).toBe(true);
+    expect(isWindowsStylePath('//s/sh/a')).toBe(true);
+    expect(isWindowsStylePath('/a')).toBe(false);
+    expect(isWindowsStylePath('src/a')).toBe(false);
+    expect(pathKey('D:/A/b.TS')).toBe('d:/a/b.ts');
+    expect(pathKey('/A/b')).toBe('/A/b');
   });
 });

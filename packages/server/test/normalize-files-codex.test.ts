@@ -140,3 +140,49 @@ test('Codex: a subagent thread resolves against its own cwd; the order threads a
     expect(node(r, 'tool:s1').files).toEqual(node(base, 'tool:s1').files);
   }
 });
+
+test('Codex: a patch quoted in a spawn_agent message or an MCP tool content names no file', () => {
+  const root = new CodexThread({ id: 'cx10', cwd: '/work/app' });
+  const r = run(new CodexNormalizer(), [
+    root.meta(),
+    root.started('t1'),
+    root.call('s1', 'spawn_agent', { task_name: 'helper', message: 'Please apply:\n*** Begin Patch\n*** Update File: secret/plan.md\n*** End Patch\n' }, 'collaboration'),
+    root.output('s1', 'ok', 'function'),
+    root.call('c2', 'write_file', { path: 'docs/x.md', content: 'Example:\n*** Begin Patch\n*** Delete File: important.ts\n*** End Patch\n' }, 'fs'),
+    root.output('c2', 'ok', 'function'),
+    root.complete(),
+  ]);
+  expect(node(r, 'tool:s1')).not.toHaveProperty('files');
+  expect(node(r, 'tool:c2')).not.toHaveProperty('files');
+});
+
+test('Codex: a FileChange whose id is its call id merges into that call even after the call output', () => {
+  const root = new CodexThread({ id: 'cx11', cwd: '/work/app' });
+  const r = run(new CodexNormalizer(), [
+    root.meta(),
+    root.started('t1'),
+    root.exec('c1', heredoc(patch('*** Update File: a.ts'))),
+    root.output('c1'),
+    fileChange(root, 'c1', { 'a.ts': { type: 'update' }, 'b.ts': { type: 'add' } }),
+    root.complete(),
+  ]);
+  expect(r.graph.nodes['item:c1']).toBeUndefined();
+  expect(node(r, 'tool:c1').files).toEqual([
+    { path: '/work/app/a.ts', action: 'edit' },
+    { path: '/work/app/b.ts', action: 'write' },
+  ]);
+});
+
+test('Codex: turn_context.cwd moves the directory relative FileChange keys resolve against', () => {
+  const root = new CodexThread({ id: 'cx12', cwd: '/work/app' });
+  const r = run(new CodexNormalizer(), [
+    root.meta(),
+    root.record('turn_context', { turn_id: 't1', cwd: '/work/other' }),
+    root.started('t1'),
+    root.exec('c1', 'run it'),
+    fileChange(root, 'fcx', { 'src/a.ts': { type: 'update' } }),
+    root.output('c1'),
+    root.complete(),
+  ]);
+  expect(node(r, 'tool:c1').files).toEqual([{ path: '/work/other/src/a.ts', action: 'edit' }]);
+});

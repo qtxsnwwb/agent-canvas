@@ -3,7 +3,7 @@
  * `apply_patch` format). Each origin's normalizer turns its call into raw touches here, then `nodeFiles` normalizes
  * the paths, drops duplicates and caps the list.
  */
-import { MAX_FILES_PER_NODE, normalizeFilePath, type FileAction, type FileTouch, type GraphNode } from '@agent-canvas/shared';
+import { MAX_FILES_PER_NODE, normalizeFilePath, pathKey, type FileAction, type FileTouch, type GraphNode } from '@agent-canvas/shared';
 
 /** A path as the tool input wrote it, with the action. */
 export interface RawTouch {
@@ -18,11 +18,6 @@ export interface NodeFiles {
 }
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
-
-/** Identity of a path for de-duplication: case-insensitive for Windows-style paths (drive letter or UNC). */
-function pathKey(path: string): string {
-  return /^[A-Za-z]:/.test(path) || path.startsWith('//') ? path.toLowerCase() : path;
-}
 
 /**
  * Normalized touches: empty paths dropped, unique (path, action) pairs in first-seen order, at most MAX_FILES_PER_NODE
@@ -52,13 +47,15 @@ const sameFiles = (a: FileTouch[] | undefined, b: FileTouch[] | undefined): bool
   (a?.length ?? 0) === (b?.length ?? 0) && (a ?? []).every((f, i) => f.path === b![i]!.path && f.action === b![i]!.action);
 
 /**
- * The patch that makes `node` carry `next`: empty when it already does. A field that goes away is set to undefined
- * (dropped when the node is serialized).
+ * The patch that makes `node` carry `next`: empty when it already does. Files that go away are cleared with an
+ * explicit `files: []` / `filesTruncated: false` (an empty list means "no files", as an absent field does), never
+ * with undefined: a patch goes through JSON (store, change log, websocket), where an undefined field would vanish and
+ * leave the old value in place on every consumer that merges patches.
  */
 export function filesPatch(node: GraphNode, next: NodeFiles): Partial<GraphNode> {
   const patch: Partial<GraphNode> = {};
-  if (!sameFiles(node.files, next.files)) patch.files = next.files;
-  if ((node.filesTruncated ?? false) !== (next.filesTruncated ?? false)) patch.filesTruncated = next.filesTruncated;
+  if (!sameFiles(node.files, next.files)) patch.files = next.files ?? [];
+  if ((node.filesTruncated ?? false) !== (next.filesTruncated ?? false)) patch.filesTruncated = next.filesTruncated ?? false;
   return patch;
 }
 
@@ -68,11 +65,6 @@ export function filesFields(next: NodeFiles): NodeFiles {
   if (next.files !== undefined) out.files = next.files;
   if (next.filesTruncated) out.filesTruncated = true;
   return out;
-}
-
-/** Whether two nodes carry the same files. */
-export function sameNodeFiles(a: GraphNode, b: GraphNode): boolean {
-  return sameFiles(a.files, b.files) && (a.filesTruncated ?? false) === (b.filesTruncated ?? false);
 }
 
 const stringField = (input: Record<string, unknown>, key: string): string | null => {
@@ -106,11 +98,32 @@ const CURSOR_TOOLS: Record<string, { key: string; action: FileAction }> = {
   delete_file: { key: 'relativeWorkspacePath', action: 'delete' },
 };
 
-/** The file a Cursor tool call names, from its parsed `params` (a string = params that did not parse: none). */
+/**
+ * The string value of `key` in JSON text that does not parse (params cut at the stored cap): the first `"key": "…"`
+ * whose value is a complete JSON string (its closing quote is in the text), JSON escapes decoded. A quoted key inside
+ * another string value is escaped there (`\"key\"`), so it cannot match. Null when the text was cut before or inside
+ * the value, or the value is not a string.
+ */
+function stringFieldFromText(text: string, key: string): string | null {
+  const re = new RegExp(`(?<!\\\\)"${key}"\\s*:\\s*"((?:[^"\\\\\\u0000-\\u001f]|\\\\.)*)"`);
+  const m = re.exec(text);
+  if (m === null) return null;
+  try {
+    const v = JSON.parse(`"${m[1]}"`) as unknown;
+    return typeof v === 'string' && v.trim() !== '' ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The file a Cursor tool call names, from its parsed `params`; params that did not parse (a string: cut at the cap)
+ * give the tool's own path field read by its key from the text (see stringFieldFromText).
+ */
 export function cursorTouches(toolName: string | null, params: unknown): RawTouch[] {
   const spec = toolName !== null && Object.hasOwn(CURSOR_TOOLS, toolName) ? CURSOR_TOOLS[toolName] : undefined;
-  if (spec === undefined || !isObject(params)) return [];
-  const path = stringField(params, spec.key);
+  if (spec === undefined) return [];
+  const path = isObject(params) ? stringField(params, spec.key) : typeof params === 'string' ? stringFieldFromText(params, spec.key) : null;
   return path === null ? [] : [{ path, action: spec.action }];
 }
 
@@ -160,17 +173,27 @@ export function applyPatchTouches(text: string): RawTouch[] {
   return out;
 }
 
-/** Every string in a value (strings in arrays and objects, depth-first), for finding patch bodies in call inputs. */
-function strings(v: unknown, out: string[] = [], depth = 0): string[] {
-  if (typeof v === 'string') out.push(v);
-  else if (depth < 8 && Array.isArray(v)) for (const x of v) strings(x, out, depth + 1);
-  else if (depth < 8 && isObject(v)) for (const x of Object.values(v)) strings(x, out, depth + 1);
-  return out;
-}
+/** Codex tools that run a command or apply a patch (full tool name, `namespace.name` when namespaced). */
+const PATCH_TOOLS = new Set(['exec', 'shell', 'local_shell', 'container.exec', 'shell_command', 'exec_command', 'apply_patch']);
+/** The arguments of those tools that hold the command, script or patch text. */
+const PATCH_ARGS = ['command', 'cmd', 'script', 'input', 'patch'];
 
-/** The files of the `apply_patch` bodies in a Codex call's input (a text, or the parsed arguments of a function call). */
-export function codexCallTouches(input: unknown): RawTouch[] {
-  return strings(input).flatMap(applyPatchTouches);
+/**
+ * The files of the `apply_patch` bodies a Codex call runs: only for PATCH_TOOLS, and only in the text input of a
+ * custom call or the command / script / input arguments of a function call (a string, or a list of strings). Patch
+ * text quoted anywhere else (a message to a subagent, an MCP tool's content, …) is never read.
+ */
+export function codexCallTouches(toolName: string, input: unknown): RawTouch[] {
+  if (!PATCH_TOOLS.has(toolName)) return [];
+  if (typeof input === 'string') return applyPatchTouches(input);
+  if (!isObject(input)) return [];
+  const out: RawTouch[] = [];
+  for (const key of PATCH_ARGS) {
+    const v = input[key];
+    if (typeof v === 'string') out.push(...applyPatchTouches(v));
+    else if (Array.isArray(v)) for (const x of v) if (typeof x === 'string') out.push(...applyPatchTouches(x));
+  }
+  return out;
 }
 
 /** The action a FileChange value describes: add → write, delete → delete, otherwise edit. */

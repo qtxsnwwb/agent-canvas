@@ -4,20 +4,25 @@
 //   - drive:  `C:/...`  (Windows; the drive letter is upper-cased)
 //   - UNC:    `//server/share/...` (Windows; `..` never climbs above the share)
 //   - POSIX:  `/...`
+// Win32 namespace prefixes (`\\?\C:\…`, `\\.\C:\…`, `\\?\UNC\server\share\…`) are reduced to the plain forms.
 // Windows-style paths (drive or UNC) compare case-insensitively; POSIX paths case-sensitively.
 
 interface Parsed {
   /** 'C:/', '//server/share/' or '/'. */
   root: string;
   segments: string[];
-  windows: boolean;
 }
 
 const DRIVE_ABS = /^([A-Za-z]):\//;
 const DRIVE_ANY = /^[A-Za-z]:/;
 
+/** Separators unified to '/', Win32 namespace prefixes removed. */
 function unify(raw: string): string {
-  return raw.replace(/\\/g, '/');
+  const p = raw.replace(/\\/g, '/');
+  const unc = /^\/\/[?.]\/UNC\//i.exec(p);
+  if (unc) return `//${p.slice(unc[0].length)}`;
+  if (/^\/\/[?.]\/[A-Za-z]:/.test(p)) return p.slice(4);
+  return p;
 }
 
 function resolveSegments(parts: string[], into: string[] = []): string[] {
@@ -32,17 +37,16 @@ function resolveSegments(parts: string[], into: string[] = []): string[] {
 /** Parses an already-unified absolute path; null when it is not absolute. */
 function parseAbsolute(p: string): Parsed | null {
   const drive = DRIVE_ABS.exec(p);
-  if (drive) {
-    return { root: `${drive[1]!.toUpperCase()}:/`, segments: resolveSegments(p.slice(3).split('/')), windows: true };
-  }
+  if (drive) return { root: `${drive[1]!.toUpperCase()}:/`, segments: resolveSegments(p.slice(3).split('/')) };
   if (p.startsWith('//') && p.length > 2 && p[2] !== '/') {
     const parts = p.slice(2).split('/');
     const server = parts[0]!;
     const share = parts[1] ?? '';
-    if (share === '') return { root: `//${server}/`, segments: resolveSegments(parts.slice(2)), windows: true };
-    return { root: `//${server}/${share}/`, segments: resolveSegments(parts.slice(2)), windows: true };
+    // A missing, '.' or '..' share is no share: the rest resolves under the server.
+    if (share === '' || share === '.' || share === '..') return { root: `//${server}/`, segments: resolveSegments(parts.slice(2)) };
+    return { root: `//${server}/${share}/`, segments: resolveSegments(parts.slice(2)) };
   }
-  if (p.startsWith('/')) return { root: '/', segments: resolveSegments(p.split('/')), windows: false };
+  if (p.startsWith('/')) return { root: '/', segments: resolveSegments(p.split('/')) };
   return null;
 }
 
@@ -54,44 +58,61 @@ function format(parsed: Parsed): string {
   return parsed.root + parsed.segments.join('/');
 }
 
+/** A drive-letter or UNC path (raw or normalized): compared case-insensitively. */
+export function isWindowsStylePath(path: string): boolean {
+  if (typeof path !== 'string') return false;
+  const p = path.replace(/\\/g, '/');
+  return DRIVE_ANY.test(p) || p.startsWith('//');
+}
+
+/** Identity key of a normalized path: lower-cased for Windows-style paths, as is for POSIX ones. */
+export function pathKey(path: string): string {
+  return isWindowsStylePath(path) ? path.toLowerCase() : path;
+}
+
 /**
- * The canonical form of a file path. Absolute input: separators unified to '/', drive letter upper-cased, '.' and '..'
- * resolved, duplicate slashes collapsed, trailing slash stripped. Relative input with an absolute cwd: joined to it,
- * then normalized. Relative input without a usable cwd: returned with separators unified. A `file://` URL is returned
- * as given. Empty, whitespace-only or non-string input gives ''. Never throws.
+ * The canonical form of a file path. Surrounding whitespace is trimmed. Absolute input: separators unified to '/',
+ * Win32 namespace prefixes removed, drive letter upper-cased, '.' and '..' resolved, duplicate slashes collapsed,
+ * trailing slash stripped. Relative input with an absolute cwd: joined to it, then normalized. Relative input without a
+ * usable cwd, a drive-relative path (`C:foo`) or a home-relative one (`~`, `~/…`): returned with separators unified. A
+ * `file://` URL is returned as given. Empty, whitespace-only or non-string input gives ''. Never throws.
  */
 export function normalizeFilePath(raw: string, cwd: string | null): string {
-  if (typeof raw !== 'string' || raw.trim() === '') return '';
-  if (/^file:\/\//i.test(raw)) return raw;
-  const p = unify(raw);
+  if (typeof raw !== 'string') return '';
+  const trimmed = raw.trim();
+  if (trimmed === '') return '';
+  if (/^file:\/\//i.test(trimmed)) return trimmed;
+  const p = unify(trimmed);
   const abs = parseAbsolute(p);
   if (abs) return format(abs);
-  if (typeof cwd === 'string' && cwd.trim() !== '' && !DRIVE_ANY.test(p)) {
-    const base = parseAbsolute(unify(cwd));
-    if (base) {
-      return format({ ...base, segments: resolveSegments(p.split('/'), [...base.segments]) });
-    }
+  if (DRIVE_ANY.test(p) || p === '~' || p.startsWith('~/')) return p;
+  if (typeof cwd === 'string' && cwd.trim() !== '') {
+    const base = parseAbsolute(unify(cwd.trim()));
+    if (base) return format({ ...base, segments: resolveSegments(p.split('/'), [...base.segments]) });
   }
   return p;
 }
 
-function isWindowsStyle(p: string): boolean {
-  return DRIVE_ANY.test(p) || p.startsWith('//');
+/** Whether a (raw or normalized) path is absolute in one of the three forms. */
+function isAbsolute(p: string): boolean {
+  return parseAbsolute(unify(p.trim())) !== null;
 }
 
 /**
- * `path` relative to `dir` when it lies inside it (case-insensitive for Windows-style paths), otherwise `path` in full.
- * The dir itself, a sibling sharing a prefix, or no dir: the full path. `dir` may be un-normalized.
+ * `path` relative to `dir` when it lies inside it (both normalized; case-insensitive for Windows-style paths),
+ * otherwise `path` in full, as given. The dir itself, a sibling sharing a prefix, a relative or missing dir: the full
+ * path.
  */
 export function relativeToDir(path: string, dir: string | null): string {
-  if (typeof path !== 'string' || dir === null || typeof dir !== 'string' || dir.trim() === '') return path;
+  if (typeof path !== 'string' || typeof dir !== 'string' || dir.trim() === '' || !isAbsolute(dir)) return path;
   const d = normalizeFilePath(dir, null);
+  const p = normalizeFilePath(path, null);
   const prefix = d.endsWith('/') ? d : `${d}/`;
-  const insensitive = isWindowsStyle(path) || isWindowsStyle(d);
-  const head = path.slice(0, prefix.length);
+  const insensitive = isWindowsStylePath(p) || isWindowsStylePath(d);
+  const head = p.slice(0, prefix.length);
   const matches = insensitive ? head.toLowerCase() === prefix.toLowerCase() : head === prefix;
-  if (!matches || path.length === prefix.length) return path;
-  return path.slice(prefix.length);
+  if (!matches || p.length === prefix.length) return path;
+  return p.slice(prefix.length);
 }
 
 /** Whether two paths name the same file after normalization; case-insensitive when either is Windows-style. */
@@ -99,6 +120,6 @@ export function samePath(a: string, b: string): boolean {
   const na = normalizeFilePath(a, null);
   const nb = normalizeFilePath(b, null);
   if (na === '' || nb === '') return false;
-  if (isWindowsStyle(na) || isWindowsStyle(nb)) return na.toLowerCase() === nb.toLowerCase();
+  if (isWindowsStylePath(na) || isWindowsStylePath(nb)) return na.toLowerCase() === nb.toLowerCase();
   return na === nb;
 }

@@ -45,6 +45,7 @@ const OUTPUTS = new Set(['custom_tool_call_output', 'function_call_output']);
 type Obj = Record<string, unknown>;
 const isObject = (v: unknown): v is Obj => typeof v === 'object' && v !== null && !Array.isArray(v);
 const str = (v: unknown): string | null => (typeof v === 'string' ? v : null);
+const nonEmpty = (v: string | null): string | null => (v !== null && v.trim() !== '' ? v : null);
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 /** Epoch milliseconds as ISO time; null for anything a Date cannot represent (NaN, ±1e20, …). */
 function isoOf(ms: number | null): string | null {
@@ -702,6 +703,8 @@ export class CodexNormalizer implements AgentNormalizer {
     this.touchSession(state, validTs, projectId, isRoot, changes);
     if (kind.kind === 'ignored') {
       if (type === 'response_item') thread.group += 1; // ends a response's run of calls
+      // A turn's working directory (a resumed session or a changed directory): relative FileChange keys resolve against it.
+      if (type === 'turn_context') thread.cwd = nonEmpty(str(payload.cwd)) ?? thread.cwd;
       return undefined;
     }
     const ctx: Ctx = { state, thread, event, payload, ts, changes, isRoot, unknown: undefined };
@@ -733,7 +736,7 @@ export class CodexNormalizer implements AgentNormalizer {
     thread.parentThreadId = str(payload.parent_thread_id) ?? str(spawn.parent_thread_id);
     thread.nickname = str(payload.agent_nickname) ?? str(spawn.agent_nickname);
     thread.agentPath = str(payload.agent_path) ?? str(spawn.agent_path);
-    thread.cwd = str(payload.cwd) ?? thread.cwd;
+    thread.cwd = nonEmpty(str(payload.cwd)) ?? thread.cwd;
     thread.startedAt = ctx.ts;
     if (isRoot) {
       const cwd = str(payload.cwd);
@@ -866,7 +869,9 @@ export class CodexNormalizer implements AgentNormalizer {
     };
     const startedMs = num(payload.started_at_ms);
     const startedAt = isoOf(startedMs);
-    const target = this.foldTarget(thread, startedAt === null ? null : startedMs);
+    // A FileChange carries the id of the call that made it: folded into that call whatever its time window.
+    const byId = itype === 'FileChange' && itemId !== null ? thread.callNodes.get(itemId) : undefined;
+    const target = byId ?? this.foldTarget(thread, startedAt === null ? null : startedMs);
     const node = target === undefined ? undefined : ctx.state.nodes.get(target);
     if (target !== undefined && node) {
       const list = [...(ctx.state.folded.get(target) ?? []), entry];
@@ -1009,7 +1014,7 @@ export class CodexNormalizer implements AgentNormalizer {
         toolName,
         toolUseId: callId,
         status: 'running',
-        files: nodeFiles(codexCallTouches(input), thread.cwd),
+        files: nodeFiles(codexCallTouches(toolName, input), thread.cwd),
         detail: { input },
       },
       true,
