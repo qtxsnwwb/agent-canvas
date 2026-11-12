@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import type { Change, GraphNode } from '@claude-canvas/shared';
+import { applyChanges, emptyGraph, type Change, type GraphNode, type Session } from '@claude-canvas/shared';
 import { CursorNormalizer } from '../src/normalize/cursor.js';
 import type { RawEvent } from '../src/store/store.js';
 import { interleave, run, type RunResult } from './codex-fixtures.js';
@@ -435,6 +435,65 @@ describe('fuzz: whole graphs (nodes, edges, session) agree', () => {
       expect(graphOf(run(n, live)), `seed ${seed}: rebuild`).toEqual(ref);
       expect(graphOf(go(interleave(queues, seed + 1000))), `seed ${seed}: shuffled`).toEqual(ref);
       expect(go(live, { checkpointEvery: Number.POSITIVE_INFINITY }).changes, `seed ${seed}: full re-derive`).toEqual(first.changes);
+    }
+  }, 60_000);
+});
+
+// ---- fix wave: batch apply and the checkpoint spacing ----
+
+/** Node details as the store folds them: node_added's detail, then each node_updated's detail merged over it. */
+function detailsOf(changes: Change[]): Record<string, Record<string, unknown>> {
+  const out: Record<string, Record<string, unknown>> = {};
+  for (const c of changes) {
+    if (c.type === 'node_added') out[c.node.id] = { ...c.detail };
+    if (c.type === 'node_updated' && c.detail !== undefined && out[c.id] !== undefined) out[c.id] = { ...out[c.id], ...c.detail };
+  }
+  return out;
+}
+
+/** The events applied in batches of `size` (Infinity: one batch), folded like `run`. */
+function goBatched(events: RawEvent[], size: number, options?: { checkpointEvery?: number }): RunResult & { details: Record<string, Record<string, unknown>> } {
+  const n = new CursorNormalizer(options);
+  const changes: Change[] = [];
+  const unknown: string[] = [];
+  const step = Number.isFinite(size) ? size : Math.max(1, events.length);
+  for (let i = 0; i < events.length; i += step) {
+    const items = events.slice(i, i + step).map((event) => ({ event, projectId: (event as { projectId?: string | null }).projectId ?? 'unknown' }));
+    const r = n.applyBatch(items);
+    changes.push(...r.changes);
+    for (const u of r.unknown) if (u !== undefined) unknown.push(u);
+  }
+  const sessions = new Map<string, Session>();
+  for (const c of changes) if (c.type === 'session_upserted') sessions.set(c.session.id, c.session);
+  return { changes, graph: applyChanges(emptyGraph(), changes), unknown, sessions, details: detailsOf(changes) };
+}
+
+describe('fix wave: a batch gives what its records applied one by one give', () => {
+  test('graph, session, node details and unknown labels agree for batch sizes 1, 7, 64 and all-in-one; in source order and shuffled', () => {
+    for (let seed = 1; seed <= 150; seed++) {
+      const { convs, queues } = scenario(seed);
+      for (const events of [interleave(convs, seed), interleave(queues, seed + 1000)]) {
+        const one = go(events);
+        const ref = { ...graphOf(one), details: detailsOf(one.changes), unknown: one.unknown };
+        for (const size of [1, 7, 64, Number.POSITIVE_INFINITY]) {
+          const b = goBatched(events, size);
+          expect({ ...graphOf(b), details: b.details, unknown: b.unknown }, `seed ${seed} size ${size}`).toEqual(ref);
+        }
+      }
+    }
+  }, 120_000);
+
+  test('a single-record batch is apply', () => {
+    const { convs } = scenario(7);
+    const live = interleave(convs, 7);
+    expect(goBatched(live, 1).changes).toEqual(go(live).changes);
+  });
+
+  test('checkpoints every 2 bubbles: the same changes as the reference derivation (M-T1)', () => {
+    for (let seed = 1; seed <= 200; seed++) {
+      const { convs } = scenario(seed);
+      const live = interleave(convs, seed);
+      expect(go(live, { checkpointEvery: 2 }).changes, `seed ${seed}`).toEqual(go(live, { checkpointEvery: Number.POSITIVE_INFINITY }).changes);
     }
   }, 60_000);
 });

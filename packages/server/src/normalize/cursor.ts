@@ -14,7 +14,7 @@ import {
   type ComposerFacts,
 } from './cursor-bubbles.js';
 import { parseCursorHook } from './cursor-hooks.js';
-import type { AgentNormalizer, NormalizeResult } from './types.js';
+import type { AgentNormalizer, BatchItem, BatchResult, NormalizeResult } from './types.js';
 
 /*
  * The Cursor normalizer (spec section 6): the trimmed `composer` / `bubble` records CursorSource stores (contract in
@@ -102,6 +102,26 @@ interface Scan {
   batch: { parent: string | null; members: string[]; maxEnd: number } | null;
 }
 
+/**
+ * What one bubble's derivation step read and what it left, as last derived (and emitted). A later derivation that
+ * reaches the bubble with the same inputs (the same view object, scan, turn facts, next start, child facts, dispatch
+ * and fallback time) would produce exactly the same node and edges: it takes `after` and emits nothing for it.
+ */
+interface Memo {
+  view: BubbleView;
+  before: Scan;
+  inputs: string;
+  after: Scan;
+}
+
+const sameBatch = (a: Scan['batch'], b: Scan['batch']): boolean => {
+  if (a === null || b === null) return a === b;
+  if (a.parent !== b.parent || a.maxEnd !== b.maxEnd || a.members.length !== b.members.length) return false;
+  for (let i = 0; i < a.members.length; i++) if (a.members[i] !== b.members[i]) return false;
+  return true;
+};
+const sameScan = (a: Scan, b: Scan): boolean => a.prevNode === b.prevNode && a.prevTs === b.prevTs && sameBatch(a.batch, b.batch);
+
 interface ThreadState {
   /** The conversation's composer id. */
   id: string;
@@ -120,6 +140,8 @@ interface ThreadState {
   version: number;
   analysis: Analysis | null;
   analysisVersion: number;
+  /** Per bubble id: its last derivation step (see Memo). */
+  memo: Map<string, Memo>;
 }
 
 interface SessionState {
@@ -140,6 +162,8 @@ interface SessionState {
   pending: Map<string, Partial<NodeDetail>>;
   /** Shown threads -> the dispatch node they hang off (null for the main conversation), as last derived. */
   links: Map<string, string | null>;
+  /** Shown subagent thread -> the facts of it its dispatch node shows (childSig), as last derived. */
+  childSigs: Map<string, string>;
 }
 
 interface DerivedNode {
@@ -297,26 +321,74 @@ function nodePatch(old: GraphNode, next: GraphNode): Partial<GraphNode> {
 export class CursorNormalizer implements AgentNormalizer {
   private readonly sessions = new Map<string, SessionState>();
   private readonly checkpointEvery: number;
+  /** Infinity spacing (tests): the reference derivation, without checkpoints, memo or child-fact gating. */
+  private readonly reference: boolean;
   /** Latest hook mark per session id; may exist before the session does (see HookMark). */
   private readonly hookMarks = new Map<string, HookMark>();
   /** Sessions without state whose hook mark was restored by restorePreSession. */
   private readonly preSessionRestored = new Set<string>();
 
-  /** `checkpointEvery` (tests): checkpoint spacing; Infinity derives every changed thread in full. */
+  /**
+   * `checkpointEvery` (tests): checkpoint spacing; Infinity is the reference derivation: every changed thread in full
+   * (no checkpoint, no memo) and the dispatching thread whenever a subagent thread changes (no child-fact gating).
+   */
   constructor(options: { checkpointEvery?: number } = {}) {
     this.checkpointEvery = options.checkpointEvery ?? CHECKPOINT_EVERY;
+    this.reference = !Number.isFinite(this.checkpointEvery);
   }
 
   apply(event: RawEvent, projectId: string): NormalizeResult {
-    // Meta events are not produced for Cursor.
-    if (event.source === 'meta') return { changes: [] };
+    const r = this.applyBatch([{ event, projectId }]);
+    const unknown = r.unknown[0];
+    return unknown === undefined ? { changes: r.changes } : { changes: r.changes, unknownRecordType: unknown };
+  }
+
+  /**
+   * Records update the state of their thread as they come; each touched session is derived once, at the end of the
+   * batch (or before a hook, which reads the derived session). Since nodes, edges and the session are a function of the
+   * records read so far (see the top of this file), the result equals applying the events one by one; only the
+   * intermediate versions of nodes and edges are not emitted.
+   */
+  applyBatch(items: readonly BatchItem[]): BatchResult {
     const changes: Change[] = [];
-    try {
-      const unknown = event.source === 'hook' ? this.applyHook(event, changes) : this.applyRecord(event, projectId, changes);
-      return unknown === undefined ? { changes } : { changes, unknownRecordType: unknown };
-    } catch {
-      return { changes, unknownRecordType: 'normalizer-error' };
-    }
+    const unknown: (string | undefined)[] = [];
+    /** Sessions with records not derived yet -> created by this batch; the index of their last record. */
+    const touched = new Map<string, { created: boolean; last: number }>();
+    const flush = (): void => {
+      for (const [sessionId, t] of touched) {
+        const state = this.sessions.get(sessionId);
+        if (state === undefined) continue;
+        try {
+          this.refresh(state, changes);
+          this.commitSession(state, this.deriveSession(state), changes, t.created);
+        } catch {
+          unknown[t.last] ??= 'normalizer-error';
+        }
+      }
+      touched.clear();
+    };
+    items.forEach(({ event, projectId }, i) => {
+      unknown.push(undefined);
+      // Meta events are not produced for Cursor.
+      if (event.source === 'meta') return;
+      try {
+        if (event.source === 'hook') {
+          flush();
+          unknown[i] = this.applyHook(event, changes);
+          return;
+        }
+        const created = !this.sessions.has(event.sessionId);
+        unknown[i] = this.recordState(event, projectId);
+        if (this.sessions.has(event.sessionId)) {
+          const t = touched.get(event.sessionId);
+          touched.set(event.sessionId, { created: (t?.created ?? false) || created, last: i });
+        }
+      } catch {
+        unknown[i] = 'normalizer-error';
+      }
+    });
+    flush();
+    return { changes, unknown };
   }
 
   dropSession(sessionId: string): void {
@@ -357,7 +429,8 @@ export class CursorNormalizer implements AgentNormalizer {
 
   // ---- records ----
 
-  private applyRecord(event: Extract<RawEvent, { source: 'transcript' }>, projectId: string, changes: Change[]): string | undefined {
+  /** Takes one record into its thread's state (nothing is derived here: see applyBatch); returns its unknown label. */
+  private recordState(event: Extract<RawEvent, { source: 'transcript' }>, projectId: string): string | undefined {
     const recordType = event.recordType;
     if (recordType !== CURSOR_RECORD_TYPES.composer && recordType !== CURSOR_RECORD_TYPES.bubble) return `cursor:${recordType}`;
     let parsed: unknown;
@@ -375,7 +448,6 @@ export class CursorNormalizer implements AgentNormalizer {
       bubble = bubbleView(parsed, bubbleId, `bubble:${threadId}:${bubbleId}`);
     }
 
-    const created = !this.sessions.has(event.sessionId);
     const state = this.stateFor(event.sessionId, projectId);
     if (projectId !== 'unknown' && (event.agentId === null || state.projectId === 'unknown')) state.projectId = projectId;
     const thread = this.threadFor(state, threadId, event.agentId);
@@ -399,8 +471,6 @@ export class CursorNormalizer implements AgentNormalizer {
       if (view.kind === null) state.pending.delete(view.nodeId);
       else if (bubble.view.kind !== null) state.pending.set(view.nodeId, bubble.detail);
     }
-    this.refresh(state, threadId, changes);
-    this.commitSession(state, this.deriveSession(state), changes, created);
     return unknown;
   }
 
@@ -429,6 +499,7 @@ export class CursorNormalizer implements AgentNormalizer {
         produced: new Map(),
         pending: new Map(),
         links: new Map(),
+        childSigs: new Map(),
       };
       this.sessions.set(sessionId, state);
     }
@@ -450,6 +521,7 @@ export class CursorNormalizer implements AgentNormalizer {
         version: 0,
         analysis: null,
         analysisVersion: -1,
+        memo: new Map(),
       };
       state.threads.set(id, thread);
     }
@@ -597,28 +669,58 @@ export class CursorNormalizer implements AgentNormalizer {
   }
 
   /**
-   * Re-derives what may have changed: the touched thread from its first changed bubble on, every thread whose link
-   * changed (newly shown, or hanging off another dispatch) in full, and for each of those the thread holding its
-   * dispatch node from that node on (a dispatch's status, end and title follow its subagent). A thread that is not
-   * shown is not derived; its changes wait in `dirtyFrom`. Parents are derived before their subagents.
+   * Re-derives what may have changed: every shown thread with records not derived yet, from its first changed bubble
+   * on; every thread whose link changed (newly shown, or hanging off another dispatch) in full; and the thread holding a
+   * dispatch node from that node on when what the node shows of its subagent changed (childSig), its link changed, or
+   * (the reference derivation) whenever the subagent thread is derived. A thread that is not shown is not derived; its
+   * changes wait in `dirtyFrom`. Parents are derived before their subagents.
    */
-  private refresh(state: SessionState, touched: string, changes: Change[]): void {
+  private refresh(state: SessionState, changes: Change[]): void {
     const links = this.links(state);
     const from = new Map<string, number>();
-    const want = (id: string, index: number): void => {
+    const at = (id: string, index: number): void => {
       from.set(id, Math.min(from.get(id) ?? Number.POSITIVE_INFINITY, index));
-      const owner = links.ownerOf.get(id);
-      const ownerThread = owner === undefined ? undefined : state.threads.get(owner);
-      if (owner === undefined || ownerThread === undefined) return;
-      const dispatch = links.shown.get(id);
-      const at = analyze(ownerThread).dispatches.find((d) => d.nodeId === dispatch)?.index ?? 0;
-      from.set(owner, Math.min(from.get(owner) ?? Number.POSITIVE_INFINITY, at));
     };
-    const touchedThread = state.threads.get(touched);
-    if (links.shown.has(touched) && touchedThread !== undefined) want(touched, touchedThread.dirtyFrom);
-    for (const [id, dispatch] of links.shown) {
-      if (!state.links.has(id) || state.links.get(id) !== dispatch) want(id, 0);
+    /** The thread holding a dispatch node and the node's index there (null when no thread has it). */
+    const dispatchAt = (nodeId: string | null, owner: string | undefined): { owner: string; index: number } | null => {
+      if (nodeId === null) return null;
+      const threads = owner !== undefined ? [owner] : [...state.threads.keys()];
+      for (const id of threads) {
+        const t = state.threads.get(id);
+        const d = t === undefined ? undefined : analyze(t).dispatches.find((x) => x.nodeId === nodeId);
+        if (d !== undefined) return { owner: id, index: d.index };
+      }
+      return null;
+    };
+    const wantOwner = (id: string): void => {
+      const d = dispatchAt(links.shown.get(id) ?? null, links.ownerOf.get(id));
+      if (d !== null) at(d.owner, d.index);
+    };
+    for (const [id] of links.shown) {
+      const t = state.threads.get(id);
+      if (t === undefined || t.dirtyFrom === Number.POSITIVE_INFINITY) continue;
+      at(id, t.dirtyFrom);
+      if (this.reference) wantOwner(id);
     }
+    for (const [id, dispatch] of links.shown) {
+      if (state.links.has(id) && state.links.get(id) === dispatch) continue;
+      at(id, 0);
+      wantOwner(id);
+    }
+    // A dispatch that lost its subagent (or whose subagent now hangs elsewhere) shows its own status again.
+    for (const [id, dispatch] of state.links) {
+      if (dispatch === null || links.shown.get(id) === dispatch) continue;
+      const d = dispatchAt(dispatch, undefined);
+      if (d !== null) at(d.owner, d.index);
+    }
+    const sigs = new Map<string, string>();
+    for (const [id, dispatch] of links.shown) {
+      if (dispatch === null) continue;
+      const sig = this.childSig(state, id, dispatch, links);
+      sigs.set(id, sig);
+      if (!this.reference && state.childSigs.get(id) !== sig) wantOwner(id);
+    }
+    state.childSigs = sigs;
     state.links = links.shown;
     for (const [id, dispatch] of links.shown) {
       const t = state.threads.get(id);
@@ -628,6 +730,23 @@ export class CursorNormalizer implements AgentNormalizer {
       t.dirtyFrom = Number.POSITIVE_INFINITY;
       if (start < t.sorted.length) this.emit(state, this.deriveThread(state, t, dispatch, links, start), changes);
     }
+  }
+
+  /**
+   * Everything about subagent thread `id` (hanging off dispatch node `dispatch`) that the dispatch node's derivation
+   * reads (deriveThread): the subagent type name, and whether it has bubbles and has finished, with its latest time
+   * when the dispatch has no end of its own.
+   */
+  private childSig(state: SessionState, id: string, dispatch: string, links: Links): string {
+    const child = state.threads.get(id);
+    if (child === undefined) return '';
+    const ca = analyze(child);
+    const owner = state.threads.get(links.ownerOf.get(id) ?? '');
+    const oa = owner === undefined ? null : analyze(owner);
+    const d = oa?.dispatches.find((x) => x.nodeId === dispatch);
+    const b = d === undefined ? undefined : oa!.sorted[d.index];
+    const done = ca.sorted.length > 0 && !ca.open;
+    return `${child.composer?.subagentTypeName ?? ''}|${done ? `done:${b?.endMs == null ? ca.maxMs : ''}` : 'open'}`;
   }
 
   // ---- one thread's graph ----
@@ -701,15 +820,38 @@ export class CursorNormalizer implements AgentNormalizer {
       const b = a.sorted[i]!;
       if (i > 0 && i % this.checkpointEvery === 0) thread.checkpoints.set(b.bubbleId, { prevNode, prevTs, batch: copyBatch(batch) });
       else if (i > start) thread.checkpoints.delete(b.bubbleId); // a stale one from another position
-      producing = [];
-      producers.set(b.nodeId, producing);
-      if (b.kind === null) continue;
+      if (b.kind === null) {
+        producing = [];
+        producers.set(b.nodeId, producing);
+        continue;
+      }
       const turn = a.turns[a.turnOf[i]!]!;
-      const ts: string = isoOf(b.startMs) ?? prevTs ?? fallbackTs;
-      const startMs = Date.parse(ts);
       let nextStart: number | null = null;
       for (let j = i + 1; j < a.sorted.length && nextStart === null; j++) nextStart = a.sorted[j]!.startMs;
       const isCall = b.kind === 'tool' || b.kind === 'subagent';
+      const child = b.kind === 'subagent' ? links.childOf.get(b.nodeId) : undefined;
+      const childThread = child === undefined ? undefined : state.threads.get(child);
+      const ca = childThread === undefined ? null : analyze(childThread);
+
+      // The same inputs as at this bubble's last derivation: the same node and edges (already emitted).
+      let inputs = '';
+      let before: Scan | null = null;
+      if (!this.reference) {
+        const childFacts = ca === null ? `${child ?? ''}` : `${child}|${childThread!.composer?.subagentTypeName ?? ''}|${ca.sorted.length}|${ca.open}|${ca.maxMs}`;
+        inputs = `${turn.promptNodeId}|${turnSig(turn)}|${nextStart}|${childFacts}|${dispatch}|${fallbackTs}`;
+        const memo = thread.memo.get(b.bubbleId);
+        if (memo !== undefined && memo.view === b && memo.inputs === inputs && sameScan(memo.before, { prevNode, prevTs, batch })) {
+          prevNode = memo.after.prevNode;
+          prevTs = memo.after.prevTs;
+          batch = copyBatch(memo.after.batch);
+          continue;
+        }
+        before = { prevNode, prevTs, batch: copyBatch(batch) };
+      }
+      producing = [];
+      producers.set(b.nodeId, producing);
+      const ts: string = isoOf(b.startMs) ?? prevTs ?? fallbackTs;
+      const startMs = Date.parse(ts);
 
       let status: GraphNode['status'] = null;
       let note: string | null = null;
@@ -722,13 +864,10 @@ export class CursorNormalizer implements AgentNormalizer {
         const own = callStatus(b, turn);
         // Without completedAtMs a finished or settled call ends where the next bubble starts (the turn's end when last).
         const ownEnd = b.endMs ?? nextStart ?? (own.settled ? turn.endMs : null);
-        const child = b.kind === 'subagent' ? links.childOf.get(b.nodeId) : undefined;
-        const childThread = child === undefined ? undefined : state.threads.get(child);
         if (b.kind === 'subagent') {
           childAgentId = child ?? null;
           title = childThread?.composer?.subagentTypeName ?? b.agentType ?? b.title;
         }
-        const ca = childThread === undefined ? null : analyze(childThread);
         if (ca !== null && ca.sorted.length > 0 && !ca.open) {
           // The subagent finished: the task_v2 call's own status (still loading: it did its job).
           status = own.status === 'running' ? 'succeeded' : own.status;
@@ -795,6 +934,7 @@ export class CursorNormalizer implements AgentNormalizer {
       });
       prevNode = b.nodeId;
       prevTs = ts;
+      if (before !== null) thread.memo.set(b.bubbleId, { view: b, before, inputs, after: { prevNode, prevTs, batch: copyBatch(batch) } });
     }
     return { nodes, edges, producers };
   }

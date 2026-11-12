@@ -99,7 +99,8 @@ CREATE TABLE IF NOT EXISTS unknown_stat (
   sample      TEXT NOT NULL
 );
 
--- Small key/value table: epoch, last_hook_at, normalizer_version, rebuild_in_progress, hook_stat_ready.
+-- Small key/value table: epoch, last_hook_at, normalizer_version, rebuild_in_progress, hook_stat_ready, and a poll
+-- source's note per unit it read completely ('poll:' + store key, e.g. poll:cursor:<id>; kept by rebuild).
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL

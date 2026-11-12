@@ -2,6 +2,7 @@ import fsp from 'node:fs/promises';
 import { STALE_AFTER_MS, type Change, type Origin, type SeqChange } from '@claude-canvas/shared';
 import type { Config } from './config.js';
 import { NORMALIZER_FACTORIES, NormalizerRegistry, type NormalizerFactories } from './normalize/registry.js';
+import type { BatchItem } from './normalize/types.js';
 import { NORMALIZER_VERSION } from './normalize/version.js';
 import { ClaudeFileSource } from './sources/claude.js';
 import { encodeProjectId } from './sources/codex/source.js';
@@ -58,6 +59,8 @@ export function defaultSources(config: Config): FileSource[] {
 /** meta keys */
 export const REBUILD_FLAG = 'rebuild_in_progress';
 export const NORMALIZER_VERSION_KEY = 'normalizer_version';
+/** meta key prefix of a poll source's notes about its units (PollSink.saveUnitState): `poll:` + the store key. */
+export const POLL_STATE_PREFIX = 'poll:';
 
 type Listener = (changes: SeqChange[]) => void;
 type ResyncListener = (sessionId: string) => void;
@@ -71,6 +74,13 @@ interface FileLock {
 }
 
 const yieldToEventLoop = (): Promise<void> => new Promise<void>((resolve) => setImmediate(resolve));
+
+/** A poll batch that found the pipeline closed after waiting its turn: rejected, not reported (PollSink contract). */
+class PipelineClosed extends Error {
+  constructor() {
+    super('pipeline closed');
+  }
+}
 
 function topLevelType(text: string): string {
   try {
@@ -97,6 +107,8 @@ export class Pipeline {
   private closing: Promise<void> | null = null;
   /** ingestRecords calls in flight (importing()). */
   private pollIngests = 0;
+  /** Tail of the poll batches' turns at store.settleWal (keeps their call order). */
+  private walGate: Promise<void> = Promise.resolve();
   /** Poll store key -> offset of its next transcript raw event (seeded from the store on first use). */
   private readonly pollOffsets = new Map<string, number>();
   private readonly listeners = new Set<Listener>();
@@ -450,13 +462,12 @@ export class Pipeline {
         for (;;) {
           const page = this.store.rawForSessionAfter(id, after, HYDRATE_PAGE_ROWS, HYDRATE_PAGE_BYTES);
           if (page.length === 0) break;
-          for (const ev of page) {
-            const out = this.normalizer.apply(ev, this.projectOf(ev));
-            changes.push(...out.changes);
-            if (out.unknownRecordType !== undefined && ev.source !== 'meta') {
-              unknown.push([out.unknownRecordType, ev.source === 'transcript' ? ev.line : ev.payload]);
-            }
-          }
+          const out = this.replay(page);
+          for (const c of out.changes) changes.push(c);
+          page.forEach((ev, k) => {
+            const type = out.unknown[k];
+            if (type !== undefined && ev.source !== 'meta') unknown.push([type, ev.source === 'transcript' ? ev.line : ev.payload]);
+          });
           after = page[page.length - 1]!.ingestId;
         }
         this.atomically(null, () => {
@@ -538,46 +549,75 @@ export class Pipeline {
         this.failures.delete(key);
       },
       storedSessionIds: () => this.store.transcriptSessionIds(KEY_PREFIXES[source.origin]),
+      loadUnitStates: () =>
+        new Map(this.store.metaWithPrefix(`${POLL_STATE_PREFIX}${KEY_PREFIXES[source.origin]}`).map(([k, v]) => [k.slice(POLL_STATE_PREFIX.length), v])),
+      saveUnitState: (key, value) => {
+        if (!key.startsWith(KEY_PREFIXES[source.origin])) throw new Error(`not a ${source.origin} key: ${key}`);
+        if (value === null) this.store.deleteMeta(`${POLL_STATE_PREFIX}${key}`);
+        else this.store.setMeta(`${POLL_STATE_PREFIX}${key}`, value);
+      },
     };
   }
 
   /**
-   * PollSink.ingestRecords: one transaction per batch, in the session's work chain. Each record not stored yet under the
-   * key becomes a transcript raw event whose offset is the key's next sequence number (0, 1, 2, ... in ingestion order,
-   * continuing after the highest one stored), so a key's offsets follow ingest order as a file's byte offsets do.
+   * PollSink.ingestRecords: one transaction and one derivation per batch, in the session's work chain. Each record not
+   * stored yet under the key becomes a transcript raw event whose offset is the key's next sequence number (0, 1, 2, ...
+   * in ingestion order, continuing after the highest one stored), so a key's offsets follow ingest order as a file's
+   * byte offsets do. A batch whose records are all stored already does nothing at all (no hydration, no derivation).
+   * Before writing, batches wait in turn (in call order) for store.settleWal, which keeps the WAL bounded during a
+   * long import.
    */
-  private async ingestPolled(origin: Origin, batch: PollBatch): Promise<void> {
-    if (this.closed) throw new Error('pipeline closed');
-    if (batch.records.length === 0) return;
-    const { key, sessionId, agentId, projectId } = batch;
+  private ingestPolled(origin: Origin, batch: PollBatch): Promise<void> {
+    if (this.closed) return Promise.reject(new Error('pipeline closed'));
+    if (batch.records.length === 0) return Promise.resolve();
+    const { key } = batch;
+    if (batch.records.every((r) => this.store.hasTranscriptLine(key, r.line))) return Promise.resolve();
     this.pollIngests += 1;
-    try {
-      await this.enqueue(sessionId, () => {
-        let next = this.pollOffsets.get(key) ?? (this.store.maxTranscriptOffset(key) ?? -1) + 1;
-        this.atomically(
-          sessionId,
-          () => {
-            const changes: Change[] = [];
-            for (const { recordType, line } of batch.records) {
-              const event: RawEvent = { source: 'transcript', origin, file: key, offset: next, line, recordType, sessionId, agentId, projectId };
-              if (this.store.insertRaw(event) === null) continue;
-              next += 1;
-              const out = this.normalizer.apply(event, projectId);
-              changes.push(...out.changes);
-              if (out.unknownRecordType !== undefined) this.store.bumpUnknown(out.unknownRecordType, line);
-            }
-            return changes;
-          },
-          () => this.pollOffsets.set(key, next),
-        );
-      });
-      // No failure is cleared here: the key's failures may come from the source itself (clearFailure clears them).
-    } catch (err) {
-      this.reportFailure(key, err);
-      throw err;
-    } finally {
-      this.pollIngests -= 1;
-    }
+    const gate = this.walGate.then(() => this.store.settleWal());
+    this.walGate = gate.catch(() => undefined);
+    const run = (async (): Promise<void> => {
+      try {
+        await gate;
+        if (this.closed) throw new PipelineClosed();
+        await this.storePolled(origin, batch);
+      } catch (err) {
+        if (!(err instanceof PipelineClosed)) this.reportFailure(key, err);
+        throw err;
+      } finally {
+        this.pollIngests -= 1;
+      }
+    })();
+    return this.track(run);
+  }
+
+  /** The write of one poll batch (see ingestPolled), in the session's work chain. */
+  private async storePolled(origin: Origin, batch: PollBatch): Promise<void> {
+    const { key, sessionId, agentId, projectId } = batch;
+    await this.enqueue(sessionId, () => {
+      let next = this.pollOffsets.get(key) ?? (this.store.maxTranscriptOffset(key) ?? -1) + 1;
+      this.atomically(
+        sessionId,
+        () => {
+          // One transaction and one derivation for the whole batch.
+          const items: BatchItem[] = [];
+          const lines: string[] = [];
+          for (const { recordType, line } of batch.records) {
+            const event: RawEvent = { source: 'transcript', origin, file: key, offset: next, line, recordType, sessionId, agentId, projectId };
+            if (this.store.insertRaw(event) === null) continue;
+            next += 1;
+            items.push({ event, projectId });
+            lines.push(line);
+          }
+          const out = this.normalizer.applyBatch(items);
+          out.unknown.forEach((type, k) => {
+            if (type !== undefined) this.store.bumpUnknown(type, lines[k]!);
+          });
+          return out.changes;
+        },
+        () => this.pollOffsets.set(key, next),
+      );
+    });
+    // No failure is cleared here: the key's failures may come from the source itself (clearFailure clears them).
   }
 
   /** PollSink.markSourceDeleted: the session is flagged, and stays flagged in every later change of it. */
@@ -997,7 +1037,7 @@ export class Pipeline {
         const start = performance.now();
         while (!done && performance.now() - start < HYDRATE_SLICE_MS) {
           const page = this.store.rawForSessionAfter(sessionId, after, HYDRATE_PAGE_ROWS, HYDRATE_PAGE_BYTES);
-          for (const ev of page) this.replayOne(ev);
+          this.replay(page);
           if (page.length === 0) done = true;
           else after = page[page.length - 1]!.ingestId;
         }
@@ -1039,7 +1079,7 @@ export class Pipeline {
     let applied: SeqChange[];
     try {
       const changes: Change[] = [];
-      for (const ev of this.rawPages(sessionId)) changes.push(...this.replayOne(ev));
+      for (const page of this.rawPageList(sessionId)) for (const c of this.replay(page).changes) changes.push(c);
       applied = this.store.transaction(() => {
         this.store.deleteDerivedForSession(sessionId);
         const out = this.persist(changes);
@@ -1064,11 +1104,16 @@ export class Pipeline {
 
   /** Every stored raw event of a session in ingest order, read page by page. */
   private *rawPages(sessionId: string): Generator<StoredRawEvent> {
+    for (const page of this.rawPageList(sessionId)) yield* page;
+  }
+
+  /** The pages of rawPages. */
+  private *rawPageList(sessionId: string): Generator<StoredRawEvent[]> {
     let after = 0;
     for (;;) {
       const page = this.store.rawForSessionAfter(sessionId, after, HYDRATE_PAGE_ROWS, HYDRATE_PAGE_BYTES);
       if (page.length === 0) return;
-      yield* page;
+      yield page;
       after = page[page.length - 1]!.ingestId;
     }
   }
@@ -1083,8 +1128,12 @@ export class Pipeline {
     return this.sourceFor(ev.origin)?.projectOfKey(ev.file) ?? UNKNOWN_PROJECT;
   }
 
-  private replayOne(ev: StoredRawEvent): Change[] {
-    return this.normalizer.apply(ev, this.projectOf(ev)).changes;
+  /**
+   * Applies stored raw events in order as one batch (a normalizer with applyBatch derives once per page; the others
+   * apply them one by one, as before).
+   */
+  private replay(events: readonly StoredRawEvent[]): { changes: Change[]; unknown: (string | undefined)[] } {
+    return this.normalizer.applyBatch(events.map((event) => ({ event, projectId: this.projectOf(event) })));
   }
 
   private drop(sessionId: string): void {

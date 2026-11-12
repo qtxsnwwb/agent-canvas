@@ -3,7 +3,7 @@ import type { RawEvent } from '../store/store.js';
 import { CodexNormalizer } from './codex.js';
 import { CursorNormalizer } from './cursor.js';
 import { Normalizer } from './normalizer.js';
-import type { AgentNormalizer, NormalizeResult } from './types.js';
+import type { AgentNormalizer, BatchItem, BatchResult, NormalizeResult } from './types.js';
 
 /** How to make a fresh normalizer for each origin; null = that origin has none (its raw events are stored only). */
 export type NormalizerFactories = Readonly<Record<Origin, (() => AgentNormalizer) | null>>;
@@ -42,6 +42,37 @@ export class NormalizerRegistry implements AgentNormalizer {
 
   apply(event: RawEvent, projectId: string): NormalizeResult {
     return this.of(originOf(event))?.apply(event, projectId) ?? { changes: [] };
+  }
+
+  /**
+   * Runs of consecutive events of one origin go to that origin's normalizer: as one batch when it has applyBatch,
+   * otherwise one by one through apply (exactly what applying each event in turn does).
+   */
+  applyBatch(items: readonly BatchItem[]): BatchResult {
+    const changes: BatchResult['changes'] = [];
+    const unknown: BatchResult['unknown'] = [];
+    let i = 0;
+    while (i < items.length) {
+      const origin = originOf(items[i]!.event);
+      let j = i + 1;
+      while (j < items.length && originOf(items[j]!.event) === origin) j += 1;
+      const n = this.of(origin);
+      if (n === null) {
+        for (let k = i; k < j; k++) unknown.push(undefined);
+      } else if (n.applyBatch !== undefined) {
+        const r = n.applyBatch(items.slice(i, j));
+        for (const c of r.changes) changes.push(c);
+        for (const u of r.unknown) unknown.push(u);
+      } else {
+        for (let k = i; k < j; k++) {
+          const r = n.apply(items[k]!.event, items[k]!.projectId);
+          for (const c of r.changes) changes.push(c);
+          unknown.push(r.unknownRecordType);
+        }
+      }
+      i = j;
+    }
+    return { changes, unknown };
   }
 
   dropSession(sessionId: string): void {

@@ -57,7 +57,12 @@ async function writeFile(file: string, content: string): Promise<void> {
 }
 const body = (lines: string[]): string => lines.map((l) => `${l}\n`).join('');
 const claudeBody = (events: RawEvent[]): string => body(events.map((e) => (e.source === 'transcript' ? e.line : '')));
-const strip = (g: GraphSnapshot | null) => (g === null ? null : { session: g.session, nodes: g.nodes, edges: g.edges });
+/**
+ * A graph's content, nodes and edges by id: the row order of a snapshot follows the order changes were written in,
+ * which for Cursor depends on how records were batched (live: per poll batch; rebuild: per page of raw events).
+ */
+const byId = <T extends { id: string }>(xs: T[]): T[] => [...xs].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+const strip = (g: GraphSnapshot | null) => (g === null ? null : { session: g.session, nodes: byId(g.nodes), edges: byId(g.edges) });
 
 function putCursor(taskStatus: 'loading' | 'completed', lastUpdatedAt: number): void {
   fx.put({

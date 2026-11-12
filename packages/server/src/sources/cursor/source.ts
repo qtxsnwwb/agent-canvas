@@ -79,6 +79,18 @@ interface BubbleSeen {
   order: number;
 }
 
+/**
+ * The bubbles a unit's last complete read covered, as saved for a restart (SavedUnit): the first `n` header entries,
+ * which had then the fingerprint `list`, and of which those in `unfinished` were not finished (or not written yet).
+ * While the header's first `n` entries keep that fingerprint, an entry among them that this run has not read and that
+ * was finished then is not read again (except in the tail).
+ */
+interface Baseline {
+  n: number;
+  list: string;
+  unfinished: Set<string>;
+}
+
 /** What this run knows about one stored unit: a conversation as stored for one session (one store key). */
 interface UnitState {
   /** Header `lastUpdatedAt` at the last clean read; undefined forces the next round to process it. */
@@ -88,7 +100,65 @@ interface UnitState {
   composerHash: string | null;
   /** Bubbles stored by this run under this key: hash of the stored line, finished then, index then. */
   bubbles: Map<string, BubbleSeen>;
+  /** Restored from the note an earlier run saved (null: everything not in `bubbles` is read). */
+  baseline: Baseline | null;
+  /** Restored from a note and not read by this run yet (its first read is not activity). */
+  restored: boolean;
 }
+
+/**
+ * The note saved (PollSink.saveUnitState) for a unit after a complete read whose records are all stored: the header's
+ * `lastUpdatedAt` then (`u`), the stored composer line's hash (`h`), the header entries then (`n`, fingerprint `l`) and
+ * which of them were unfinished (`f`), the session's project (`p`), the conversation's `subagentComposerIds` (`k`) and,
+ * for a subagent, its `parentComposerId` / `rootParentConversationId` (`par`, `root`). On start, a unit whose header
+ * still shows `u` is taken as read (it is not due), so an unchanged database is not read again. A unit whose header
+ * changed is due, and reads what a unit read earlier in the same run would read (Baseline): new entries, the tail and
+ * the unfinished ones, all of it when its list changed before the end. Without a note (never read completely, e.g. an
+ * import cut short) or with one that does not parse, a unit is read in full.
+ */
+interface SavedUnit {
+  v: 1;
+  u: number | null;
+  h: string;
+  n: number;
+  l: string;
+  f: string[];
+  p: string;
+  k: string[];
+  par: string | null;
+  root: string | null;
+}
+
+function parseSaved(text: string): SavedUnit | null {
+  try {
+    const v = JSON.parse(text) as Partial<SavedUnit>;
+    const strings = (x: unknown): x is string[] => Array.isArray(x) && x.every((y) => typeof y === 'string');
+    if (
+      v?.v !== 1 ||
+      !(v.u === null || typeof v.u === 'number') ||
+      typeof v.h !== 'string' ||
+      typeof v.n !== 'number' ||
+      typeof v.l !== 'string' ||
+      !strings(v.f) ||
+      typeof v.p !== 'string' ||
+      !strings(v.k) ||
+      !(v.par === null || typeof v.par === 'string') ||
+      !(v.root === null || typeof v.root === 'string')
+    ) {
+      return null;
+    }
+    return v as SavedUnit;
+  } catch {
+    return null;
+  }
+}
+
+/** Fingerprint of header entries (ids and indexes, in order). */
+const listHash = (entries: readonly { bubbleId: string; order: number }[]): string => {
+  const h = createHash('sha1');
+  for (const e of entries) h.update(`${e.bubbleId}:${e.order}\n`);
+  return h.digest('hex');
+};
 
 /** A conversation's composerData as read this round (shared by every session that owns it). */
 interface Loaded {
@@ -133,8 +203,9 @@ const byRecency = (a: HeaderRow, b: HeaderRow): number => (headerUpdatedAt(b) ??
  * Only units that changed or were recently active are read, and of those only the bubbles that need reading; the
  * trimmed records (composer first, then bubbles) go through the sink. A conversation with no bubble yet produces
  * nothing. A session we hold data for that is archived or gone is marked "source deleted" and not read again (until it
- * is unarchived). Nothing is remembered across restarts: the first round re-reads every picked session (the pipeline
- * drops records it already stored) and re-asserts the "source deleted" marks of stored sessions.
+ * is unarchived). Across restarts only a note per completely read unit is kept (SavedUnit): the first round reads
+ * only units whose header changed since (or that were never read completely), and re-asserts the "source deleted"
+ * marks of stored sessions.
  */
 export class CursorSource implements PollSource {
   readonly origin = 'cursor' as const;
@@ -173,6 +244,8 @@ export class CursorSource implements PollSource {
   private readonly held = new Set<string>();
   /** Sessions this run marked "source deleted". */
   private readonly marked = new Set<string>();
+  /** Store key -> the note saved for it (as saved, by this or an earlier run). */
+  private readonly saved = new Map<string, string>();
 
   constructor(private readonly options: CursorSourceOptions) {
     this.intervalMs = options.intervalMs ?? DEFAULT_INTERVAL_MS;
@@ -312,6 +385,7 @@ export class CursorSource implements PollSource {
     if (this.firstRound) {
       try {
         for (const id of sink.storedSessionIds()) this.held.add(id);
+        this.restoreNotes(sink);
         this.firstRound = false;
         first = true;
       } catch (err) {
@@ -330,7 +404,7 @@ export class CursorSource implements PollSource {
         try {
           await sink.markSourceDeleted(id);
           this.marked.add(id);
-          this.forget(id);
+          this.forget(sink, id);
         } catch (err) {
           sink.reportFailure(PREFIX + id, err); // not marked: tried again next round
         }
@@ -466,8 +540,51 @@ export class CursorSource implements PollSource {
     });
   }
 
+  /**
+   * The notes earlier runs saved: the links they recorded (subagent lists, a subagent's parent / root) are taken as
+   * known; a unit's own state is restored by `due` when its header still shows the note's `lastUpdatedAt`.
+   */
+  private restoreNotes(sink: PollSink): void {
+    this.saved.clear();
+    for (const [key, text] of sink.loadUnitStates()) {
+      const note = parseSaved(text);
+      if (note === null) continue;
+      this.saved.set(key, text);
+      const rest = key.slice(PREFIX.length);
+      const slash = rest.indexOf('/');
+      const composerId = slash === -1 ? rest : rest.slice(slash + 1);
+      if (!this.children.has(composerId)) this.children.set(composerId, note.k);
+      if (slash !== -1 && !this.probes.has(composerId)) {
+        this.probes.set(composerId, { updatedAt: note.u, hasData: true, parent: note.par, root: note.root });
+      }
+    }
+  }
+
+  /**
+   * A unit this run has no state for but a saved note: its state as the note describes it, read already when its header
+   * still shows the note's `lastUpdatedAt`, due otherwise (with the note's bubbles as its baseline).
+   */
+  private restoreUnit(key: string, h: HeaderRow): void {
+    if (this.units.has(key)) return;
+    const text = this.saved.get(key);
+    const note = text === undefined ? null : parseSaved(text);
+    if (note === null) return;
+    this.units.set(key, {
+      lastUpdatedAt: note.u === headerUpdatedAt(h) ? note.u : undefined,
+      changedAt: null,
+      composerHash: note.h,
+      bubbles: new Map(),
+      baseline: { n: note.n, list: note.l, unfinished: new Set(note.f) },
+      restored: true,
+    });
+    if (h.isSubagent) return;
+    const sessionId = key.slice(PREFIX.length);
+    if (!this.projectOfRoot.has(sessionId)) this.projectOfRoot.set(sessionId, note.p);
+  }
+
   /** Changed since the last clean read, recently active, poked, or never read by this run. */
   private due(key: string, h: HeaderRow, poked: boolean): boolean {
+    this.restoreUnit(key, h);
     const state = this.units.get(key);
     if (state === undefined || state.lastUpdatedAt === undefined || poked) return true;
     const updated = headerUpdatedAt(h);
@@ -476,10 +593,23 @@ export class CursorSource implements PollSource {
     return this.now() - recent < RECENT_MS;
   }
 
-  /** Forgets what this run stored for a session (its main conversation and its subagent units). */
-  private forget(sessionId: string): void {
+  /**
+   * Forgets what this run stored for a session (its main conversation and its subagent units), and the notes saved for
+   * them: unarchived, it is read in full again.
+   */
+  private forget(sink: PollSink, sessionId: string): void {
     const main = cursorKey(sessionId, null);
-    for (const key of [...this.units.keys()]) if (key === main || key.startsWith(`${main}/`)) this.units.delete(key);
+    const mine = (key: string): boolean => key === main || key.startsWith(`${main}/`);
+    for (const key of [...this.units.keys()]) if (mine(key)) this.units.delete(key);
+    for (const key of [...this.saved.keys()]) {
+      if (!mine(key)) continue;
+      try {
+        sink.saveUnitState(key, null);
+        this.saved.delete(key);
+      } catch (err) {
+        sink.reportFailure(key, err); // the note stays: a stale note only means its header is compared again
+      }
+    }
   }
 
   /**
@@ -543,6 +673,41 @@ export class CursorSource implements PollSource {
   }
 
   /**
+   * Saves the unit's note (SavedUnit) after a complete read whose records are all stored, when it differs from the one
+   * saved. A failure to save is reported under the key; the unit is then simply read in full after a restart.
+   */
+  private saveNote(sink: PollSink, key: string, h: HeaderRow, entries: { bubbleId: string; order: number }[], state: UnitState, projectId: string): void {
+    const baseline = state.baseline;
+    const unfinished: string[] = [];
+    entries.forEach(({ bubbleId }, pos) => {
+      const seen = state.bubbles.get(bubbleId);
+      const finished = seen !== undefined ? seen.finished : baseline !== null && pos < baseline.n && !baseline.unfinished.has(bubbleId);
+      if (!finished) unfinished.push(bubbleId);
+    });
+    const probe = h.isSubagent ? this.probes.get(h.composerId) : undefined;
+    const note: SavedUnit = {
+      v: 1,
+      u: headerUpdatedAt(h),
+      h: state.composerHash!,
+      n: entries.length,
+      l: listHash(entries),
+      f: unfinished,
+      p: projectId,
+      k: this.children.get(h.composerId) ?? [],
+      par: probe?.parent ?? null,
+      root: probe?.root ?? null,
+    };
+    const text = JSON.stringify(note);
+    if (this.saved.get(key) === text) return;
+    try {
+      sink.saveUnitState(key, text);
+      this.saved.set(key, text);
+    } catch (err) {
+      sink.reportFailure(key, err);
+    }
+  }
+
+  /**
    * Reads one unit — conversation `h` as stored for session `sessionId` (`agentId` null for the main conversation, its
    * composer id for a subagent) — and ingests what changed. Failures stay with the unit (reportFailure under its key).
    */
@@ -550,8 +715,9 @@ export class CursorSource implements PollSource {
     const composerId = h.composerId;
     const key = cursorKey(sessionId, agentId);
     const known = this.units.get(key);
-    const hadRead = known !== undefined && known.composerHash !== null;
-    const state = known ?? { lastUpdatedAt: undefined, changedAt: null, composerHash: null, bubbles: new Map<string, BubbleSeen>() };
+    const hadRead = known !== undefined && known.composerHash !== null && !known.restored;
+    const state: UnitState = known ?? { lastUpdatedAt: undefined, changedAt: null, composerHash: null, bubbles: new Map<string, BubbleSeen>(), baseline: null, restored: false };
+    state.restored = false;
     try {
       const loaded = this.load(db, composerId);
       if (h.isSubagent) this.noteProbe(h, loaded);
@@ -579,14 +745,21 @@ export class CursorSource implements PollSource {
       const composerHash = hashOf(composerLine);
 
       // Bubbles to read: unseen, unfinished when last seen, moved to another index since last stored, and the tail.
-      // A bubble that dropped out of the list is not read and gets no record (its last one stands).
+      // A bubble that dropped out of the list is not read and gets no record (its last one stands). With a baseline
+      // (a restored note), "seen" also covers the finished entries of the note's unchanged list prefix.
       const tail = new Set(entries.slice(-TAIL_BUBBLES).map((e) => e.bubbleId));
+      if (state.baseline !== null && (entries.length < state.baseline.n || listHash(entries.slice(0, state.baseline.n)) !== state.baseline.list)) {
+        state.baseline = null;
+      }
+      const baseline = state.baseline;
       const pending: { record: PollRecord; bubbleId: string | null; seen: BubbleSeen | null }[] = [];
       if (composerHash !== state.composerHash) pending.push({ record: { recordType: CURSOR_RECORD_TYPES.composer, line: composerLine }, bubbleId: null, seen: null });
       const unreadable: string[] = [];
-      for (const { bubbleId, order } of entries) {
+      for (let pos = 0; pos < entries.length; pos++) {
+        const { bubbleId, order } = entries[pos]!;
         const before = state.bubbles.get(bubbleId);
         if (before !== undefined && before.finished && before.order === order && !tail.has(bubbleId)) continue;
+        if (before === undefined && baseline !== null && pos < baseline.n && !baseline.unfinished.has(bubbleId) && !tail.has(bubbleId)) continue;
         await this.breathe();
         const text = this.lookup(db.bubble(composerId, bubbleId));
         if (text === null) continue; // listed but not written yet: read again next time
@@ -632,6 +805,7 @@ export class CursorSource implements PollSource {
         sink.reportFailure(key, new Error(`cursor: ${unreadable.length} bubble(s) not readable JSON (first: ${unreadable[0]})`));
       } else {
         sink.clearFailure(key);
+        if (state.composerHash !== null) this.saveNote(sink, key, h, entries, state, projectId);
       }
     } catch (err) {
       state.lastUpdatedAt = undefined;

@@ -39,6 +39,15 @@ class FakeSink implements PollSink {
   storedSessionIds(): string[] {
     return this.stored;
   }
+  /** Unit notes saved through the sink (kept across sources that share this sink, as the store keeps them). */
+  readonly notes = new Map<string, string>();
+  loadUnitStates(): Map<string, string> {
+    return new Map(this.notes);
+  }
+  saveUnitState(key: string, value: string | null): void {
+    if (value === null) this.notes.delete(key);
+    else this.notes.set(key, value);
+  }
   /** Records of all batches so far, parsed. */
   records(): { key: string; sessionId: string; agentId: string | null; projectId: string; recordType: string; value: Record<string, unknown> }[] {
     return this.batches.flatMap((b) =>
@@ -1169,5 +1178,128 @@ describe('subagent ownership (fix round 3)', () => {
     const s = await started();
     await s.pollOnce();
     expect(sink.calls).toEqual(['deleted old', 'undeleted A', 'ingest cursor:A composer,bubble', 'ingest cursor:A/s1 composer,bubble']);
+  });
+});
+
+describe('fix wave: restart notes (a completely read unit is not read again while its header is unchanged)', () => {
+  const subSpec = (id: string, parent: string, extra: Partial<ComposerSpec> = {}): ComposerSpec => ({
+    id,
+    isSubagent: true,
+    subagentInfo: { toolCallId: `tc-${id}`, parentComposerId: parent, rootParentConversationId: parent },
+    bubbles: [userBubble(`${id}-0`, 'task'), textBubble(`${id}-1`, 'done')],
+    ...extra,
+  });
+  const many = (prefix: string, n: number, at = T0): FixtureBubble[] =>
+    Array.from({ length: n }, (_, i) => (i === 0 ? userBubble(`${prefix}${i}`, 'go', at) : textBubble(`${prefix}${i}`, `t${i}`, at + i)));
+  const bubbleReads = (): string[] => reads.filter((r) => r.startsWith('bubble:'));
+
+  test('a restart over unchanged data reads no bubble and ingests nothing; the stored marks are still re-asserted', async () => {
+    fx.put({ id: 'm', subagentComposerIds: ['s'], bubbles: many('m', 60) });
+    fx.put(subSpec('s', 'm'));
+    fx.put({ id: 'gone', bubbles: [userBubble('g0', 'go')] });
+    const a = await started();
+    await a.pollOnce();
+    expect(sink.notes.size).toBe(3);
+    await a.stop();
+    fx.remove('gone');
+    sink.reset();
+    sink.stored = ['gone', 'm'];
+    reads = [];
+    const b = await started();
+    await b.pollOnce();
+    expect(bubbleReads()).toEqual([]);
+    expect(sink.calls).toEqual(['deleted gone', 'undeleted m']);
+    expect(sink.notes.has('cursor:gone')).toBe(false); // forgotten with the session: read in full if it comes back
+    await b.pollOnce();
+    expect(sink.calls).toEqual(['deleted gone', 'undeleted m']);
+  });
+
+  test('after a restart a changed conversation reads its new bubbles and the tail only; its subagent stays unread', async () => {
+    fx.put({ id: 'm', subagentComposerIds: ['s'], bubbles: many('m', 60) });
+    fx.put(subSpec('s', 'm'));
+    const a = await started();
+    await a.pollOnce();
+    await a.stop();
+    fx.update('m', { lastUpdatedAt: T0 + 100, bubbles: [...many('m', 60), textBubble('m60', 'new', T0 + 100)] });
+    sink.reset();
+    reads = [];
+    const b = await started();
+    await b.pollOnce();
+    const read = bubbleReads();
+    expect(read).toEqual(Array.from({ length: 20 }, (_, i) => `bubble:m:m${41 + i}`)); // the tail, the new one included
+    expect(read.some((r) => r.startsWith('bubble:s:'))).toBe(false);
+    // The tail goes to the sink again (its stored hashes are not kept across restarts); the pipeline drops what it has.
+    expect(sink.records().map((r) => r.value.bubbleId)).toContain('m60');
+    expect(sink.batches.map((b) => b.key)).toEqual(['cursor:m']);
+  });
+
+  test('a subagent that changed while its root did not is read after a restart, under the project of the root', async () => {
+    fx.put({ id: 'm', subagentComposerIds: ['s'], headerFsPath: 'D:\\work\\beta', bubbles: many('m', 5) });
+    fx.put(subSpec('s', 'm'));
+    const a = await started();
+    await a.pollOnce();
+    await a.stop();
+    fx.update('s', { lastUpdatedAt: T0 + 50, bubbles: [userBubble('s-0', 'task'), textBubble('s-1', 'done'), textBubble('s-2', 'more', T0 + 50)] });
+    sink.reset();
+    reads = [];
+    const b = await started();
+    await b.pollOnce();
+    expect(sink.batches.map((b) => b.key)).toEqual(['cursor:m/s']);
+    expect(sink.records().map((r) => [r.recordType, r.value.bubbleId])).toEqual([['bubble', 's-0'], ['bubble', 's-1'], ['bubble', 's-2']]);
+    expect(sink.batches[0]).toMatchObject({ sessionId: 'm', agentId: 's', projectId: 'D--work-beta' });
+    expect(bubbleReads().some((r) => r.startsWith('bubble:m:'))).toBe(false);
+  });
+
+  test('an ingest that failed leaves no note: the unit is read in full after a restart', async () => {
+    fx.put({ id: 'm', bubbles: many('m', 30) });
+    sink.failIngest = new Error('store busy');
+    const a = await started();
+    await a.pollOnce();
+    expect(sink.notes.size).toBe(0);
+    await a.stop();
+    sink.failIngest = null;
+    reads = [];
+    const b = await started();
+    await b.pollOnce();
+    expect(bubbleReads()).toHaveLength(30);
+    expect(sink.notes.has('cursor:m')).toBe(true);
+  });
+
+  test('a changed header reads the tail (the list is unchanged); a note that does not parse means a full read', async () => {
+    fx.put({ id: 'm', bubbles: many('m', 30) });
+    fx.put({ id: 'n', bubbles: many('n', 30) });
+    const a = await started();
+    await a.pollOnce();
+    await a.stop();
+    sink.notes.set('cursor:n', '{"v":1,');
+    fx.update('m', { lastUpdatedAt: T0 + 7 });
+    sink.reset();
+    reads = [];
+    const b = await started();
+    await b.pollOnce();
+    expect(bubbleReads().filter((r) => r.startsWith('bubble:m:'))).toHaveLength(20);
+    expect(bubbleReads().filter((r) => r.startsWith('bubble:n:'))).toHaveLength(30);
+    expect(sink.batches.map((b) => [b.key, b.records[0]!.recordType])).toEqual([['cursor:m', 'bubble'], ['cursor:n', 'composer']]);
+  });
+
+  test('a bubble unfinished at the last read is read again after a restart; a list changed before the end is read in full', async () => {
+    fx.put({ id: 'm', bubbles: [...many('m', 30), toolBubble('t', 'grep', 'loading', T0 + 40)] });
+    fx.put({ id: 'n', bubbles: many('n', 30) });
+    const a = await started();
+    await a.pollOnce();
+    await a.stop();
+    clock += 60 * 60 * 1000;
+    reads = [];
+    // same headers, but recently active: due (the recent rule), the tail and the unfinished bubble are read
+    fx.update('m', { lastUpdatedAt: clock - 1000 });
+    const noteM = JSON.parse(sink.notes.get('cursor:m')!) as { u: number };
+    sink.notes.set('cursor:m', JSON.stringify({ ...noteM, u: clock - 1000 }));
+    // n: an entry inserted at the front (the list is not append-only): every bubble is read
+    fx.update('n', { lastUpdatedAt: T0 + 99, bubbles: [userBubble('n-first', 'x'), ...many('n', 30)] });
+    const b = await started();
+    await b.pollOnce();
+    expect(bubbleReads().filter((r) => r.startsWith('bubble:m:'))).toHaveLength(20); // the tail includes t
+    expect(bubbleReads()).toContain('bubble:m:t');
+    expect(bubbleReads().filter((r) => r.startsWith('bubble:n:'))).toHaveLength(31);
   });
 });

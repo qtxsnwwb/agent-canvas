@@ -50,6 +50,17 @@ export interface PollSink {
    * re-assert "source deleted" marks after a restart or rebuild, which do not keep them). Read-only.
    */
   storedSessionIds(): string[];
+  /**
+   * What the source saved with saveUnitState, by store key (this origin's keys only), as saved by any earlier run.
+   * Read-only.
+   */
+  loadUnitStates(): Map<string, string>;
+  /**
+   * Saves (`value`) or deletes (null) the source's own note about the unit stored under `key` (a key of this origin),
+   * kept across restarts and rebuilds (it describes what was read and stored, not derived data). Throws when it could not
+   * be written.
+   */
+  saveUnitState(key: string, value: string | null): void;
 }
 
 /**
