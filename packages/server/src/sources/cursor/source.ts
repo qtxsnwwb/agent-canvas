@@ -6,7 +6,7 @@ import { KEY_PREFIXES } from '../source.js';
 import { openCursorDb, type CursorDbReader, type DbResult, type HeaderRow } from './db.js';
 import { cursorCwd, cursorProjectId, workspaceStorageDir } from './project.js';
 import { CURSOR_RECORD_TYPES } from './records.js';
-import { bubbleFinished, bubbleIdsOf, bubbleRecord, isObject, subagentInfoOf, trimComposer } from './trim.js';
+import { bubbleEntriesOf, bubbleFinished, bubbleRecord, isObject, subagentInfoOf, trimComposer } from './trim.js';
 
 const PREFIX = KEY_PREFIXES.cursor;
 export const DEFAULT_INTERVAL_MS = 3000;
@@ -44,8 +44,11 @@ export interface CursorSourceOptions {
 }
 
 interface BubbleSeen {
+  /** Hash of the line last stored for it. */
   hash: string;
   finished: boolean;
+  /** Its index in the list when that line was stored. */
+  order: number;
 }
 
 /** What this run knows about one conversation (composer). */
@@ -321,26 +324,20 @@ export class CursorSource implements PollSource {
         this.projectOfRoot.set(id, projectId);
       }
 
-      const composerLine = trimComposer(data, {
-        composerId: id,
-        workspaceId: h.workspaceId,
-        headerCreatedAt: h.createdAt,
-        headerLastUpdatedAt: h.lastUpdatedAt,
-        headerUnifiedMode: headerUnifiedMode(h),
-        cwd,
-      });
+      const composerLine = trimComposer(data, { composerId: id, headerCreatedAt: h.createdAt, headerUnifiedMode: headerUnifiedMode(h), cwd });
       const composerHash = hashOf(composerLine);
 
-      // Bubbles to read: unseen, unfinished when last seen, and the tail.
-      const ids = bubbleIdsOf(data);
-      const tail = new Set(ids.slice(-TAIL_BUBBLES));
+      // Bubbles to read: unseen, unfinished when last seen, moved to another index since last stored, and the tail.
+      // A bubble that dropped out of the list is not read and gets no record (its last one stands).
+      const entries = bubbleEntriesOf(data);
+      const tail = new Set(entries.slice(-TAIL_BUBBLES).map((e) => e.bubbleId));
       const pending: { record: PollRecord; bubbleId: string | null; seen: BubbleSeen | null }[] = [];
       if (composerHash !== state.composerHash) pending.push({ record: { recordType: CURSOR_RECORD_TYPES.composer, line: composerLine }, bubbleId: null, seen: null });
       const unreadable: string[] = [];
       let reads = 0;
-      for (const bubbleId of ids) {
+      for (const { bubbleId, order } of entries) {
         const before = state.bubbles.get(bubbleId);
-        if (before !== undefined && before.finished && !tail.has(bubbleId)) continue;
+        if (before !== undefined && before.finished && before.order === order && !tail.has(bubbleId)) continue;
         if (++reads % READS_PER_YIELD === 0) await yieldNow();
         const raw = db.bubble(id, bubbleId);
         if (!raw.ok) throw raw.error;
@@ -356,9 +353,9 @@ export class CursorSource implements PollSource {
           unreadable.push(bubbleId);
           continue;
         }
-        const record = bubbleRecord(parsed, bubbleId);
+        const record = bubbleRecord(parsed, bubbleId, order);
         const line = JSON.stringify(record);
-        const seen = { hash: hashOf(line), finished: bubbleFinished(record) };
+        const seen = { hash: hashOf(line), finished: bubbleFinished(record), order };
         if (before !== undefined && before.hash === seen.hash) {
           before.finished = seen.finished;
           continue;

@@ -24,7 +24,11 @@ export interface CursorSubagentInfo {
   subagentType: number | null;
 }
 
-/** recordType `composer`: one conversation (Cursor "composer"), as of the read. */
+/**
+ * recordType `composer`: one conversation (Cursor "composer"), its slowly changing facts only. Nothing that moves on
+ * every step (no `lastUpdatedAt`, no bubble list), so it is stored again only when one of these facts changes. Bubble
+ * order is carried by each bubble's `order`; last activity comes from bubble times.
+ */
 export interface CursorComposerRecord {
   composerId: string;
   /** Title (`composerData.name`). */
@@ -33,20 +37,14 @@ export interface CursorComposerRecord {
   status: string | null;
   /** Creation time, ms since epoch (`composerData.createdAt`, else the header's). */
   createdAt: number | null;
-  /** Last update, ms since epoch (`composerData.lastUpdatedAt`, else the header's `lastUpdatedAt` column). */
-  lastUpdatedAt: number | null;
   /** `composerData.modelConfig.modelName`. */
   modelName: string | null;
   /** `composerData.unifiedMode` (e.g. 'agent'), else the header value's. */
   unifiedMode: string | null;
-  /** Workspace id of the header row (`composerHeaders.workspaceId`). */
-  workspaceId: string | null;
   /** Working directory by the three-step fallback of spec 5.4; null when none was found. */
   cwd: string | null;
   /** Present for subagent conversations only. */
   subagentInfo: CursorSubagentInfo | null;
-  /** Bubble ids in conversation order (`fullConversationHeadersOnly[].bubbleId`). */
-  bubbleIds: string[];
 }
 
 /** `toolFormerData` of a tool bubble. */
@@ -66,6 +64,12 @@ export interface CursorToolFormerData {
 /** recordType `bubble`: one message or step. A later version of the same `bubbleId` supersedes an earlier one. */
 export interface CursorBubbleRecord {
   bubbleId: string;
+  /**
+   * The bubble's 0-based index in the conversation's `fullConversationHeadersOnly` list when it was read. When the
+   * index changes (the list is not append-only), the bubble is stored again with the new one. A bubble that drops
+   * out of the list gets no new record (its last one stands).
+   */
+  order: number;
   /** 1 user, 2 assistant. */
   type: number | null;
   /** 15 tool, 30 thinking, null for plain text. */

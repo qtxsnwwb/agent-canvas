@@ -23,16 +23,22 @@ export function capUtf8(s: string, maxBytes: number = CURSOR_TEXT_CAP_BYTES): { 
   return { text: buf.subarray(0, end).toString('utf8'), cut: true };
 }
 
-/** Bubble ids in conversation order from `composerData.fullConversationHeadersOnly` (entries without one skipped). */
-export function bubbleIdsOf(composerData: unknown): string[] {
+/**
+ * Bubbles in conversation order from `composerData.fullConversationHeadersOnly`, each with its index in that list
+ * (`order`). Entries without a bubble id are skipped (their index is not reused); a repeated id keeps its first index.
+ */
+export function bubbleEntriesOf(composerData: unknown): { bubbleId: string; order: number }[] {
   const list = obj(composerData).fullConversationHeadersOnly;
   if (!Array.isArray(list)) return [];
-  const ids: string[] = [];
-  for (const h of list) {
-    const id = str(obj(h).bubbleId);
-    if (id !== null) ids.push(id);
-  }
-  return ids;
+  const seen = new Set<string>();
+  const out: { bubbleId: string; order: number }[] = [];
+  list.forEach((h, order) => {
+    const bubbleId = str(obj(h).bubbleId);
+    if (bubbleId === null || seen.has(bubbleId)) return;
+    seen.add(bubbleId);
+    out.push({ bubbleId, order });
+  });
+  return out;
 }
 
 /** `subagentInfo` of a composerData, trimmed; null when it has none. */
@@ -53,9 +59,7 @@ export interface ComposerExtras {
   /** The conversation's id (authoritative: the key it was read under). */
   composerId: string;
   /** From the `composerHeaders` row. */
-  workspaceId: string | null;
   headerCreatedAt: number | null;
-  headerLastUpdatedAt: number | null;
   /** `unifiedMode` of the header's value. */
   headerUnifiedMode: string | null;
   /** Working directory (spec 5.4), resolved by the source. */
@@ -70,24 +74,24 @@ export function trimComposer(raw: unknown, extras: ComposerExtras): string {
     name: str(data.name),
     status: str(data.status),
     createdAt: num(data.createdAt) ?? extras.headerCreatedAt,
-    lastUpdatedAt: num(data.lastUpdatedAt) ?? extras.headerLastUpdatedAt,
     modelName: str(obj(data.modelConfig).modelName),
     unifiedMode: str(data.unifiedMode) ?? extras.headerUnifiedMode,
-    workspaceId: extras.workspaceId,
     cwd: extras.cwd,
     subagentInfo: subagentInfoOf(data),
-    bubbleIds: bubbleIdsOf(data),
   };
   return JSON.stringify(record);
 }
 
-/** The `bubble` line of one bubble (CursorBubbleRecord); `bubbleId` (the id it was read under) wins over the JSON's. */
-export function trimBubble(raw: unknown, bubbleId?: string): string {
-  return JSON.stringify(bubbleRecord(raw, bubbleId));
+/**
+ * The `bubble` line of one bubble (CursorBubbleRecord) at index `order` of its conversation's list; `bubbleId` (the id
+ * it was read under) wins over the JSON's.
+ */
+export function trimBubble(raw: unknown, bubbleId: string, order: number): string {
+  return JSON.stringify(bubbleRecord(raw, bubbleId, order));
 }
 
 /** The CursorBubbleRecord of one bubble (what trimBubble serialises). */
-export function bubbleRecord(raw: unknown, bubbleId?: string): CursorBubbleRecord {
+export function bubbleRecord(raw: unknown, bubbleId: string, order: number): CursorBubbleRecord {
   const b = obj(raw);
   const truncated: string[] = [];
   const capped = (name: string, v: unknown): string | null => {
@@ -112,7 +116,8 @@ export function bubbleRecord(raw: unknown, bubbleId?: string): CursorBubbleRecor
         };
   const tokens = isObject(b.tokenCount) ? b.tokenCount : null;
   return {
-    bubbleId: bubbleId ?? str(b.bubbleId) ?? '',
+    bubbleId,
+    order,
     type: num(b.type),
     capabilityType: num(b.capabilityType),
     createdAt: str(b.createdAt),

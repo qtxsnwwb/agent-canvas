@@ -127,31 +127,33 @@ afterEach(async () => {
 describe('trim', () => {
   test('a tool bubble keeps the fields of spec 5.3 only, in a fixed order; equal content gives equal lines', () => {
     const raw = { ...toolBubble('b1', 'read_file', 'completed', T0, { toolCallId: 'tc-1', params: { target: 'a.txt' } }), codebaseContextChunks: [], turnDurationMs: 900 };
-    const line = trimBubble(raw);
+    const line = trimBubble(raw, 'b1', 4);
     const rec = JSON.parse(line) as CursorBubbleRecord;
     expect(Object.keys(rec)).toEqual([
-      'bubbleId', 'type', 'capabilityType', 'createdAt', 'startedAtMs', 'completedAtMs', 'turnDurationMs', 'text', 'thinking',
+      'bubbleId', 'order', 'type', 'capabilityType', 'createdAt', 'startedAtMs', 'completedAtMs', 'turnDurationMs', 'text', 'thinking',
       'thinkingDurationMs', 'tokenCount', 'toolFormerData', 'truncated',
     ]);
     expect(rec.toolFormerData).toEqual({ name: 'read_file', status: 'completed', toolCallId: 'tc-1', params: '{"target":"a.txt"}', result: '{"ok":true}' });
     expect(rec.text).toBeNull(); // empty string → null
     expect(rec.turnDurationMs).toBe(900);
+    expect(rec.order).toBe(4);
+    expect(trimBubble(raw, 'b1', 5)).not.toBe(line); // a new position is a new line
     expect(line).not.toContain('toolCallBinary');
     expect(line).not.toContain('rawArgs');
     expect(line).not.toContain('codebaseContextChunks');
     // key order of the input does not matter
     const shuffled = Object.fromEntries(Object.entries(raw).reverse());
-    expect(trimBubble(shuffled)).toBe(line);
+    expect(trimBubble(shuffled, 'b1', 4)).toBe(line);
   });
 
   test('thinking, user and text bubbles; missing fields are null', () => {
-    const t = bubbleRecord(thinkingBubble('t1', 'pondering'));
+    const t = bubbleRecord(thinkingBubble('t1', 'pondering'), 't1', 0);
     expect(t.thinking).toEqual({ text: 'pondering' });
     expect(t.thinkingDurationMs).toBe(1200);
     expect(JSON.stringify(t)).not.toContain('sig-xyz');
-    const u = bubbleRecord({ bubbleId: 'u1', type: 1, text: 'hello' });
-    expect(u).toMatchObject({ bubbleId: 'u1', type: 1, capabilityType: null, createdAt: null, completedAtMs: null, thinking: null, tokenCount: null, toolFormerData: null, truncated: [] });
-    expect(bubbleRecord({ type: 2, text: 'x' }, 'from-key').bubbleId).toBe('from-key');
+    const u = bubbleRecord({ bubbleId: 'u1', type: 1, text: 'hello' }, 'u1', 2);
+    expect(u).toMatchObject({ bubbleId: 'u1', order: 2, type: 1, capabilityType: null, createdAt: null, completedAtMs: null, thinking: null, tokenCount: null, toolFormerData: null, truncated: [] });
+    expect(bubbleRecord({ bubbleId: 'own', type: 2, text: 'x' }, 'from-key', 0).bubbleId).toBe('from-key');
   });
 
   test('text, thinking, params and result are cut to 64 KB of UTF-8 and named in truncated', () => {
@@ -162,7 +164,7 @@ describe('trim', () => {
       text: big,
       thinking: { text: big },
       toolFormerData: { name: 'x', status: 'completed', params: big, result: 'small' },
-    });
+    }, 'b', 0);
     expect(Buffer.byteLength(rec.text!, 'utf8')).toBe(64 * 1024);
     expect(rec.text!.endsWith('é')).toBe(true);
     expect(rec.truncated).toEqual(['text', 'thinking.text', 'params']);
@@ -170,7 +172,7 @@ describe('trim', () => {
     expect(capUtf8('a😀', 3)).toEqual({ text: 'a', cut: true });
   });
 
-  test('composer record: fields, ordered bubble ids, subagent info, header fallbacks', () => {
+  test('composer record: slowly changing facts only (no bubble list, no lastUpdatedAt), subagent info, header fallbacks', () => {
     const line = trimComposer(
       {
         composerId: 'ignored',
@@ -182,7 +184,7 @@ describe('trim', () => {
         subagentInfo: { subagentType: 2, subagentTypeName: 'explore', parentComposerId: 'p', rootParentConversationId: 'r', toolCallId: 'tc', conversationLengthAtSpawn: 4 },
         fullConversationHeadersOnly: [{ bubbleId: 'b2', type: 1 }, { type: 2 }, { bubbleId: 'b1', type: 2 }],
       },
-      { composerId: 'c1', workspaceId: 'ws', headerCreatedAt: 1, headerLastUpdatedAt: 2000, headerUnifiedMode: 'chat', cwd: 'd:\\w' },
+      { composerId: 'c1', headerCreatedAt: 1, headerUnifiedMode: 'chat', cwd: 'd:\\w' },
     );
     const rec = JSON.parse(line) as CursorComposerRecord;
     expect(rec).toEqual({
@@ -190,14 +192,27 @@ describe('trim', () => {
       name: 'Fix the widget',
       status: 'none',
       createdAt: 1000,
-      lastUpdatedAt: 2000,
       modelName: 'm-1',
       unifiedMode: 'agent',
-      workspaceId: 'ws',
       cwd: 'd:\\w',
       subagentInfo: { parentComposerId: 'p', rootParentConversationId: 'r', toolCallId: 'tc', subagentTypeName: 'explore', subagentType: 2 },
-      bubbleIds: ['b2', 'b1'],
     });
+    expect(Object.keys(rec)).toEqual(['composerId', 'name', 'status', 'createdAt', 'modelName', 'unifiedMode', 'cwd', 'subagentInfo']);
+    // a new step (lastUpdatedAt, a longer list) does not change the line
+    const later = trimComposer(
+      {
+        name: 'Fix the widget',
+        status: 'none',
+        createdAt: 1000,
+        lastUpdatedAt: 99_999,
+        unifiedMode: 'agent',
+        modelConfig: { modelName: 'm-1' },
+        subagentInfo: { subagentType: 2, subagentTypeName: 'explore', parentComposerId: 'p', rootParentConversationId: 'r', toolCallId: 'tc' },
+        fullConversationHeadersOnly: [{ bubbleId: 'b2', type: 1 }, { bubbleId: 'b1', type: 2 }, { bubbleId: 'b3', type: 2 }],
+      },
+      { composerId: 'c1', headerCreatedAt: 1, headerUnifiedMode: 'chat', cwd: 'd:\\w' },
+    );
+    expect(later).toBe(line);
   });
 });
 
@@ -310,9 +325,12 @@ describe('selection and records', () => {
     const sub = sink.batches[1]!;
     expect(sub).toMatchObject({ key: 'cursor:sub', sessionId: 'main', agentId: 'sub', projectId: 'cursor-ws-1' });
     const composer = JSON.parse(main.records[0]!.line) as CursorComposerRecord;
-    expect(composer).toMatchObject({ composerId: 'main', name: 'Main one', status: 'completed', lastUpdatedAt: T0, modelName: 'synthetic-model', bubbleIds: ['m1', 'm2', 'm3'], subagentInfo: null });
+    expect(composer).toMatchObject({ composerId: 'main', name: 'Main one', status: 'completed', modelName: 'synthetic-model', subagentInfo: null });
+    expect(composer).not.toHaveProperty('bubbleIds');
+    expect(composer).not.toHaveProperty('lastUpdatedAt');
     expect((JSON.parse(sub.records[0]!.line) as CursorComposerRecord).subagentInfo).toMatchObject({ rootParentConversationId: 'main', toolCallId: 'tc-sub' });
-    expect(main.records.slice(1).map((r) => (JSON.parse(r.line) as CursorBubbleRecord).bubbleId)).toEqual(['m1', 'm2', 'm3']);
+    const bubbles = main.records.slice(1).map((r) => JSON.parse(r.line) as CursorBubbleRecord);
+    expect(bubbles.map((b) => [b.bubbleId, b.order])).toEqual([['m1', 0], ['m2', 1], ['m3', 2]]);
     expect(reads).not.toContain('bubble:arch:x1');
     expect(reads.filter((r) => r.startsWith('composerData:arch'))).toEqual([]);
     expect(sink.failures.size).toBe(0);
@@ -388,9 +406,61 @@ describe('incremental reads', () => {
     // tail of 20 over 33 ids: t12..t29, live, new; plus nothing else (u1, t0..t11 are finished and not in the tail)
     expect(bubbleReads).toEqual([...Array.from({ length: 18 }, (_, i) => `t${i + 12}`), 'live', 'new']);
     const stored = sink.records();
-    expect(stored.map((r) => (r.recordType === 'composer' ? 'composer' : (r.value.bubbleId as string)))).toEqual(['composer', 'live', 'new']);
-    expect((stored[1]!.value as unknown as CursorBubbleRecord).toolFormerData?.status).toBe('completed');
-    expect((stored[0]!.value as unknown as CursorComposerRecord).lastUpdatedAt).toBe(T0 + 5000);
+    // the composer's slow facts did not change: only the two bubbles are stored
+    expect(stored.map((r) => (r.recordType === 'composer' ? 'composer' : (r.value.bubbleId as string)))).toEqual(['live', 'new']);
+    expect((stored[0]!.value as unknown as CursorBubbleRecord).toolFormerData?.status).toBe('completed');
+    expect((stored[1]!.value as unknown as CursorBubbleRecord).order).toBe(32);
+  });
+
+  test('the composer is stored again only when a slow fact changes (status)', async () => {
+    fx.put({ id: 'c', status: 'none', bubbles: [userBubble('u1', 'go')] });
+    const s = await started();
+    await s.pollOnce();
+    sink.reset();
+    fx.update('c', { lastUpdatedAt: T0 + 10, bubbles: [userBubble('u1', 'go'), textBubble('a1', 'ok')] });
+    await s.pollOnce();
+    expect(sink.calls).toEqual(['ingest cursor:c bubble']);
+    sink.reset();
+    fx.update('c', { lastUpdatedAt: T0 + 20, status: 'completed' });
+    await s.pollOnce();
+    expect(sink.calls).toEqual(['ingest cursor:c composer']);
+    expect(sink.records()[0]!.value.status).toBe('completed');
+  });
+
+  /** Rewrites composerData:c's bubble list to these ids (first a user bubble, then assistant ones) and bumps lastUpdatedAt. */
+  function setList(ids: string[]): void {
+    const list = JSON.stringify(ids.map((id, i) => ({ bubbleId: id, type: i === 0 ? 1 : 2 })));
+    fx.exec(`UPDATE cursorDiskKV SET value = json_set(CAST(value AS TEXT), '$.fullConversationHeadersOnly', json('${list}')) WHERE key = 'composerData:c'`);
+    fx.exec(`UPDATE composerHeaders SET lastUpdatedAt = lastUpdatedAt + 1 WHERE composerId = 'c'`);
+  }
+
+  test('a bubble whose index changes outside the tail is re-read and stored with its new order', async () => {
+    const bubbles = [userBubble('u1', 'start')];
+    for (let i = 0; i < 30; i += 1) bubbles.push(textBubble(`x${i}`, `line ${i}`, T0 + i));
+    fx.put({ id: 'c', bubbles });
+    const s = await started();
+    await s.pollOnce();
+    reads = [];
+    sink.reset();
+    // a bubble inserted at index 3: x2 and later shift by one, most of them outside the tail of 20
+    fx.setBubble('c', textBubble('ins', 'inserted', T0 + 2));
+    const ids = bubbles.map((b) => b.bubbleId);
+    ids.splice(3, 0, 'ins');
+    setList(ids);
+    await s.pollOnce();
+    const bubbleReads = reads.filter((r) => r.startsWith('bubble:')).map((r) => r.split(':')[2]);
+    expect(bubbleReads).toEqual(ids.slice(3)); // u1, x0, x1 kept their index and are finished: not read
+    expect(sink.records().map((r) => [r.value.bubbleId, r.value.order])).toEqual(ids.slice(3).map((id, i) => [id, i + 3]));
+  });
+
+  test('a bubble that disappears from the list: nothing is emitted for it; the ones after it move up', async () => {
+    fx.put({ id: 'c', bubbles: [userBubble('u1', 'go'), textBubble('a1', 'one'), textBubble('a2', 'two')] });
+    const s = await started();
+    await s.pollOnce();
+    sink.reset();
+    setList(['u1', 'a2']);
+    await s.pollOnce();
+    expect(sink.records().map((r) => [r.recordType, r.value.bubbleId, r.value.order])).toEqual([['bubble', 'a2', 1]]);
   });
 
   test('an unfinished bubble outside the tail is re-read until it finishes', async () => {
