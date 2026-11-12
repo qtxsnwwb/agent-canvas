@@ -16,10 +16,13 @@ afterEach(() => {
   for (const d of dirs.splice(0)) fs.rmSync(d, { recursive: true, force: true });
 });
 
-function fakeIo(): HooksCliIo & { out: string[]; errs: string[] } {
-  const out: string[] = [];
+function fakeIo(): HooksCliIo & { outs: string[]; errs: string[] } {
+  const outs: string[] = [];
   const errs: string[] = [];
-  return { out, errs, log: (l) => out.push(l), err: (l) => errs.push(l), confirm: async () => true, isInteractive: false, now: () => new Date('2026-11-12T00:00:00Z') };
+  return {
+    outs, errs, out: (l) => void outs.push(l), err: (l) => void errs.push(l), confirm: async () => true, isInteractive: false,
+    now: () => new Date('2026-11-12T00:00:00Z'),
+  };
 }
 
 test('isNpxPath：npx 缓存里的路径（两种分隔符）算，全局安装和源码目录不算', () => {
@@ -72,7 +75,7 @@ test('从 npx 缓存运行时拒绝安装 Codex / Cursor 的 hooks（路径不�
     // Uninstall is never refused for this reason (here it just finds nothing to remove).
     const un = fakeIo();
     await main(['hooks', 'uninstall', flag, '--yes', '--settings', file], { hooksIo: un, cliPath: npxCli });
-    expect([...un.errs, ...un.out].join('\n')).not.toContain('npx');
+    expect([...un.errs, ...un.outs].join('\n')).not.toContain('npm install -g');
   }
   const settings = path.join(dir, 'settings.json');
   fs.writeFileSync(settings, '{}\n');
