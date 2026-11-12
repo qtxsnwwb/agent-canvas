@@ -18,7 +18,7 @@ export function workspaceStorageDir(dbPath: string): string {
  */
 export function fileUriToPath(uri: string): string | null {
   if (!/^file:\/\//i.test(uri)) return null;
-  const rest = uri.slice('file://'.length);
+  const rest = uri.slice('file://'.length).replace(/[?#].*$/s, ''); // a raw ? or # starts the query / fragment
   const slash = rest.indexOf('/');
   const authority = slash === -1 ? rest : rest.slice(0, slash);
   let p: string;
@@ -61,7 +61,18 @@ export function workspaceFolder(storageDir: string, workspaceId: string | null):
  * `workspaceIdentifier.uri.fsPath`, the header value's, and the workspace.json `folder` of its workspace id.
  */
 export function cursorCwd(composerData: unknown, headerValue: unknown, workspaceId: string | null, storageDir: string): string | null {
-  return fsPathOf(composerData) ?? fsPathOf(headerValue) ?? workspaceFolder(storageDir, workspaceId);
+  const cwd = fsPathOf(composerData) ?? fsPathOf(headerValue) ?? workspaceFolder(storageDir, workspaceId);
+  return cwd === null ? null : normaliseCwd(cwd);
+}
+
+/**
+ * A directory as Claude Code spells it, so its encoded project id matches: a Windows drive letter upper-cased (Cursor
+ * writes `d:\…`, Claude Code `D:\…`), trailing separators removed except on a root (`D:\`, `/`).
+ */
+export function normaliseCwd(cwd: string): string {
+  let out = cwd.replace(/^([a-z]):/, (_m, d: string) => `${d.toUpperCase()}:`);
+  while (out.length > 1 && /[\\/]$/.test(out) && !/^[A-Za-z]:[\\/]$/.test(out)) out = out.slice(0, -1);
+  return out;
 }
 
 /** Project id: the cwd encoded as Claude Code does (reusing an id differing only in case), else `cursor-<workspaceId>`. */

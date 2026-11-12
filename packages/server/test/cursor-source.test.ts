@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import type { PollBatch, PollSink } from '../src/sources/poll.js';
 import { openCursorDb, type CursorDbReader, type DbResult } from '../src/sources/cursor/db.js';
-import { fileUriToPath, workspaceStorageDir } from '../src/sources/cursor/project.js';
+import { fileUriToPath, normaliseCwd, workspaceStorageDir } from '../src/sources/cursor/project.js';
 import type { CursorBubbleRecord, CursorComposerRecord } from '../src/sources/cursor/records.js';
 import { CursorSource, RECENT_MS, type CursorSourceOptions, type PollTimers } from '../src/sources/cursor/source.js';
 import { bubbleRecord, capUtf8, trimBubble, trimComposer } from '../src/sources/cursor/trim.js';
@@ -172,6 +172,26 @@ describe('trim', () => {
     expect(capUtf8('a😀', 3)).toEqual({ text: 'a', cut: true });
   });
 
+  test('a cut that lands inside a multi-byte character backs off to the character before it', () => {
+    const euro = '€'.repeat(30_000); // 3 bytes each; 65536 is not a multiple of 3
+    const rec = bubbleRecord({ type: 2, text: euro }, 'b', 0);
+    expect(Buffer.byteLength(rec.text!, 'utf8')).toBe(65_535);
+    expect(rec.text).toBe('€'.repeat(21_845));
+    expect(rec.text!.includes('�')).toBe(false);
+    expect(rec.truncated).toEqual(['text']);
+  });
+
+  test('params / result: JSON text kept as is; an object becomes stable JSON; anything else null', () => {
+    const tool = (params: unknown, result: unknown) =>
+      bubbleRecord({ type: 2, capabilityType: 15, toolFormerData: { name: 'x', status: 'completed', params, result } }, 'b', 0).toolFormerData!;
+    expect(tool('{"b":1,"a":2}', undefined)).toMatchObject({ params: '{"b":1,"a":2}', result: null });
+    expect(tool({ b: 1, a: { d: 1, c: 2 } }, { ok: true }).params).toBe('{"a":{"c":2,"d":1},"b":1}');
+    expect(tool({ a: { c: 2, d: 1 }, b: 1 }, null).params).toBe('{"a":{"c":2,"d":1},"b":1}');
+    expect(tool(42, '')).toMatchObject({ params: null, result: null });
+    // text is not JSON-coerced
+    expect(bubbleRecord({ type: 2, text: { not: 'text' } }, 'b', 0).text).toBeNull();
+  });
+
   test('composer record: slowly changing facts only (no bubble list, no lastUpdatedAt), subagent info, header fallbacks', () => {
     const line = trimComposer(
       {
@@ -223,6 +243,25 @@ describe('project', () => {
     expect(fileUriToPath('file://server/share/x')).toBe('\\\\server\\share\\x');
     expect(fileUriToPath('vscode-remote://ssh-remote+h/x')).toBeNull();
     expect(fileUriToPath('file:///bad%E0')).toBeNull();
+    expect(fileUriToPath('file:///d%3A/work/x?query=1#frag')).toBe('d:\\work\\x');
+    expect(fileUriToPath('file:///d%3A/a%23b')).toBe('d:\\a#b'); // an encoded # is part of the path
+  });
+
+  test('cwd normalisation: drive letter upper-cased, trailing separators dropped except on a root', () => {
+    expect(normaliseCwd('d:\\work\\x\\')).toBe('D:\\work\\x');
+    expect(normaliseCwd('D:\\work\\x')).toBe('D:\\work\\x');
+    expect(normaliseCwd('d:\\')).toBe('D:\\');
+    expect(normaliseCwd('/home/u/x/')).toBe('/home/u/x');
+    expect(normaliseCwd('/')).toBe('/');
+  });
+
+  test('a workspace.json folder with a trailing slash and lower-case drive joins the Claude Code project', async () => {
+    fx.put({ id: 'c', workspaceId: 'ws-c', bubbles: [userBubble('c1', 'hi')] });
+    fx.writeWorkspaceJson('ws-c', { folder: 'file:///d%3A/work/gamma/' });
+    const s = await started({ knownProjectIds: () => ['D--work-gamma'] });
+    await s.pollOnce();
+    expect(sink.batches[0]!.projectId).toBe('D--work-gamma');
+    expect(sink.records()[0]!.value.cwd).toBe('D:\\work\\gamma');
   });
 
   test('workspaceStorage is the sibling of globalStorage', () => {
@@ -240,11 +279,11 @@ describe('project', () => {
     const s = await started({ knownProjectIds: () => ['D--work-alpha'] });
     await s.pollOnce();
     const composers = new Map(sink.records().filter((r) => r.recordType === 'composer').map((r) => [r.value.composerId as string, r]));
-    expect(composers.get('a')!.value.cwd).toBe('d:\\work\\alpha');
-    expect(composers.get('a')!.projectId).toBe('D--work-alpha'); // reused, differs only in case
-    expect(composers.get('b')!.value.cwd).toBe('d:\\work\\beta');
-    expect(composers.get('b')!.projectId).toBe('d--work-beta');
-    expect(composers.get('c')!.value.cwd).toBe('d:\\work\\gamma');
+    expect(composers.get('a')!.value.cwd).toBe('D:\\work\\alpha'); // drive letter as Claude Code writes it
+    expect(composers.get('a')!.projectId).toBe('D--work-alpha');
+    expect(composers.get('b')!.value.cwd).toBe('D:\\work\\beta');
+    expect(composers.get('b')!.projectId).toBe('D--work-beta');
+    expect(composers.get('c')!.value.cwd).toBe('D:\\work\\gamma');
     expect(composers.get('d')!.value.cwd).toBeNull();
     expect(composers.get('d')!.projectId).toBe('cursor-ws-d');
     expect(composers.get('e')!.projectId).toBe('cursor-..');
@@ -569,12 +608,66 @@ describe('archive, disappearance, restart', () => {
 
   test('gone from composerHeaders: marked "source deleted"', async () => {
     fx.put({ id: 'c', bubbles: [userBubble('u1', 'go')] });
+    fx.put({ id: 'other', bubbles: [userBubble('o1', 'go')] });
     const s = await started();
     await s.pollOnce();
     sink.reset();
     fx.remove('c');
     await s.pollOnce();
     expect(sink.calls).toEqual(['deleted c']);
+  });
+
+  test('an empty header table while sessions are held marks nothing (a database being recreated)', async () => {
+    fx.put({ id: 'c', bubbles: [userBubble('u1', 'go')] });
+    sink.stored = ['c', 'old'];
+    const s = await started();
+    await s.pollOnce();
+    expect(sink.calls.filter((c) => c.startsWith('deleted'))).toEqual(['deleted old']);
+    sink.reset();
+    fx.remove('c');
+    await s.pollOnce();
+    expect(sink.calls).toEqual([]); // c not marked
+    expect(s.status().lastError).toBeNull();
+    // rows back: nothing to undo, nothing marked
+    fx.put({ id: 'c', bubbles: [userBubble('u1', 'go')] });
+    await s.pollOnce();
+    expect(sink.calls.filter((c) => c.startsWith('deleted') || c.startsWith('undeleted'))).toEqual([]);
+  });
+
+  test('a failing markSourceDeleted is reported and retried; the round still reads conversations', async () => {
+    fx.put({ id: 'c', bubbles: [userBubble('u1', 'go')] });
+    sink.stored = ['gone'];
+    let fail = true;
+    const mark = sink.markSourceDeleted.bind(sink);
+    sink.markSourceDeleted = async (id) => {
+      if (fail) throw new Error('store busy');
+      return mark(id);
+    };
+    const s = await started();
+    await s.pollOnce();
+    expect(sink.failures.get('cursor:gone')).toBe('store busy');
+    expect(sink.calls).toContain('ingest cursor:c composer,bubble');
+    expect(s.status().lastPollAt).not.toBeNull();
+    fail = false;
+    await s.pollOnce();
+    expect(sink.calls).toContain('deleted gone');
+  });
+
+  test('a failing storedSessionIds is retried next round', async () => {
+    fx.put({ id: 'c', bubbles: [userBubble('u1', 'go')] });
+    let fail = true;
+    sink.storedSessionIds = () => {
+      if (fail) throw new Error('not yet');
+      return ['gone', 'c'];
+    };
+    const s = await started();
+    await s.pollOnce();
+    expect(sink.failures.get('cursor:poll')).toBe('not yet');
+    expect(sink.calls.some((c) => c.startsWith('deleted'))).toBe(false);
+    fail = false;
+    await s.pollOnce();
+    expect(sink.calls).toContain('deleted gone');
+    expect(sink.calls).toContain('undeleted c');
   });
 
   test('after a restart, stored sessions now archived or gone are marked; picked ones are cleared and re-read', async () => {
@@ -638,5 +731,238 @@ describe('loop', () => {
     s.poke('c');
     await s.pollOnce();
     expect(reads).toEqual([]);
+  });
+});
+
+describe('robustness (fix round 2)', () => {
+  /** Wraps the tracing reader: optional failures, counts opens / closes and overlapping handles. */
+  function instrumented(
+    opts: { bubble?: (id: string, b: string) => DbResult<string | null> | null; composerData?: (id: string) => DbResult<string | null> | null } = {},
+  ) {
+    const stats = { opens: 0, closes: 0, open: 0, overlapped: false };
+    const openDb = (p: string): DbResult<CursorDbReader> => {
+      const r = tracingOpen(p);
+      if (!r.ok) return r;
+      stats.opens += 1;
+      stats.open += 1;
+      if (stats.open > 1) stats.overlapped = true;
+      const db = r.value;
+      return {
+        ok: true,
+        value: {
+          headers: () => db.headers(),
+          composerData: (id) => opts.composerData?.(id) ?? db.composerData(id),
+          bubble: (id, b) => opts.bubble?.(id, b) ?? db.bubble(id, b),
+          close: () => {
+            stats.closes += 1;
+            stats.open -= 1;
+            db.close();
+          },
+        },
+      };
+    };
+    return { stats, openDb };
+  }
+  const busy = (): DbResult<string | null> => ({ ok: false, error: Object.assign(new Error('database is locked'), { code: 'SQLITE_BUSY' }) });
+  const odd = (): DbResult<string | null> => ({ ok: false, error: new Error('something odd') });
+  const tick = (): Promise<void> => new Promise((r) => setImmediate(r));
+
+  test('a database-level lookup error mid-round ends the round: lastError, no conversation blamed, retried next round', async () => {
+    fx.put({ id: 'a', lastUpdatedAt: T0 + 3, bubbles: [userBubble('a1', 'go')] });
+    fx.put({ id: 'b', lastUpdatedAt: T0 + 2, bubbles: [userBubble('b1', 'go')] });
+    fx.put({ id: 'c', lastUpdatedAt: T0 + 1, bubbles: [userBubble('c1', 'go')] });
+    let locked = true;
+    const { stats, openDb } = instrumented({ bubble: (id) => (locked && id === 'b' ? busy() : null) });
+    const s = await started({ openDb });
+    await s.pollOnce();
+    expect(sink.calls).toEqual(['ingest cursor:a composer,bubble']);
+    expect(reads).not.toContain('composerData:c');
+    expect(sink.failures.size).toBe(0);
+    expect(s.status().lastError).toMatch(/unavailable.*locked/);
+    expect(s.status().lastPollAt).toBeNull();
+    expect(stats.closes).toBe(stats.opens);
+    locked = false;
+    await s.pollOnce();
+    expect(sink.calls).toEqual(['ingest cursor:a composer,bubble', 'ingest cursor:b composer,bubble', 'ingest cursor:c composer,bubble']);
+    expect(s.status().lastError).toBeNull();
+  });
+
+  test('three consecutive failed lookups end the round whatever the error; fewer are per-conversation failures', async () => {
+    for (const [i, id] of ['a', 'b', 'c', 'd'].entries()) fx.put({ id, lastUpdatedAt: T0 + 10 - i, bubbles: [userBubble(`${id}1`, 'go')] });
+    const tried: string[] = [];
+    const { openDb } = instrumented({
+      composerData: (id) => {
+        tried.push(id);
+        return odd();
+      },
+    });
+    const s = await started({ openDb });
+    await s.pollOnce();
+    expect([...sink.failures.keys()]).toEqual(['cursor:a', 'cursor:b']);
+    expect(tried).toEqual(['a', 'b', 'c']);
+    expect(s.status().lastError).toMatch(/something odd/);
+  });
+
+  test('the handle is closed on every path: abandoned round, open failure, normal round', async () => {
+    fx.put({ id: 'a', bubbles: [userBubble('a1', 'go')] });
+    let fail = true;
+    const { stats, openDb } = instrumented({ bubble: () => (fail ? busy() : null) });
+    const s = await started({ openDb });
+    await s.pollOnce(); // abandoned
+    fail = false;
+    fx.exec('ALTER TABLE composerHeaders RENAME TO composerHeadersX');
+    await s.pollOnce(); // open fails (statement prepare): the reader closes its own handle
+    fx.exec('ALTER TABLE composerHeadersX RENAME TO composerHeaders');
+    await s.pollOnce(); // normal
+    expect(stats.opens).toBe(2);
+    expect(stats.closes).toBe(2);
+    expect(stats.open).toBe(0);
+  });
+
+  test('stop() mid-round: the round stops between conversations, closes the handle, and is not a completed poll', async () => {
+    fx.put({ id: 'a', lastUpdatedAt: T0 + 2, bubbles: [userBubble('a1', 'go')] });
+    fx.put({ id: 'b', lastUpdatedAt: T0 + 1, bubbles: [userBubble('b1', 'go')] });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const ingest = sink.ingestRecords.bind(sink);
+    sink.ingestRecords = async (batch) => {
+      await gate;
+      return ingest(batch);
+    };
+    const { stats, openDb } = instrumented();
+    const s = await started({ openDb });
+    const round = s.pollOnce();
+    await tick();
+    await tick();
+    const stopping = s.stop();
+    release();
+    await stopping;
+    await round;
+    expect(sink.calls).toEqual(['ingest cursor:a composer,bubble']);
+    expect(reads).not.toContain('composerData:b');
+    expect(s.status().lastPollAt).toBeNull();
+    expect(stats.closes).toBe(stats.opens);
+  });
+
+  test('a poke during a running round is served by one more round; rounds never overlap', async () => {
+    fx.put({ id: 'a', bubbles: [userBubble('a1', 'go')] });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const ingest = sink.ingestRecords.bind(sink);
+    sink.ingestRecords = async (batch) => {
+      await gate;
+      return ingest(batch);
+    };
+    const { stats, openDb } = instrumented();
+    const s = await started({ openDb });
+    const round = s.pollOnce();
+    await tick();
+    await tick();
+    s.poke('a');
+    s.poke('a');
+    const extra = s.pollOnce(); // queued behind the poked round
+    release();
+    await round;
+    await extra;
+    expect(reads.filter((r) => r === 'composerData:a')).toHaveLength(2); // first round + the poked round
+    expect(stats.overlapped).toBe(false);
+    expect(stats.opens).toBe(3);
+  });
+
+  test('nested subagents: a child read before its parent waits for the parent root, then joins the session', async () => {
+    fx.put({ id: 'root', lastUpdatedAt: T0, bubbles: [userBubble('r1', 'go')] });
+    fx.put({
+      id: 'child',
+      isSubagent: true,
+      lastUpdatedAt: T0 + 1,
+      subagentInfo: { parentComposerId: 'root', rootParentConversationId: 'root', toolCallId: 't1' },
+      bubbles: [userBubble('c1', 'x')],
+    });
+    // newer than its parent (read first), and no rootParentConversationId
+    fx.put({ id: 'grand', isSubagent: true, lastUpdatedAt: T0 + 2, subagentInfo: { parentComposerId: 'child', toolCallId: 't2' }, bubbles: [userBubble('g1', 'y')] });
+    const s = await started();
+    await s.pollOnce();
+    expect(sink.batches.find((b) => b.key === 'cursor:grand')).toMatchObject({ sessionId: 'root', agentId: 'grand' });
+    expect(sink.failures.size).toBe(0);
+  });
+
+  test('a nested subagent whose parent is not readable is not guessed: it waits, without a failure', async () => {
+    fx.put({ id: 'root', bubbles: [userBubble('r1', 'go')] });
+    fx.put({ id: 'mid', isSubagent: true, withData: false });
+    fx.put({ id: 'leaf', isSubagent: true, subagentInfo: { parentComposerId: 'mid', toolCallId: 't' }, bubbles: [userBubble('l1', 'x')] });
+    const s = await started();
+    await s.pollOnce();
+    expect(sink.batches.map((b) => b.key)).toEqual(['cursor:root']);
+    expect(sink.failures.size).toBe(0);
+    // mid becomes readable later, naming the root: leaf follows in the same round
+    fx.update('mid', {
+      withData: true,
+      lastUpdatedAt: T0 + 5,
+      subagentInfo: { parentComposerId: 'root', rootParentConversationId: 'root', toolCallId: 'tm' },
+      bubbles: [userBubble('m1', 'z')],
+    });
+    await s.pollOnce();
+    expect(sink.batches.find((b) => b.key === 'cursor:leaf')).toMatchObject({ sessionId: 'root', agentId: 'leaf' });
+  });
+
+  test('a root without composerData: nothing stored for it or its subagents, no failure', async () => {
+    fx.put({ id: 'root', withData: false });
+    fx.put({ id: 'sub', isSubagent: true, subagentInfo: { rootParentConversationId: 'root', toolCallId: 't' }, bubbles: [userBubble('s1', 'x')] });
+    const s = await started();
+    await s.pollOnce();
+    await s.pollOnce();
+    expect(sink.calls).toEqual([]);
+    expect(sink.failures.size).toBe(0);
+    expect(s.status().lastError).toBeNull();
+  });
+
+  test('the database file deleted, then replaced, between rounds', async () => {
+    fx.put({ id: 'c', bubbles: [userBubble('u1', 'go')] });
+    const s = await started();
+    await s.pollOnce();
+    sink.reset();
+    const dir = path.dirname(fx.dbPath);
+    fx.close();
+    for (const f of fs.readdirSync(dir)) fs.rmSync(path.join(dir, f));
+    await s.pollOnce(); // gone: Cursor "not installed", nothing marked
+    expect(sink.calls).toEqual([]);
+    expect(s.status().lastError).toBeNull();
+    fx = new CursorDbFixture(path.join(tmp, 'Cursor'));
+    fx.put({ id: 'n', bubbles: [userBubble('n1', 'new')] });
+    await s.pollOnce();
+    expect(sink.calls).toEqual(['deleted c', 'ingest cursor:n composer,bubble']);
+  });
+
+  test('yields to the event loop between conversations and inside a long conversation', async () => {
+    fx.put({ id: 'a', lastUpdatedAt: T0 + 2, bubbles: [userBubble('a1', 'go')] });
+    const many = [userBubble('b0', 'go')];
+    for (let i = 1; i < 12; i += 1) many.push(textBubble(`b${i}`, `t${i}`, T0 + i));
+    fx.put({ id: 'b', lastUpdatedAt: T0 + 1, bubbles: many });
+    let fired = false;
+    let firedMidConversation = false;
+    const { openDb } = instrumented({
+      bubble: (id, b) => {
+        if (id !== 'b') return null;
+        if (b === 'b0') setImmediate(() => (fired = true));
+        if (b === 'b11') firedMidConversation = fired;
+        const until = performance.now() + 3; // a slow lookup
+        while (performance.now() < until) {
+          // busy
+        }
+        return null;
+      },
+    });
+    let ticked = false;
+    let tickedBeforeB = false;
+    const ingest = sink.ingestRecords.bind(sink);
+    sink.ingestRecords = async (batch) => {
+      if (batch.key === 'cursor:a') setImmediate(() => (ticked = true));
+      if (batch.key === 'cursor:b') tickedBeforeB = ticked;
+      return ingest(batch);
+    };
+    const s = await started({ openDb });
+    await s.pollOnce();
+    expect(tickedBeforeB).toBe(true); // between conversations
+    expect(firedMidConversation).toBe(true); // 12 lookups of 3 ms exceed the 10 ms budget
   });
 });

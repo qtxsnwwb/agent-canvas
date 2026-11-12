@@ -14,6 +14,13 @@ const str = (v: unknown): string | null => (typeof v === 'string' && v !== '' ? 
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 const obj = (v: unknown): Obj => (isObject(v) ? v : {});
 
+/** JSON with object keys sorted at every level, so equal content gives equal text. */
+export function stableJson(v: unknown): string {
+  return JSON.stringify(v, (_key, value: unknown) =>
+    isObject(value) ? Object.fromEntries(Object.keys(value).sort().map((k) => [k, value[k]])) : value,
+  );
+}
+
 /** At most `maxBytes` of UTF-8, cut at a code point boundary. */
 export function capUtf8(s: string, maxBytes: number = CURSOR_TEXT_CAP_BYTES): { text: string; cut: boolean } {
   if (s.length * 3 <= maxBytes || Buffer.byteLength(s, 'utf8') <= maxBytes) return { text: s, cut: false };
@@ -94,8 +101,9 @@ export function trimBubble(raw: unknown, bubbleId: string, order: number): strin
 export function bubbleRecord(raw: unknown, bubbleId: string, order: number): CursorBubbleRecord {
   const b = obj(raw);
   const truncated: string[] = [];
-  const capped = (name: string, v: unknown): string | null => {
-    const s = str(v);
+  const capped = (name: string, v: unknown, jsonValue = false): string | null => {
+    // params / result are JSON text in practice; an object (never seen) is kept as stable JSON rather than dropped.
+    const s = jsonValue && typeof v === 'object' && v !== null ? stableJson(v) : str(v);
     if (s === null) return null;
     const { text, cut } = capUtf8(s);
     if (cut) truncated.push(name);
@@ -111,8 +119,8 @@ export function bubbleRecord(raw: unknown, bubbleId: string, order: number): Cur
           name: str(tool.name),
           status: str(tool.status),
           toolCallId: str(tool.toolCallId),
-          params: capped('params', tool.params),
-          result: capped('result', tool.result),
+          params: capped('params', tool.params, true),
+          result: capped('result', tool.result, true),
         };
   const tokens = isObject(b.tokenCount) ? b.tokenCount : null;
   return {

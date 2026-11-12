@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import { ProjectIdResolver } from '../project-ids.js';
 import type { PollRecord, PollSink, PollSource, PollStatus } from '../poll.js';
 import { KEY_PREFIXES } from '../source.js';
-import { openCursorDb, type CursorDbReader, type DbResult, type HeaderRow } from './db.js';
+import { isDatabaseLevelError, openCursorDb, type CursorDbReader, type DbResult, type HeaderRow } from './db.js';
 import { cursorCwd, cursorProjectId, workspaceStorageDir } from './project.js';
 import { CURSOR_RECORD_TYPES } from './records.js';
 import { bubbleEntriesOf, bubbleFinished, bubbleRecord, isObject, subagentInfoOf, trimComposer } from './trim.js';
@@ -16,8 +16,17 @@ export const RECENT_MS = 10 * 60 * 1000;
 export const TAIL_BUBBLES = 20;
 /** Records per ingestRecords call (a conversation's first import is split into batches of this size). */
 const BATCH_RECORDS = 256;
-/** Bubble lookups between two yields to the event loop. */
-const READS_PER_YIELD = 256;
+/** Wall time a round may run before it yields to the event loop (checked per lookup, conversation and batch). */
+const YIELD_BUDGET_MS = 10;
+/** Consecutive failed KV lookups after which the round is abandoned whatever the error. */
+export const MAX_FAILED_LOOKUPS = 3;
+
+/** A database-level failure during a round: the round ends with lastError; no conversation is blamed. */
+class RoundAbort extends Error {
+  constructor(readonly cause: Error) {
+    super(cause.message);
+  }
+}
 
 export interface PollTimers {
   set(fn: () => void, ms: number): unknown;
@@ -104,6 +113,8 @@ export class CursorSource implements PollSource {
   private firstRound = true;
   private lastPollAt: string | null = null;
   private lastError: string | null = null;
+  private failedLookups = 0;
+  private lastYield = 0;
 
   private readonly conv = new Map<string, ConvState>();
   /** Subagent composer id -> its root conversation id (never changes). */
@@ -180,6 +191,27 @@ export class CursorSource implements PollSource {
     }
   }
 
+  /** Yields to the event loop once this round has run for YIELD_BUDGET_MS of wall time since the last yield. */
+  private async breathe(force = false): Promise<void> {
+    if (!force && performance.now() - this.lastYield < YIELD_BUDGET_MS) return;
+    await yieldNow();
+    this.lastYield = performance.now();
+  }
+
+  /**
+   * One KV lookup. A failure counts towards MAX_FAILED_LOOKUPS consecutive ones; a database-level failure, or reaching
+   * that count, ends the round (RoundAbort). Other failures throw for the conversation being read.
+   */
+  private lookup<T>(result: DbResult<T>): T {
+    if (result.ok) {
+      this.failedLookups = 0;
+      return result.value;
+    }
+    this.failedLookups += 1;
+    if (isDatabaseLevelError(result.error) || this.failedLookups >= MAX_FAILED_LOOKUPS) throw new RoundAbort(result.error);
+    throw result.error;
+  }
+
   private async roundWith(sink: PollSink): Promise<void> {
     let exists = false;
     try {
@@ -203,7 +235,17 @@ export class CursorSource implements PollSource {
         this.lastError = `cannot read Cursor conversations: ${headers.error.message}`;
         return;
       }
-      await this.process(sink, db, headers.value);
+      this.failedLookups = 0;
+      this.lastYield = performance.now();
+      let completed: boolean;
+      try {
+        completed = await this.process(sink, db, headers.value);
+      } catch (err) {
+        if (!(err instanceof RoundAbort)) throw err;
+        this.lastError = `Cursor database unavailable, round abandoned: ${err.cause.message}`;
+        return;
+      }
+      if (!completed) return; // cut short by stop(): not a completed poll
       this.lastPollAt = new Date(this.now()).toISOString();
       this.lastError = null;
     } finally {
@@ -213,12 +255,15 @@ export class CursorSource implements PollSource {
 
   // ---------------------------------------------------------------- one round
 
-  private async process(sink: PollSink, db: CursorDbReader, headers: HeaderRow[]): Promise<void> {
-    const first = this.firstRound;
-    this.firstRound = false;
-    if (first) {
+  /** One round over the read headers. False when stop() cut it short. Throws RoundAbort on a database-level failure. */
+  private async process(sink: PollSink, db: CursorDbReader, headers: HeaderRow[]): Promise<boolean> {
+    // Stored sessions of earlier runs, loaded once; retried next round when the sink fails.
+    let first = false;
+    if (this.firstRound) {
       try {
         for (const id of sink.storedSessionIds()) this.held.add(id);
+        this.firstRound = false;
+        first = true;
       } catch (err) {
         sink.reportFailure(`${PREFIX}poll`, err);
       }
@@ -226,18 +271,30 @@ export class CursorSource implements PollSource {
     const roots = headers.filter((h) => !h.isSubagent && !isArchived(h) && !isDraft(h));
     const selected = new Set(roots.map((h) => h.composerId));
 
-    // Archived or gone: mark once, forget what this run read of it (and of its subagents).
-    for (const id of this.held) {
-      if (selected.has(id) || this.marked.has(id)) continue;
-      await sink.markSourceDeleted(id);
-      this.marked.add(id);
-      this.forget(id);
+    // An empty header table while we hold sessions is "nothing known this round" (a database being recreated), not
+    // "everything was deleted".
+    if (headers.length > 0) {
+      // Archived or gone: mark once, forget what this run read of it (and of its subagents).
+      for (const id of this.held) {
+        if (selected.has(id) || this.marked.has(id)) continue;
+        try {
+          await sink.markSourceDeleted(id);
+          this.marked.add(id);
+          this.forget(id);
+        } catch (err) {
+          sink.reportFailure(PREFIX + id, err); // not marked: tried again next round
+        }
+      }
     }
     // Back again (unarchived), or a stored session flagged by an earlier run that is picked now: clear the flag.
     for (const id of selected) {
       if (this.marked.has(id) || (first && this.held.has(id))) {
-        await sink.clearSourceDeleted(id);
-        this.marked.delete(id);
+        try {
+          await sink.clearSourceDeleted(id);
+          this.marked.delete(id);
+        } catch (err) {
+          sink.reportFailure(PREFIX + id, err); // still marked: tried again next round
+        }
       }
     }
 
@@ -245,15 +302,30 @@ export class CursorSource implements PollSource {
     this.pokes.clear();
     const byRecency = (a: HeaderRow, b: HeaderRow): number => (headerUpdatedAt(b) ?? 0) - (headerUpdatedAt(a) ?? 0);
     for (const h of [...roots].sort(byRecency)) {
-      if (this.stopped) return;
-      if (this.due(h, poked.has(h.composerId))) await this.read(sink, db, h, selected);
+      if (this.stopped) return false;
+      if (!this.due(h, poked.has(h.composerId))) continue;
+      await this.breathe(true);
+      if (this.stopped) return false;
+      await this.read(sink, db, h, selected);
     }
-    for (const h of headers.filter((x) => x.isSubagent).sort(byRecency)) {
-      if (this.stopped) return;
-      const root = this.rootOfSub.get(h.composerId);
-      if (root !== undefined && !selected.has(root)) continue;
-      if (this.due(h, root !== undefined && poked.has(root))) await this.read(sink, db, h, selected);
+    const subagentIds = new Set(headers.filter((x) => x.isSubagent).map((x) => x.composerId));
+    let todo = headers.filter((x) => x.isSubagent).sort(byRecency);
+    // A nested subagent read before its parent's root is known waits; the pass repeats while that unblocks some.
+    for (;;) {
+      const waiting: HeaderRow[] = [];
+      for (const h of todo) {
+        if (this.stopped) return false;
+        const root = this.rootOfSub.get(h.composerId);
+        if (root !== undefined && !selected.has(root)) continue;
+        if (!this.due(h, root !== undefined && poked.has(root))) continue;
+        await this.breathe(true);
+        if (this.stopped) return false;
+        if ((await this.read(sink, db, h, selected, subagentIds)) === 'waiting') waiting.push(h);
+      }
+      if (waiting.length === 0 || waiting.length === todo.length) break;
+      todo = waiting;
     }
+    return true;
   }
 
   /** Changed since the last clean read, recently active, poked, or never read by this run. */
@@ -272,15 +344,20 @@ export class CursorSource implements PollSource {
   }
 
   /** Reads one conversation and ingests what changed. Failures stay with this conversation (reportFailure). */
-  private async read(sink: PollSink, db: CursorDbReader, h: HeaderRow, selected: ReadonlySet<string>): Promise<void> {
+  private async read(
+    sink: PollSink,
+    db: CursorDbReader,
+    h: HeaderRow,
+    selected: ReadonlySet<string>,
+    subagentIds: ReadonlySet<string> = new Set(),
+  ): Promise<'waiting' | void> {
     const id = h.composerId;
     const key = PREFIX + id;
     const known = this.conv.get(id);
     const hadRead = known !== undefined && known.composerHash !== null;
     const state = known ?? { lastUpdatedAt: undefined, changedAt: null, composerHash: null, bubbles: new Map<string, BubbleSeen>() };
     try {
-      const text = db.composerData(id);
-      if (!text.ok) throw text.error;
+      const text = { value: this.lookup(db.composerData(id)) };
       if (text.value === null) {
         // No composerData (seen for a few empty conversations): nothing to store; look again when it changes.
         state.lastUpdatedAt = headerUpdatedAt(h);
@@ -302,7 +379,8 @@ export class CursorSource implements PollSource {
       let projectId: string;
       const cwd = cursorCwd(data, h.value, h.workspaceId, this.storageDir);
       if (h.isSubagent) {
-        const root = this.rootOf(data);
+        const root = this.rootOf(data, subagentIds);
+        if (root === undefined) return 'waiting'; // parent is a subagent whose root is not known yet: nothing cached
         if (root === null) {
           // Not a transient read problem: report it, and look again only when the conversation changes.
           state.lastUpdatedAt = headerUpdatedAt(h);
@@ -334,13 +412,11 @@ export class CursorSource implements PollSource {
       const pending: { record: PollRecord; bubbleId: string | null; seen: BubbleSeen | null }[] = [];
       if (composerHash !== state.composerHash) pending.push({ record: { recordType: CURSOR_RECORD_TYPES.composer, line: composerLine }, bubbleId: null, seen: null });
       const unreadable: string[] = [];
-      let reads = 0;
       for (const { bubbleId, order } of entries) {
         const before = state.bubbles.get(bubbleId);
         if (before !== undefined && before.finished && before.order === order && !tail.has(bubbleId)) continue;
-        if (++reads % READS_PER_YIELD === 0) await yieldNow();
-        const raw = db.bubble(id, bubbleId);
-        if (!raw.ok) throw raw.error;
+        await this.breathe();
+        const raw = { value: this.lookup(db.bubble(id, bubbleId)) };
         if (raw.value === null) continue; // listed but not written yet: read again next time
         let parsed: unknown;
         try {
@@ -364,6 +440,7 @@ export class CursorSource implements PollSource {
       }
 
       for (let i = 0; i < pending.length; i += BATCH_RECORDS) {
+        if (i > 0) await this.breathe(true);
         const chunk = pending.slice(i, i + BATCH_RECORDS);
         await sink.ingestRecords({ key, projectId, sessionId, agentId, records: chunk.map((p) => p.record) });
         // Remembered only once stored (a rejected batch committed nothing).
@@ -387,16 +464,24 @@ export class CursorSource implements PollSource {
     } catch (err) {
       state.lastUpdatedAt = undefined;
       this.conv.set(id, state);
+      if (err instanceof RoundAbort) throw err; // the database, not this conversation: no per-conversation failure
       sink.reportFailure(key, err);
     }
   }
 
-  /** The root conversation of a subagent: `rootParentConversationId`, else its parent's root (or the parent). */
-  private rootOf(data: unknown): string | null {
+  /**
+   * The root conversation of a subagent: `rootParentConversationId`; else, when the parent is a main conversation,
+   * the parent; when the parent is a subagent, its root once known (undefined until then: never guessed or cached).
+   * Null when there is no usable id at all.
+   */
+  private rootOf(data: unknown, subagentIds: ReadonlySet<string>): string | null | undefined {
     const info = subagentInfoOf(data);
     if (info === null) return null;
     if (info.rootParentConversationId !== null) return info.rootParentConversationId;
     const parent = info.parentComposerId;
-    return parent === null ? null : (this.rootOfSub.get(parent) ?? parent);
+    if (parent === null) return null;
+    const known = this.rootOfSub.get(parent);
+    if (known !== undefined) return known;
+    return subagentIds.has(parent) ? undefined : parent;
   }
 }

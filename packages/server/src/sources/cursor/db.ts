@@ -32,6 +32,19 @@ const HEADERS_SQL = `SELECT composerId, workspaceId, createdAt, lastUpdatedAt, i
 const KV_SQL = `SELECT value FROM cursorDiskKV WHERE key = ?`;
 
 const toError = (err: unknown): Error => (err instanceof Error ? err : new Error(String(err)));
+
+const DB_LEVEL_CODE = /^SQLITE_(BUSY|LOCKED|IOERR|CORRUPT|NOTADB)/;
+const DB_LEVEL_MESSAGE = /database is closed|database connection is not open|database is locked|disk I\/O error|malformed|not a database/i;
+
+/**
+ * True for a failure of the database as a whole rather than of one record: busy / locked, I/O error, corruption, not a
+ * database, or a closed handle. Such a failure ends the round (lastError) instead of being reported per conversation.
+ */
+export function isDatabaseLevelError(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  if (typeof code === 'string' && DB_LEVEL_CODE.test(code)) return true;
+  return err instanceof Error && DB_LEVEL_MESSAGE.test(err.message);
+}
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : typeof v === 'bigint' ? Number(v) : null);
 const str = (v: unknown): string | null => (typeof v === 'string' && v !== '' ? v : null);
 
