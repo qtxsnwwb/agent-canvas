@@ -50,10 +50,13 @@ export const EXPECTED_CODEX_HOOK_EVENTS: readonly string[] = [
   'Interrupt',
 ];
 
+/** The hook events `claude-canvas hooks install --cursor` registers in `~/.cursor/hooks.json`. */
+export const EXPECTED_CURSOR_HOOK_EVENTS: readonly string[] = ['sessionStart', 'beforeSubmitPrompt', 'stop', 'subagentStop', 'sessionEnd'];
+
 export const EXPECTED_HOOK_EVENTS_BY_ORIGIN: Record<Origin, readonly string[]> = {
   claude: EXPECTED_HOOK_EVENTS,
   codex: EXPECTED_CODEX_HOOK_EVENTS,
-  cursor: [], // Cursor hooks come later
+  cursor: EXPECTED_CURSOR_HOOK_EVENTS,
 };
 
 /** The origin of a file by its store key: Codex files are `codex:`-prefixed, Cursor conversations `cursor:`-prefixed. */

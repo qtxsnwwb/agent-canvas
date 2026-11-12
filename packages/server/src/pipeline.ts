@@ -5,7 +5,9 @@ import { NORMALIZER_FACTORIES, NormalizerRegistry, type NormalizerFactories } fr
 import { NORMALIZER_VERSION } from './normalize/version.js';
 import { ClaudeFileSource } from './sources/claude.js';
 import { encodeProjectId } from './sources/codex/source.js';
+import { fileUriToPath, normaliseCwd } from './sources/cursor/project.js';
 import type { PollBatch, PollSink, PollSource, PollStatus } from './sources/poll.js';
+import { ProjectIdResolver } from './sources/project-ids.js';
 import { isPromise, KEY_PREFIXES, originOfKey, type FileClass, type FileSource, type MaybePromise } from './sources/source.js';
 import { readNewLines } from './sources/transcript/reader.js';
 import type { RawEvent, Store, StoredRawEvent } from './store/store.js';
@@ -20,6 +22,18 @@ const HYDRATE_PAGE_BYTES = 256 * 1024;
 const LIVE_STATUSES: ReadonlySet<string> = new Set(['running', 'awaiting_permission', 'awaiting_input']);
 const UNKNOWN_PROJECT = 'unknown';
 const REBUILD_PROGRESS_EVERY = 100;
+
+/**
+ * A Cursor hook's workspace root as a local directory spelled as the Cursor source spells a working directory: a
+ * `file://` URI becomes a path, `/d:/x` becomes `d:\x`, then normaliseCwd (drive letter upper-cased, trailing separator
+ * removed). Null for a URI that names no local path.
+ */
+function cursorRootPath(root: string): string | null {
+  let p: string | null = root;
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(root)) p = fileUriToPath(root);
+  else if (/^\/[A-Za-z]:([\\/]|$)/.test(root)) p = root.slice(1).replace(/\//g, '\\');
+  return p === null || p === '' ? null : normaliseCwd(p);
+}
 /** At most one failure log line per file (or hook session) per minute. */
 const LOG_EVERY_MS = 60_000;
 
@@ -115,6 +129,8 @@ export class Pipeline {
   private lastHook: string | null = null;
   /** Hook events already inserted into raw_event (so a failed task does not insert them twice). */
   private readonly persistedHooks = new WeakSet<object>();
+  /** Project ids of Cursor hooks for sessions the store does not know (the stored sessions' ids, case-insensitively reused). */
+  private readonly cursorProjects = new ProjectIdResolver(() => this.store.sessionProjectIds());
   private flagsChecked = false;
   /** Absolute paths whose last classification threw (reported); cleared, with the failure, once one succeeds. */
   private readonly classifyFailed = new Set<string>();
@@ -255,6 +271,8 @@ export class Pipeline {
   /**
    * `transcriptPath` is the payload's `transcript_path`: when the source of `origin` knows it as a session or agent
    * transcript, its project is stored with the raw event (so replay reproduces it) and used for a new session.
+   * Cursor: `sessionId` is the payload's conversation id and `from.cwd` its first workspace root; a known subagent
+   * conversation's hook is filed under (and pokes) its root session (cursorHookTarget).
    */
   ingestHook(
     eventName: string,
@@ -266,12 +284,15 @@ export class Pipeline {
   ): void {
     const receivedAt = new Date().toISOString();
     const source = this.sourceFor(origin);
-    const projectId =
-      origin === 'codex'
-        ? this.codexHookProject(sessionId, transcriptPath ?? null, from)
-        : source !== null && typeof transcriptPath === 'string' && transcriptPath !== ''
-          ? source.projectOfTranscript(transcriptPath)
-          : null;
+    let projectId: string | null;
+    if (origin === 'cursor') ({ sessionId, projectId } = this.cursorHookTarget(sessionId, from.cwd));
+    else
+      projectId =
+        origin === 'codex'
+          ? this.codexHookProject(sessionId, transcriptPath ?? null, from)
+          : source !== null && typeof transcriptPath === 'string' && transcriptPath !== ''
+            ? source.projectOfTranscript(transcriptPath)
+            : null;
     const event: RawEvent = { source: 'hook', origin, receivedAt, eventName, sessionId, payload, projectId };
     this.pokePoll(origin, sessionId);
     this.seed();
@@ -301,7 +322,7 @@ export class Pipeline {
         (!this.normalizer.hasSession(sessionId) &&
           (this.store.getSession(sessionId) !== null ||
             (this.normalizer.needsPreSessionReplay(sessionId) && this.store.hasRawForSession(sessionId)))));
-    if (!needsQueue) {
+    if (!needsQueue || sessionId === null) {
       try {
         this.applyHook(event);
         this.failures.delete(key);
@@ -640,6 +661,24 @@ export class Pipeline {
 
   private sourceFor(origin: Origin): FileSource | null {
     return this.sources.find((s) => s.origin === origin) ?? null;
+  }
+
+  /**
+   * Session and project of a Cursor hook, decided once on arrival and stored with the raw event (replay uses the stored
+   * values). Session: the conversation id, or — when the store already holds records of that conversation as a subagent
+   * (`cursor:<id>` owned by another session) — its root session. Project: the session's own when the store knows the
+   * session (a hook never moves it); else the first workspace root encoded as the Cursor source encodes a working
+   * directory (reusing a known project id that differs only in letter case); else null.
+   */
+  private cursorHookTarget(conversationId: string | null, workspaceRoot: string | null): { sessionId: string | null; projectId: string | null } {
+    if (conversationId === null) return { sessionId: null, projectId: null };
+    const owner = this.store.transcriptFileOwner(`${KEY_PREFIXES.cursor}${conversationId}`);
+    const sessionId = owner?.sessionId ?? conversationId;
+    const stored = this.store.getSession(sessionId)?.projectId ?? null;
+    if (stored !== null && stored !== UNKNOWN_PROJECT) return { sessionId, projectId: stored };
+    if (owner?.projectId != null && owner.projectId !== UNKNOWN_PROJECT) return { sessionId, projectId: owner.projectId };
+    const cwd = workspaceRoot === null ? null : cursorRootPath(workspaceRoot);
+    return { sessionId, projectId: cwd === null ? null : this.cursorProjects.forCwd(cwd) };
   }
 
   /**

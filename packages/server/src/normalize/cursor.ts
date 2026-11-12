@@ -13,6 +13,7 @@ import {
   type BubbleView,
   type ComposerFacts,
 } from './cursor-bubbles.js';
+import { parseCursorHook } from './cursor-hooks.js';
 import type { AgentNormalizer, NormalizeResult } from './types.js';
 
 /*
@@ -27,6 +28,8 @@ import type { AgentNormalizer, NormalizeResult } from './types.js';
  * longer produces. Nodes, edges and the session are therefore a function of the records read so far, whatever their
  * order. (One exception, kept on purpose: a bubble whose newer record has a shape that makes no node keeps the node of
  * its last recognised shape; nodes are never removed.)
+ *
+ * Hooks (spec 7.3) only leave a session-level mark (HookMark); the session status combines it with the records.
  */
 
 const EPOCH = '1970-01-01T00:00:00.000Z';
@@ -36,6 +39,27 @@ const ABORTED_NOTE = 'Aborted: the conversation was stopped while the tool was s
 const NEVER_FINISHED_NOTE = 'Never finished: the turn ended while the tool was still running.';
 /** A derivation saves a scan checkpoint before every CHECKPOINT_EVERY-th bubble of a thread. */
 const CHECKPOINT_EVERY = 32;
+/** How many sessions that exist only as hook marks (no record, no session yet) are remembered (as for Codex). */
+const MAX_UNSEEN_HOOK_SESSIONS = 200;
+
+/**
+ * The latest session-level mark the hooks of a conversation left: `started` (beforeSubmitPrompt), `stopped` (stop),
+ * `ended` (sessionEnd), `resumed` (sessionStart: the conversation exists again, without saying that a turn runs).
+ * "Latest" is by the hook's time: the receive time stored with the raw event (Cursor's payloads carry no time of their
+ * own), so a replay gives the same mark; a later-applied hook wins a tie. Kept outside SessionState so a hook received
+ * before its session's first record still counts once the session appears.
+ */
+interface HookMark {
+  kind: 'started' | 'stopped' | 'ended' | 'resumed';
+  atMs: number;
+}
+
+const MARK_OF_EVENT: Readonly<Record<string, HookMark['kind']>> = {
+  beforeSubmitPrompt: 'started',
+  stop: 'stopped',
+  sessionEnd: 'ended',
+  sessionStart: 'resumed',
+};
 
 interface Turn {
   /** The prompt node that opened it; null for bubbles before the thread's first prompt. */
@@ -273,6 +297,10 @@ function nodePatch(old: GraphNode, next: GraphNode): Partial<GraphNode> {
 export class CursorNormalizer implements AgentNormalizer {
   private readonly sessions = new Map<string, SessionState>();
   private readonly checkpointEvery: number;
+  /** Latest hook mark per session id; may exist before the session does (see HookMark). */
+  private readonly hookMarks = new Map<string, HookMark>();
+  /** Sessions without state whose hook mark was restored by restorePreSession. */
+  private readonly preSessionRestored = new Set<string>();
 
   /** `checkpointEvery` (tests): checkpoint spacing; Infinity derives every changed thread in full. */
   constructor(options: { checkpointEvery?: number } = {}) {
@@ -280,11 +308,11 @@ export class CursorNormalizer implements AgentNormalizer {
   }
 
   apply(event: RawEvent, projectId: string): NormalizeResult {
-    // Hooks are Task 5 (session-level marks); meta events are not produced for Cursor.
-    if (event.source !== 'transcript') return { changes: [] };
+    // Meta events are not produced for Cursor.
+    if (event.source === 'meta') return { changes: [] };
     const changes: Change[] = [];
     try {
-      const unknown = this.applyRecord(event, projectId, changes);
+      const unknown = event.source === 'hook' ? this.applyHook(event, changes) : this.applyRecord(event, projectId, changes);
       return unknown === undefined ? { changes } : { changes, unknownRecordType: unknown };
     } catch {
       return { changes, unknownRecordType: 'normalizer-error' };
@@ -293,14 +321,26 @@ export class CursorNormalizer implements AgentNormalizer {
 
   dropSession(sessionId: string): void {
     this.sessions.delete(sessionId);
+    this.hookMarks.delete(sessionId);
+    this.preSessionRestored.delete(sessionId);
   }
 
-  /** Nothing is kept for a session before its first record (hooks are not handled yet). */
-  needsPreSessionReplay(_sessionId: string): boolean {
-    return false;
+  /** Before a session's first record the only thing kept is its hook mark. */
+  needsPreSessionReplay(sessionId: string): boolean {
+    return !this.sessions.has(sessionId) && !this.preSessionRestored.has(sessionId);
   }
 
-  restorePreSession(_sessionId: string, _events: Iterable<RawEvent>): void {}
+  /** Restores the hook mark of a session that has no record yet from its stored hooks, in order. */
+  restorePreSession(sessionId: string, events: Iterable<RawEvent>): void {
+    this.dropSession(sessionId);
+    try {
+      for (const ev of events) if (ev.source === 'hook' && ev.sessionId === sessionId) this.recordHook(ev);
+    } catch (err) {
+      this.dropSession(sessionId);
+      throw err;
+    }
+    if (!this.sessions.has(sessionId)) this.preSessionRestored.add(sessionId);
+  }
 
   hasSession(sessionId: string): boolean {
     return this.sessions.has(sessionId);
@@ -416,12 +456,53 @@ export class CursorNormalizer implements AgentNormalizer {
     return thread;
   }
 
+  // ---- hooks (session-level marks only: they never create a session or touch a node) ----
+
+  /** Records the hook's mark and recomputes the status of its session if it exists; returns the unknown label, if any. */
+  private applyHook(event: Extract<RawEvent, { source: 'hook' }>, changes: Change[]): string | undefined {
+    const parsed = parseCursorHook(event.eventName, event.payload);
+    if (!parsed.ok) return parsed.unknownRecordType ?? undefined;
+    this.recordHook(event);
+    const state = event.sessionId === null ? undefined : this.sessions.get(event.sessionId);
+    if (state !== undefined) this.commitSession(state, this.deriveSession(state), changes, false);
+    return undefined;
+  }
+
+  /**
+   * The mark a hook leaves on its session (HookMark). None from subagentStop, from a hook without a session id, or from
+   * a hook of a subagent conversation that the pipeline filed under its root session (its conversation id is not the
+   * session's): a subagent's prompt, stop or end says nothing about the main conversation.
+   */
+  private recordHook(event: Extract<RawEvent, { source: 'hook' }>): void {
+    const sessionId = event.sessionId;
+    if (sessionId === null) return;
+    const parsed = parseCursorHook(event.eventName, event.payload);
+    if (!parsed.ok || parsed.hook.conversationId !== sessionId) return;
+    const kind = MARK_OF_EVENT[parsed.hook.eventName];
+    const atMs = Date.parse(event.receivedAt);
+    if (kind === undefined || Number.isNaN(atMs)) return;
+    const old = this.hookMarks.get(sessionId);
+    if (old !== undefined && atMs < old.atMs) return;
+    this.hookMarks.set(sessionId, { kind, atMs });
+    if (old === undefined) this.pruneUnseenHookMarks();
+  }
+
+  /** Hook marks of sessions that never appear must not pile up: beyond the limit the oldest are dropped. */
+  private pruneUnseenHookMarks(): void {
+    const unseen: string[] = [];
+    for (const id of this.hookMarks.keys()) if (!this.sessions.has(id)) unseen.push(id);
+    for (const id of unseen.slice(0, Math.max(0, unseen.length - MAX_UNSEEN_HOOK_SESSIONS))) this.hookMarks.delete(id);
+  }
+
   // ---- session ----
 
   /**
-   * The session as a function of the records: title = the root composer's name, else its first prompt with text; cwd
-   * from the root composer; created = the root composer's createdAt, else the earliest bubble; last activity = the
-   * latest bubble time of any thread; status = running while the root conversation's last turn is open, else idle.
+   * The session as a function of the records and the hook mark: title = the root composer's name, else its first
+   * prompt with text; cwd from the root composer; created = the root composer's createdAt, else the earliest bubble;
+   * last activity = the latest bubble time of any thread. Status (spec 6 and 7.3), whatever order records and hooks
+   * arrived in: the latest hook mark is `ended` → ended; else the root conversation's last turn is open in the records
+   * → running; else the latest mark is `started` and newer than the session's latest bubble (a prompt was submitted and
+   * nothing of it has been read from the database yet) → running; else idle.
    */
   private deriveSession(state: SessionState): Session {
     const rootId = state.session.id;
@@ -436,12 +517,18 @@ export class CursorNormalizer implements AgentNormalizer {
     }
     const startedMs = root?.composer?.createdAt ?? minMs;
     const startedAt = isoOf(startedMs) ?? EPOCH;
+    const mark = this.hookMarks.get(rootId);
+    let status: Session['status'];
+    if (mark?.kind === 'ended') status = 'ended';
+    else if (ra?.open) status = 'running';
+    else if (mark?.kind === 'started' && (maxMs === null || mark.atMs > maxMs)) status = 'running';
+    else status = 'idle';
     return {
       ...state.session,
       projectId: state.projectId,
       cwd: root?.composer?.cwd ?? null,
       title: root?.composer?.name ?? ra?.firstPromptTitle ?? null,
-      status: ra?.open ? 'running' : 'idle',
+      status,
       startedAt,
       lastActivityAt: isoOf(maxOf(maxMs, startedMs)) ?? startedAt,
     };

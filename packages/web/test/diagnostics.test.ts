@@ -250,9 +250,19 @@ test('cursorPollLine：相对时间，null 是“尚未轮询”', () => {
   expect(cursorPollLine('nonsense', NOW)).toBe('时间无法识别');
 });
 
-test('cursorHooks：Cursor 的事件、最近时间；没有 hook 时 events 为空', () => {
-  expect(cursorHooks(base)).toEqual({ origin: 'cursor', events: [], missing: [], lastAt: null });
+test('cursorHooks：Cursor 的事件、最近时间；没有 hook 时 events 为空，五个安装的事件都算缺少', () => {
+  expect(cursorHooks(base)).toEqual({
+    origin: 'cursor',
+    events: [],
+    missing: ['sessionStart', 'beforeSubmitPrompt', 'stop', 'subagentStop', 'sessionEnd'],
+    lastAt: null,
+  });
   const h = cursorHooks({ ...base, hookEvents: [{ origin: 'claude', eventName: 'Stop', count: 1, lastAt: at(5) }, cursorHook] });
   expect(h.events.map((e) => e.eventName)).toEqual(['stop']);
+  expect(h.missing).toEqual(['sessionStart', 'beforeSubmitPrompt', 'subagentStop', 'sessionEnd']);
   expect(h.lastAt).toBe(at(1));
+});
+
+test('EXPECTED_HOOK_EVENTS_BY_ORIGIN.cursor 与 hooks install --cursor 安装的五个事件一致', () => {
+  expect([...EXPECTED_HOOK_EVENTS_BY_ORIGIN.cursor]).toEqual(['sessionStart', 'beforeSubmitPrompt', 'stop', 'subagentStop', 'sessionEnd']);
 });

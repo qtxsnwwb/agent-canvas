@@ -15,6 +15,7 @@ import {
   type ServerMessage,
 } from '@claude-canvas/shared';
 import type { Config } from '../config.js';
+import { cursorHookConversationId, cursorHookWorkspaceRoot, sanitizeCursorHookPayload } from '../normalize/cursor-hooks.js';
 import { NORMALIZER_VERSION } from '../normalize/version.js';
 import type { Pipeline } from '../pipeline.js';
 import type { Store } from '../store/store.js';
@@ -310,7 +311,13 @@ export function buildServer(deps: { store: Store; pipeline: Pipeline; config: Co
           const sessionId = typeof obj.session_id === 'string' ? obj.session_id : null;
           const transcriptPath = typeof obj.transcript_path === 'string' ? obj.transcript_path : null;
           if (origin === 'claude') pipeline.ingestHook(eventName, sessionId, text, transcriptPath);
-          else {
+          else if (origin === 'cursor') {
+            // Cursor: the conversation id is the session id; the payload is stored without the user's e-mail address.
+            pipeline.ingestHook(eventName, cursorHookConversationId(obj), sanitizeCursorHookPayload(text), null, origin, {
+              cwd: cursorHookWorkspaceRoot(obj),
+              agentId: null,
+            });
+          } else {
             const cwd = typeof obj.cwd === 'string' && obj.cwd !== '' ? obj.cwd : null;
             const agentId = typeof obj.agent_id === 'string' && obj.agent_id !== '' ? obj.agent_id : null;
             pipeline.ingestHook(eventName, sessionId, text, transcriptPath, origin, { cwd, agentId });

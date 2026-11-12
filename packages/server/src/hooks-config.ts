@@ -15,6 +15,11 @@ export interface HookTarget {
   isOurs(hook: unknown): boolean;
   /** One of ours that no longer matches what install would write (install replaces it). Absent: never. */
   isOutdated?(hook: unknown): boolean;
+  /**
+   * The event arrays hold handlers directly (Cursor: `hooks.<event>: [{ command, timeout }]`) instead of matcher groups
+   * (`{ hooks: [handler] }`); `entry` then returns the handler itself.
+   */
+  flat?: boolean;
 }
 
 /** The hook events claude-canvas listens to; same order as docs/hooks-snippet.json. */
@@ -91,8 +96,14 @@ function readHooks(settings: unknown, events: readonly string[]): { root: Obj; h
   return { root, hooks };
 }
 
+/** The handlers of one entry of an event array: the entry itself for a flat target. */
+function handlersOf(target: HookTarget, entry: unknown): unknown[] | null {
+  return target.flat === true ? [entry] : entryHooks(entry);
+}
+
 /** The entries without the handlers `drop` selects; an entry left with no handler goes too. */
-function withoutHandlers(entries: unknown[], drop: (hook: unknown) => boolean): unknown[] {
+function withoutHandlers(entries: unknown[], drop: (hook: unknown) => boolean, flat = false): unknown[] {
+  if (flat) return entries.filter((e) => !drop(e));
   const kept: unknown[] = [];
   for (const entry of entries) {
     const list = entryHooks(entry);
@@ -119,13 +130,13 @@ export function planInstallFor(target: HookTarget, settings: unknown): InstallPl
   const outdated = (h: unknown): boolean => target.isOurs(h) && (target.isOutdated?.(h) ?? false);
   for (const event of target.events) {
     let existing = nextHooks[event] as unknown[] | undefined;
-    const ours = existing?.flatMap((entry) => (entryHooks(entry) ?? []).filter((h) => target.isOurs(h))) ?? [];
+    const ours = existing?.flatMap((entry) => (handlersOf(target, entry) ?? []).filter((h) => target.isOurs(h))) ?? [];
     if (ours.some((h) => !outdated(h))) {
       alreadyPresent.push(event);
       continue;
     }
     if (existing !== undefined && ours.length > 0) {
-      existing = withoutHandlers(existing, outdated);
+      existing = withoutHandlers(existing, outdated, target.flat === true);
       setOwn(nextHooks, event, existing);
       replaced.push(event);
     } else added.push(event);
@@ -145,8 +156,8 @@ export function planUninstallFor(target: HookTarget, settings: unknown): Uninsta
   const nextHooks = next.hooks as Obj;
   for (const [event, value] of Object.entries(nextHooks)) {
     if (!Array.isArray(value)) continue;
-    if (!value.some((entry) => entryHooks(entry)?.some((h) => target.isOurs(h)))) continue;
-    const kept = withoutHandlers(value, (h) => target.isOurs(h));
+    if (!value.some((entry) => handlersOf(target, entry)?.some((h) => target.isOurs(h)))) continue;
+    const kept = withoutHandlers(value, (h) => target.isOurs(h), target.flat === true);
     removed.push(event);
     if (kept.length > 0) setOwn(nextHooks, event, kept);
     else delete nextHooks[event];
@@ -349,4 +360,138 @@ export function codexHookTarget(spec: CodexForwardSpec): HookTarget {
     isOurs: (hook) => nodes(hook).length > 0,
     isOutdated: (hook) => nodes(hook).some((n) => n === null || !samePath(n, spec.nodePath)),
   };
+}
+
+// ---------------------------------------------------------------- Cursor
+
+/** The Cursor hook events claude-canvas installs (spec 7.2): observation-only, never a permission hook. */
+export const CURSOR_HOOK_EVENTS: readonly string[] = ['sessionStart', 'beforeSubmitPrompt', 'stop', 'subagentStop', 'sessionEnd'];
+
+export const CURSOR_HOOK_TIMEOUT_SECONDS = 5;
+
+/** Characters PowerShell treats specially inside a double-quoted string (the typographic quotes count as `"`). */
+const POWERSHELL_DQ_SPECIAL = /[`$"“”„]/g;
+
+/** One argument for PowerShell: double-quoted, with `` ` ``, `$` and the double quotes escaped by a backtick. */
+export function powershellQuote(arg: string): string {
+  return `"${arg.replace(POWERSHELL_DQ_SPECIAL, (c) => `\`${c}`)}"`;
+}
+
+const isDq = (c: string): boolean => c === '"' || c === '“' || c === '”' || c === '„';
+const isSq = (c: string): boolean => c === "'" || c === '‘' || c === '’' || c === '‚' || c === '‛';
+
+/**
+ * Splits a PowerShell command line into words, enough to read back what powershellQuote writes: double-quoted strings
+ * (backtick escapes, `""` for a quote), single-quoted strings (literal, `''` for a quote), bare words split at
+ * whitespace. Variables are not expanded.
+ */
+export function splitPowerShell(line: string): string[] {
+  const out: string[] = [];
+  let cur = '';
+  let inWord = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i]!;
+    if (isDq(c)) {
+      inWord = true;
+      for (i++; i < line.length; i++) {
+        const d = line[i]!;
+        if (d === '`' && i + 1 < line.length) cur += line[++i];
+        else if (isDq(d)) {
+          if (i + 1 < line.length && isDq(line[i + 1]!)) cur += line[++i];
+          else break;
+        } else cur += d;
+      }
+    } else if (isSq(c)) {
+      inWord = true;
+      for (i++; i < line.length; i++) {
+        const d = line[i]!;
+        if (isSq(d)) {
+          if (i + 1 < line.length && isSq(line[i + 1]!)) cur += line[++i];
+          else break;
+        } else cur += d;
+      }
+    } else if (c === '`' && i + 1 < line.length) {
+      cur += line[++i];
+      inWord = true;
+    } else if (/\s/.test(c)) {
+      if (inWord) out.push(cur);
+      cur = '';
+      inWord = false;
+    } else {
+      cur += c;
+      inWord = true;
+    }
+  }
+  if (inWord) out.push(cur);
+  return out;
+}
+
+/**
+ * The forwarder command Cursor runs: on Windows Cursor runs it through PowerShell, so a quoted executable needs the
+ * call operator (`& "<node>" "<cli.js>" hook-forward --origin cursor --port <n>`); elsewhere a shell command line with
+ * single-quoted paths.
+ */
+export function cursorForwardCommand(spec: CodexForwardSpec): string {
+  const args = `hook-forward --origin cursor --port ${spec.port}`;
+  if ((spec.platform ?? process.platform) === 'win32') return `& ${powershellQuote(spec.nodePath)} ${powershellQuote(spec.cliPath)} ${args}`;
+  return `${posixQuote(spec.nodePath)} ${posixQuote(spec.cliPath)} ${args}`;
+}
+
+/** The PowerShell call form (`& …`) or a plain command line, split accordingly. */
+function splitCursorCommand(cmd: string): { words: string[]; callForm: boolean } {
+  const trimmed = cmd.trimStart();
+  if (trimmed.startsWith('&')) return { words: splitPowerShell(trimmed.slice(1)), callForm: true };
+  return { words: splitPosix(trimmed), callForm: false };
+}
+
+/**
+ * Cursor: one `{ command, timeout }` per event, directly in the event's array. Ours = a handler whose `command` (the
+ * PowerShell call form, or a plain command line) has this installation's cli.js as a word, `hook-forward` right after
+ * it, and the forwarder's origin `cursor` and port (`--port n`, `--port=n`, default 4317) equal to ours; paths compare
+ * case-insensitively on win32. Outdated = ours, but the node word is missing or not the current node binary, or the
+ * command is not in this platform's form (the call form on Windows, a plain command line elsewhere).
+ */
+export function cursorHookTarget(spec: CodexForwardSpec): HookTarget {
+  const command = cursorForwardCommand(spec);
+  const win = (spec.platform ?? process.platform) === 'win32';
+  const norm = (p: string): string => (win ? p.replace(/\//g, BACKSLASH).toLowerCase() : p);
+  const samePath = (a: string, b: string): boolean => norm(a) === norm(b);
+  /** undefined = not ours; else whether it is outdated. */
+  const inspect = (hook: unknown): boolean | undefined => {
+    if (!isPlainObject(hook) || typeof hook.command !== 'string') return undefined;
+    const { words, callForm } = splitCursorCommand(hook.command);
+    const at = words.findIndex((w) => samePath(w, spec.cliPath));
+    if (at === -1 || words[at + 1] !== 'hook-forward') return undefined;
+    const fwd = parseForwardArgs(words.slice(at + 2));
+    if (fwd.origin !== 'cursor' || fwd.port !== spec.port) return undefined;
+    const node = at > 0 ? words[at - 1]! : null;
+    return node === null || !samePath(node, spec.nodePath) || callForm !== win;
+  };
+  return {
+    events: CURSOR_HOOK_EVENTS,
+    flat: true,
+    entry: () => ({ command, timeout: CURSOR_HOOK_TIMEOUT_SECONDS }),
+    isOurs: (hook) => inspect(hook) !== undefined,
+    isOutdated: (hook) => inspect(hook) === true,
+  };
+}
+
+/** Cursor's hooks.json carries `version: 1`; any other value is a format we do not know and refuse to write. */
+function checkCursorVersion(settings: unknown): void {
+  if (!isPlainObject(settings) || !('version' in settings)) return;
+  if (settings.version !== 1) throw new SettingsShapeError('hooks.json 的 version 不是 1（键 version 的形状不对），未知格式');
+}
+
+/** planInstallFor plus Cursor's `version`: refused when it is not 1, added (as the first key) only when absent. */
+export function planCursorInstall(target: HookTarget, settings: unknown): InstallPlan {
+  checkCursorVersion(settings);
+  const plan = planInstallFor(target, settings);
+  if (!('version' in plan.next)) plan.next = { version: 1, ...plan.next };
+  return plan;
+}
+
+/** planUninstallFor, refusing an unknown `version` (never adds one). */
+export function planCursorUninstall(target: HookTarget, settings: unknown): UninstallPlan {
+  checkCursorVersion(settings);
+  return planUninstallFor(target, settings);
 }

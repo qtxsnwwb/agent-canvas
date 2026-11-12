@@ -130,7 +130,7 @@ describe('cursor origin', () => {
   });
 
   test('NORMALIZER_VERSION bumped for the cursor origin', () => {
-    expect(NORMALIZER_VERSION).toBe(22);
+    expect(NORMALIZER_VERSION).toBe(23);
   });
 
   test('without a cursor normalizer (factory null) a cursor raw event yields no changes', () => {

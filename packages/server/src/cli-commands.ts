@@ -9,9 +9,12 @@ import { runHookForward } from './hook-forward.js';
 import {
   confirmOnStreams,
   defaultCodexHooksFile,
+  defaultCursorHooksFile,
   defaultSettingsFile,
   runCodexHooksInstall,
   runCodexHooksUninstall,
+  runCursorHooksInstall,
+  runCursorHooksUninstall,
   runHooksInstall,
   runHooksUninstall,
   type HooksCliIo,
@@ -46,8 +49,12 @@ const USAGE = `Usage:
                                      Add the forwarding hooks to Codex's ~/.codex/hooks.json
   claude-canvas hooks uninstall --codex [--port <n>] [--yes] [--settings <file>]
                                      Remove them again
-  claude-canvas hook-forward [--origin <claude|codex>] [--port <n>]
-                                     Forward one hook payload from stdin to the server (run by Codex)
+  claude-canvas hooks install --cursor [--port <n>] [--yes] [--settings <file>]
+                                     Add the forwarding hooks to Cursor's ~/.cursor/hooks.json
+  claude-canvas hooks uninstall --cursor [--port <n>] [--yes] [--settings <file>]
+                                     Remove them again
+  claude-canvas hook-forward [--origin <claude|codex|cursor>] [--port <n>]
+                                     Forward one hook payload from stdin to the server (run by Codex / Cursor)
 `;
 
 /** This installation's cli.js (next to this module in dist/), as written into Codex's hook commands. */
@@ -206,12 +213,17 @@ async function hooksCommand(args: string[], env: NodeJS.ProcessEnv, io: HooksCli
   try {
     const { values } = parseArgs({
       args: rest,
-      options: { port: { type: 'string' }, yes: { type: 'boolean' }, settings: { type: 'string' }, codex: { type: 'boolean' } },
+      options: { port: { type: 'string' }, yes: { type: 'boolean' }, settings: { type: 'string' }, codex: { type: 'boolean' }, cursor: { type: 'boolean' } },
       allowPositionals: false,
     });
     if (values.port !== undefined && !/^[0-9]+$/.test(values.port)) throw new Error(`invalid --port: ${values.port}`);
     const port = values.port === undefined ? loadConfig(env).port : Number(values.port);
     if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`invalid --port: ${values.port}`);
+    if (values.codex === true && values.cursor === true) throw new Error('--codex and --cursor cannot be used together');
+    if (values.cursor === true) {
+      const opts = { settingsFile: values.settings ?? defaultCursorHooksFile(env), port, yes: values.yes === true, nodePath: process.execPath, cliPath };
+      return await (sub === 'install' ? runCursorHooksInstall(opts, io) : runCursorHooksUninstall(opts, io));
+    }
     if (values.codex === true) {
       const opts = { settingsFile: values.settings ?? defaultCodexHooksFile(env), port, yes: values.yes === true, nodePath: process.execPath, cliPath };
       return await (sub === 'install' ? runCodexHooksInstall(opts, io) : runCodexHooksUninstall(opts, io));
@@ -230,7 +242,7 @@ export interface MainDeps {
   env?: NodeJS.ProcessEnv;
   /** stdin of `hook-forward` (default process.stdin). */
   stdin?: NodeJS.ReadableStream;
-  /** cli.js written into Codex's hook commands (default: this installation's). */
+  /** cli.js written into Codex's / Cursor's hook commands (default: this installation's). */
   cliPath?: string;
 }
 

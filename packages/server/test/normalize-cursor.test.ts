@@ -580,7 +580,8 @@ describe('arrival order independence', () => {
     expect(n.sessionCount()).toBe(1);
     n.dropSession(ROOT);
     expect(n.hasSession(ROOT)).toBe(false);
-    expect(n.needsPreSessionReplay(ROOT)).toBe(false);
+    // Task 5: hook marks are kept before a session exists, so a dropped session asks for its pre-session replay.
+    expect(n.needsPreSessionReplay(ROOT)).toBe(true);
     const second = run(n, events);
     expect(second.changes).toEqual(first.changes);
   });
