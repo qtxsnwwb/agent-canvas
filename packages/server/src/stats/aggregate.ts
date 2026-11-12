@@ -7,9 +7,11 @@ import {
   STATS_SLOWEST,
   STATS_TOP_PROJECTS,
   STATS_TOP_TOOLS,
+  STATS_WEEKLY_AFTER_DAYS,
   type Origin,
   type Project,
   type Session,
+  type StatsBucket,
   type StatsDay,
   type StatsFailingTool,
   type StatsMeasures,
@@ -63,6 +65,12 @@ function dayOfIndex(i: number): string {
 /** Calendar arithmetic on a day key (no time zone involved). */
 export function addDays(key: string, days: number): string {
   return dayOfIndex(dayIndex(key) + days);
+}
+
+/** The Monday starting the week of a day key (calendar arithmetic; day index 0, 1970-01-01, was a Thursday). */
+export function weekStart(key: string): string {
+  const i = dayIndex(key);
+  return dayOfIndex(i - (((i + 3) % 7) + 7) % 7);
 }
 
 /** Nearest-rank percentile of ascending `sorted`; null when empty. */
@@ -250,27 +258,35 @@ export function aggregateStats(input: AggregateInput): StatsResponse {
 
   const origins = ORIGINS.filter((o) => (byOrigin.get(o)?.sessions.size ?? 0) > 0);
 
-  // Days: every day of the range; for `all`, from the first active day, at most the most recent STATS_BY_DAY_MAX.
+  // The series: every day of the range; for `all`, from the first active day, by week beyond
+  // STATS_WEEKLY_AFTER_DAYS days; at most the most recent STATS_BY_DAY_MAX entries.
   let rangeFrom: string | null = from;
-  let dayFrom: string | null = from;
-  let byDayTruncated = false;
+  let bucket: StatsBucket = 'day';
   if (range === 'all') {
-    const first = active.first !== null && active.first <= today ? active.first : null;
-    rangeFrom = first;
-    dayFrom = first;
-    if (first !== null && dayIndex(today) - dayIndex(first) + 1 > STATS_BY_DAY_MAX) {
-      dayFrom = addDays(today, -(STATS_BY_DAY_MAX - 1));
-      byDayTruncated = true;
-    }
+    rangeFrom = active.first !== null && active.first <= today ? active.first : null;
+    if (rangeFrom !== null && dayIndex(today) - dayIndex(rangeFrom) + 1 > STATS_WEEKLY_AFTER_DAYS) bucket = 'week';
+  }
+  const step = bucket === 'week' ? 7 : 1;
+  const seriesEnd = bucket === 'week' ? weekStart(today) : today;
+  let seriesFrom = rangeFrom === null ? null : bucket === 'week' ? weekStart(rangeFrom) : rangeFrom;
+  let byDayTruncated = false;
+  if (seriesFrom !== null && (dayIndex(seriesEnd) - dayIndex(seriesFrom)) / step + 1 > STATS_BY_DAY_MAX) {
+    seriesFrom = addDays(seriesEnd, -(STATS_BY_DAY_MAX - 1) * step);
+    byDayTruncated = true;
   }
   const days: StatsDay[] = [];
-  if (dayFrom !== null) {
-    for (let i = dayIndex(dayFrom), end = dayIndex(today); i <= end; i++) {
+  if (seriesFrom !== null) {
+    for (let i = dayIndex(seriesFrom), end = dayIndex(seriesEnd); i <= end; i += step) {
       const day = dayOfIndex(i);
-      const perOrigin = byDay.get(day);
+      // The bucket's days (only days in range carry data: byDay holds nothing else).
+      const perDay = Array.from({ length: step }, (_, k) => byDay.get(dayOfIndex(i + k)));
       const all = newAcc();
       const parts = origins.map((origin) => {
-        const acc = perOrigin?.get(origin) ?? newAcc();
+        const acc = newAcc();
+        for (const d of perDay) {
+          const part = d?.get(origin);
+          if (part !== undefined) merge(acc, part);
+        }
         merge(all, acc);
         return {
           origin, turns: acc.turns, activeMs: acc.activeMs, toolCalls: acc.toolCalls, failed: acc.failed, toolMs: acc.toolMs,
@@ -335,6 +351,7 @@ export function aggregateStats(input: AggregateInput): StatsResponse {
     filters: { origin: input.origin, projectId: input.projectId },
     totals: measures(totals, noData),
     byDay: days,
+    bucket,
     byOrigin: originRows,
     byProject: byProjectRows,
     byTool,

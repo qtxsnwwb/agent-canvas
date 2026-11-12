@@ -146,17 +146,61 @@ describe('range and day attribution', () => {
     expect(r.coverage.firstActiveDay).toBe('2026-11-01');
   });
 
-  test('all over more than 366 days: byDay holds the most recent 366, totals still cover everything', () => {
-    const old = Date.parse('2024-01-01T10:00:00Z');
+  test('7d, 30d and an all range of at most 62 days: daily buckets', () => {
+    const t = entry(mkSession('s1'), turn(Date.parse('2026-09-12T10:00:00Z'), 1000)); // 62 days up to 2026-11-12
+    expect(run([t]).bucket).toBe('day');
+    expect(run([t], { range: '30d' }).bucket).toBe('day');
+    const all = run([t], { range: 'all' });
+    expect(all.bucket).toBe('day');
+    expect(all.byDay).toHaveLength(62);
+  });
+
+  test('all over more than 62 days: one entry per Monday-based week, dated by its Monday, summing its days', () => {
+    const at = (day: string, hh = 10) => Date.parse(`${day}T${String(hh).padStart(2, '0')}:00:00Z`);
+    const r = run([
+      entry(mkSession('s1'), [
+        ...turn(at('2026-09-11'), 1000, [{}]), // Friday: the first active day (63 days up to today)
+        ...turn(at('2026-09-13', 23), 2000), // Sunday: same week
+        ...turn(at('2026-09-14'), 4000, [{}, {}]), // Monday: the next week
+      ]),
+      entry(mkSession('k1', { origin: 'codex' }), turn(NOW - H, 8000, [], [10, 1, 100])), // today, Thursday
+    ], { range: 'all' });
+    expect(r.bucket).toBe('week');
+    expect(r.range).toEqual({ range: 'all', from: '2026-09-11', to: '2026-11-12' });
+    expect(r.byDay.map((w) => w.day)).toEqual([
+      '2026-09-07', '2026-09-14', '2026-09-21', '2026-09-28', '2026-10-05', '2026-10-12', '2026-10-19', '2026-10-26',
+      '2026-11-02', '2026-11-09',
+    ]);
+    expect(r.byDay[0]).toMatchObject({ turns: 2, activeMs: 3000, toolCalls: 1 });
+    expect(r.byDay[1]).toMatchObject({ turns: 1, activeMs: 4000, toolCalls: 2 });
+    expect(r.byDay[2]).toMatchObject({ turns: 0, activeMs: 0, toolCalls: 0 });
+    const last = r.byDay[9]!;
+    expect(last).toMatchObject({ turns: 1, activeMs: 8000, tokens: { input: 10, cachedInput: 100, output: 1 } });
+    expect(last.byOrigin.map((o) => [o.origin, o.activeMs])).toEqual([['claude', 0], ['codex', 8000]]);
+    expect(r.byDay.reduce((a, w) => a + w.turns, 0)).toBe(r.totals.turns);
+    expect(r.coverage.byDayTruncated).toBe(false);
+  });
+
+  test('weeks over years: every week since the first active day; more than 366 weeks keeps the most recent 366', () => {
+    const old = Date.parse('2024-01-01T10:00:00Z'); // a Monday
     const r = run([entry(mkSession('s1'), [...turn(old, 1000), ...turn(NOW - H, 1000)])], { range: 'all' });
-    expect(r.byDay).toHaveLength(366);
-    expect(r.byDay[0]!.day).toBe(addDays('2026-11-12', -365));
-    expect(r.byDay[365]!.day).toBe('2026-11-12');
-    expect(r.coverage.byDayTruncated).toBe(true);
-    expect(r.coverage.firstActiveDay).toBe('2024-01-01');
-    expect(r.range.from).toBe('2024-01-01');
-    expect(r.totals.turns).toBe(2);
-    expect(r.byDay.reduce((a, d) => a + d.turns, 0)).toBe(1);
+    expect(r.bucket).toBe('week');
+    expect(r.byDay[0]!.day).toBe('2024-01-01');
+    expect(r.byDay.at(-1)!.day).toBe('2026-11-09');
+    expect(r.byDay).toHaveLength((Date.parse('2026-11-09') - Date.parse('2024-01-01')) / (7 * 24 * H) + 1);
+    expect(r.coverage.byDayTruncated).toBe(false);
+    expect(r.byDay.reduce((a, d) => a + d.turns, 0)).toBe(2);
+
+    const ancient = Date.parse('2016-01-01T10:00:00Z');
+    const t = run([entry(mkSession('s1'), [...turn(ancient, 1000), ...turn(NOW - H, 1000)])], { range: 'all' });
+    expect(t.byDay).toHaveLength(366);
+    expect(t.byDay[365]!.day).toBe('2026-11-09');
+    expect(t.byDay[0]!.day).toBe(addDays('2026-11-09', -365 * 7));
+    expect(t.coverage.byDayTruncated).toBe(true);
+    expect(t.coverage.firstActiveDay).toBe('2016-01-01');
+    expect(t.range.from).toBe('2016-01-01');
+    expect(t.totals.turns).toBe(2);
+    expect(t.byDay.reduce((a, d) => a + d.turns, 0)).toBe(1);
   });
 });
 

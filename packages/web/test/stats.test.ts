@@ -4,7 +4,8 @@ import {
   DEFAULT_STATS_FILTER, STATS_FILTER_KEY, availableOrigins, columnLayout, dayIndexAt, dayLabel, dayLong, durationTicks,
   durationTickLabel, effectiveStatsFilter, formatAvg, formatCount, formatRate, formatSpan, formatTokenCount, formatTokenTriple, TOKEN_PARTS, tokenCells,
   isEmptyStats, labelEvery, labelIndices, parseStatsFilter, projectRowName, rangeLabel, roundedEndRect, serializeStatsFilter,
-  sessionHref, shownNoTokenOrigins, splitTools, stackSegments, statsQueryString,
+  sessionHref, shownNoTokenOrigins, splitTools, stackSegments, statsQueryString, seriesBucket, seriesTitle, bucketLong, bucketLabel,
+  coverageNotes,
 } from '../src/stats';
 
 const H = 3_600_000;
@@ -112,6 +113,15 @@ describe('columns and x labels', () => {
       expect(k * (w / n)).toBeGreaterThanOrEqual(40);
     }
   });
+  test('labelEvery for weeks steps by 1, 2, 4, 8, 13, 26, 52 weeks', () => {
+    expect(labelEvery(10, 800, 40, 'week')).toBe(1);
+    expect(labelEvery(53, 800, 40, 'week')).toBe(4);
+    expect(labelEvery(150, 800, 40, 'week')).toBe(8);
+    for (const [n, w] of [[10, 300], [53, 500], [150, 900], [366, 600]] as const) {
+      const k = labelEvery(n, w, 40, 'week');
+      expect(k * (w / n)).toBeGreaterThanOrEqual(40);
+    }
+  });
   test('labelIndices always include the last day', () => {
     expect(labelIndices(7, 1)).toEqual([0, 1, 2, 3, 4, 5, 6]);
     expect(labelIndices(7, 3)).toEqual([0, 3, 6]);
@@ -208,6 +218,26 @@ describe('response helpers', () => {
   test('projectRowName names the merged row', () => {
     expect(projectRowName({ projectId: 'p', name: 'app', projectCount: 1 })).toBe('app');
     expect(projectRowName({ projectId: null, name: '其他', projectCount: 7 })).toBe('其他（7 个项目）');
+  });
+  test('series bucket: absent means daily; titles, labels and tooltips say 每天 / 每周', () => {
+    expect(seriesBucket({} as StatsResponse)).toBe('day');
+    expect(seriesBucket({ bucket: 'week' } as StatsResponse)).toBe('week');
+    expect(seriesTitle('day')).toBe('每天的活跃时长');
+    expect(seriesTitle('week')).toBe('每周的活跃时长');
+    expect(bucketLong('2026-11-12', 'day')).toBe('2026-11-12 周四');
+    expect(bucketLong('2026-11-09', 'week')).toBe('2026-11-09 至 11/15 这一周');
+    expect(bucketLong('2026-12-28', 'week')).toBe('2026-12-28 至 2027-01-03 这一周');
+    expect(bucketLabel('2026-11-09', 'week')).toBe('11/9');
+  });
+  test('coverageNotes: importing and undated turns, only when they apply', () => {
+    const c = (o: Partial<StatsResponse['coverage']>) => ({ coverage: { failedSessions: 0, ...o } }) as unknown as StatsResponse;
+    expect(coverageNotes(c({}))).toEqual([]);
+    expect(coverageNotes(c({ importing: false, undatedTurns: 0 }))).toEqual([]);
+    expect(coverageNotes(c({ importing: true, undatedTurns: 3, failedSessions: 2 }))).toEqual([
+      '数据还在导入，数字会继续变化。',
+      '有 3 个轮次的开始时间无法识别，没有算进任何数字。',
+      '有 2 个会话算不出来，已跳过。',
+    ]);
   });
   test('sessionHref', () => {
     expect(sessionHref('a b')).toBe('#/s/a%20b');

@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode, type RefObject } from 'react';
-import type { Origin, Project, StatsDay, StatsResponse, StatsTokens, StatsTool } from '@agent-canvas/shared';
+import type { Origin, Project, StatsBucket, StatsDay, StatsResponse, StatsTokens, StatsTool } from '@agent-canvas/shared';
 import { api } from '../client';
 import { ORIGIN_LOOK, projectTitle, stripProjects } from '../home';
 import {
-  DEFAULT_STATS_FILTER, STATS_FILTER_KEY, STATS_RANGE_OPTIONS, availableOrigins, columnLayout, dayIndexAt, dayLabel, dayLong,
+  DEFAULT_STATS_FILTER, STATS_FILTER_KEY, STATS_RANGE_OPTIONS, availableOrigins, bucketLabel, bucketLong, columnLayout,
+  coverageNotes, dayIndexAt, seriesBucket, seriesTitle,
   durationTickLabel, durationTicks, effectiveStatsFilter, formatAvg, formatCount, formatRate, formatSpan, formatTokenCount,
   formatTokenTriple, isEmptyStats, NONE, TOKEN_CAPTION, TOKEN_PARTS, tokenCells, labelEvery, labelIndices, parseStatsFilter, projectRowName, rangeLabel, roundedEndRect,
   serializeStatsFilter, sessionHref, shownNoTokenOrigins, splitTools, stackSegments, statsQueryString,
@@ -148,9 +149,6 @@ function Totals({ data }: { data: StatsResponse }) {
           sub={tokenSub}
         />
       </div>
-      {data.coverage.failedSessions > 0 && (
-        <p className="stats-note">有 {data.coverage.failedSessions} 个会话算不出来，已跳过。</p>
-      )}
     </section>
   );
 }
@@ -164,7 +162,8 @@ const M_LEFT = 64;
 const M_RIGHT = 20;
 const X_LABEL_W = 40;
 
-function DayChart({ days, origins, truncated }: { days: StatsDay[]; origins: Origin[]; truncated: boolean }) {
+function DayChart({ days, origins, truncated, bucket }: { days: StatsDay[]; origins: Origin[]; truncated: boolean; bucket: StatsBucket }) {
+  const unit = bucket === 'week' ? '周' : '天';
   const [boxRef, width] = useWidth<HTMLDivElement>();
   const [active, setActive] = useState<{ day: number; origin: number | null } | null>(null);
   const plotW = Math.max(0, width - M_LEFT - M_RIGHT);
@@ -175,7 +174,7 @@ function DayChart({ days, origins, truncated }: { days: StatsDay[]; origins: Ori
   const baseY = M_TOP + PLOT_H;
   const px = PLOT_H / axis.max;
   const stacks = days.map((d) => stackSegments(d.byOrigin.map((o) => o.activeMs), px, baseY));
-  const labels = labelIndices(n, labelEvery(n, plotW, X_LABEL_W));
+  const labels = labelIndices(n, labelEvery(n, plotW, X_LABEL_W, bucket));
   const svgH = M_TOP + PLOT_H + M_BOTTOM;
 
   const onPointer = (e: PointerEvent<SVGRectElement>): void => {
@@ -203,7 +202,7 @@ function DayChart({ days, origins, truncated }: { days: StatsDay[]; origins: Ori
   const aDay = a === null ? null : days[a.day]!;
   const tipLeft = a === null ? 0 : M_LEFT + layout.x(a.day) + layout.barWidth / 2;
   const tipFlip = tipLeft > width - 230;
-  const activeText = aDay === null ? '' : `${dayLong(aDay.day)}，合计 ${formatSpan(dayTotal(aDay))}`
+  const activeText = aDay === null ? '' : `${bucketLong(aDay.day, bucket)}，合计 ${formatSpan(dayTotal(aDay))}`
     + (origins.length > 1 ? '；' + aDay.byOrigin.map((o) => `${originName(o.origin)} ${formatSpan(o.activeMs)}`).join('，') : '');
 
   return (
@@ -211,7 +210,7 @@ function DayChart({ days, origins, truncated }: { days: StatsDay[]; origins: Ori
       <Legend origins={origins} />
       <div
         ref={boxRef} className="stats-daychart" tabIndex={0} role="group"
-        aria-label="每天的活跃时长图。用左右方向键逐天查看。"
+        aria-label={`${seriesTitle(bucket)}图。用左右方向键逐${unit}查看。`}
         onFocus={() => setActive((x) => x ?? (n > 0 ? { day: lastActive(), origin: null } : null))}
         onBlur={() => setActive(null)} onKeyDown={onKey}
       >
@@ -240,7 +239,7 @@ function DayChart({ days, origins, truncated }: { days: StatsDay[]; origins: Ori
             <line x1={M_LEFT} x2={M_LEFT + plotW} y1={baseY} y2={baseY} className="stats-axis" />
             {labels.map((i) => (
               <text key={i} x={M_LEFT + layout.x(i) + layout.barWidth / 2} y={baseY + 17} textAnchor="middle" className="stats-tick">
-                {dayLabel(days[i]!.day)}
+                {bucketLabel(days[i]!.day, bucket)}
               </text>
             ))}
             {/* The hit area: the whole plot, snapped to the day under the pointer (wider and taller than any column). */}
@@ -250,8 +249,10 @@ function DayChart({ days, origins, truncated }: { days: StatsDay[]; origins: Ori
         )}
         {aDay !== null && a !== null && (
           <div className="stats-tip" style={tipFlip ? { right: width - tipLeft + 12, top: M_TOP } : { left: tipLeft + 12, top: M_TOP }}>
-            <div className="stats-tip-date">{dayLong(aDay.day)}</div>
-            <div className="stats-tip-row"><strong>{formatSpan(dayTotal(aDay))}</strong><span>合计 · {formatCount(aDay.turns)} 轮</span></div>
+            <div className="stats-tip-date">{bucketLong(aDay.day, bucket)}</div>
+            <div className="stats-tip-row">
+              <strong>{formatSpan(dayTotal(aDay))}</strong><span>{bucket === 'week' ? '这周合计' : '合计'} · {formatCount(aDay.turns)} 轮</span>
+            </div>
             {aDay.byOrigin.map((o, k) => (
               <div key={o.origin} className={`stats-tip-row${a.origin === k ? ' is-active' : ''}`}>
                 <span className="stats-tip-key" style={{ background: `var(--series-${o.origin})` }} />
@@ -262,14 +263,14 @@ function DayChart({ days, origins, truncated }: { days: StatsDay[]; origins: Ori
         )}
         <span className="visually-hidden" aria-live="polite">{activeText}</span>
       </div>
-      {truncated && <p className="stats-note">时间太长，图里只画了最近 366 天；上面的总量和下面的表包含全部时间。</p>}
+      {truncated && <p className="stats-note">时间太长，图里只画了最近 366 {unit}；上面的总量和下面的表包含全部时间。</p>}
       <details className="stats-details">
-        <summary>看每天的数字</summary>
+        <summary>看每{unit}的数字</summary>
         <div className="stats-table-wrap">
           <table className="stats-table">
             <thead>
               <tr>
-                <th>日期</th>
+                <th>{bucket === 'week' ? '周' : '日期'}</th>
                 {origins.length > 1 && origins.map((o) => <th key={o} className="num">{originName(o)}</th>)}
                 <th className="num">活跃时长</th><th className="num">轮次</th>
               </tr>
@@ -277,7 +278,7 @@ function DayChart({ days, origins, truncated }: { days: StatsDay[]; origins: Ori
             <tbody>
               {days.filter((d) => dayTotal(d) > 0 || d.turns > 0).reverse().map((d) => (
                 <tr key={d.day}>
-                  <td>{dayLong(d.day)}</td>
+                  <td>{bucketLong(d.day, bucket)}</td>
                   {origins.length > 1 && d.byOrigin.map((o) => <td key={o.origin} className="num">{formatSpan(o.activeMs)}</td>)}
                   <td className="num">{formatSpan(dayTotal(d))}</td><td className="num">{formatCount(d.turns)}</td>
                 </tr>
@@ -285,7 +286,7 @@ function DayChart({ days, origins, truncated }: { days: StatsDay[]; origins: Ori
             </tbody>
           </table>
         </div>
-        <p className="stats-note">只列出有活动的日子。</p>
+        <p className="stats-note">只列出有活动的{bucket === 'week' ? '周' : '日子'}。</p>
       </details>
     </>
   );
@@ -530,13 +531,17 @@ function StatsBody({ data, projectNames }: { data: StatsResponse; projectNames: 
     );
   }
   const origins = data.byOrigin.map((o) => o.origin);
+  const bucket = seriesBucket(data);
   return (
     <>
       <Totals data={data} />
       <section aria-labelledby="stats-days-h">
-        <SectionHead id="stats-days-h" title="每天的活跃时长"
-          caption="每一轮算在它开始的那一天。轮次时长 = 最后一个节点结束 − 提示的时间；进行中的轮次算到现在，超过 15 分钟没动静就不再增长。" />
-        <DayChart days={data.byDay} origins={origins} truncated={data.coverage.byDayTruncated} />
+        <SectionHead id="stats-days-h" title={seriesTitle(bucket)}
+          caption={(bucket === 'week'
+            ? '时间跨度超过 62 天，按周（周一到周日）合计，横轴标的是每周的周一。'
+            : '')
+            + '每一轮算在它开始的那一天。轮次时长 = 最后一个节点结束 − 提示的时间；进行中的轮次算到现在，超过 15 分钟没动静就不再增长。'} />
+        <DayChart days={data.byDay} origins={origins} truncated={data.coverage.byDayTruncated} bucket={bucket} />
       </section>
       {data.byOrigin.length > 1 && <OriginTable data={data} />}
       <ToolBars data={data} />
@@ -609,6 +614,7 @@ export function Stats() {
       ) : (
         <>
           {load.error !== null && <p className="error stats-state">刷新失败：{load.error}。下面是上一次的结果。{retry}</p>}
+          {coverageNotes(load.data).map((line) => <p key={line} className="stats-note stats-coverage">{line}</p>)}
           <div className={`stats-body${load.loading ? ' is-loading' : ''}`} aria-busy={load.loading}>
             <StatsBody data={load.data} projectNames={projectNames} />
           </div>

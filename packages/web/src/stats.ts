@@ -2,7 +2,8 @@
    state, and small reads of the StatsResponse. No React, no DOM. */
 import {
   ORIGINS, STATS_DEFAULT_RANGE, STATS_RANGES,
-  type Origin, type Project, type StatsProject, type StatsRange, type StatsResponse, type StatsTokens, type StatsTool,
+  type Origin, type Project, type StatsBucket, type StatsProject, type StatsRange, type StatsResponse, type StatsTokens,
+  type StatsTool,
 } from '@agent-canvas/shared';
 import { formatTokens } from './canvas/replay';
 
@@ -103,6 +104,33 @@ export function dayLong(day: string): string {
   return `${day} 周${WEEKDAYS[new Date(Date.UTC(y, m - 1, d)).getUTCDay()]}`;
 }
 
+// ---- the series' bucket (StatsResponse.bucket: a day, or a Monday-based week dated by its Monday) ----
+
+/** The bucket of byDay; a server without the field sends days. */
+export function seriesBucket(r: Pick<StatsResponse, 'bucket'>): StatsBucket {
+  return r.bucket ?? 'day';
+}
+
+export function seriesTitle(bucket: StatsBucket): string {
+  return bucket === 'week' ? '每周的活跃时长' : '每天的活跃时长';
+}
+
+/** The x label of a bucket: its day, or its week's Monday ("11/9"). */
+export function bucketLabel(day: string, _bucket: StatsBucket): string {
+  return dayLabel(day);
+}
+
+/** The tooltip / table date: "2026-11-12 周四", or "2026-11-09 至 11/15 这一周" (the year repeated when it changes). */
+export function bucketLong(day: string, bucket: StatsBucket): string {
+  if (bucket === 'day') return dayLong(day);
+  const [y, m, d] = dayParts(day);
+  const end = new Date(Date.UTC(y, m - 1, d + 6));
+  const endText = end.getUTCFullYear() === y
+    ? `${end.getUTCMonth() + 1}/${end.getUTCDate()}`
+    : end.toISOString().slice(0, 10);
+  return `${day} 至 ${endText} 这一周`;
+}
+
 /** The covered days, for the line under the page title. */
 export function rangeLabel(range: StatsResponse['range']): string {
   if (range.from === null) return `截至 ${range.to}`;
@@ -160,13 +188,16 @@ export function dayIndexAt(x: number, layout: ColumnLayout): number {
   return Math.max(0, Math.min(layout.count - 1, Math.floor(x / layout.band)));
 }
 
-const LABEL_STEPS = [1, 2, 3, 7, 14, 28, 56, 91, 182, 366] as const;
+const LABEL_STEPS: Record<StatsBucket, readonly number[]> = {
+  day: [1, 2, 3, 7, 14, 28, 56, 91, 182, 366],
+  week: [1, 2, 4, 8, 13, 26, 52, 104],
+};
 
-/** Label every k-th day so that labels `labelWidth` wide never collide. */
-export function labelEvery(n: number, plotWidth: number, labelWidth: number): number {
+/** Label every k-th bucket (day or week) so that labels `labelWidth` wide never collide. */
+export function labelEvery(n: number, plotWidth: number, labelWidth: number, bucket: StatsBucket = 'day'): number {
   if (n <= 0 || plotWidth <= 0) return 1;
   const band = plotWidth / n;
-  return LABEL_STEPS.find((k) => k * band >= labelWidth) ?? Math.ceil(labelWidth / band);
+  return LABEL_STEPS[bucket].find((k) => k * band >= labelWidth) ?? Math.ceil(labelWidth / band);
 }
 
 /** Which days get a label: every k-th counting back from the last (today is always labelled). */
@@ -298,6 +329,16 @@ export function splitTools(
 export function shownNoTokenOrigins(r: Pick<StatsResponse, 'coverage' | 'byOrigin'>): Origin[] {
   const shown = new Set(r.byOrigin.map((o) => o.origin));
   return ORIGINS.filter((o) => shown.has(o) && r.coverage.noTokenData.includes(o));
+}
+
+/** Lines about how complete the numbers are: still importing, turns without a usable time, sessions skipped. */
+export function coverageNotes(r: Pick<StatsResponse, 'coverage'>): string[] {
+  const c = r.coverage;
+  const out: string[] = [];
+  if (c.importing === true) out.push('数据还在导入，数字会继续变化。');
+  if ((c.undatedTurns ?? 0) > 0) out.push(`有 ${formatCount(c.undatedTurns!)} 个轮次的开始时间无法识别，没有算进任何数字。`);
+  if (c.failedSessions > 0) out.push(`有 ${formatCount(c.failedSessions)} 个会话算不出来，已跳过。`);
+  return out;
 }
 
 /** Nothing happened in the range under the filters. */

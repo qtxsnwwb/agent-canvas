@@ -9,8 +9,14 @@ import type { GraphNode, Origin, Usage } from './model.js';
 export type StatsRange = '7d' | '30d' | 'all';
 export const STATS_RANGES: readonly StatsRange[] = ['7d', '30d', 'all'];
 export const STATS_DEFAULT_RANGE: StatsRange = '7d';
-/** `byDay` holds at most this many days (for `all`: the most recent ones, see StatsCoverage.byDayTruncated). */
+/** `byDay` holds at most this many entries (for `all`: the most recent ones, see StatsCoverage.byDayTruncated). */
 export const STATS_BY_DAY_MAX = 366;
+/**
+ * The bucket of `byDay`: `day` (one entry per local day), or `week` (one entry per Monday-based local week) when an
+ * `all` range spans more than STATS_WEEKLY_AFTER_DAYS days. 7d and 30d are always daily.
+ */
+export type StatsBucket = 'day' | 'week';
+export const STATS_WEEKLY_AFTER_DAYS = 62;
 /** `byProject` lists at most this many projects; the rest are merged into one "其他" row. */
 export const STATS_TOP_PROJECTS = 20;
 export const STATS_TOP_TOOLS = 30;
@@ -64,7 +70,10 @@ export interface StatsDayOrigin {
 }
 
 /**
- * One local day (`YYYY-MM-DD`), turns attributed to the day they started. Days without activity are present with 0s.
+ * One bucket of the series (see StatsResponse.bucket), turns attributed to the day they started; buckets without
+ * activity are present with 0s. `day` (`YYYY-MM-DD`, local): with bucket `day`, that day; with bucket `week`, the
+ * Monday that starts the week, and the entry sums the days of that week inside the range (the first and the current
+ * week can be partial; the Monday itself may lie before range.from).
  * byOrigin: one entry per origin of `byOrigin` (same order), zeros included, so stacked columns line up.
  */
 export interface StatsDay {
@@ -150,8 +159,8 @@ export interface StatsFailingTool {
  *   only the range, and regardless of the filters): their tokens are null everywhere, to be shown as "—".
  * - failedSessions: sessions skipped because their summary could not be computed.
  * - firstActiveDay: the local day of the earliest turn in scope (filters applied; any range), or null when none.
- * - byDayTruncated: `all` only: activity spans more than STATS_BY_DAY_MAX days, so byDay holds the most recent
- *   STATS_BY_DAY_MAX days only (the totals and every other list still cover everything).
+ * - byDayTruncated: `all` only: activity spans more than STATS_BY_DAY_MAX buckets (weeks, see StatsResponse.bucket), so
+ *   byDay holds the most recent STATS_BY_DAY_MAX only (the totals and every other list still cover everything).
  * - undatedTurns (added in fix round 1; optional): turns (and orphan subagent nodes) in scope whose start time is
  *   unparseable or not after 1970-01-01T00:00:00Z; they are in no day and no number of the response.
  * - importing (added in fix round 1; optional): true while the service's start-up import, a rebuild or a poll source's
@@ -171,7 +180,8 @@ export interface StatsCoverage {
  * range.from / range.to: the first and last local day (`YYYY-MM-DD`) of the range; for `all`, from is the first active
  * day (null with no activity at all). filters echo the request (null = not filtered). generatedAt: ISO 8601.
  * slowest: at most STATS_SLOWEST, durationMs descending. mostFailing: at most STATS_MOST_FAILING, failed descending
- * (ties: failureRate descending, origin, name).
+ * (ties: failureRate descending, origin, name). bucket (added in the fix wave; absent from older servers = `day`): the
+ * bucket of byDay's entries, see StatsBucket and StatsDay.
  */
 export interface StatsResponse {
   generatedAt: string;
@@ -179,6 +189,7 @@ export interface StatsResponse {
   filters: { origin: Origin | null; projectId: string | null };
   totals: StatsMeasures;
   byDay: StatsDay[];
+  bucket?: StatsBucket;
   byOrigin: StatsOrigin[];
   byProject: StatsProject[];
   byTool: StatsTool[];
