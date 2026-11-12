@@ -8,6 +8,7 @@ import {
 } from '@agent-canvas/shared';
 import type { RawEvent } from '../store/store.js';
 import { parseCodexHook, type CodexHook } from './codex-hooks.js';
+import { codexCallTouches, fileChangeTouches, filesFields, filesPatch, mergeFiles, nodeFiles, type NodeFiles } from './files.js';
 import { summarize } from './summary.js';
 import type { AgentNormalizer, NormalizeResult } from './types.js';
 
@@ -95,6 +96,8 @@ interface ThreadState {
   parentThreadId: string | null;
   nickname: string | null;
   agentPath: string | null;
+  /** The thread's working directory from its own session_meta (relative file paths resolve against it). */
+  cwd: string | null;
   /** Time of the thread's own session_meta (orders threads spawned under the same name). */
   startedAt: string;
   /** Last node placed in this thread: the next node hangs off it. */
@@ -487,6 +490,7 @@ export class CodexNormalizer implements AgentNormalizer {
         parentThreadId: null,
         nickname: null,
         agentPath: null,
+        cwd: null,
         startedAt: ts,
         lastNode: null,
         firstNode: null,
@@ -729,6 +733,7 @@ export class CodexNormalizer implements AgentNormalizer {
     thread.parentThreadId = str(payload.parent_thread_id) ?? str(spawn.parent_thread_id);
     thread.nickname = str(payload.agent_nickname) ?? str(spawn.agent_nickname);
     thread.agentPath = str(payload.agent_path) ?? str(spawn.agent_path);
+    thread.cwd = str(payload.cwd) ?? thread.cwd;
     thread.startedAt = ctx.ts;
     if (isRoot) {
       const cwd = str(payload.cwd);
@@ -874,6 +879,8 @@ export class CodexNormalizer implements AgentNormalizer {
         // An item can arrive after the call's output: a failure still fails the settled call.
         if (node.status === 'succeeded' && entryFailed(entry)) patch.status = 'failed';
       }
+      // The FileChange of a call and the call's apply_patch describe one change: merged, never counted twice.
+      if (itype === 'FileChange') Object.assign(patch, filesPatch(node, mergeFiles(node, nodeFiles(fileChangeTouches(item), thread.cwd))));
       this.patch(ctx.state, target, patch, ctx.changes, { raw: { items: list } });
       return;
     }
@@ -888,6 +895,7 @@ export class CodexNormalizer implements AgentNormalizer {
       timestamp: startedAt ?? ctx.ts,
       endedAt: ctx.ts,
       durationMs: entry.durationMs,
+      files: itype === 'FileChange' ? nodeFiles(fileChangeTouches(item), thread.cwd) : {},
       detail: { raw: { items: [entry] } },
     });
   }
@@ -1001,6 +1009,7 @@ export class CodexNormalizer implements AgentNormalizer {
         toolName,
         toolUseId: callId,
         status: 'running',
+        files: nodeFiles(codexCallTouches(input), thread.cwd),
         detail: { input },
       },
       true,
@@ -1227,6 +1236,7 @@ export class CodexNormalizer implements AgentNormalizer {
       endedAt?: string | null;
       durationMs?: number | null;
       systemSubtype?: string;
+      files?: NodeFiles;
     },
     isCall = false,
   ): string | null {
@@ -1276,6 +1286,7 @@ export class CodexNormalizer implements AgentNormalizer {
       endedAt: spec.endedAt ?? null,
       usage: null,
       systemSubtype: spec.systemSubtype ?? null,
+      ...filesFields(spec.files ?? {}),
     };
     const sid = state.session.id;
     state.nodes.set(id, placed);
