@@ -130,7 +130,7 @@ describe('cursor origin', () => {
   });
 
   test('NORMALIZER_VERSION bumped for the cursor origin (and once for the fix wave)', () => {
-    expect(NORMALIZER_VERSION).toBe(25);
+    expect(NORMALIZER_VERSION).toBe(26); // 26: Codex token usage from token_usage_record
   });
 
   test('without a cursor normalizer (factory null) a cursor raw event yields no changes', () => {

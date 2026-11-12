@@ -270,8 +270,36 @@ export class CodexThread {
     return this.record('event_msg', payload, { timestamp: at });
   }
 
-  usage(): RawEvent {
-    return this.record('token_usage_record', { response_id: `resp_${this.ordinal}`, thread_id: this.id, turn_id: this.turn, usage: { input_tokens: 10 } });
+  /**
+   * A `token_usage_record` (one per model response, written after the response's items). Without `tokens` it is the
+   * legacy minimal record (`usage: { input_tokens: 10 }`, no output count: the normalizer ignores it). With `tokens`
+   * it has every key the real records have; `responseId: null` leaves `response_id` out, `turnId` overrides the turn.
+   */
+  usage(tokens?: { input: unknown; output: unknown }, over: { responseId?: string | null; turnId?: string | null } = {}): RawEvent {
+    const responseId = over.responseId === undefined ? `resp_${this.ordinal}` : over.responseId;
+    const turnId = over.turnId === undefined ? this.turn : over.turnId;
+    if (tokens === undefined) {
+      return this.record('token_usage_record', { response_id: responseId, thread_id: this.id, turn_id: turnId, usage: { input_tokens: 10 } });
+    }
+    const usage = {
+      input_tokens: tokens.input,
+      cached_input_tokens: 0,
+      cache_write_input_tokens: 0,
+      output_tokens: tokens.output,
+      reasoning_output_tokens: 0,
+      total_tokens: typeof tokens.input === 'number' && typeof tokens.output === 'number' ? tokens.input + tokens.output : 0,
+    };
+    const payload: Record<string, unknown> = {
+      thread_id: this.id,
+      turn_id: turnId,
+      session_id: this.sessionId,
+      root_turn_id: turnId,
+      usage,
+      // The turn's running total: must not be used (a large value makes using it visible).
+      turn_token_usage: { ...usage, input_tokens: 999_999, output_tokens: 999_999 },
+    };
+    if (responseId !== null) payload.response_id = responseId;
+    return this.record('token_usage_record', payload);
   }
 
   compaction(): RawEvent {

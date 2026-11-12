@@ -31,7 +31,7 @@ export function promptTitle(text: string): string | null {
 }
 
 /** Top-level record types that are known and produce nothing. */
-const IGNORED_RECORDS = new Set(['turn_context', 'world_state', 'token_usage_record', 'inter_agent_communication_metadata']);
+const IGNORED_RECORDS = new Set(['turn_context', 'world_state', 'inter_agent_communication_metadata']);
 const IGNORED_EVENTS = new Set(['token_count', 'thread_settings_applied']);
 const IGNORED_RESPONSE_ITEMS = new Set(['additional_tools', 'agent_message', 'configuration_update']);
 /** `item_completed` items that produce no node of their own (Reasoning and SubAgentActivity are still read). */
@@ -132,6 +132,15 @@ interface ThreadState {
   turnCalls: Map<string, { open: Set<string>; settled: number }>;
   /** Time of the thread's last record with a valid timestamp (the fallback for one without). */
   lastTs: string | null;
+  /**
+   * Model-output nodes (assistant text, thinking, calls) placed in this thread since its last `token_usage_record`, in
+   * placement order: the nodes of the response that record will account for.
+   */
+  responseNodes: string[];
+  /** Every node placed in this thread, in placement order (usage fallback: nearest earlier node of the turn). */
+  placed: string[];
+  /** Response ids (or record identities) whose usage was already applied in this thread. */
+  usageSeen: Set<string>;
 }
 
 /** How many sessions that exist only as hook marks (no transcript, no session yet) are remembered. */
@@ -202,6 +211,8 @@ interface SessionState {
   /** child threads whose spawn edge was emitted. */
   spawned: Set<string>;
   firstPromptSeen: boolean;
+  /** `token_usage_record`s with valid counts but no node of their turn in their thread (their usage is dropped). */
+  droppedUsage: number;
 }
 
 type Transcript = Extract<RawEvent, { source: 'transcript' }>;
@@ -218,6 +229,7 @@ function classify(type: string, payload: Obj): Kind {
   switch (type) {
     case 'session_meta':
     case 'compacted':
+    case 'token_usage_record':
       return { kind: 'handled' };
     case 'event_msg':
       if (ptype === 'task_started' || ptype === 'task_complete' || ptype === 'turn_aborted') return { kind: 'handled' };
@@ -381,6 +393,14 @@ export class CodexNormalizer implements AgentNormalizer {
     return this.sessions.get(sessionId)?.toolInputs.size ?? 0;
   }
 
+  /**
+   * Number of the session's `token_usage_record`s whose usage was dropped (no node of their turn in their thread when
+   * they were read). Held in memory with the session: rebuilt identically by a re-hydration, 0 for an evicted session.
+   */
+  droppedUsageCount(sessionId: string): number {
+    return this.sessions.get(sessionId)?.droppedUsage ?? 0;
+  }
+
   // ---- titles ----
 
   private applyMeta(event: Extract<RawEvent, { source: 'meta' }>, changes: Change[]): void {
@@ -442,6 +462,7 @@ export class CodexNormalizer implements AgentNormalizer {
         dispatchOf: new Map(),
         spawned: new Set(),
         firstPromptSeen: false,
+        droppedUsage: 0,
       };
       this.sessions.set(sessionId, state);
       this.preSessionRestored.delete(sessionId);
@@ -485,6 +506,9 @@ export class CodexNormalizer implements AgentNormalizer {
         callOrder: [],
         turnCalls: new Map(),
         lastTs: null,
+        responseNodes: [],
+        placed: [],
+        usageSeen: new Set(),
       };
       state.threads.set(id, thread);
     }
@@ -673,7 +697,7 @@ export class CodexNormalizer implements AgentNormalizer {
     if (validTs !== null) thread.lastTs = validTs;
     this.touchSession(state, validTs, projectId, isRoot, changes);
     if (kind.kind === 'ignored') {
-      if (type === 'token_usage_record' || type === 'response_item') thread.group += 1; // ends a response's run of calls
+      if (type === 'response_item') thread.group += 1; // ends a response's run of calls
       return undefined;
     }
     const ctx: Ctx = { state, thread, event, payload, ts, changes, isRoot, unknown: undefined };
@@ -689,6 +713,10 @@ export class CodexNormalizer implements AgentNormalizer {
         break;
       case 'response_item':
         this.applyResponseItem(ctx);
+        break;
+      case 'token_usage_record':
+        thread.group += 1; // ends a response's run of calls
+        this.applyUsage(ctx);
         break;
     }
     return ctx.unknown;
@@ -924,7 +952,8 @@ export class CodexNormalizer implements AgentNormalizer {
         this.beginModelOutput(ctx);
         const text = joinParts(payload.content, (p) => (p.type === 'output_text' ? str(p.text) : null), '');
         const id = str(payload.id);
-        this.addNode(ctx, { id: id !== null ? `text:${id}` : null, kind: 'text', title: 'Text', summary: summarize(text), detail: { text, raw: { phase: str(payload.phase) } } });
+        const placed = this.addNode(ctx, { id: id !== null ? `text:${id}` : null, kind: 'text', title: 'Text', summary: summarize(text), detail: { text, raw: { phase: str(payload.phase) } } });
+        if (placed !== null) thread.responseNodes.push(placed);
         return;
       }
       case 'reasoning': {
@@ -939,6 +968,7 @@ export class CodexNormalizer implements AgentNormalizer {
           durationMs: rid !== null ? (thread.reasoningMs.get(rid) ?? null) : null,
           detail: { text },
         });
+        if (placed !== null) thread.responseNodes.push(placed);
         if (rid !== null && placed !== null) {
           thread.reasoningMs.delete(rid);
           thread.reasoningNodes.set(rid, placed);
@@ -976,6 +1006,7 @@ export class CodexNormalizer implements AgentNormalizer {
       true,
     );
     if (id === null) return;
+    thread.responseNodes.push(id);
     thread.callNodes.set(callId, id);
     thread.openCalls.push(id);
     thread.callOrder.push(id);
@@ -1017,6 +1048,45 @@ export class CodexNormalizer implements AgentNormalizer {
     const durationMs = elapsedMs(node.timestamp, ctx.ts);
     if (durationMs !== null) patch.durationMs = durationMs;
     this.patch(state, id, patch, ctx.changes, detail);
+  }
+
+  /**
+   * A `token_usage_record`: the usage of one model response (`usage`, never the turn's running `turn_token_usage`).
+   * Response items carry item ids only, no response id, so the response is told by order within the thread's file
+   * (Codex writes the record after the response's items): its nodes are the model-output nodes of the record's turn
+   * placed in this thread since the thread's previous record. The usage goes on the first of them; without one, on
+   * the nearest earlier node of the same turn in this thread (usages on one node add up); with no node of that turn in
+   * the thread it is dropped and counted. A function of this thread's records only, so the order other threads' files
+   * arrive in does not matter. A response id already applied in this thread changes nothing (a repeated record);
+   * a record without one is identified by its place in the file. A record whose input or output count is not a
+   * non-negative number is ignored, but still ends its response.
+   */
+  private applyUsage(ctx: Ctx): void {
+    const { state, thread, payload } = ctx;
+    const key = str(payload.response_id) ?? `@${ctx.event.offset}`;
+    if (thread.usageSeen.has(key)) return;
+    thread.usageSeen.add(key);
+    const segment = thread.responseNodes;
+    thread.responseNodes = [];
+    const usage = obj(payload.usage);
+    const input = num(usage.input_tokens);
+    const output = num(usage.output_tokens);
+    if (input === null || output === null || input < 0 || output < 0) return;
+    const turnId = str(payload.turn_id) ?? thread.currentTurn;
+    const sameTurn = (id: string): boolean => state.nodes.get(id)?.turnId === turnId;
+    let target = segment.find(sameTurn);
+    for (let i = thread.placed.length - 1; target === undefined && i >= 0; i--) {
+      if (sameTurn(thread.placed[i]!)) target = thread.placed[i];
+    }
+    const node = target === undefined ? undefined : state.nodes.get(target);
+    if (target === undefined || !node) {
+      state.droppedUsage += 1;
+      return;
+    }
+    const prev = node.usage;
+    const next = { inputTokens: (prev?.inputTokens ?? 0) + input, outputTokens: (prev?.outputTokens ?? 0) + output };
+    // The total, not the increment: a replay writing the same patches again lands on the same value.
+    this.writeNode(state, target, { usage: next }, ctx.changes);
   }
 
   // ---- hooks (marks only: they never create, confirm or settle a node) ----
@@ -1207,6 +1277,7 @@ export class CodexNormalizer implements AgentNormalizer {
     }
     for (const from of joinFrom) changes.push({ type: 'edge_added', edge: { id: `${from}->${id}`, sessionId: sid, from, to: id, kind: 'sequence' } });
     thread.lastNode = id;
+    thread.placed.push(id);
     thread.lastWasCompact = false;
     if (thread.firstNode === null) {
       thread.firstNode = id;
