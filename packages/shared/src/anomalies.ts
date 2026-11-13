@@ -115,17 +115,20 @@ const cmpId = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 interface Item {
   node: GraphNode;
   ms: number;
+  /** The timestamp parses. */
+  dated: boolean;
 }
 
 /**
- * Nodes with their start, by start then id — the one sort of a detection. A node whose timestamp cannot be parsed is
- * left out: it cannot be judged (spec 7), so it takes no part in turns, detection or costs.
+ * Nodes with their start, by start then id — the one sort of a detection. As groupTurns does, an unparseable timestamp
+ * counts as 0 for grouping (so turns are the canvas's turns); `dated` is false then: such a node cannot be judged
+ * (spec 7) and takes no part in detection or costs.
  */
 function sortedItems(nodes: Iterable<GraphNode>): Item[] {
   const items: Item[] = [];
   for (const node of nodes) {
     const ms = parseMs(node.timestamp);
-    if (ms !== null) items.push({ node, ms });
+    items.push({ node, ms: ms ?? 0, dated: ms !== null });
   }
   items.sort((a, b) => a.ms - b.ms || cmpId(a.node.id, b.node.id));
   return items;
@@ -176,7 +179,8 @@ function turnsOfItems(items: Item[]): DetectionTurn[] {
  * The detection turns of a session (spec 3.1): per thread (agentId; main = null). The main thread's turns are exactly
  * groupTurns'; a subagent thread's follow the same rule, a prompt of that thread without a turnId also starting a turn
  * (a thread without any is one turn, `<agentId>:__prelude__`). A dispatch node belongs to the thread that dispatched it
- * (its agentId). Nodes whose timestamp cannot be parsed are left out. Ordered by start, then key.
+ * (its agentId). A node whose timestamp cannot be parsed is grouped as groupTurns does (at time 0). Ordered by start,
+ * then key.
  */
 export function detectionTurns(nodes: Iterable<GraphNode>): DetectionTurn[] {
   return turnsOfItems(sortedItems(nodes));
@@ -365,7 +369,8 @@ export function detectAnomalies(nodes: Iterable<GraphNode>): Anomaly[] {
     const byStart: Call[] = [];
     for (const n of turn.nodes) {
       if (!isCall(n)) continue;
-      const ms = parseMs(n.timestamp)!; // sortedItems kept parseable ones only
+      const ms = parseMs(n.timestamp);
+      if (ms === null) continue; // cannot be judged: no part in detection
       const knownEndMs = parseMs(n.endedAt);
       byStart.push({ node: n, ms, knownEndMs, endMs: knownEndMs ?? ms });
     }
@@ -393,32 +398,45 @@ const ACTIVE_KINDS: ReadonlySet<GraphNode['kind']> = new Set<GraphNode['kind']>(
  * rule (a messageId counts once per session), applied to the nodes by time then id so the result does not depend on
  * the input order; a counted subagent-internal node is attributed to the turn that dispatched its agent (the earliest
  * dispatch node naming it, followed up through nested agents), else to the latest turn started at or before it, else
- * the first turn — the stats page's rule. A node whose timestamp cannot be parsed is left out (no time, no tokens, never
- * a turn's start or end); `at` is an ISO time (toISOString).
+ * the first turn — the stats page's rule. Turns are groupTurns' (the canvas's) over every node; a node whose timestamp
+ * cannot be parsed adds no time or tokens and is never a turn's start, end, first or last node, and a turn made only of
+ * such nodes has no entry. `at` is an ISO time (toISOString).
  */
 export function turnCosts(nodes: Iterable<GraphNode>, sessionRunning: boolean): TurnCost[] {
   const items = sortedItems(nodes);
   const turns = groupTurns(items.map((x) => x.node));
   if (turns.length === 0) return [];
   const turnOfMain = new Map<string, number>();
-  const costs: TurnCost[] = turns.map((t, i) => {
+  const costs: (TurnCost | null)[] = turns.map((t, i) => {
     let activeMs = 0;
-    let atMs = t.startMs;
+    let first: GraphNode | null = null;
+    let last: GraphNode | null = null;
+    let startMs = 0;
+    let atMs = 0;
     for (const n of t.nodes) {
       turnOfMain.set(n.id, i);
+      const ms = parseMs(n.timestamp);
+      if (ms === null) continue; // cannot be judged: no time, no start, no end
+      if (first === null) {
+        first = n;
+        startMs = ms;
+        atMs = ms;
+      }
+      last = n;
       if (ACTIVE_KINDS.has(n.kind) && typeof n.durationMs === 'number' && Number.isFinite(n.durationMs) && n.durationMs > 0) activeMs += n.durationMs;
-      const end = parseMs(n.endedAt) ?? parseMs(n.timestamp)!;
+      const end = parseMs(n.endedAt) ?? ms;
       if (end > atMs) atMs = end;
     }
+    if (first === null || last === null) return null; // no node of the turn can be judged
     return {
-      sessionId: t.nodes[0]!.sessionId,
+      sessionId: first.sessionId,
       turnKey: t.key,
-      startMs: t.startMs,
+      startMs,
       activeMs,
       tokens: 0,
       finished: i < turns.length - 1 || !sessionRunning,
-      firstNodeId: t.nodes[0]!.id,
-      lastNodeId: t.nodes[t.nodes.length - 1]!.id,
+      firstNodeId: first.id,
+      lastNodeId: last.id,
       at: new Date(atMs).toISOString(),
     };
   });
@@ -449,11 +467,12 @@ export function turnCosts(nodes: Iterable<GraphNode>, sessionRunning: boolean): 
     }
     return found;
   };
-  for (const n of countedUsageNodes(items.map((x) => x.node))) {
-    const i = n.agentId === null ? turnOfMain.get(n.id)! : (resolveAgent(n.agentId) ?? turnByTime(parseMs(n.timestamp) ?? 0));
-    costs[i]!.tokens += n.usage!.inputTokens + n.usage!.outputTokens;
+  for (const n of countedUsageNodes(items.filter((x) => x.dated).map((x) => x.node))) {
+    const i = n.agentId === null ? turnOfMain.get(n.id)! : (resolveAgent(n.agentId) ?? turnByTime(parseMs(n.timestamp)!));
+    const c = costs[i];
+    if (c) c.tokens += n.usage!.inputTokens + n.usage!.outputTokens;
   }
-  return costs;
+  return costs.filter((c): c is TurnCost => c !== null);
 }
 
 /** Nearest-rank percentile of an ascending list (p in 0..1); null for an empty list. */

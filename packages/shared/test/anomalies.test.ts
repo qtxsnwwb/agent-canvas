@@ -547,3 +547,20 @@ test('costBaseline: an origin without token cost (Cursor) never gets a tokens pe
   expect(costBaseline(turns).tokensP95).toBe(2_900_000);
   expect(costAnomalies([cost('h', 9e9, 9e9)], costBaseline(turns, { origin: 'cursor' })).map((a) => a.basis)).toEqual(['time']);
 });
+
+// ---- final review ----
+
+test('unparseable timestamps: turns still match the canvas (groupTurns), the node only leaves detection and costs', () => {
+  // The turn's only turnId node is unparseable: the canvas anchors T1 at 0, so every later node joins T1.
+  const nodes = [
+    mk('pre', 1),
+    mk('p', 0, { kind: 'prompt', turnId: 'T1', timestamp: 'garbage' }),
+    ...[2, 3, 4, 5, 6].map((s, i) => call(`f${i}`, s, `k${i}`, 'failed', { turnId: null })),
+  ];
+  const main = detectionTurns(nodes).filter((t) => t.agentId === null);
+  expect(main.map((t) => [t.key, t.nodes.map((n) => n.id)])).toEqual(groupTurns(nodes).map((t) => [t.key, t.nodes.map((n) => n.id)]));
+  expect(ofKind(detectAnomalies(nodes), 'failures')).toMatchObject([{ turnKey: 'T1', count: 5, firstNodeId: 'f0' }]);
+  const costs = turnCosts(nodes, false);
+  expect(costs.map((c) => [c.turnKey, c.firstNodeId, c.startMs])).toEqual([['T1', 'pre', BASE + 1000]]);
+  for (const c of costs) expect(groupTurns(nodes).map((t) => t.key)).toContain(c.turnKey);
+});
