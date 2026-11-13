@@ -819,43 +819,92 @@ function ruleCustom(sc: Scan, ac: Automaton | null): void {
 
 // ---- learned values ----------------------------------------------------------------------------------------------
 
-/** Learned values by their first MASK_LEARN_MIN_CHARS characters, each list longest first; and their types. */
+/**
+ * Learned values by a hash of their first MASK_LEARN_MIN_CHARS characters (each list longest first), a bit filter over
+ * those hashes (most positions of a text are rejected by one bit test), and their types.
+ */
 interface Learned {
-  byPrefix: Map<string, string[]>;
+  byHash: Map<number, string[]>;
+  filter: Uint32Array;
   types: Map<string, MaskType>;
   sorted: boolean;
 }
 /** Candidates tried per position at most (a pathological set of values sharing a prefix stays bounded). */
 const LEARNED_TRIES = 64;
+const HASH_BASE = 0x01000193;
+/** HASH_BASE^(MASK_LEARN_MIN_CHARS - 1) mod 2^32. */
+const HASH_TOP = (() => {
+  let p = 1;
+  for (let i = 1; i < MASK_LEARN_MIN_CHARS; i++) p = Math.imul(p, HASH_BASE) >>> 0;
+  return p;
+})();
+const FILTER_BITS = 20;
+
+function hashAt(text: string, from: number): number {
+  let h = 0;
+  for (let i = from; i < from + MASK_LEARN_MIN_CHARS; i++) h = (Math.imul(h, HASH_BASE) + text.charCodeAt(i)) >>> 0;
+  return h;
+}
+const filterIndex = (h: number): number => h >>> (32 - FILTER_BITS);
+
+function newLearned(): Learned {
+  return { byHash: new Map(), filter: new Uint32Array(1 << (FILTER_BITS - 5)), types: new Map(), sorted: true };
+}
+
+function addLearned(learned: Learned, value: string, type: MaskType): void {
+  learned.types.set(value, type);
+  const h = hashAt(value, 0);
+  let list = learned.byHash.get(h);
+  if (!list) learned.byHash.set(h, (list = []));
+  list.push(value);
+  const idx = filterIndex(h);
+  learned.filter[idx >>> 5]! |= 1 << (idx & 31);
+  learned.sorted = false;
+}
 
 function ruleLearned(sc: Scan, learned: Learned): void {
   if (learned.types.size === 0) return;
   if (!learned.sorted) {
-    for (const list of learned.byPrefix.values()) list.sort((a, b) => b.length - a.length);
+    for (const list of learned.byHash.values()) list.sort((a, b) => b.length - a.length);
     learned.sorted = true;
   }
   const { text } = sc;
   const k = MASK_LEARN_MIN_CHARS;
+  if (text.length < k) return;
+  const filter = learned.filter;
   // Bounded work: comparisons beyond this budget (only a text built against the learned values reaches it) make the
   // whole text fail closed (MASK_FAILED_TEXT) instead of running long.
   let budget = 32 * text.length + 1_000_000;
-  for (let i = 0; i + k <= text.length; i++) {
-    const list = learned.byPrefix.get(text.slice(i, i + k));
-    if (list === undefined) continue;
-    const tries = Math.min(list.length, LEARNED_TRIES);
-    for (let j = 0; j < tries; j++) {
-      const v = list[j]!;
-      if (i + v.length > text.length) continue;
-      let p = k;
-      while (p < v.length && v.charCodeAt(p) === text.charCodeAt(i + p)) p++;
-      budget -= p;
-      if (budget < 0) throw new Error('learned-value matching budget exceeded');
-      if (p === v.length) {
-        sc.out.push(cand(i, i + v.length, learned.types.get(v)!));
-        i += v.length - 1;
-        break;
+  let h = hashAt(text, 0);
+  for (let i = 0; i + k <= text.length; ) {
+    const idx = filterIndex(h);
+    let matched = 0;
+    if ((filter[idx >>> 5]! >>> (idx & 31)) & 1) {
+      const list = learned.byHash.get(h);
+      if (list !== undefined) {
+        const tries = Math.min(list.length, LEARNED_TRIES);
+        for (let j = 0; j < tries; j++) {
+          const v = list[j]!;
+          if (i + v.length > text.length) continue;
+          let p = 0;
+          while (p < v.length && v.charCodeAt(p) === text.charCodeAt(i + p)) p++;
+          budget -= p + 1;
+          if (budget < 0) throw new Error('learned-value matching budget exceeded');
+          if (p === v.length) {
+            sc.out.push(cand(i, i + v.length, learned.types.get(v)!));
+            matched = v.length;
+            break;
+          }
+        }
       }
     }
+    if (matched > 0) {
+      i += matched;
+      if (i + k <= text.length) h = hashAt(text, i);
+      continue;
+    }
+    if (i + k < text.length) h = (Math.imul((h - Math.imul(text.charCodeAt(i), HASH_TOP)) >>> 0, HASH_BASE) + text.charCodeAt(i + k)) >>> 0;
+    i++;
   }
 }
 
@@ -1249,7 +1298,7 @@ export function createMasker(options: MaskOptions): Masker {
   const automaton = terms.length > 0 ? buildAutomaton(terms) : null;
   const users = personal ? normalizeUsers(options.homeUsers) : [];
   const numbered = options.numbered !== false;
-  const learned: Learned = { byPrefix: new Map(), types: new Map(), sorted: true };
+  const learned: Learned = newLearned();
 
   const numbers = new Map<MaskType, Map<string, number>>();
   const counted = new Map<MaskType, MaskTypeCount>();
@@ -1398,12 +1447,7 @@ export function createMasker(options: MaskOptions): Masker {
 
   const remember = (value: string, type: MaskType): void => {
     if (value.length < MASK_LEARN_MIN_CHARS || value.length > MASK_LEARN_MAX_CHARS || learned.types.has(value) || learned.types.size >= MASK_LEARN_CAP) return;
-    learned.types.set(value, type);
-    const prefix = value.slice(0, MASK_LEARN_MIN_CHARS);
-    let list = learned.byPrefix.get(prefix);
-    if (!list) learned.byPrefix.set(prefix, (list = []));
-    list.push(value);
-    learned.sorted = false;
+    addLearned(learned, value, type);
   };
 
   const learnText = (text: string, opts: MaskTextOptions | undefined, extra: Cand | null): void => {
