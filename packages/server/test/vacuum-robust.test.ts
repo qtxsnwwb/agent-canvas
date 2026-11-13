@@ -58,21 +58,22 @@ async function hookStored(): Promise<boolean> {
 }
 
 describe('bounded and honest', () => {
-  test('另一个连接拿着读快照：截断检查点做不完 -> 放开写入，记 skipped:busy（不记 done），记下失败时间', async () => {
+  test('另一个连接拿着读快照：截断检查点做不完 -> 放开写入，记 skipped:busy（不记 done，不退避）；读者走后再试就成功', async () => {
     const reader = new Database(file, { readonly: true });
     reader.exec('BEGIN');
     reader.prepare('SELECT COUNT(*) FROM raw_event').get(); // holds a snapshot
     try {
-      const out = await vacuumIfDue(store, { host: pipeline, ...big, checkpointBusyMs: 50, checkpointAttempts: 2 });
+      const out = await vacuumIfDue(store, { host: pipeline, ...big, checkpointBusyMs: 50, checkpointAttempts: 2, checkpointDelayMs: 10 });
       expect(out).toMatchObject({ outcome: 'skipped', failed: true, reason: expect.stringMatching(/^busy: another connection/) });
     } finally {
       reader.exec('COMMIT');
       reader.close();
     }
     expect(store.getMeta(STORAGE_META.vacuum)).toMatch(/^skipped:busy/);
-    expect(store.getMeta(STORAGE_META.vacuumFailedAt)).not.toBeNull();
+    expect(store.getMeta(STORAGE_META.vacuumFailedAt)).toBeNull(); // a busy reader is no reason to wait 24 h
     expect(pipeline.writesHeld()).toBe(false);
     expect(await hookStored()).toBe(true);
+    expect((await vacuumIfDue(store, { host: pipeline, ...big })).outcome).toBe('done');
   });
 
   test('超过期限：杀掉子进程，放开写入，记 timeout；数据库完好', async () => {
@@ -174,4 +175,26 @@ test('throttledProgress：每秒最多一行、百分比前进才写，最后一
   expect(lines.length).toBeGreaterThan(10);
   expect(lines.length).toBeLessThanOrEqual(40);
   expect(lines.at(-1)).toBe(`compact: ${total}/${total} (100%)\n`);
+});
+
+describe('the store checkpointer does not make VACUUM fail', () => {
+  test('检查点线程一直在跑（间隔 1 ms）、VACUUM 后 WAL 很大：截断检查点仍然完成，记 done', async () => {
+    store.close();
+    // Larger rows so VACUUM writes a WAL big enough that the thread's PASSIVE copy of it takes a while.
+    const db = new Database(file);
+    const ins = db.prepare(`INSERT INTO raw_event (source, file, "offset", line_hash, record_type, session_id, data, enc) VALUES ('transcript', 'p/s2.jsonl', ?, ?, 'x', 's2', ?, 0)`);
+    db.transaction(() => {
+      for (let i = 0; i < 6000; i++) {
+        const line = JSON.stringify({ type: 'x', i, pad: createHash('sha256').update(String(i)).digest('hex').repeat(80) });
+        ins.run(i, createHash('sha1').update(line).digest('hex'), line);
+      }
+    })();
+    db.exec(`DELETE FROM raw_event WHERE ingest_id % 2 = 0`);
+    db.close();
+    store = openStore(file, { checkpointIntervalMs: 1 });
+    for (let i = 0; i < 3; i++) {
+      const out = await vacuumIfDue(store, { ...big, evenIfDone: true, ignoreBackoff: true });
+      expect(out).toMatchObject({ outcome: 'done' });
+    }
+  }, 120_000);
 });

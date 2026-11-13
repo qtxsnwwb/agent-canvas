@@ -105,8 +105,10 @@ export function vacuumSpaceProblem(
 /** VACUUM + checkpoint must answer within this; the child process is killed otherwise (writes are held meanwhile). */
 export const VACUUM_DEADLINE_MS = 120_000;
 /** The truncating checkpoint after VACUUM: busy timeout per attempt and attempts (a reader's snapshot blocks it). */
-export const VACUUM_CHECKPOINT_BUSY_MS = 5000; // the store's own checkpointer thread may be copying a large WAL
-export const VACUUM_CHECKPOINT_ATTEMPTS = 3;
+export const VACUUM_CHECKPOINT_BUSY_MS = 1000; // a reader holding a snapshot: up to 10 x (1 s + 0.5 s)
+export const VACUUM_CHECKPOINT_ATTEMPTS = 10;
+/** Wait between two checkpoint attempts: a checkpoint already running makes one fail at once, not after the timeout. */
+export const VACUUM_CHECKPOINT_DELAY_MS = 500;
 /** A failed VACUUM is not tried again (by the service or a plain `compact`) for this long; `compact --force` does. */
 export const VACUUM_RETRY_AFTER_MS = 24 * 60 * 60 * 1000;
 /** How long the service waits for the pipeline to stop importing before postponing VACUUM to the next start. */
@@ -197,6 +199,7 @@ export function migrateAll(
   let failed = 0;
   for (;;) {
     const r = migrateBatch(store, options);
+    store.checkpointIfLarge(); // keeps the WAL bounded (no event loop to wait on here)
     converted += r.converted;
     failed += r.failed;
     if (options.progress !== undefined) {
@@ -248,6 +251,7 @@ export interface VacuumOptions {
   deadlineMs?: number;
   checkpointBusyMs?: number;
   checkpointAttempts?: number;
+  checkpointDelayMs?: number;
   now?: () => number;
 }
 
@@ -301,17 +305,17 @@ async function vacuumUnsafe(store: Store, options: VacuumOptions, log: (line: st
     const retryAt = new Date(failedAt + VACUUM_RETRY_AFTER_MS).toISOString();
     return { outcome: 'backoff', reason: `failed at ${new Date(failedAt).toISOString()}; retried after ${retryAt}` };
   }
-  const skip = (reason: string, failed = false): VacuumResult => {
+  const skip = (reason: string, failed = false, backOff = failed): VacuumResult => {
     store.setMeta(STORAGE_META.vacuum, `skipped:${reason}`);
-    if (failed) store.setMeta(STORAGE_META.vacuumFailedAt, new Date(now).toISOString());
+    if (backOff) store.setMeta(STORAGE_META.vacuumFailedAt, new Date(now).toISOString());
     log(`agent-canvas: database compaction (VACUUM) ${failed ? 'failed' : 'skipped'}: ${reason}`);
     return { outcome: 'skipped', reason, ...(failed ? { failed: true } : {}) };
   };
-  const before = store.dbFileSizes();
+  const atStart = store.dbFileSizes();
   if (options.skipSpaceCheck !== true) {
     let problem: string | null;
     try {
-      problem = vacuumSpaceProblem(path.dirname(path.resolve(store.dbPath())), before.fileBytes + before.walBytes, {
+      problem = vacuumSpaceProblem(path.dirname(path.resolve(store.dbPath())), atStart.fileBytes + atStart.walBytes, {
         freeBytes: options.freeBytes ?? freeBytesOf,
         tempDir: options.tempDir ?? sqliteTempDir(),
         volumeOf: options.volumeOf ?? volumeOf,
@@ -334,16 +338,26 @@ async function vacuumUnsafe(store: Store, options: VacuumOptions, log: (line: st
   let result: ChildResult;
   let releaseWrites: (() => void) | null = null;
   let releaseMeta: (() => void) | null = null;
+  let resumeCheckpointer: (() => void) | null = null;
+  let before = store.dbFileSizes(); // measured again once nothing writes any more
   try {
     if (host !== undefined) {
       releaseWrites = host.holdWrites();
       releaseMeta = store.holdMetaWrites();
     }
+    // The store's own checkpointer would make the truncating checkpoint after VACUUM fail at once.
+    resumeCheckpointer = await store.pauseCheckpointer();
+    before = store.dbFileSizes();
     result = await vacuumInChild(store, options);
   } catch (err) {
     result = { kind: 'error', message: err instanceof Error ? err.message : String(err) };
   } finally {
     // Each release on its own: a failing one (the held meta flush on a full disk) never keeps the other held.
+    try {
+      resumeCheckpointer?.();
+    } catch (err) {
+      log(`agent-canvas: resuming the checkpointer failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
     try {
       releaseMeta?.();
     } catch (err) {
@@ -358,7 +372,8 @@ async function vacuumUnsafe(store: Store, options: VacuumOptions, log: (line: st
   if (result.kind === 'error') return skip(`error: ${result.message}`, true);
   if (result.kind === 'timeout') return skip(`timeout: VACUUM did not finish within ${Math.round(result.ms / 1000)} s`, true);
   if (result.checkpoint === null || result.checkpoint.busy !== 0) {
-    return skip('busy: another connection held a read snapshot, so the file could not be truncated', true);
+    // Not backed off: a reader that held a snapshot is usually gone by the next start.
+    return skip('busy: another connection held a read snapshot, so the file could not be truncated', true, false);
   }
   const after = store.dbFileSizes();
   if (!(after.fileBytes < before.fileBytes || result.freelistBefore === 0)) {
@@ -390,7 +405,12 @@ function vacuumInChild(store: Store, options: VacuumOptions): Promise<ChildResul
   const script = ['vacuum-child.js', 'vacuum-child.ts'].map((f) => path.join(here, f)).find((f) => fs.existsSync(f));
   if (script === undefined) return Promise.resolve({ kind: 'error', message: 'vacuum-child script not found' });
   const deadlineMs = options.deadlineMs ?? VACUUM_DEADLINE_MS;
-  const args = [path.resolve(dbPath), String(options.checkpointBusyMs ?? VACUUM_CHECKPOINT_BUSY_MS), String(options.checkpointAttempts ?? VACUUM_CHECKPOINT_ATTEMPTS)];
+  const args = [
+    path.resolve(dbPath),
+    String(options.checkpointBusyMs ?? VACUUM_CHECKPOINT_BUSY_MS),
+    String(options.checkpointAttempts ?? VACUUM_CHECKPOINT_ATTEMPTS),
+    String(options.checkpointDelayMs ?? VACUUM_CHECKPOINT_DELAY_MS),
+  ];
   return new Promise((resolve) => {
     let settled: ChildResult | null = null;
     const child = fork(script, args, { execArgv: [], stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
@@ -500,6 +520,8 @@ export function startStorageMaintenance(store: Store, host: StorageHost, options
           }
           if (!more) break;
           await new Promise<void>((resolve) => setImmediate(resolve));
+          // Lets the checkpointer catch up so the WAL restarts instead of growing to the size of the rewritten rows.
+          await store.settleWal();
         }
       } finally {
         migrating = false;

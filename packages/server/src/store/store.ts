@@ -110,6 +110,8 @@ export interface StoreOptions {
   walSizeLimitBytes?: number;
   /** How far past walSizeLimitBytes the WAL file may grow before settleWal waits (default 16 MB). */
   walSettleSlackBytes?: number;
+  /** How often the checkpointer thread runs a PASSIVE checkpoint (default 1 s; tests). */
+  checkpointIntervalMs?: number;
   /** Receives every SQL statement executed (tests). */
   verbose?: (sql: unknown) => void;
   /** Receives notices about slow one-time work done while opening (start prints them); silent when omitted. */
@@ -307,6 +309,18 @@ export interface Store {
   dbFileSizes(): { fileBytes: number; walBytes: number };
   /** The path the store was opened with. */
   dbPath(): string;
+  /**
+   * Stops the checkpointer thread's periodic checkpoints and resolves once none of them is running (or after about two
+   * seconds without an answer); the returned function starts them again (once). For VACUUM, whose truncating
+   * checkpoint would otherwise lose to them. Without a checkpointer thread it resolves at once.
+   */
+  pauseCheckpointer(): Promise<() => void>;
+  /**
+   * When the WAL file has grown past its size limit by more than the settle slack, a truncating checkpoint on this
+   * connection (synchronous; a checkpoint already running makes it a no-op this time). For long synchronous write loops
+   * (rebuild, `compact`'s migration) that cannot await settleWal. Returns true when it ran and completed.
+   */
+  checkpointIfLarge(): boolean;
   /** VACUUM on this connection (an in-memory database; files are vacuumed by migrate-storage's child process). */
   vacuum(): void;
   /**
@@ -476,12 +490,12 @@ const WAL_SIZE_LIMIT_BYTES = 64 * 1024 * 1024;
  * Auto-checkpoints on the main connection copy the WAL into the database file synchronously, stalling the event loop
  * for hundreds of milliseconds during an import. They are disabled here and a worker thread checkpoints instead.
  */
-function startCheckpointer(db: Database.Database, dbPath: string, onError: () => void): Worker | null {
+function startCheckpointer(db: Database.Database, dbPath: string, onError: () => void, intervalMs = CHECKPOINT_INTERVAL_MS): Worker | null {
   const here = path.dirname(fileURLToPath(import.meta.url));
   const script = ['checkpointer.js', 'checkpointer.ts'].map((f) => path.join(here, f)).find((f) => fs.existsSync(f));
   if (script === undefined) return null; // keep SQLite's automatic checkpoints
   try {
-    const worker = new Worker(script, { workerData: { dbPath, intervalMs: CHECKPOINT_INTERVAL_MS } });
+    const worker = new Worker(script, { workerData: { dbPath, intervalMs } });
     worker.on('error', () => {
       onError();
       try {
@@ -574,13 +588,21 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
       ? null
       : startCheckpointer(db, dbPath, () => {
           checkpointerFailed = true;
-        });
+        }, options.checkpointIntervalMs);
   const walLimit = options.walSizeLimitBytes ?? WAL_SIZE_LIMIT_BYTES;
   const walPath = `${dbPath}-wal`;
   /** Checkpoint requests waiting for the worker's answer, by request id. */
   const replies = new Map<number, (complete: boolean) => void>();
   let nextRequest = 0;
+  /** pauseCheckpointer requests waiting for the worker's answer, by request id. */
+  const pauseReplies = new Map<number, () => void>();
   checkpointer?.on('message', (m: { type?: unknown; id?: unknown; busy?: unknown; log?: unknown; checkpointed?: unknown }) => {
+    if (m?.type === 'paused' && typeof m.id === 'number') {
+      const paused = pauseReplies.get(m.id);
+      pauseReplies.delete(m.id);
+      paused?.();
+      return;
+    }
     if (m?.type !== 'checkpointed' || typeof m.id !== 'number') return;
     const reply = replies.get(m.id);
     replies.delete(m.id);
@@ -1432,6 +1454,52 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
       return { fileBytes: size(dbPath), walBytes: size(walPath) };
     },
     dbPath: () => dbPath,
+    pauseCheckpointer() {
+      if (checkpointer === null || checkpointerFailed || !db.open) return Promise.resolve(() => {});
+      const worker = checkpointer;
+      const resume = (): void => {
+        try {
+          worker.postMessage({ type: 'resume' });
+        } catch {
+          // closed
+        }
+      };
+      let resumed = false;
+      const once = (): void => {
+        if (resumed) return;
+        resumed = true;
+        resume();
+      };
+      return new Promise((resolve) => {
+        const id = nextRequest++;
+        const timer = setTimeout(() => {
+          pauseReplies.delete(id);
+          resolve(once);
+        }, WAL_SETTLE_REPLY_MS);
+        timer.unref();
+        pauseReplies.set(id, () => {
+          clearTimeout(timer);
+          resolve(once);
+        });
+        try {
+          worker.postMessage({ type: 'pause', id });
+        } catch {
+          pauseReplies.delete(id);
+          clearTimeout(timer);
+          resolve(once);
+        }
+      });
+    },
+    checkpointIfLarge() {
+      if (dbPath === ':memory:' || dbPath === '' || !db.open) return false;
+      if (walFileSize() <= walLimit + (options.walSettleSlackBytes ?? WAL_SETTLE_SLACK_BYTES)) return false;
+      try {
+        const r = (db.pragma('wal_checkpoint(TRUNCATE)') as { busy: number; log: number; checkpointed: number }[])[0];
+        return r !== undefined && r.busy === 0;
+      } catch {
+        return false;
+      }
+    },
     vacuum() {
       db.exec('VACUUM');
       if (dbPath !== ':memory:' && dbPath !== '') db.pragma('wal_checkpoint(TRUNCATE)');

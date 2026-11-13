@@ -635,6 +635,7 @@ export class Pipeline {
           return changes;
         });
         this.normalizer = this.newNormalizer(); // release this session before the next one
+        this.store.checkpointIfLarge(); // a synchronous loop of writes: keep the WAL bounded
         if ((i + 1) % REBUILD_PROGRESS_EVERY === 0 || i + 1 === ids.length) progress?.(i + 1, ids.length);
       });
     } finally {

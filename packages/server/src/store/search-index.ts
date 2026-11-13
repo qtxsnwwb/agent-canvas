@@ -332,7 +332,7 @@ export interface SearchIndexBuild {
  * build until the next start. Its timers never keep the process alive.
  */
 export function startSearchIndexBuild(
-  store: { searchIndexStatus(): SearchIndexStatus; searchIndexBatch(maxRows: number, maxBytes: number): { more: boolean; skipped?: number } },
+  store: { searchIndexStatus(): SearchIndexStatus; searchIndexBatch(maxRows: number, maxBytes: number): { more: boolean; skipped?: number }; settleWal?(): Promise<void> },
   host: SearchIndexHost,
   options: SearchIndexBuildOptions = {},
 ): SearchIndexBuild {
@@ -382,6 +382,8 @@ export function startSearchIndexBuild(
       }
       if (!more) break;
       await new Promise<void>((resolve) => setImmediate(resolve));
+      // Lets the checkpointer catch up so the WAL restarts instead of growing with the index.
+      await store.settleWal?.();
     }
     log('agent-canvas: search index built');
   };

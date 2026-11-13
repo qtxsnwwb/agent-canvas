@@ -121,7 +121,7 @@ test('main compact：进度写到 stderr，前后大小写到 stdout；用法里
   expect(out.join('\n')).toMatch(/agent-canvas compact \[--force\]/);
 });
 
-test('main compact：VACUUM 失败（读快照让检查点做不完）时退出码 1；之后 24 小时内不再试，--force 再试', async () => {
+test('main compact：VACUUM 失败（读快照让检查点做不完）时退出码 1；读者走后再跑就成功（busy 不退避）', async () => {
   vi.stubEnv('AGENT_CANVAS_DATA_DIR', dataDir);
   vi.stubEnv('AGENT_CANVAS_PROJECTS_DIR', projectsDir);
   oldDatabase(300);
@@ -140,9 +140,8 @@ test('main compact：VACUUM 失败（读快照让检查点做不完）时退出�
   expect(out.join('\n')).toMatch(/VACUUM failed: busy/);
   out.length = 0;
   expect(await main(['compact'])).toBe(0);
-  expect(out.join('\n')).toMatch(/VACUUM not tried/);
-  expect(await main(['compact', '--force'])).toBe(0);
-}, 60_000);
+  expect(out.join('\n')).not.toMatch(/VACUUM not tried|VACUUM failed/);
+}, 120_000);
 
 test('start：旧库在后台迁移并 VACUUM，诊断里看得到；之后重启什么都不做', async () => {
   oldDatabase(400);
