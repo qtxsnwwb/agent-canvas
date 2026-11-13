@@ -389,6 +389,8 @@ function migrateSchema(db: Database.Database): void {
   db.transaction(() => {
     if (!hasColumn(db, 'raw_event', 'origin')) db.exec(MIGRATIONS.rawEventOrigin);
     if (!hasColumn(db, 'hook_stat', 'origin')) db.exec(MIGRATIONS.hookStatByOrigin);
+    if (!hasColumn(db, 'raw_event', 'enc')) db.exec(MIGRATIONS.rawEventEnc);
+    if (!hasColumn(db, 'node_detail', 'enc')) db.exec(MIGRATIONS.nodeDetailEnc);
   })();
 }
 

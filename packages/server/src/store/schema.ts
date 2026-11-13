@@ -14,8 +14,9 @@ CREATE TABLE IF NOT EXISTS raw_event (
   agent_id    TEXT,
   event_name  TEXT,
   received_at TEXT,
-  body        TEXT NOT NULL,
-  origin      TEXT NOT NULL DEFAULT 'claude' -- 'claude' | 'codex'; added by migrateSchema on older databases
+  body        TEXT NOT NULL,   -- read through decodeBody (codec.ts): text when enc = 0, raw deflate (BLOB) when enc = 1
+  origin      TEXT NOT NULL DEFAULT 'claude', -- 'claude' | 'codex'; added by migrateSchema on older databases
+  enc         INTEGER NOT NULL DEFAULT 0      -- body encoding (codec.ts); added by migrateSchema on older databases
 );
 CREATE UNIQUE INDEX IF NOT EXISTS raw_event_transcript_dedupe
   ON raw_event (file, line_hash) WHERE source = 'transcript';
@@ -74,7 +75,8 @@ CREATE INDEX IF NOT EXISTS node_main_prompt ON node (session_id)
 CREATE TABLE IF NOT EXISTS node_detail (
   session_id TEXT NOT NULL,
   node_id    TEXT NOT NULL,
-  detail     TEXT NOT NULL,
+  detail     TEXT NOT NULL,    -- read through decodeBody (codec.ts), as raw_event.body
+  enc        INTEGER NOT NULL DEFAULT 0, -- detail encoding; added by migrateSchema on older databases
   PRIMARY KEY (session_id, node_id)
 );
 
@@ -99,8 +101,9 @@ CREATE TABLE IF NOT EXISTS unknown_stat (
   sample      TEXT NOT NULL
 );
 
--- Small key/value table: epoch, last_hook_at, normalizer_version, rebuild_in_progress, hook_stat_ready, and a poll
--- source's note per unit it read completely ('poll:' + store key, e.g. poll:cursor:<id>; kept by rebuild).
+-- Small key/value table: epoch, last_hook_at, normalizer_version, rebuild_in_progress, hook_stat_ready, a poll
+-- source's note per unit it read completely ('poll:' + store key, e.g. poll:cursor:<id>; kept by rebuild), and the
+-- storage migration's progress ('storage:' keys, migrate-storage.ts).
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -108,12 +111,16 @@ CREATE TABLE IF NOT EXISTS meta (
 `;
 
 /**
- * Steps that bring a database created before the origin dimension up to SCHEMA_SQL; migrateSchema (store.ts) runs each
- * one only when its column is missing, after SCHEMA_SQL, in one transaction. rawEventOrigin: every existing row is a
- * Claude Code row. hookStatByOrigin: rekeys hook_stat by (origin, event name), keeping the existing counters as 'claude'.
+ * Steps that bring an older database up to SCHEMA_SQL; migrateSchema (store.ts) runs each one only when its column is
+ * missing, after SCHEMA_SQL, in one transaction. rawEventOrigin: every existing row is a Claude Code row.
+ * hookStatByOrigin: rekeys hook_stat by (origin, event name), keeping the existing counters as 'claude'. rawEventEnc /
+ * nodeDetailEnc: every existing row holds plain text (enc 0); the storage migration (migrate-storage.ts) compresses them
+ * later, in the background.
  */
 export const MIGRATIONS = {
   rawEventOrigin: `ALTER TABLE raw_event ADD COLUMN origin TEXT NOT NULL DEFAULT 'claude'`,
+  rawEventEnc: `ALTER TABLE raw_event ADD COLUMN enc INTEGER NOT NULL DEFAULT 0`,
+  nodeDetailEnc: `ALTER TABLE node_detail ADD COLUMN enc INTEGER NOT NULL DEFAULT 0`,
   hookStatByOrigin: `
 CREATE TABLE hook_stat_by_origin (
   origin     TEXT NOT NULL,
