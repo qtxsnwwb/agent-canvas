@@ -72,7 +72,7 @@ test('compact：做完剩下的迁移并 VACUUM，报告前后大小和进度；
   const progress: [number, number][] = [];
   const r = await compact({ projectsDir, dataDir }, { progress: (m, t) => progress.push([m, t]), freeBytes: () => 10 ** 12 });
   expect(r.converted).toBe(3000);
-  expect(r.vacuum.outcome).toBe('done');
+  expect(r.vacuum).toMatchObject({ outcome: 'done' }); // shows the reason when it is not
   expect(r.after.fileBytes + r.after.walBytes).toBeLessThan((r.before.fileBytes + r.before.walBytes) / 2);
   expect(progress.at(-1)).toEqual([3000, 3000]);
   expect(encOf()).toEqual({ 1: 3000 });

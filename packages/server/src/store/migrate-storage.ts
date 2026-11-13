@@ -105,7 +105,7 @@ export function vacuumSpaceProblem(
 /** VACUUM + checkpoint must answer within this; the child process is killed otherwise (writes are held meanwhile). */
 export const VACUUM_DEADLINE_MS = 120_000;
 /** The truncating checkpoint after VACUUM: busy timeout per attempt and attempts (a reader's snapshot blocks it). */
-export const VACUUM_CHECKPOINT_BUSY_MS = 2000;
+export const VACUUM_CHECKPOINT_BUSY_MS = 5000; // the store's own checkpointer thread may be copying a large WAL
 export const VACUUM_CHECKPOINT_ATTEMPTS = 3;
 /** A failed VACUUM is not tried again (by the service or a plain `compact`) for this long; `compact --force` does. */
 export const VACUUM_RETRY_AFTER_MS = 24 * 60 * 60 * 1000;
