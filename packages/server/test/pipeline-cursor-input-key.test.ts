@@ -79,7 +79,14 @@ async function send(sink: PollSink, events: RawEvent[]): Promise<void> {
 /** Nodes by id (inputKey included) and the session's anomalies. */
 function content(store: Store): { nodes: unknown; anomalies: unknown } {
   const g = store.getGraph(ROOT)!;
-  const nodes = Object.fromEntries([...g.nodes].sort((a, b) => (a.id < b.id ? -1 : 1)).map((x) => [x.id, x]));
+  // An empty `files` list means "no files", as an absent one does (a node that lost its files live carries [], a rebuilt
+  // one nothing: see filesPatch) — compared as equal.
+  const plain = (x: (typeof g.nodes)[number]) => {
+    if (x.files === undefined || x.files.length > 0) return x;
+    const { files: _files, filesTruncated: _t, ...rest } = x;
+    return rest;
+  };
+  const nodes = Object.fromEntries([...g.nodes].sort((a, b) => (a.id < b.id ? -1 : 1)).map((x) => [x.id, plain(x)]));
   return { nodes, anomalies: detectAnomalies(g.nodes) };
 }
 
@@ -148,4 +155,87 @@ test('Cursor params that vanish and come back to an earlier identical record (no
   expect(content(all.store)).toEqual(ref);
   all.pipeline.rebuild();
   expect(content(all.store)).toEqual(ref);
+}, 60_000);
+
+// ---- real-data calibration: Cursor edits carry what changed in their result (content ids), not their params ----
+
+const EDIT = 'edit_file_v2';
+const editParams = { relativeWorkspacePath: '/w/a.ts', noCodeblock: true, cloudAgentEdit: false };
+const ids = (before: string, after: string) => JSON.stringify({ beforeContentId: before, afterContentId: after });
+
+/** Graph nodes by bubble id, from every batching of `events` (one by one, all at once, every split, rebuilt). */
+async function everyBatching(events: RawEvent[]): Promise<Record<string, string | undefined>> {
+  const one = await newPipeline();
+  for (const e of events) await send(one.sink, [e]);
+  const ref = content(one.store);
+  one.pipeline.rebuild();
+  expect(content(one.store), 'one by one, rebuilt').toEqual(ref);
+  const all = await newPipeline();
+  await send(all.sink, events);
+  expect(content(all.store), 'all at once').toEqual(ref);
+  for (let cut = 1; cut < events.length; cut++) {
+    const p = await newPipeline();
+    await send(p.sink, events.slice(0, cut));
+    await send(p.sink, events.slice(cut));
+    expect(content(p.store), `split at ${cut}`).toEqual(ref);
+  }
+  const g = one.store.getGraph(ROOT)!;
+  return Object.fromEntries(g.nodes.map((x) => [x.id.slice(`bubble:${ROOT}:`.length), x.inputKey]));
+}
+
+test('Cursor edits: the key follows params, then the result content ids; different changes differ, equal ones match', async () => {
+  const c = new CursorConv({ id: ROOT });
+  const events = [
+    c.composer({ status: 'none' }),
+    c.user('u1', 'go', 0),
+    // e1: params only (loading), then the result with ids.
+    c.tool('e1', EDIT, 'loading', 1, { params: editParams }),
+    c.update('e1', { toolFormerData: { status: 'completed', result: ids('c0', 'c1') } }),
+    // e2: same path, another change.
+    c.tool('e2', EDIT, 'completed', 3, { params: editParams, result: JSON.parse(ids('c1', 'c2')) }),
+    // e3: the same change as e1 (same before / after).
+    c.tool('e3', EDIT, 'completed', 5, { params: editParams, result: JSON.parse(ids('c0', 'c1')) }),
+    // e4: params only, never a result.
+    c.tool('e4', EDIT, 'loading', 7, { params: editParams }),
+    // e5: ids, then a record whose result is gone: the ids are kept (as params are).
+    c.tool('e5', EDIT, 'completed', 9, { params: editParams, result: JSON.parse(ids('c2', 'c3')) }),
+  ];
+  events.push(c.update('e5', { toolFormerData: { result: null } }));
+  // e6: ids, then a record without params: the key stays.
+  events.push(c.tool('e6', EDIT, 'completed', 11, { params: editParams, result: JSON.parse(ids('c3', 'c4')) }));
+  events.push(c.update('e6', { toolFormerData: { params: null } }));
+  const keys = await everyBatching(events);
+  const k1 = inputKeyOf(EDIT, editParams);
+  expect(keys.e4).toBe(k1);
+  expect(keys.e1).toMatch(/^[0-9a-f]{16}$/);
+  expect(keys.e1).not.toBe(k1);
+  expect(keys.e2).not.toBe(keys.e1);
+  expect(keys.e3).toBe(keys.e1);
+  expect(keys.e5).not.toBe(k1);
+  expect(new Set([keys.e1, keys.e2, keys.e5, keys.e6]).size).toBe(4);
+}, 180_000);
+
+test('Cursor edits: params-only key while loading, then the ids key; a live update patches it', async () => {
+  const c = new CursorConv({ id: ROOT });
+  const p = await newPipeline();
+  await send(p.sink, [c.composer({ status: 'none' }), c.user('u1', 'go', 0), c.tool('e1', EDIT, 'loading', 1, { params: editParams })]);
+  const k1 = p.store.getGraph(ROOT)!.nodes.find((x) => x.id.endsWith(':e1'))!.inputKey;
+  expect(k1).toBe(inputKeyOf(EDIT, editParams));
+  await send(p.sink, [c.update('e1', { toolFormerData: { status: 'completed', result: ids('a', 'b') } })]);
+  const k2 = p.store.getGraph(ROOT)!.nodes.find((x) => x.id.endsWith(':e1'))!.inputKey;
+  expect(k2).toMatch(/^[0-9a-f]{16}$/);
+  expect(k2).not.toBe(k1);
+}, 60_000);
+
+test('Cursor: five edits of one file with different changes are no loop; five identical changes are', async () => {
+  const c = new CursorConv({ id: ROOT });
+  const base = [c.composer({ status: 'none' }), c.user('u1', 'go', 0)];
+  const differ = [...base, ...[0, 1, 2, 3, 4].map((i) => c.tool(`d${i}`, EDIT, 'completed', 1 + 2 * i, { params: editParams, result: JSON.parse(ids(`x${i}`, `x${i + 1}`)) }))];
+  const p = await newPipeline();
+  await send(p.sink, differ);
+  expect(detectAnomalies(p.store.getGraph(ROOT)!.nodes).filter((a) => a.kind === 'loop')).toEqual([]);
+  const c2 = new CursorConv({ id: 'c2' });
+  const same = [c2.composer({ status: 'none' }), c2.user('u1', 'go', 0), ...[0, 1, 2, 3, 4].map((i) => c2.tool(`s${i}`, EDIT, 'completed', 1 + 2 * i, { params: editParams, result: JSON.parse(ids('y0', 'y1')) }))];
+  await send(p.sink, same);
+  expect(detectAnomalies(p.store.getGraph('c2')!.nodes).filter((a) => a.kind === 'loop')).toMatchObject([{ basis: 'repeat', count: 5 }]);
 }, 60_000);

@@ -10,6 +10,7 @@ import {
   maxOf,
   minOf,
   str,
+  cursorCallKey,
   type BubbleView,
   type ComposerFacts,
 } from './cursor-bubbles.js';
@@ -498,10 +499,18 @@ export class CursorNormalizer implements AgentNormalizer {
     } else {
       const old = thread.bubbles.get(bubble.view.bubbleId);
       let view = bubble.view;
-      // A call record without params keeps the key of the bubble's last record with params: carried in the record
-      // state, so the key is a function of the records read (whatever the batching, as a rebuild replays them).
-      if (view.inputKey === undefined && old?.inputKey !== undefined && (view.kind === 'tool' || view.kind === 'subagent')) {
-        view = { ...view, inputKey: old.inputKey };
+      // A call record without params keeps the bubble's last params, one whose result names no content ids keeps the
+      // last ids: carried in the record state, so the key is a function of the records read (whatever the batching, as
+      // a rebuild and a hydration replay them).
+      if ((view.kind === 'tool' || view.kind === 'subagent') && old !== undefined) {
+        const paramsKey = view.paramsKey ?? old.paramsKey;
+        const contentIds = view.contentIds ?? old.contentIds;
+        if (paramsKey !== view.paramsKey || contentIds !== view.contentIds) {
+          view = { ...view, paramsKey, contentIds, inputKey: cursorCallKey(view.toolName ?? 'unknown', paramsKey, contentIds) };
+          if (view.inputKey === undefined) delete view.inputKey;
+          if (view.paramsKey === undefined) delete view.paramsKey;
+          if (view.contentIds === undefined) delete view.contentIds;
+        }
       }
       if (view.unknown !== null) {
         // Counted once per shape change of a bubble, not once per version.

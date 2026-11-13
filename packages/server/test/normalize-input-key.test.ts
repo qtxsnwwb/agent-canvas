@@ -209,3 +209,32 @@ test('Cursor: params that go away keep the last key, in the normalizer state too
   const third = runCodex(live, [back]);
   for (const ch of third.changes) if (ch.type === 'node_updated') expect(ch.patch).not.toHaveProperty('inputKey');
 });
+
+// ---- real-data calibration: an edit's input carries the change ----
+
+test('Claude Code: two different Edits of one file get different keys (old_string / new_string are in the input)', () => {
+  const { graph } = run(new Normalizer(), [
+    userPrompt('u1', null, 'x'),
+    use('a1', 'u1', 't1', 'Edit', { file_path: '/w/a.ts', old_string: 'a', new_string: 'b' }),
+    use('a2', 'a1', 't2', 'Edit', { file_path: '/w/a.ts', old_string: 'b', new_string: 'c' }),
+    use('a3', 'a2', 't3', 'Edit', { file_path: '/w/a.ts', old_string: 'a', new_string: 'b' }),
+  ]);
+  expect(graph.nodes['tool:t1']!.inputKey).not.toBe(graph.nodes['tool:t2']!.inputKey);
+  expect(graph.nodes['tool:t3']!.inputKey).toBe(graph.nodes['tool:t1']!.inputKey);
+});
+
+test('Codex: two different apply_patch calls on one file get different keys (the patch is the input)', () => {
+  const root = new CodexThread({ id: 'cx-edit', cwd: '/w' });
+  const patchOf = (line: string): string => ['*** Begin Patch', '*** Update File: a.ts', '@@', `-${line}`, `+${line}!`, '*** End Patch', ''].join('\n');
+  const r = runCodex(new CodexNormalizer(), [
+    root.meta(),
+    root.started('t1'),
+    root.user('u1', 'x'),
+    root.exec('c1', patchOf('one')),
+    root.output('c1'),
+    root.exec('c2', patchOf('two')),
+    root.output('c2'),
+  ]);
+  expect(nodeOf(r, 'tool:c1').files).toEqual(nodeOf(r, 'tool:c2').files);
+  expect(nodeOf(r, 'tool:c1').inputKey).not.toBe(nodeOf(r, 'tool:c2').inputKey);
+});

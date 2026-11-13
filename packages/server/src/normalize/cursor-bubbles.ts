@@ -122,8 +122,33 @@ export interface BubbleView {
   resultAgentId: string | null;
   /** The files the call names, as its params wrote them (resolved against the composer's cwd when derived). */
   fileTouches: RawTouch[];
-  /** Tool / task bubbles: the call's input fingerprint (inputKeyOf of the tool name and the params as derived). */
+  /** Tool / task bubbles: the call's fingerprint (see cursorCallKey), from paramsKey and contentIds. */
   inputKey?: string;
+  /** Tool / task bubbles: inputKeyOf(tool name, params), absent without params. */
+  paramsKey?: string;
+  /**
+   * The content ids a call's result names (`beforeContentId` / `afterContentId`, e.g. edit_file_v2: its params hold only
+   * the path, what changed is in the result); absent when the result names neither.
+   */
+  contentIds?: { before: string | null; after: string | null };
+}
+
+/**
+ * The fingerprint of a Cursor call: the params key, combined with the result's content ids when it names them — so two
+ * edits of one file are the same call only when they turn the same content into the same content. Undefined without
+ * params.
+ */
+export function cursorCallKey(name: string, paramsKey: string | undefined, contentIds: BubbleView['contentIds']): string | undefined {
+  if (paramsKey === undefined) return undefined;
+  if (contentIds === undefined) return paramsKey;
+  return inputKeyOf(name, { params: paramsKey, beforeContentId: contentIds.before, afterContentId: contentIds.after });
+}
+
+function contentIdsOf(output: unknown): BubbleView['contentIds'] {
+  if (!isObject(output)) return undefined;
+  const before = str(output.beforeContentId);
+  const after = str(output.afterContentId);
+  return before === null && after === null ? undefined : { before, after };
 }
 
 /** `params` keys naming a call's main argument for tools without their own entry (camelCase and snake_case). */
@@ -326,7 +351,11 @@ export function bubbleView(rec: Obj, bubbleId: string, nodeId: string): { view: 
       view.toolCallId = str(t.toolCallId);
       view.summary = toolSummary(name, input);
       view.fileTouches = cursorTouches(name, input);
-      const key = inputKeyOf(name, input);
+      const paramsKey = inputKeyOf(name, input);
+      if (paramsKey !== undefined) view.paramsKey = paramsKey;
+      const contentIds = contentIdsOf(output);
+      if (contentIds !== undefined) view.contentIds = contentIds;
+      const key = cursorCallKey(name, paramsKey, contentIds);
       if (key !== undefined) view.inputKey = key;
       view.rejected = isObject(output) && output.rejected === true;
       if (name === TERMINAL_TOOL && isObject(output)) view.exitCode = num(output.exitCode);
