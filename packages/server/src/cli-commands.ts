@@ -34,6 +34,17 @@ import { startWatcher } from './sources/transcript/watcher.js';
 import { FilesService } from './files/service.js';
 import { StatsService, storeStatsSource } from './stats/service.js';
 import { startStatsWarmup, type StatsWarmup } from './stats/warmup.js';
+import {
+  migrateAll,
+  startStorageMaintenance,
+  STORAGE_META,
+  vacuumIfDue,
+  type StorageMaintenance,
+  type StorageMaintenanceOptions,
+  type VacuumOptions,
+  type VacuumResult,
+} from './store/migrate-storage.js';
+import { startSearchIndexBuild, type SearchIndexBuild, type SearchIndexBuildOptions } from './store/search-index.js';
 import { openStore, type Store } from './store/store.js';
 
 export interface Running {
@@ -53,6 +64,9 @@ const USAGE = `Usage:
   agent-canvas start [--port <n>]   Watch transcripts and serve the canvas
   agent-canvas --version            Print the version
   agent-canvas rebuild              Re-derive the graph from the stored raw log
+  agent-canvas compact [--force]    Compress the stored records still uncompressed and reclaim free space (VACUUM);
+                                     the service must not be running. --force: VACUUM even when not needed, without
+                                     the free-disk-space check
   agent-canvas hooks install [--port <n>] [--yes] [--settings <file>]
                                      Add the agent-canvas hooks to Claude Code's settings.json
   agent-canvas hooks uninstall [--port <n>] [--yes] [--settings <file>]
@@ -178,6 +192,21 @@ export interface StartOptions {
    * AGENT_CANVAS_STATS_WARMUP=0 (the test configuration does).
    */
   statsWarmup?: boolean;
+  /**
+   * The storage job (migrate-storage.ts: compress records stored before compression, then VACUUM), run in the
+   * background once start-up is done when the database still needs it; options for tests, false: never.
+   */
+  storage?: StorageMaintenanceOptions | false;
+  /**
+   * The search index build (search-index.ts), run in the background once start-up is done when the database has no
+   * complete index; options for tests, false: never.
+   */
+  searchIndex?: SearchIndexBuildOptions | false;
+}
+
+/** True while the database still needs the storage job (its migration or its VACUUM is not done). */
+function storageWorkDue(store: Store): boolean {
+  return store.getMeta(STORAGE_META.migration) !== 'done' || store.getMeta(STORAGE_META.vacuum) !== 'done';
 }
 
 export async function start(overrides: Partial<Config> = {}, options: StartOptions = {}): Promise<Running> {
@@ -190,6 +219,8 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
   let stats: StatsService | null = null;
   let files: FilesService | null = null;
   let warmup: StatsWarmup | null = null;
+  let storage: StorageMaintenance | null = null;
+  let searchBuild: SearchIndexBuild | null = null;
   let pipeline: Pipeline;
   try {
     store = openStore(config.dbPath, options.log ? { log: options.log } : {});
@@ -211,7 +242,26 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
     });
     stats = new StatsService(storeStatsSource(store));
     files = new FilesService(storeStatsSource(store));
-    app = buildServer({ store, pipeline, config, notifications, stats, files });
+    // After the (automatic) rebuild above; the job itself waits for the initial scan and the first poll rounds.
+    if (options.storage !== false && storageWorkDue(store)) {
+      storage = startStorageMaintenance(store, pipeline, { log: (line) => process.stderr.write(`${line}\n`), ...options.storage });
+    }
+    // After the (automatic) rebuild above, which leaves the index to this background build (it marks it incomplete).
+    if (options.searchIndex !== false && store.searchIndexStatus().indexing) {
+      searchBuild = startSearchIndexBuild(store, pipeline, { log: (line) => process.stderr.write(`${line}\n`), ...options.searchIndex });
+    }
+    const storageJob = storage;
+    const searchJobNow = searchBuild;
+    app = buildServer({
+      store,
+      pipeline,
+      config,
+      notifications,
+      stats,
+      files,
+      ...(storageJob !== null ? { storage: storageJob } : {}),
+      ...(searchJobNow !== null ? { search: searchJobNow } : {}),
+    });
     await app.listen({ port: config.port, host: config.host });
     // After the (automatic) rebuild above, before the initial scan: its changes arrive while importing() holds.
     notifications.start(`http://${config.host}:${(app.server.address() as AddressInfo).port}`);
@@ -234,6 +284,8 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
     stats?.close();
     files?.close();
     await warmup?.stop();
+    await storage?.stop();
+    await searchBuild?.stop();
     await notifications?.close().catch(() => undefined);
     await app?.close().catch(() => undefined);
     store?.close();
@@ -249,6 +301,8 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
   const statsService = stats!;
   const filesService = files!;
   const statsWarmup = warmup;
+  const storageJob = storage;
+  const searchJob = searchBuild;
   return {
     url,
     address: { address: bound.address, port: bound.port },
@@ -258,6 +312,10 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
         try {
           // The warm-up first: it stops waiting, and a summary build in progress stops at its next page.
           await statsWarmup?.stop();
+          // The storage job stops before its next batch (a VACUUM in progress ends first, releasing held writes).
+          await storageJob?.stop();
+          // The search index build stops before its next batch.
+          await searchJob?.stop();
           statsService.close();
           filesService.close();
           await statsWarmup?.done;
@@ -292,6 +350,78 @@ export function rebuild(overrides: Partial<Config> = {}, options: { progress?: (
   } finally {
     lock.release();
   }
+}
+
+export interface CompactOptions {
+  /** VACUUM even when not needed or failed recently, without the free-disk-space check. */
+  force?: boolean;
+  /** Migration progress (positions done, total), after each batch. */
+  progress?: (migrated: number, total: number) => void;
+  /** Free bytes of a directory's volume (tests); default fs.statfsSync. */
+  freeBytes?: (dir: string) => number;
+  /** Tests: VACUUM's deadline and checkpoint settings. */
+  vacuum?: Pick<VacuumOptions, 'deadlineMs' | 'checkpointBusyMs' | 'checkpointAttempts'>;
+}
+
+export interface CompactResult {
+  converted: number;
+  failed: number;
+  vacuum: VacuumResult;
+  before: { fileBytes: number; walBytes: number };
+  after: { fileBytes: number; walBytes: number };
+}
+
+/**
+ * `agent-canvas compact`: with the lock of start / rebuild (refused while the service runs), the remaining storage
+ * migration synchronously, then VACUUM (in a child process), unless one was done and nothing was migrated since (outcome
+ * 'already'), or one failed within the last 24 hours ('backoff'); skipped when there is not enough free space
+ * (vacuumSpaceProblem). `force` runs VACUUM in any case, without the space check. VACUUM runs in a child process with
+ * a deadline (vacuumIfDue).
+ */
+export async function compact(overrides: Partial<Config> = {}, options: CompactOptions = {}): Promise<CompactResult> {
+  const config = resolveConfig(overrides);
+  const lock = acquireLock(config.dataDir);
+  try {
+    const store = openStore(config.dbPath);
+    try {
+      const before = store.dbFileSizes();
+      const migratedBefore = store.getMeta(STORAGE_META.migration) === 'done';
+      const { converted, failed } = migrateAll(store, options.progress !== undefined ? { progress: options.progress } : {});
+      // A VACUUM done after the migration finished leaves nothing to reclaim: run it again only when forced.
+      const vacuum = await vacuumIfDue(store, {
+        evenIfDone: options.force === true || !migratedBefore,
+        ...(options.force === true ? { skipSpaceCheck: true, ignoreBackoff: true } : {}),
+        ...(options.freeBytes !== undefined ? { freeBytes: options.freeBytes } : {}),
+        ...options.vacuum,
+      });
+      return { converted, failed, vacuum, before, after: store.dbFileSizes() };
+    } finally {
+      store.close();
+    }
+  } finally {
+    lock.release();
+  }
+}
+
+const megabytes = (n: number): string => `${(n / 1024 / 1024).toFixed(1)} MB`;
+
+/**
+ * A progress callback that writes `compact: done/total (p%)` at most once a second and only when the whole percent has
+ * moved on, plus the final line: a few dozen lines for a migration of any size.
+ */
+export function throttledProgress(write: (line: string) => void, now: () => number = Date.now): (done: number, total: number) => void {
+  let lastAt = -Infinity;
+  let lastPercent = -1;
+  return (done, total) => {
+    const percent = total > 0 ? Math.floor((done / total) * 100) : 100;
+    const final = done >= total;
+    const t = now();
+    if (!final && (percent <= lastPercent || t - lastAt < 1000)) return;
+    if (final && lastPercent === 100) return;
+    lastAt = t;
+    lastPercent = final ? 100 : percent;
+    write(`compact: ${done}/${total} (${final ? 100 : percent}%)\n`);
+  };
 }
 
 function terminalIo(): HooksCliIo {
@@ -393,6 +523,19 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
       rebuild({}, { progress: (done, total) => process.stderr.write(`rebuild: ${done}/${total} sessions\n`) });
       console.log('agent-canvas rebuild complete');
       return 0;
+    }
+    if (command === 'compact') {
+      const { values } = parseArgs({ args: rest, options: { force: { type: 'boolean' } }, allowPositionals: false });
+      const r = await compact({}, { force: values.force === true, progress: throttledProgress((line) => process.stderr.write(line)) });
+      const size = (s: { fileBytes: number; walBytes: number }): string => megabytes(s.fileBytes + s.walBytes);
+      if (r.failed > 0) console.log(`agent-canvas compact: ${r.failed} stored rows could not be compressed (kept as they were)`);
+      if (r.vacuum.outcome === 'skipped') console.log(`agent-canvas compact: VACUUM ${r.vacuum.failed === true ? 'failed' : 'skipped'}: ${r.vacuum.reason ?? ''}`);
+      if (r.vacuum.outcome === 'backoff') console.log(`agent-canvas compact: VACUUM not tried: it ${r.vacuum.reason ?? 'failed recently'}; --force runs it now`);
+      if (r.vacuum.outcome === 'already') {
+        console.log('agent-canvas compact: VACUUM not needed (done before, nothing compressed since); --force runs it anyway');
+      }
+      console.log(`agent-canvas compact: database file: ${size(r.before)} -> ${size(r.after)}`);
+      return r.vacuum.failed === true ? 1 : 0;
     }
   } catch (err) {
     console.error(err instanceof Error ? err.message : String(err));

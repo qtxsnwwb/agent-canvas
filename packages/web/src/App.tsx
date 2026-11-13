@@ -38,7 +38,7 @@ export function App() {
         <a className="header-link header-link-next" href="#/diagnostics">诊断</a>
       </header>
       {route.page === 'session' ? (
-        <SessionPage key={route.sessionId} sessionId={route.sessionId} filePath={route.filePath ?? null} />
+        <SessionPage key={route.sessionId} sessionId={route.sessionId} filePath={route.filePath ?? null} nodeId={route.nodeId ?? null} />
       ) : route.page === 'diagnostics' ? (
         <Diagnostics />
       ) : route.page === 'stats' ? (

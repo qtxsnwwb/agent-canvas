@@ -17,6 +17,7 @@ import { scopeKey, scopeOf, stepChain, stepTicking, waterfallClock, type Waterfa
 import { sessionStatusView } from '../labels';
 import { OriginBadge } from '../OriginBadge';
 import { sessionLoadState } from '../sessionLoad';
+import { NODE_MISSING_NOTE, nextNodeTarget, nodeJumpAction, type NodeTarget } from '../nodeJump';
 import { useNow } from '../useNow';
 
 function hasKeys(obj: object): boolean {
@@ -64,10 +65,12 @@ function DensitySwitch({ compact, disabled, onChange }: { compact: boolean; disa
  * re-renders do not reach React Flow; it re-renders when the canvas snapshot or the selection changes. Every handler
  * passed to Canvas is stable.
  */
-const SessionCanvas = memo(function SessionCanvas({ live, toolbar, filePath }: {
+const SessionCanvas = memo(function SessionCanvas({ live, toolbar, filePath, nodeId }: {
   live: LiveSession; toolbar: HTMLElement | null;
   /** The deep link's file (`#/s/<id>/f/<path>`): opens the file panel at it, again whenever it changes. */
   filePath: string | null;
+  /** The deep link's node (`#/s/<id>/n/<nodeId>`): selected and brought into view, again whenever it changes. */
+  nodeId: string | null;
 }) {
   const canvas = useCanvas(live);
   // ---- the file panel (spec 4) ----
@@ -267,16 +270,14 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar, filePath }: {
    * expanded, then it is selected and centred. When the view cannot draw it, its turn is selected (or centred) instead
    * and the panel says so.
    */
-  const pickStep = useCallback((nodeId: string) => {
+  const showStep = useCallback((nodeId: string): string | null => {
     const cur = now.current;
     const graph = live.getGraph();
     const node = graph.nodes[nodeId];
     const plan = revealPlan(graph, nodeId);
     const focusOn = (target: Omit<CanvasFocus, 'seq'>): void => setFocus({ ...target, seq: ++focusSeq.current });
-    setPickedStep(nodeId);
     if (node === undefined || plan === null) {
-      setPickNote('这一步已经不在画布上了。');
-      return;
+      return '这一步已经不在画布上了。';
     }
     const turnId = plan.turnKey !== null ? `turn:${plan.turnKey}` : null;
     if (cur.outline) {
@@ -286,40 +287,64 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar, filePath }: {
       if (target !== null && cur.view.nodes.has(target)) {
         setSelectedId(target);
         setDetail({ id: nodeId, scope: node.agentId === null ? target : `agent:${node.agentId}` });
-        setPickNote(null);
         focusOn({ id: target });
+        return null;
       } else if (turnId !== null && cur.view.nodes.has(turnId)) {
         setSelectedId(turnId);
         setDetail(null);
-        setPickNote('概览里找不到这一步所在的子代理，已选中它所在的轮次。');
         focusOn({ id: turnId });
+        return '概览里找不到这一步所在的子代理，已选中它所在的轮次。';
       } else {
-        setPickNote('这一步在概览里画不出来。');
+        return '这一步在概览里画不出来。';
       }
-      return;
     }
     // Like the drawer's 展开: auto-fold off first, so nothing opened here is folded away again by later updates.
     setAutoFold(false);
     setStopFollowingSignal((n) => n + 1);
     if (reveal(nodeId)) {
       setSelectedId(nodeId);
-      setPickNote(null);
       focusOn({ id: nodeId });
-      return;
+      return null;
     }
     const why = cur.view.mode === 'replay' ? '复盘时间还没到这一步' : '这一步在当前视角里画不出来';
     if (plan.turnKey === null) {
-      setPickNote(`${why}。`);
-    } else if (turnId !== null && cur.view.nodes.has(turnId)) {
-      setSelectedId(turnId);
-      setPickNote(`${why}，已选中它所在的轮次。`);
-      focusOn({ id: turnId });
-    } else {
-      setSelectedId(null);
-      setPickNote(`${why}，已定位到它所在的轮次。`);
-      focusOn({ turnKey: plan.turnKey });
+      return `${why}。`;
     }
+    if (turnId !== null && cur.view.nodes.has(turnId)) {
+      setSelectedId(turnId);
+      focusOn({ id: turnId });
+      return `${why}，已选中它所在的轮次。`;
+    }
+    setSelectedId(null);
+    focusOn({ turnKey: plan.turnKey });
+    return `${why}，已定位到它所在的轮次。`;
   }, [live, reveal, setAutoFold]);
+  const pickStep = useCallback((nodeId: string) => {
+    setPickedStep(nodeId);
+    setPickNote(showStep(nodeId));
+  }, [showStep]);
+
+  // ---- the node address (`#/s/<id>/n/<nodeId>`) ----
+  // Once per navigation, when the canvas model exists (the graph is loaded before this page is mounted): the node is shown
+  // like a step picked in the file panel. Graph updates do not run it again (the effect depends on the target only).
+  const [nodeTarget, setNodeTarget] = useState<NodeTarget | null>(() => nextNodeTarget(null, nodeId));
+  const [nodeNote, setNodeNote] = useState<string | null>(null);
+  const handledNode = useRef(0);
+  useEffect(() => { setNodeTarget((t) => nextNodeTarget(t, nodeId)); }, [nodeId]);
+  const ready = canvas.ready;
+  useEffect(() => {
+    const act = nodeJumpAction(nodeTarget, handledNode.current, ready, (id) => live.getGraph().nodes[id] !== undefined);
+    if (act === 'idle' || act === 'wait' || nodeTarget === null) return;
+    handledNode.current = nodeTarget.seq;
+    setFilesOpen(false); // the drawer and the file panel share the right-hand side
+    if (act === 'missing') {
+      setNodeNote(NODE_MISSING_NOTE);
+      return;
+    }
+    setPickedStep(nodeTarget.id);
+    setPickNote(null);
+    setNodeNote(showStep(nodeTarget.id));
+  }, [nodeTarget, ready, live, showStep]);
   const closeFiles = useCallback(() => {
     setFilesOpen(false);
     setPickNote(null);
@@ -404,6 +429,12 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar, filePath }: {
             onClose={closePanel}
           />
         )}
+        {nodeNote !== null && (
+          <p className="node-note" role="status">
+            <span>{nodeNote}</span>
+            <button type="button" aria-label="关闭提示" onClick={() => setNodeNote(null)}>×</button>
+          </p>
+        )}
         {empty && <div className="canvas-empty muted">暂无节点</div>}
         {laying && <div className="canvas-empty muted">布局中…</div>}
       </div>
@@ -411,7 +442,7 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar, filePath }: {
   );
 });
 
-export function SessionPage({ sessionId, filePath = null }: { sessionId: string; filePath?: string | null }) {
+export function SessionPage({ sessionId, filePath = null, nodeId = null }: { sessionId: string; filePath?: string | null; nodeId?: string | null }) {
   const [live, setLive] = useState<LiveSession | null>(null);
   /** The failure of openLiveSession (null while there is none); see sessionLoadState. */
   const [error, setError] = useState<unknown>(null);
@@ -465,7 +496,7 @@ export function SessionPage({ sessionId, filePath = null }: { sessionId: string;
         {session.sourceDeleted && <span className="tag">源文件已删除</span>}
         <div className="session-bar-end" ref={setToolbar} />
       </div>
-      <SessionCanvas key={session.id} live={live} toolbar={toolbar} filePath={filePath} />
+      <SessionCanvas key={session.id} live={live} toolbar={toolbar} filePath={filePath} nodeId={nodeId} />
     </div>
   );
 }

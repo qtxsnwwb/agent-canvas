@@ -85,4 +85,5 @@ export interface Session {
  */
 export interface Project { id: string; cwd: string | null; sessionCount: number; activeSessionCount: number; origins: Origin[] }
 
-export interface NodeDetail { nodeId: string; input: unknown; output: unknown; text: string | null; raw: unknown }
+/** `unreadable`: the stored detail could not be decoded (damaged); the other fields are then empty. */
+export interface NodeDetail { nodeId: string; input: unknown; output: unknown; text: string | null; raw: unknown; unreadable?: true }

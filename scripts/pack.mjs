@@ -3,6 +3,9 @@
 // The workspace packages stay private. The published package is one directory:
 //   release/package.json   generated here (name, version, real dependencies)
 //   release/dist/cli.js    the server bundled with the shared model code (third-party dependencies stay external)
+//   release/dist/vacuum-child.js, release/dist/checkpointer.js
+//                          the scripts the store starts as a child process / worker thread; the store looks for them
+//                          next to its own code (the chunks in dist/), by these names
 //   release/web/           the built web app
 //   release/README.md, release/LICENSE
 import fs from 'node:fs';
@@ -17,8 +20,14 @@ const read = (p) => JSON.parse(fs.readFileSync(path.join(root, p), 'utf8'));
 const rootPkg = read('package.json');
 const serverPkg = read('packages/server/package.json');
 const entry = path.join(root, 'packages/server/dist/cli.js');
+// Started by file name next to the store's module (migrate-storage.ts vacuumInChild, store.ts startCheckpointer).
+const helperEntries = { 'vacuum-child': 'packages/server/dist/store/vacuum-child.js', checkpointer: 'packages/server/dist/store/checkpointer.js' };
 const webDist = path.join(root, 'packages/web/dist');
-for (const [what, p] of [['server build', entry], ['web build', path.join(webDist, 'index.html')]]) {
+for (const [what, p] of [
+  ['server build', entry],
+  ...Object.values(helperEntries).map((p) => ['server build', path.join(root, p)]),
+  ['web build', path.join(webDist, 'index.html')],
+]) {
   if (!fs.existsSync(p)) {
     console.error(`pack: missing ${what} (${path.relative(root, p)}); run "pnpm build" first`);
     process.exit(1);
@@ -33,7 +42,7 @@ fs.mkdirSync(out, { recursive: true });
 
 // Code splitting keeps cli.js small: `hook-forward` runs once per hook event and must not load the server.
 await build({
-  entryPoints: [entry],
+  entryPoints: { cli: entry, ...Object.fromEntries(Object.entries(helperEntries).map(([name, p]) => [name, path.join(root, p)])) },
   outdir: path.join(out, 'dist'),
   bundle: true,
   splitting: true,
@@ -44,6 +53,13 @@ await build({
   chunkNames: 'chunk-[hash]',
   logLevel: 'warning',
 });
+
+for (const name of ['cli', ...Object.keys(helperEntries)]) {
+  if (!fs.existsSync(path.join(out, 'dist', `${name}.js`))) {
+    console.error(`pack: dist/${name}.js is missing from the bundle`);
+    process.exit(1);
+  }
+}
 
 fs.cpSync(webDist, path.join(out, 'web'), { recursive: true });
 fs.copyFileSync(path.join(root, 'README.md'), path.join(out, 'README.md'));

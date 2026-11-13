@@ -484,3 +484,7 @@ button.cc-reason:focus-visible, .cc-reason-current:focus-visible { outline: 3px 
 .file-step-time { flex: none; color: var(--ink-soft); font-size: 11px; font-variant-numeric: tabular-nums; }
 /* In the panel the time column is narrow and the counts wrap under a long name only when they must. */
 .file-panel .file-when { min-width: 3.5em; }
+
+/* The note of a node address that could not be shown (or only in part): dismissible, over the top of the canvas. */
+.node-note { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 6; margin: 0; max-width: min(560px, calc(100% - 24px)); display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 12px; border-radius: 10px; background: #fff3c4; color: var(--ink); font-size: 13px; box-shadow: 0 2px 8px rgb(0 0 0 / 12%); }
+.node-note button { border: 0; background: transparent; color: inherit; font-size: 16px; line-height: 1; cursor: pointer; padding: 0 4px; }

@@ -351,7 +351,7 @@ export function projectRowName(p: Pick<StatsProject, 'projectId' | 'name' | 'pro
   return p.projectId === null ? `其他（${p.projectCount} 个项目）` : p.name;
 }
 
-/** The session page of a session (it has no way to pre-select a node from the address). */
+/** The session page of a session. */
 export function sessionHref(sessionId: string): string {
   return `#/s/${encodeURIComponent(sessionId)}`;
 }

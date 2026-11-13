@@ -1,4 +1,14 @@
-import { effectiveStatus, type EffectiveSessionStatus, type NodeStatus, type Session } from '@agent-canvas/shared';
+import { effectiveStatus, type EffectiveSessionStatus, type NodeKind, type NodeStatus, type Session } from '@agent-canvas/shared';
+
+export const KIND_LABEL: Record<NodeKind, string> = {
+  prompt: '提示',
+  thinking: '思考',
+  text: '回复',
+  tool: '工具',
+  subagent: '子代理',
+  system: '系统',
+  unknown: '未知',
+};
 
 export const NODE_STATUS_LABEL: Record<NodeStatus, string> = {
   running: '执行中',

@@ -8,11 +8,13 @@ import {
   SEARCH_MAX_LIMIT,
   type Change,
   type ClientMessage,
+  type ContentSearchResponse,
   type Diagnostics,
   type NotificationSettingsResponse,
   type NotificationTestResponse,
   type Origin,
   type SearchHit,
+  type SearchIndexStatus,
   type SeqChange,
   type ServerMessage,
 } from '@agent-canvas/shared';
@@ -22,6 +24,7 @@ import { NORMALIZER_VERSION } from '../normalize/version.js';
 import type { NotificationService } from '../notify/service.js';
 import type { Pipeline } from '../pipeline.js';
 import { KEY_PREFIXES } from '../sources/source.js';
+import { storageStatus, type StorageDiagnostics } from '../store/migrate-storage.js';
 import type { Store } from '../store/store.js';
 import { FilesService, parseFilesQuery } from '../files/service.js';
 import { parseStatsQuery, StatsService, storeStatsSource } from '../stats/service.js';
@@ -165,6 +168,10 @@ export function buildServer(deps: {
   notifications?: NotificationService;
   stats?: StatsService;
   files?: FilesService;
+  /** The storage job (start()); without one, Diagnostics.storage is read from the database alone. */
+  storage?: { status(): StorageDiagnostics };
+  /** The search index build (start(), when the index was incomplete): Diagnostics.search with its lastError. */
+  search?: { status(): SearchIndexStatus };
 }): FastifyInstance {
   const { store, pipeline, config, notifications } = deps;
   const stats = deps.stats ?? new StatsService(storeStatsSource(store));
@@ -281,6 +288,25 @@ export function buildServer(deps: {
     const parsed = typeof limit === 'string' && /^\s*-?\d+\s*$/.test(limit) ? Number(limit) : SEARCH_DEFAULT_LIMIT;
     return store.searchSessions(q, Math.min(SEARCH_MAX_LIMIT, Math.max(1, parsed)));
   });
+  // Search inside sessions: conversation text by design (the snippets). `q` other than one string: no hits. 400 for an
+  // unknown origin. indexing: the index is still being built (results may be incomplete).
+  app.get<{ Querystring: { q?: unknown; origin?: unknown; projectId?: unknown } }>(
+    '/api/search/content',
+    async (req, reply): Promise<ContentSearchResponse | undefined> => {
+      const { q, origin, projectId } = req.query;
+      if (origin !== undefined && (typeof origin !== 'string' || !(ORIGINS as readonly string[]).includes(origin))) {
+        return reply.code(400).send({ error: 'unknown origin' });
+      }
+      if (projectId !== undefined && typeof projectId !== 'string') return reply.code(400).send({ error: 'bad projectId' });
+      const indexing = store.searchIndexStatus().indexing;
+      if (typeof q !== 'string') return { hits: [], truncated: false, shortQuery: false, indexing };
+      const result = store.searchContent(q, {
+        origin: (origin as Origin | undefined) ?? null,
+        projectId: projectId === undefined || projectId === '' ? null : projectId,
+      });
+      return { ...result, indexing };
+    },
+  );
   app.get<{ Params: { id: string } }>('/api/sessions/:id/graph', async (req, reply) => {
     // Built from the stored bodies and sent as-is: no parse/re-serialize of every node.
     const json = store.getGraphJson(req.params.id);
@@ -335,6 +361,8 @@ export function buildServer(deps: {
           hasData: store.transcriptKeys(KEY_PREFIXES.cursor).length > 0,
         },
         ...(notifications !== undefined ? { notifications: notifications.diagnostics() } : {}),
+        storage: deps.storage?.status() ?? storageStatus(store),
+        search: deps.search?.status() ?? store.searchIndexStatus(),
       };
     },
   );
@@ -342,6 +370,8 @@ export function buildServer(deps: {
   if (notifications !== undefined) {
     app.get('/api/notifications/settings', async (): Promise<NotificationSettingsResponse> => notifications.getSettings());
     app.put('/api/notifications/settings', async (req, reply) => {
+      // While the database is being compacted (VACUUM) writes are held; a settings change would only live in memory.
+      if (pipeline.writesHeld()) return reply.code(503).send({ error: '数据库正在整理，稍后再试' });
       const result = notifications.putSettings(req.body);
       if (!result.ok) return reply.code(400).send({ error: result.error });
       return result.response;

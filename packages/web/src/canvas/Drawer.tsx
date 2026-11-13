@@ -5,7 +5,7 @@ import { NODE_STATUS_LABEL } from '../labels';
 import type { UpstreamChain } from './chain';
 import { formatDuration } from './format';
 import { usageLabel } from './replay';
-import { DETAIL_MAX_CHARS, detailSections } from './detail';
+import { DETAIL_MAX_CHARS, detailNote, detailSections } from './detail';
 import { KIND_LABEL, nodeColor, UNFINISHED_LABEL } from './nodes';
 import { CHAIN_FOLDED, NO_REASONING, reasoningRows, type ReasoningRow } from './reasoning';
 import type { CanvasView } from './view';
@@ -121,12 +121,14 @@ function DrawerBody({ sessionId, node, prefix }: { sessionId: string; node: Grap
       </div>
     );
   }
-  const sections = detailSections(detail);
+  // A damaged detail comes with empty fields: say so instead of showing nothing.
+  const sections = detail.unreadable === true ? [] : detailSections(detail);
+  const note = detailNote(detail, sections.length);
   return (
     <div className="cc-drawer-body">
       {prefix}
       {error !== null && <div className="cc-drawer-error">详情刷新失败：{error}</div>}
-      {sections.length === 0 && <div className="cc-muted">无内容</div>}
+      {note !== null && <div className={detail.unreadable === true ? 'cc-drawer-error' : 'cc-muted'}>{note}</div>}
       {sections.map((s) => {
         const content = () => (
           <>

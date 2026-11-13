@@ -1,22 +1,14 @@
 import { createContext, memo, useContext, type CSSProperties, type MouseEvent, type ReactNode } from 'react';
 import { Handle, Position, type Node, type NodeProps, type NodeTypes } from '@xyflow/react';
 import type { GraphNode, NodeKind, NodeStatus } from '@agent-canvas/shared';
-import { NODE_STATUS_LABEL } from '../labels';
+import { KIND_LABEL, NODE_STATUS_LABEL } from '../labels';
 import { formatDuration, nodeAriaLabel } from './format';
 import { THINKING_NOT_RECORDED } from './reasoning';
 import { replayOverlay, replayOverlayTitle } from './replay';
 import { isBackgroundStep } from './waterfall';
 import type { TurnSummary } from './view';
 
-export const KIND_LABEL: Record<NodeKind, string> = {
-  prompt: '提示',
-  thinking: '思考',
-  text: '回复',
-  tool: '工具',
-  subagent: '子代理',
-  system: '系统',
-  unknown: '未知',
-};
+export { KIND_LABEL } from '../labels';
 
 /** Candy colours (the same as the tokens in styles.css); always used as a fill behind ink-coloured text or an ink outline. */
 export const STATUS_COLOR: Record<NodeStatus, string> = {

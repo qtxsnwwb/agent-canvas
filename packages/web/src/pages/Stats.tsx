@@ -2,12 +2,13 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type Keyboar
 import type { Origin, Project, StatsBucket, StatsDay, StatsResponse, StatsTokens, StatsTool } from '@agent-canvas/shared';
 import { api } from '../client';
 import { ORIGIN_LOOK, projectTitle, stripProjects } from '../home';
+import { sessionNodeHash } from '../route';
 import {
   DEFAULT_STATS_FILTER, STATS_FILTER_KEY, STATS_RANGE_OPTIONS, availableOrigins, bucketLabel, bucketLong, columnLayout,
   coverageNotes, dayIndexAt, seriesBucket, seriesTitle,
   durationTickLabel, durationTicks, effectiveStatsFilter, formatAvg, formatCount, formatRate, formatSpan, formatTokenCount,
   formatTokenTriple, isEmptyStats, NONE, TOKEN_CAPTION, TOKEN_PARTS, tokenCells, labelEvery, labelIndices, parseStatsFilter, projectRowName, rangeLabel, roundedEndRect,
-  serializeStatsFilter, sessionHref, shownNoTokenOrigins, splitTools, stackSegments, statsQueryString,
+  serializeStatsFilter, shownNoTokenOrigins, splitTools, stackSegments, statsQueryString,
   type StatsFilter, type StatsOriginFilter,
 } from '../stats';
 
@@ -437,7 +438,7 @@ function Slowest({ data, projectNames }: { data: StatsResponse; projectNames: Ma
   return (
     <section aria-labelledby="stats-slow-h">
       <SectionHead id="stats-slow-h" title="最慢的 10 次调用"
-        caption="范围内耗时最长的已结束调用，含子代理内部的。点工具名打开那个会话。" />
+        caption="范围内耗时最长的已结束调用，含子代理内部的。点工具名打开那个会话并定位到这一步。" />
       {data.slowest.length === 0 ? <p className="muted">没有已结束的调用。</p> : (
         <div className="stats-table-wrap">
           <table className="stats-table">
@@ -445,7 +446,7 @@ function Slowest({ data, projectNames }: { data: StatsResponse; projectNames: Ma
             <tbody>
               {data.slowest.map((c) => (
                 <tr key={`${c.sessionId}:${c.nodeId}`}>
-                  <td><a href={sessionHref(c.sessionId)} title="打开这个会话"><ToolName origin={c.origin} name={c.toolName} multi={multi} /></a></td>
+                  <td><a href={sessionNodeHash(c.sessionId, c.nodeId)} title="打开这个会话，并定位到这一步"><ToolName origin={c.origin} name={c.toolName} multi={multi} /></a></td>
                   <td className="num">{formatSpan(c.durationMs)}</td>
                   <td className="wrap">{projectNames.get(c.projectId) ?? c.projectId}</td>
                   <td>{formatWhen(c.startedAt)}</td>

@@ -1,6 +1,7 @@
 import {
   applyChanges,
   type ClientMessage,
+  type ContentSearchResponse,
   type Diagnostics,
   type Graph,
   type GraphSnapshot,
@@ -8,6 +9,7 @@ import {
   type NotificationSettings,
   type NotificationSettingsResponse,
   type NotificationTestResponse,
+  type Origin,
   type Project,
   type ProjectFilesResponse,
   type SeqChange,
@@ -63,6 +65,9 @@ export const api = {
     sendJson<NotificationSettingsResponse>('PUT', '/api/notifications/settings', settings),
   testNotification: () => sendJson<NotificationTestResponse>('POST', '/api/notifications/test'),
   search: (q: string) => getJson<SearchHit[]>(`/api/search?q=${enc(q)}`),
+  /** Content hits inside sessions (GET /api/search/content). */
+  searchContent: (q: string, origin: Origin | null = null) =>
+    getJson<ContentSearchResponse>(`/api/search/content?q=${enc(q)}${origin === null ? '' : `&origin=${enc(origin)}`}`),
   /** `query` is built by stats.ts `statsQueryString`. */
   stats: (query: string) => getJson<StatsResponse>(`/api/stats?${query}`),
   sessionFiles: (sessionId: string) => getJson<SessionFilesResponse>(`/api/sessions/${enc(sessionId)}/files`),

@@ -69,6 +69,19 @@ describe('通知接口', () => {
     expect((await app.inject({ method: 'GET', url: '/api/notifications/settings' })).json().settings).toEqual(enabled);
   });
 
+  test('整理数据库（写入被挡住）期间 PUT 设置：503，不改设置；之后照常', async () => {
+    const release = pipeline.holdWrites();
+    try {
+      const res = await app.inject({ method: 'PUT', url: '/api/notifications/settings', payload: enabled });
+      expect(res.statusCode).toBe(503);
+      expect(res.json()).toEqual({ error: '数据库正在整理，稍后再试' });
+    } finally {
+      release();
+    }
+    expect((await app.inject({ method: 'GET', url: '/api/notifications/settings' })).json().settings).toEqual(DEFAULT_NOTIFICATION_SETTINGS);
+    expect((await app.inject({ method: 'PUT', url: '/api/notifications/settings', payload: enabled })).statusCode).toBe(200);
+  });
+
   test.each([
     ['缺字段', { enabled: true }],
     ['范围外', { ...DEFAULT_NOTIFICATION_SETTINGS, finishedMinSeconds: -1 }],

@@ -30,6 +30,7 @@ export const fileSources: typeof Commands.fileSources = (...args) => loaded().fi
 export const rebuildReason: typeof Commands.rebuildReason = (...args) => loaded().rebuildReason(...args);
 export const start: typeof Commands.start = (...args) => loaded().start(...args);
 export const rebuild: typeof Commands.rebuild = (...args) => loaded().rebuild(...args);
+export const compact: typeof Commands.compact = (...args) => loaded().compact(...args);
 export const main: typeof Commands.main = (...args) => loaded().main(...args);
 
 if (forwardOnly) {

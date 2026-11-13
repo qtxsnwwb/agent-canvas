@@ -4,14 +4,19 @@
  */
 export type Route =
   | { page: 'home'; projectId: string | null }
-  /** `filePath`: `#/s/<id>/f/<path>` opens the session's file panel at that file (absent on the plain session route). */
-  | { page: 'session'; sessionId: string; filePath?: string }
+  /**
+   * `filePath`: `#/s/<id>/f/<path>` opens the session's file panel at that file; `nodeId`: `#/s/<id>/n/<nodeId>` opens
+   * the session with that node selected and brought into view. Both are absent on the plain session route, and a route
+   * carries at most one of them.
+   */
+  | { page: 'session'; sessionId: string; filePath?: string; nodeId?: string }
   | { page: 'diagnostics' }
   | { page: 'notifications' }
   | { page: 'stats' }
   | { page: 'files' };
 
 const FILE_SEGMENT = '/f/';
+const NODE_SEGMENT = '/n/';
 
 export function parseHash(hash: string): Route {
   const h = hash.replace(/^#/, '');
@@ -28,14 +33,19 @@ export function parseHash(hash: string): Route {
   if (h === '/files') return { page: 'files' };
   if (h.startsWith('/s/')) {
     const rest = h.slice(3);
-    // The id is encoded (no literal '/'), so the first '/f/' starts the file part. A file part that cannot be decoded
-    // (or is empty) falls back to the plain session route.
-    const cut = rest.indexOf(FILE_SEGMENT);
+    // The id is encoded (no literal '/'), so the first '/f/' or '/n/' starts the file or node part (whichever comes
+    // first wins; the rest is that part's value). A part that cannot be decoded (or is empty) falls back to the plain
+    // session route.
+    const f = rest.indexOf(FILE_SEGMENT);
+    const n = rest.indexOf(NODE_SEGMENT);
+    const cut = f < 0 ? n : n < 0 ? f : Math.min(f, n);
     if (cut > 0) {
       const id = decode(rest.slice(0, cut));
       if (id) {
-        const filePath = decode(rest.slice(cut + FILE_SEGMENT.length));
-        return filePath ? { page: 'session', sessionId: id, filePath } : { page: 'session', sessionId: id };
+        const isFile = cut === f;
+        const value = decode(rest.slice(cut + (isFile ? FILE_SEGMENT : NODE_SEGMENT).length));
+        if (!value) return { page: 'session', sessionId: id };
+        return isFile ? { page: 'session', sessionId: id, filePath: value } : { page: 'session', sessionId: id, nodeId: value };
       }
     } else {
       const id = decode(rest);
@@ -57,4 +67,9 @@ export function sessionHash(sessionId: string): string {
 /** The session page with its file panel open at `path` (parseHash gives back the same id and path). */
 export function sessionFileHash(sessionId: string, path: string): string {
   return `${sessionHash(sessionId)}${FILE_SEGMENT}${encodeURIComponent(path)}`;
+}
+
+/** The session page with `nodeId` selected and brought into view (parseHash gives back the same id and node id). */
+export function sessionNodeHash(sessionId: string, nodeId: string): string {
+  return `${sessionHash(sessionId)}${NODE_SEGMENT}${encodeURIComponent(nodeId)}`;
 }
