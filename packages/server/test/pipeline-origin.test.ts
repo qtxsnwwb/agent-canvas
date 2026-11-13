@@ -294,7 +294,7 @@ describe('pipeline 与来源', () => {
     const cols = `ingest_id, source, file, project_id, "offset", line_hash, record_type, session_id, agent_id, event_name, received_at, body`;
     // The previous version stored bodies as plain text: decode what this version stored (compressed rows, enc 1).
     old.function('decode_body', (body: unknown, enc: unknown) => decodeBody(body, Number(enc)));
-    old.exec(`INSERT INTO raw_event (${cols}) SELECT ${cols.replace(/body$/, 'decode_body(body, enc)')} FROM f.raw_event ORDER BY ingest_id`);
+    old.exec(`INSERT INTO raw_event (${cols}) SELECT ${cols.replace(/body$/, 'decode_body(data, enc)')} FROM f.raw_event ORDER BY ingest_id`);
     old.exec(`INSERT INTO file_offset SELECT * FROM f.file_offset`);
     old.exec(`INSERT INTO hook_stat (event_name, count, last_at) SELECT event_name, count, last_at FROM f.hook_stat`);
     old.exec(`INSERT INTO session (id, project_id, status, last_activity_at, body)

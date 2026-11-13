@@ -81,7 +81,8 @@ const sessionKey = (sessionId: string): string => `session:${sessionId}`;
  * Failure key of stored raw records that cannot be decoded (damaged bytes): one per store key, `raw:<key>`, or per
  * session for hook records, `raw:hook:<sessionId>`. Replay skips such a record.
  */
-const corruptKey = (ev: StoredRawEvent): string => `raw:${ev.source === 'hook' ? `hook:${ev.sessionId}` : ev.file}`;
+const corruptKey = (ev: StoredRawEvent): string =>
+  `raw:${ev.source === 'hook' ? (ev.sessionId === null ? 'hook' : `hook:${ev.sessionId}`) : ev.file}`;
 /** Failure keys that are not file paths. */
 const isNonFileKey = (key: string): boolean => key.startsWith('hook') || key.startsWith('session:') || key.startsWith('raw:');
 interface FileLock {
@@ -1373,7 +1374,10 @@ export class Pipeline {
               ? { ...c, session: { ...c.session, sourceDeleted: true } }
               : c,
           );
-    return this.store.applyChanges(fixed);
+    const applied = this.store.applyChanges(fixed);
+    // Sessions the store found an undecodable detail in: re-derived on their next touch.
+    for (const id of this.store.takeNewlyDirty()) this.dirty.add(id);
+    return applied;
   }
 
   private notify(applied: SeqChange[]): void {

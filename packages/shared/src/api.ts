@@ -50,7 +50,8 @@ export interface Diagnostics {
    * running now. migrated / total: progress in row-key positions (about rows; equal once done). vacuum: 'skipped' with
    * vacuumSkipReason (e.g. `low-space: ...`, `busy`, `error: ...`) is retried at the next start and by `agent-canvas
    * compact`. lastError: why the migration or VACUUM failed this run, or how many rows could not be compressed; null
-   * when none. Absent from servers before it existed.
+   * when none. unreadableDetails: node details found undecodable (damaged) since the service started; such a detail is
+   * served empty with `unreadable: true`. Absent from servers before it existed.
    */
   storage?: {
     fileBytes: number;
@@ -61,6 +62,7 @@ export interface Diagnostics {
     vacuum: 'pending' | 'done' | 'skipped';
     vacuumSkipReason: string | null;
     lastError: string | null;
+    unreadableDetails: number;
   };
 }
 

@@ -14,9 +14,10 @@ CREATE TABLE IF NOT EXISTS raw_event (
   agent_id    TEXT,
   event_name  TEXT,
   received_at TEXT,
-  body        TEXT NOT NULL,   -- read through decodeBody (codec.ts): text when enc = 0, raw deflate (BLOB) when enc = 1
+  data        TEXT NOT NULL,   -- read through decodeBody (codec.ts): text when enc = 0, zlib stream (BLOB) when enc = 1;
+                               -- called "body" before storage format 1 (renamed so older builds fail to open the database)
   origin      TEXT NOT NULL DEFAULT 'claude', -- 'claude' | 'codex'; added by migrateSchema on older databases
-  enc         INTEGER NOT NULL DEFAULT 0      -- body encoding (codec.ts); added by migrateSchema on older databases
+  enc         INTEGER NOT NULL DEFAULT 0      -- data encoding (codec.ts); added by migrateSchema on older databases
 );
 CREATE UNIQUE INDEX IF NOT EXISTS raw_event_transcript_dedupe
   ON raw_event (file, line_hash) WHERE source = 'transcript';
@@ -75,7 +76,7 @@ CREATE INDEX IF NOT EXISTS node_main_prompt ON node (session_id)
 CREATE TABLE IF NOT EXISTS node_detail (
   session_id TEXT NOT NULL,
   node_id    TEXT NOT NULL,
-  detail     TEXT NOT NULL,    -- read through decodeBody (codec.ts), as raw_event.body
+  data       TEXT NOT NULL,    -- read through decodeBody (codec.ts), as raw_event.data; called "detail" before format 1
   enc        INTEGER NOT NULL DEFAULT 0, -- detail encoding; added by migrateSchema on older databases
   PRIMARY KEY (session_id, node_id)
 );
@@ -124,11 +125,15 @@ CREATE TABLE IF NOT EXISTS meta (
  * missing, after SCHEMA_SQL, in one transaction. rawEventOrigin: every existing row is a Claude Code row.
  * hookStatByOrigin: rekeys hook_stat by (origin, event name), keeping the existing counters as 'claude'. rawEventEnc /
  * nodeDetailEnc: every existing row holds plain text (enc 0); the storage migration (migrate-storage.ts) compresses them
- * later, in the background. edgeCompact: replaces the old edge table (session_id, id, body) by the compact layout; its
+ * later, in the background. rawEventData / nodeDetailData: the data columns' new names (storage format 1); an older
+ * build's statements name `body` / `detail` and fail when it prepares them, so it refuses to run on such a database
+ * instead of misreading compressed rows. edgeCompact: replaces the old edge table (session_id, id, body) by the compact layout; its
  * rows are derived data, rebuilt by the rebuild the normalizer version bump triggers.
  */
 export const MIGRATIONS = {
   rawEventOrigin: `ALTER TABLE raw_event ADD COLUMN origin TEXT NOT NULL DEFAULT 'claude'`,
+  rawEventData: `ALTER TABLE raw_event RENAME COLUMN body TO data`,
+  nodeDetailData: `ALTER TABLE node_detail RENAME COLUMN detail TO data`,
   rawEventEnc: `ALTER TABLE raw_event ADD COLUMN enc INTEGER NOT NULL DEFAULT 0`,
   nodeDetailEnc: `ALTER TABLE node_detail ADD COLUMN enc INTEGER NOT NULL DEFAULT 0`,
   edgeCompact: `DROP TABLE edge;

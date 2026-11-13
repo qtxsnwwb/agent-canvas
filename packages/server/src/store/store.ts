@@ -260,6 +260,13 @@ export interface Store {
   /** The stored part of Diagnostics; the API adds the pipeline's live fields. */
   diagnostics(): StoreDiagnostics;
   // ---- storage migration (migrate-storage.ts)
+  /**
+   * Sessions the store marked dirty by itself since the last call (an update met a stored detail it could not decode;
+   * see applyChanges), for the pipeline's in-memory dirty set.
+   */
+  takeNewlyDirty(): string[];
+  /** Node details found undecodable since the store was opened (by getNodeDetail or an update). */
+  unreadableDetailCount(): number;
   /** Highest raw_event ingest_id and node_detail rowid (0 for an empty table). */
   bodyKeyRange(): { raw: number; detail: number };
   /**
@@ -309,7 +316,7 @@ function edgeKeysOf(id: string): [string, string, string][] {
 /** The `body` / `enc` parameters of a raw_event insert: the event's text through encodeBody. */
 function withBody<T extends object>(event: T, text: string): T & { body: Buffer | string; enc: number } {
   const { data, enc } = encodeBody(text);
-  return { ...event, body: data, enc };
+  return { ...event, body: data, enc }; // bound to the data column
 }
 
 /** A stored node detail as an object, or null when it cannot be decoded or parsed. */
@@ -343,14 +350,14 @@ interface RawRow {
   received_at: string | null;
   project_id: string | null;
   /** Through decodeBody only (text or BLOB, see enc). */
-  body: unknown;
+  data: unknown;
   enc: number;
 }
 
 /** The decoded body of a raw row, or the decode error (CorruptBodyError) as `corrupt`. */
 function rawText(r: RawRow): { text: string; corrupt?: string } {
   try {
-    return { text: decodeBody(r.body, r.enc) };
+    return { text: decodeBody(r.data, r.enc) };
   } catch (err) {
     if (err instanceof CorruptBodyError) return { text: '', corrupt: err.message };
     throw err;
@@ -463,6 +470,33 @@ function startCheckpointer(db: Database.Database, dbPath: string, onError: () =>
   }
 }
 
+/**
+ * The storage format this build writes and understands, kept in `meta` (`storage_format`). 1: raw_event.data and
+ * node_detail.data may be compressed (enc 0 / 1, codec.ts). A database written by a newer format is refused.
+ */
+export const STORAGE_FORMAT = 1;
+export const STORAGE_FORMAT_KEY = 'storage_format';
+
+/** A database whose storage format is newer than this build's: openStore refuses it without writing anything. */
+export class NewerStorageFormatError extends Error {
+  constructor(dbPath: string, found: string) {
+    super(
+      `this database was written by a newer version of agent-canvas (storage format ${found}; this version understands up to ` +
+        `${STORAGE_FORMAT}): ${dbPath}. Install the newer version again, or restore a backup made before that upgrade.`,
+    );
+    this.name = 'NewerStorageFormatError';
+  }
+}
+
+/** Throws NewerStorageFormatError when `meta.storage_format` is above STORAGE_FORMAT (or not a number). Reads only. */
+function checkStorageFormat(db: Database.Database, dbPath: string): void {
+  if (db.prepare(`SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'meta'`).get() === undefined) return;
+  const value = db.prepare(`SELECT value FROM meta WHERE key = ?`).pluck().get(STORAGE_FORMAT_KEY) as string | undefined;
+  if (value === undefined) return;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n > STORAGE_FORMAT) throw new NewerStorageFormatError(dbPath, value);
+}
+
 const hasColumn = (db: Database.Database, table: string, column: string): boolean =>
   (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).some((c) => c.name === column);
 
@@ -475,6 +509,8 @@ function migrateSchema(db: Database.Database): void {
   db.transaction(() => {
     if (!hasColumn(db, 'raw_event', 'origin')) db.exec(MIGRATIONS.rawEventOrigin);
     if (!hasColumn(db, 'hook_stat', 'origin')) db.exec(MIGRATIONS.hookStatByOrigin);
+    if (hasColumn(db, 'raw_event', 'body')) db.exec(MIGRATIONS.rawEventData);
+    if (hasColumn(db, 'node_detail', 'detail')) db.exec(MIGRATIONS.nodeDetailData);
     if (!hasColumn(db, 'raw_event', 'enc')) db.exec(MIGRATIONS.rawEventEnc);
     if (!hasColumn(db, 'node_detail', 'enc')) db.exec(MIGRATIONS.nodeDetailEnc);
     if (hasColumn(db, 'edge', 'body')) db.exec(MIGRATIONS.edgeCompact);
@@ -485,11 +521,21 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   const maxRows = options.changeLogMaxRows ?? CHANGE_LOG_MAX_ROWS;
   const pruneEvery = options.pruneCheckEvery ?? PRUNE_CHECK_EVERY;
   const db = new Database(dbPath, options.verbose ? { verbose: options.verbose } : {});
+  try {
+    checkStorageFormat(db, dbPath); // before anything is written
+  } catch (err) {
+    db.close();
+    throw err;
+  }
   db.pragma('journal_mode = WAL');
   // A WAL that grew during an import is cut back to this size the next time it restarts after a full checkpoint.
   db.pragma(`journal_size_limit = ${options.walSizeLimitBytes ?? WAL_SIZE_LIMIT_BYTES}`);
   db.exec(SCHEMA_SQL);
   migrateSchema(db);
+  db.prepare(`INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE CAST(meta.value AS INTEGER) < ${STORAGE_FORMAT}`).run(
+    STORAGE_FORMAT_KEY,
+    String(STORAGE_FORMAT),
+  );
   let checkpointerFailed = false;
   const checkpointer =
     dbPath === ':memory:' || dbPath === ''
@@ -540,18 +586,18 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   // INSERT ... SELECT ... WHERE NOT EXISTS (rather than INSERT OR IGNORE): with AUTOINCREMENT, an
   // ignored insert would still consume an ingest_id and leave gaps.
   const insertRawTranscript = db.prepare(
-    `INSERT INTO raw_event (source, origin, file, "offset", line_hash, record_type, session_id, agent_id, project_id, body, enc)
+    `INSERT INTO raw_event (source, origin, file, "offset", line_hash, record_type, session_id, agent_id, project_id, data, enc)
      SELECT 'transcript', @origin, @file, @offset, @lineHash, @recordType, @sessionId, @agentId, @projectId, @body, @enc
      WHERE NOT EXISTS (
        SELECT 1 FROM raw_event WHERE source = 'transcript' AND file = @file AND line_hash = @lineHash
      )`,
   );
   const insertRawHook = db.prepare(
-    `INSERT INTO raw_event (source, origin, event_name, received_at, session_id, project_id, body, enc)
+    `INSERT INTO raw_event (source, origin, event_name, received_at, session_id, project_id, data, enc)
      VALUES ('hook', @origin, @eventName, @receivedAt, @sessionId, @projectId, @body, @enc)`,
   );
   const insertRawMeta = db.prepare(
-    `INSERT INTO raw_event (source, origin, file, session_id, agent_id, project_id, body, enc)
+    `INSERT INTO raw_event (source, origin, file, session_id, agent_id, project_id, data, enc)
      VALUES ('meta', @origin, @file, @sessionId, @agentId, @projectId, @body, @enc)`,
   );
   const selectTranscriptLine = db
@@ -588,14 +634,14 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   const insertNode = db.prepare(`INSERT OR REPLACE INTO node (session_id, id, body) VALUES (?, ?, ?)`);
   const selectNodeBody = db.prepare(`SELECT body FROM node WHERE session_id = ? AND id = ?`).pluck();
   const updateNode = db.prepare(`UPDATE node SET body = ? WHERE session_id = ? AND id = ?`);
-  const insertDetail = db.prepare(`INSERT OR REPLACE INTO node_detail (session_id, node_id, detail, enc) VALUES (?, ?, ?, ?)`);
+  const insertDetail = db.prepare(`INSERT OR REPLACE INTO node_detail (session_id, node_id, data, enc) VALUES (?, ?, ?, ?)`);
   const upsertDetail = (sessionId: string, nodeId: string, detail: string): void => {
     const { data, enc } = encodeBody(detail);
     insertDetail.run(sessionId, nodeId, data, enc);
   };
-  const selectDetail = db.prepare(`SELECT detail, enc FROM node_detail WHERE session_id = ? AND node_id = ?`);
+  const selectDetail = db.prepare(`SELECT data, enc FROM node_detail WHERE session_id = ? AND node_id = ?`);
   const selectNodeWithDetail = db.prepare(
-    `SELECT d.detail AS detail, d.enc AS enc FROM node n
+    `SELECT d.data AS data, d.enc AS enc FROM node n
      LEFT JOIN node_detail d ON d.session_id = n.session_id AND d.node_id = n.id
      WHERE n.session_id = ? AND n.id = ?`,
   );
@@ -695,7 +741,7 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     `SELECT * FROM raw_event WHERE session_id = ? AND ingest_id > ? ORDER BY ingest_id LIMIT ?`,
   );
   const selectLatestMeta = db.prepare(
-    `SELECT body, enc FROM raw_event WHERE source = 'meta' AND file = ? ORDER BY ingest_id DESC LIMIT 1`,
+    `SELECT data, enc FROM raw_event WHERE source = 'meta' AND file = ? ORDER BY ingest_id DESC LIMIT 1`,
   );
   const selectTranscriptOwner = db.prepare(
     `SELECT session_id AS sessionId, agent_id AS agentId, project_id AS projectId FROM raw_event
@@ -754,12 +800,12 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   const selectMaxIngestId = db.prepare(`SELECT MAX(ingest_id) FROM raw_event`).pluck();
   const selectMaxDetailRowid = db.prepare(`SELECT MAX(rowid) FROM node_detail`).pluck();
   const convertSelect: Record<BodyTable, Database.Statement> = {
-    raw_event: db.prepare(`SELECT ingest_id AS id, body FROM raw_event WHERE ingest_id > ? AND ingest_id <= ? AND enc = 0 ORDER BY ingest_id LIMIT ?`),
-    node_detail: db.prepare(`SELECT rowid AS id, detail AS body FROM node_detail WHERE rowid > ? AND rowid <= ? AND enc = 0 ORDER BY rowid LIMIT ?`),
+    raw_event: db.prepare(`SELECT ingest_id AS id, data FROM raw_event WHERE ingest_id > ? AND ingest_id <= ? AND enc = 0 ORDER BY ingest_id LIMIT ?`),
+    node_detail: db.prepare(`SELECT rowid AS id, data FROM node_detail WHERE rowid > ? AND rowid <= ? AND enc = 0 ORDER BY rowid LIMIT ?`),
   };
   const convertUpdate: Record<BodyTable, Database.Statement> = {
-    raw_event: db.prepare(`UPDATE raw_event SET body = ?, enc = ? WHERE ingest_id = ?`),
-    node_detail: db.prepare(`UPDATE node_detail SET detail = ?, enc = ? WHERE rowid = ?`),
+    raw_event: db.prepare(`UPDATE raw_event SET data = ?, enc = ? WHERE ingest_id = ?`),
+    node_detail: db.prepare(`UPDATE node_detail SET data = ?, enc = ? WHERE rowid = ?`),
   };
   /** setMeta / deleteMeta kept in memory while held (holdMetaWrites); null when not held. */
   let heldMeta: Map<string, string | null> | null = null;
@@ -772,6 +818,10 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
    * rebuild) is compressed once instead of written, read back, decoded, merged and compressed again.
    */
   const pendingDetails = new Map<string, { sessionId: string; nodeId: string; detail: object }>();
+  /** Node details found undecodable (by key), since the store was opened: Diagnostics.storage.unreadableDetails. */
+  const unreadableDetails = new Set<string>();
+  /** Sessions this store marked dirty itself (an undecodable detail met by a merge), until takeNewlyDirty(). */
+  const newlyDirty = new Set<string>();
   const detailKey = (sessionId: string, nodeId: string): string => `${sessionId}\u0000${nodeId}`;
   function flushDetails(): void {
     for (const { sessionId, nodeId, detail } of pendingDetails.values()) upsertDetail(sessionId, nodeId, JSON.stringify(detail));
@@ -799,12 +849,21 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
         updateNode.run(JSON.stringify({ ...(JSON.parse(body) as object), ...c.patch }), c.sessionId, c.id);
         if (c.detail !== undefined) {
           // node_detail is touched only when the update carries detail.
-          // A stored detail that cannot be decoded is replaced by the update's (it is unreadable either way).
           const key = detailKey(c.sessionId, c.id);
           let prev: object | undefined = pendingDetails.get(key)?.detail;
           if (prev === undefined) {
-            const row = selectDetail.get(c.sessionId, c.id) as { detail: unknown; enc: number } | undefined;
-            prev = row === undefined ? {} : (readDetail(row.detail, row.enc) ?? {});
+            const row = selectDetail.get(c.sessionId, c.id) as { data: unknown; enc: number } | undefined;
+            const stored = row === undefined ? {} : readDetail(row.data, row.enc);
+            if (stored === null) {
+              // A stored detail that cannot be decoded (damaged, or an encoding this build does not know) is left as it
+              // is, never overwritten by a partial merge: the session is marked dirty, so it is re-derived from its raw
+              // events (which replaces the detail with the real one), and the detail is counted as unreadable.
+              unreadableDetails.add(key);
+              insertDirty.run(c.sessionId);
+              newlyDirty.add(c.sessionId);
+              break;
+            }
+            prev = stored;
           }
           pendingDetails.set(key, { sessionId: c.sessionId, nodeId: c.id, detail: { ...prev, ...c.detail } });
         }
@@ -1043,12 +1102,16 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     },
     lastSeq,
     getNodeDetail(sessionId, nodeId) {
-      const row = selectNodeWithDetail.get(sessionId, nodeId) as { detail: unknown; enc: number | null } | undefined;
+      const row = selectNodeWithDetail.get(sessionId, nodeId) as { data: unknown; enc: number | null } | undefined;
       if (!row) return null;
       const empty: NodeDetail = { input: null, output: null, text: null, raw: null, nodeId };
-      if (row.detail === null) return empty;
-      const d = readDetail(row.detail, row.enc ?? 0);
-      return d === null ? { ...empty, unreadable: true } : { ...empty, ...d, nodeId };
+      if (row.data === null) return empty;
+      const d = readDetail(row.data, row.enc ?? 0);
+      if (d === null) {
+        unreadableDetails.add(detailKey(sessionId, nodeId));
+        return { ...empty, unreadable: true };
+      }
+      return { ...empty, ...d, nodeId };
     },
     changesSince(seq, sessionId, limit) {
       if (sessionId === undefined) return toChanges(selectChanges.all(seq));
@@ -1079,10 +1142,10 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     },
     latestMeta(file) {
       // A latest row that cannot be decoded counts as none: the caller writes the current content again.
-      const row = selectLatestMeta.get(file) as { body: unknown; enc: number } | undefined;
+      const row = selectLatestMeta.get(file) as { data: unknown; enc: number } | undefined;
       if (row === undefined) return null;
       try {
-        return decodeBody(row.body, row.enc);
+        return decodeBody(row.data, row.enc);
       } catch (err) {
         if (err instanceof CorruptBodyError) return null;
         throw err;
@@ -1177,16 +1240,22 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
         files: listOffsets(),
       };
     },
+    takeNewlyDirty() {
+      const ids = [...newlyDirty];
+      newlyDirty.clear();
+      return ids;
+    },
+    unreadableDetailCount: () => unreadableDetails.size,
     bodyKeyRange() {
       return { raw: (selectMaxIngestId.get() as number | null) ?? 0, detail: (selectMaxDetailRowid.get() as number | null) ?? 0 };
     },
     convertBodies(table, after, end, maxRows, maxBytes) {
-      const rows: { id: number; body: unknown }[] = [];
+      const rows: { id: number; data: unknown }[] = [];
       let bytes = 0;
       let cut = false;
-      for (const row of convertSelect[table].iterate(after, end, maxRows) as IterableIterator<{ id: number; body: unknown }>) {
+      for (const row of convertSelect[table].iterate(after, end, maxRows) as IterableIterator<{ id: number; data: unknown }>) {
         rows.push(row);
-        bytes += typeof row.body === 'string' ? row.body.length : row.body instanceof Uint8Array ? row.body.length : 0;
+        bytes += typeof row.data === 'string' ? row.data.length : row.data instanceof Uint8Array ? row.data.length : 0;
         if (bytes >= maxBytes) {
           cut = true;
           break; // ends the iteration (and the statement) before the updates below
@@ -1195,14 +1264,14 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
       let converted = 0;
       let failed = 0;
       for (const row of rows) {
-        if (typeof row.body !== 'string') {
+        if (typeof row.data !== 'string') {
           failed += 1;
           continue;
         }
         try {
-          const { data, enc } = encodeBody(row.body);
+          const { data, enc } = encodeBody(row.data);
           if (enc === 0) continue; // short or incompressible: stays as it is
-          if (decodeBody(data, enc) !== row.body) {
+          if (decodeBody(data, enc) !== row.data) {
             failed += 1; // not representable as UTF-8 byte for byte (e.g. a lone surrogate): keep the text
             continue;
           }

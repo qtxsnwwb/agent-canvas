@@ -455,6 +455,7 @@ export function storageStatus(store: Store, job: { migrating: boolean; lastError
     total,
     vacuum: v === 'done' ? 'done' : v?.startsWith('skipped:') ? 'skipped' : 'pending',
     vacuumSkipReason: v?.startsWith('skipped:') ? v.slice('skipped:'.length) : null,
+    unreadableDetails: store.unreadableDetailCount(),
     lastError: job.lastError ?? (failed > 0 ? `${failed} stored rows could not be compressed (kept as they were)` : null),
   };
 }

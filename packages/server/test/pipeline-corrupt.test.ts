@@ -33,7 +33,7 @@ afterEach(async () => {
 function damage(ingestId: number): void {
   const db = new Database(dbFile);
   try {
-    db.prepare(`UPDATE raw_event SET body = x'00112233', enc = 1 WHERE ingest_id = ?`).run(ingestId);
+    db.prepare(`UPDATE raw_event SET data = x'00112233', enc = 1 WHERE ingest_id = ?`).run(ingestId);
   } finally {
     db.close();
   }

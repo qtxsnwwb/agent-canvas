@@ -189,7 +189,7 @@ describe('迁移', () => {
     db.close();
     store = openStore(file);
     expect(migrateAll(store)).toMatchObject({ failed: 1 });
-    expect(peek(`SELECT enc, typeof(body) AS t FROM raw_event WHERE ingest_id = 3`)).toEqual([{ enc: 0, t: 'blob' }]);
+    expect(peek(`SELECT enc, typeof(data) AS t FROM raw_event WHERE ingest_id = 3`)).toEqual([{ enc: 0, t: 'blob' }]);
     expect(store.getMeta(STORAGE_META.failed)).toBe('1');
     expect(storageStatus(store).lastError).toMatch(/1 /);
   });

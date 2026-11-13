@@ -62,7 +62,7 @@ describe('schema', () => {
     old.close();
     store = openStore(oldFile);
     file = oldFile;
-    expect(peek(`SELECT enc, typeof(body) AS t FROM raw_event`)).toEqual([{ enc: 0, t: 'text' }]);
+    expect(peek(`SELECT enc, typeof(data) AS t FROM raw_event`)).toEqual([{ enc: 0, t: 'text' }]);
     expect(peek(`SELECT enc FROM node_detail`)).toEqual([{ enc: 0 }]);
     expect(store.rawForSession('s1')).toMatchObject([{ source: 'transcript', line: LONG }]);
   });
@@ -74,7 +74,7 @@ describe('写入', () => {
     store.insertRaw({ source: 'transcript', file: 'p/s1.jsonl', offset: 1, line: SHORT, recordType: 'user', sessionId: 's1', agentId: null });
     store.insertRaw({ source: 'hook', receivedAt: '2026-01-01T00:00:00.000Z', eventName: 'Stop', sessionId: 's1', payload: LONG });
     store.insertRaw({ source: 'meta', file: 'p/s1/custom-title.json', sessionId: 's1', agentId: null, payload: LONG });
-    const rows = peek<{ enc: number; t: string; len: number }>(`SELECT enc, typeof(body) AS t, length(body) AS len FROM raw_event ORDER BY ingest_id`);
+    const rows = peek<{ enc: number; t: string; len: number }>(`SELECT enc, typeof(data) AS t, length(data) AS len FROM raw_event ORDER BY ingest_id`);
     expect(rows.map((r) => [r.enc, r.t])).toEqual([
       [1, 'blob'],
       [0, 'text'],
@@ -99,7 +99,7 @@ describe('写入', () => {
     const detail = { input: { command: 'ls -la '.repeat(100) }, output: null, text: null, raw: null };
     const changes: Change[] = [{ type: 'node_added', node: node('n1'), detail }];
     store.applyChanges(changes);
-    expect(peek(`SELECT enc, typeof(detail) AS t FROM node_detail`)).toEqual([{ enc: 1, t: 'blob' }]);
+    expect(peek(`SELECT enc, typeof(data) AS t FROM node_detail`)).toEqual([{ enc: 1, t: 'blob' }]);
     expect(store.getNodeDetail('s1', 'n1')).toEqual({ ...detail, nodeId: 'n1' });
     store.applyChanges([{ type: 'node_updated', sessionId: 's1', id: 'n1', patch: {}, detail: { output: 'done' } }]);
     expect(store.getNodeDetail('s1', 'n1')).toEqual({ ...detail, output: 'done', nodeId: 'n1' });
@@ -121,8 +121,8 @@ describe('新旧行并存', () => {
   }
 
   test('rawForSession / rawForSessionAfter / latestMeta 读两种行', () => {
-    writeOld(`INSERT INTO raw_event (source, file, "offset", line_hash, record_type, session_id, body) VALUES ('transcript', 'p/s1.jsonl', 0, ?, 'user', 's1', ?)`, sha1(LONG), LONG);
-    writeOld(`INSERT INTO raw_event (source, file, session_id, body) VALUES ('meta', 'p/s1/custom-title.json', 's1', ?)`, `${LONG}old`);
+    writeOld(`INSERT INTO raw_event (source, file, "offset", line_hash, record_type, session_id, data) VALUES ('transcript', 'p/s1.jsonl', 0, ?, 'user', 's1', ?)`, sha1(LONG), LONG);
+    writeOld(`INSERT INTO raw_event (source, file, session_id, data) VALUES ('meta', 'p/s1/custom-title.json', 's1', ?)`, `${LONG}old`);
     store.insertRaw({ source: 'transcript', file: 'p/s1.jsonl', offset: 1, line: `${LONG} `, recordType: 'user', sessionId: 's1', agentId: null });
     expect(store.latestMeta('p/s1/custom-title.json')).toBe(`${LONG}old`);
     store.insertRaw({ source: 'meta', file: 'p/s1/custom-title.json', sessionId: 's1', agentId: null, payload: `${LONG}new` });
@@ -139,7 +139,7 @@ describe('新旧行并存', () => {
 
   test('getNodeDetail 和合并更新读旧详情', () => {
     store.applyChanges([{ type: 'node_added', node: node('n1'), detail: {} }]);
-    writeOld(`UPDATE node_detail SET detail = ? WHERE node_id = 'n1'`, JSON.stringify({ input: { a: 'q'.repeat(400) } }));
+    writeOld(`UPDATE node_detail SET data = ? WHERE node_id = 'n1'`, JSON.stringify({ input: { a: 'q'.repeat(400) } }));
     expect(store.getNodeDetail('s1', 'n1')).toMatchObject({ input: { a: 'q'.repeat(400) } });
     store.applyChanges([{ type: 'node_updated', sessionId: 's1', id: 'n1', patch: {}, detail: { output: 'o'.repeat(400) } }]);
     expect(peek(`SELECT enc FROM node_detail`)).toEqual([{ enc: 1 }]);
@@ -161,7 +161,7 @@ describe('损坏的行', () => {
     for (let i = 0; i < 3; i++) {
       store.insertRaw({ source: 'transcript', file: 'p/s1.jsonl', offset: i, line: `${LONG}${i}`, recordType: 'user', sessionId: 's1', agentId: null });
     }
-    corrupt(`UPDATE raw_event SET body = x'00112233445566' WHERE ingest_id = 2`);
+    corrupt(`UPDATE raw_event SET data = x'00112233445566' WHERE ingest_id = 2`);
     const page = store.rawForSessionAfter('s1', 0, 10, 10 ** 9);
     expect(page.map((e) => e.ingestId)).toEqual([1, 2, 3]);
     expect(page[0]!.corrupt).toBeUndefined();
@@ -173,16 +173,30 @@ describe('损坏的行', () => {
 
   test('最近的 meta 解压失败时当作没有（下一次会重新写入）', () => {
     store.insertRaw({ source: 'meta', file: 'p/s1/custom-title.json', sessionId: 's1', agentId: null, payload: LONG });
-    corrupt(`UPDATE raw_event SET body = x'0011' WHERE ingest_id = 1`);
+    corrupt(`UPDATE raw_event SET data = x'0011' WHERE ingest_id = 1`);
     expect(store.latestMeta('p/s1/custom-title.json')).toBeNull();
   });
 
-  test('节点详情解压失败：给空详情并标记 unreadable；更新时不抛出', () => {
+  test('节点详情解压失败：给空详情并标记 unreadable，计入诊断；更新不覆盖它，会话标记为待重新推导', () => {
     store.applyChanges([{ type: 'node_added', node: node('n1'), detail: { text: 't'.repeat(1000) } }]);
-    corrupt(`UPDATE node_detail SET detail = x'0011223344' WHERE node_id = 'n1'`);
+    corrupt(`UPDATE node_detail SET data = x'0011223344' WHERE node_id = 'n1'`);
     expect(store.getNodeDetail('s1', 'n1')).toEqual({ nodeId: 'n1', input: null, output: null, text: null, raw: null, unreadable: true });
+    expect(store.unreadableDetailCount()).toBe(1);
     store.applyChanges([{ type: 'node_updated', sessionId: 's1', id: 'n1', patch: {}, detail: { output: 'ok' } }]);
-    expect(store.getNodeDetail('s1', 'n1')).toEqual({ nodeId: 'n1', input: null, output: 'ok', text: null, raw: null });
+    expect(peek(`SELECT hex(data) AS h FROM node_detail WHERE node_id = 'n1'`)).toEqual([{ h: '0011223344' }]);
+    expect(store.dirtySessionIds()).toEqual(['s1']);
+    expect(store.takeNewlyDirty()).toEqual(['s1']);
+    expect(store.takeNewlyDirty()).toEqual([]);
+  });
+
+  test('评审的复现：未知编码（enc 2，更新的版本写的）的详情，node_updated 不会用部分详情把它覆盖', () => {
+    store.applyChanges([{ type: 'node_added', node: node('n1'), detail: { input: { a: 1 }, text: 'x'.repeat(300) } }]);
+    corrupt(`UPDATE node_detail SET enc = 2 WHERE node_id = 'n1'`);
+    const before = peek<{ h: string; enc: number }>(`SELECT hex(data) AS h, enc FROM node_detail WHERE node_id = 'n1'`);
+    store.applyChanges([{ type: 'node_updated', sessionId: 's1', id: 'n1', patch: {}, detail: { output: 'partial' } }]);
+    expect(peek(`SELECT hex(data) AS h, enc FROM node_detail WHERE node_id = 'n1'`)).toEqual(before);
+    expect(store.getNodeDetail('s1', 'n1')).toMatchObject({ unreadable: true });
+    expect(store.dirtySessionIds()).toEqual(['s1']);
   });
 });
 
@@ -190,7 +204,7 @@ test('encodeBody 的结果按 enc 写入（直接写 BLOB 也能读回）', () =
   const { data, enc } = encodeBody(LONG);
   expect(enc).toBe(1);
   const db = new Database(file);
-  db.prepare(`INSERT INTO raw_event (source, file, "offset", line_hash, record_type, session_id, body, enc) VALUES ('transcript', 'p/x.jsonl', 0, 'h', 'user', 'sx', ?, ?)`).run(data, enc);
+  db.prepare(`INSERT INTO raw_event (source, file, "offset", line_hash, record_type, session_id, data, enc) VALUES ('transcript', 'p/x.jsonl', 0, 'h', 'user', 'sx', ?, ?)`).run(data, enc);
   db.close();
   expect(store.rawForSession('sx')).toMatchObject([{ line: LONG }]);
 });
