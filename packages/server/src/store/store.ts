@@ -114,8 +114,8 @@ export interface StoreOptions {
   verbose?: (sql: unknown) => void;
   /** Receives notices about slow one-time work done while opening (start prints them); silent when omitted. */
   log?: (line: string) => void;
-  /** Detail level of a newly created search index (benchmark); default DEFAULT_SEARCH_DETAIL. */
-  searchDetail?: SearchIndexDetail;
+  /** Detail level of a newly created search index (benchmark); default DEFAULT_SEARCH_DETAIL. 'off': no index rows are written (benchmark baseline only). */
+  searchDetail?: SearchIndexDetail | 'off';
 }
 
 /** `%x%` with `\`, `%` and `_` escaped (use with ESCAPE '\\'). */

@@ -253,8 +253,8 @@ export function cutSnippet(text: string, at: number, length: number): Snippet {
 // ---- the background build
 
 /** Nodes per build batch, and the stored bytes (node bodies + compressed details) after which a batch ends early. */
-export const SEARCH_BUILD_BATCH_ROWS = 500;
-export const SEARCH_BUILD_BATCH_BYTES = 1024 * 1024;
+export const SEARCH_BUILD_BATCH_ROWS = 100;
+export const SEARCH_BUILD_BATCH_BYTES = 256 * 1024;
 /** The build checks `startupDone` / `importing` / held writes this often, and starts anyway after this long. */
 export const SEARCH_BUILD_POLL_MS = 1000;
 export const SEARCH_BUILD_MAX_WAIT_MS = 120_000;
@@ -442,13 +442,16 @@ export class SearchIndex {
 
   private readonly db: Database.Database;
   readonly detail: SearchIndexDetail;
+  /** False only for the benchmark's baseline (detail 'off'): no row is written. */
+  private readonly maintained: boolean;
 
   // No parameter properties: the store is also loaded by Node's type stripping (test/child), which does not support them.
-  constructor(db: Database.Database, detail: SearchIndexDetail = DEFAULT_SEARCH_DETAIL) {
+  constructor(db: Database.Database, detail: SearchIndexDetail | 'off' = DEFAULT_SEARCH_DETAIL) {
     this.db = db;
-    this.detail = detail;
+    this.detail = detail === 'off' ? 'none' : detail;
+    this.maintained = detail !== 'off';
     const existed = db.prepare(`SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'search_fts'`).get() !== undefined;
-    db.exec(searchIndexSql(detail));
+    db.exec(searchIndexSql(this.detail));
     this.insertRow = db.prepare(`INSERT INTO search_fts (rowid, text) VALUES (?, ?)`);
     this.deleteRow = db.prepare(`DELETE FROM search_fts WHERE rowid = ?`);
     this.deleteAllRows = db.prepare(`INSERT INTO search_fts (search_fts) VALUES ('delete-all')`);
@@ -521,12 +524,14 @@ export class SearchIndex {
 
   /** Replaces a node's row: removes the one under `stale` (the node's previous rowid, if it had one), adds `text`. */
   write(stale: number | null, rowid: number, text: string): void {
+    if (!this.maintained) return;
     if (stale !== null) this.deleteRow.run(stale);
     if (text !== '') this.insertRow.run(rowid, text);
   }
 
   /** Removes the rows of one session's nodes (before the nodes themselves are deleted). */
   deleteForSession(sessionId: string): void {
+    if (!this.maintained) return;
     for (const rowid of this.sessionRowids.all(sessionId) as number[]) this.deleteRow.run(rowid);
   }
 
