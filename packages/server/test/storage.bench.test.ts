@@ -294,4 +294,36 @@ describe.skipIf(!BENCH)('storage benchmark', () => {
       fs.rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 500 });
     }
   }, 3_600_000);
+
+  test('edge storage: bytes per edge with Cursor-length node ids', async () => {
+    const root = fs.mkdtempSync(path.join(process.env.AGENT_CANVAS_BENCH_TMP ?? os.tmpdir(), 'cc-edge-bench-'));
+    const file = path.join(root, 'edges.db');
+    const EDGES = Number(process.env.AGENT_CANVAS_BENCH_EDGES ?? '300000');
+    try {
+      const s = openStore(file);
+      const r = rng(7);
+      const hex = (n: number): string => Array.from({ length: n }, () => Math.floor(r() * 16).toString(16)).join('');
+      // Cursor node ids: `<conversation id>:<bubble id>`-like, about 80 characters; session ids are UUIDs.
+      const sessions = Array.from({ length: 300 }, () => `${hex(8)}-${hex(4)}-${hex(4)}-${hex(4)}-${hex(12)}`);
+      const perSession = Math.ceil(EDGES / sessions.length);
+      for (const sid of sessions) {
+        const ids = Array.from({ length: perSession + 1 }, () => `${sid}:${hex(8)}-${hex(4)}-${hex(4)}-${hex(4)}-${hex(12)}:b`);
+        s.applyChanges(
+          ids.slice(1).map((to, i) => ({
+            type: 'edge_added' as const,
+            edge: { id: `${ids[i]}->${to}`, sessionId: sid, from: ids[i]!, to, kind: 'sequence' as const },
+          })),
+        );
+      }
+      s.close();
+      const t = tableBytes(file);
+      const edgeBytes = Object.entries(t)
+        .filter(([k]) => k === 'edge' || k.startsWith('sqlite_autoindex_edge'))
+        .reduce((n, [, v]) => n + v, 0);
+      console.log(`edges ${perSession * sessions.length}: edge table + its indexes ${MB(edgeBytes)} MB, ${(edgeBytes / (perSession * sessions.length)).toFixed(0)} bytes per edge (${Object.entries(t).filter(([k]) => k.includes('edge')).map(([k, v]) => `${k} ${MB(v)}`).join(', ')})`);
+    } finally {
+      await new Promise((r) => setTimeout(r, 1000)); // the closed store's checkpointer thread lets go of the file
+      fs.rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 500 });
+    }
+  }, 600_000);
 });

@@ -300,7 +300,10 @@ describe('pipeline 与来源', () => {
     old.exec(`INSERT INTO session (id, project_id, status, last_activity_at, body)
       SELECT id, project_id, status, last_activity_at, json_remove(body, '$.origin') FROM f.session`);
     old.exec(`INSERT INTO node SELECT * FROM f.node`);
-    old.exec(`INSERT INTO edge SELECT * FROM f.edge`);
+    // The previous layout: one row per edge with its id and the edge as JSON.
+    old.exec(`INSERT INTO edge (session_id, id, body)
+      SELECT session_id, from_id || '->' || to_id || tag, json_object('id', from_id || '->' || to_id || tag, 'sessionId', session_id,
+        'from', from_id, 'to', to_id, 'kind', CASE kind WHEN 0 THEN 'sequence' WHEN 1 THEN 'fork' ELSE 'spawn' END) FROM f.edge`);
     old.exec(`INSERT INTO meta SELECT * FROM f.meta WHERE key <> 'normalizer_version'`);
     old.exec(`INSERT INTO meta (key, value) VALUES ('normalizer_version', '13')`);
     old.exec(`DETACH DATABASE f`);

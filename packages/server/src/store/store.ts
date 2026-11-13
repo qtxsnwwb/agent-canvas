@@ -286,6 +286,26 @@ export interface Store {
 
 const SAMPLE_MAX = 500;
 
+/** edge.kind codes (index = stored value). */
+const EDGE_KINDS = ['sequence', 'fork', 'spawn'] as const;
+/** edge.tag of an edge whose id is not from->to + tag: this prefix and the whole id. */
+const ODD_EDGE_TAG = '\u0001';
+
+/**
+ * The (from, to, tag) keys an edge id of the form from->to or from->to:fork can be stored under: one per '->' in it,
+ * two when what follows ends in ':fork'. Usually exactly one or two.
+ */
+function edgeKeysOf(id: string): [string, string, string][] {
+  const keys: [string, string, string][] = [];
+  for (let at = id.indexOf('->'); at >= 0; at = id.indexOf('->', at + 1)) {
+    const from = id.slice(0, at);
+    const rest = id.slice(at + 2);
+    keys.push([from, rest, '']);
+    if (rest.endsWith(':fork')) keys.push([from, rest.slice(0, -':fork'.length), ':fork']);
+  }
+  return keys;
+}
+
 /** The `body` / `enc` parameters of a raw_event insert: the event's text through encodeBody. */
 function withBody<T extends object>(event: T, text: string): T & { body: Buffer | string; enc: number } {
   const { data, enc } = encodeBody(text);
@@ -457,6 +477,7 @@ function migrateSchema(db: Database.Database): void {
     if (!hasColumn(db, 'hook_stat', 'origin')) db.exec(MIGRATIONS.hookStatByOrigin);
     if (!hasColumn(db, 'raw_event', 'enc')) db.exec(MIGRATIONS.rawEventEnc);
     if (!hasColumn(db, 'node_detail', 'enc')) db.exec(MIGRATIONS.nodeDetailEnc);
+    if (hasColumn(db, 'edge', 'body')) db.exec(MIGRATIONS.edgeCompact);
   })();
 }
 
@@ -578,8 +599,16 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
      LEFT JOIN node_detail d ON d.session_id = n.session_id AND d.node_id = n.id
      WHERE n.session_id = ? AND n.id = ?`,
   );
-  const insertEdge = db.prepare(`INSERT OR REPLACE INTO edge (session_id, id, body) VALUES (?, ?, ?)`);
-  const deleteEdge = db.prepare(`DELETE FROM edge WHERE session_id = ? AND id = ?`);
+  const insertEdge = db.prepare(`INSERT OR REPLACE INTO edge (session_id, from_id, to_id, tag, kind, ord) VALUES (?, ?, ?, ?, ?, ?)`);
+  const deleteEdgeKey = db.prepare(`DELETE FROM edge WHERE session_id = ? AND from_id = ? AND to_id = ? AND tag = ?`);
+  // Only for an id that is not of the from->to form (never written by the normalizers): scans the session's edges.
+  const deleteEdgeByTag = db.prepare(`DELETE FROM edge WHERE session_id = ? AND tag = ?`);
+  /** Removes the edge with this id (whichever of its possible keys it is stored under); true when one was removed. */
+  const deleteEdgeById = (sessionId: string, id: string, oddToo = true): boolean => {
+    let removed = false;
+    for (const [from, to, tag] of edgeKeysOf(id)) if (deleteEdgeKey.run(sessionId, from, to, tag).changes > 0) removed = true;
+    return removed || (oddToo && deleteEdgeByTag.run(sessionId, `${ODD_EDGE_TAG}${id}`).changes > 0);
+  };
 
   // Active = effective status running/awaiting_*: a `running` session older than STALE_AFTER_MS is stale, not active.
   // strftime normalizes the stored ISO timestamp so it compares correctly with the cutoff's toISOString().
@@ -636,7 +665,18 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   const selectNodeBodies = db.prepare(`SELECT body FROM node WHERE session_id = ? ORDER BY rowid`).pluck();
   const selectNodePageFirst = db.prepare(`SELECT rowid, body FROM node WHERE session_id = ? ORDER BY id LIMIT ?`);
   const selectNodePageAfter = db.prepare(`SELECT rowid, body FROM node WHERE session_id = ? AND id > ? ORDER BY id LIMIT ?`);
-  const selectEdgeBodies = db.prepare(`SELECT body FROM edge WHERE session_id = ? ORDER BY rowid`).pluck();
+  const selectEdges = db.prepare(`SELECT from_id, to_id, tag, kind FROM edge WHERE session_id = ? ORDER BY ord`).raw();
+  /** A session's edges, each serialized as JSON.stringify(edge) would (snapshot order). */
+  const edgeJsons = (sessionId: string): string[] =>
+    (selectEdges.all(sessionId) as [string, string, string, number | string][]).map(([from, to, tag, kind]) =>
+      JSON.stringify({
+        id: tag.startsWith(ODD_EDGE_TAG) ? tag.slice(ODD_EDGE_TAG.length) : `${from}->${to}${tag}`,
+        sessionId,
+        from,
+        to,
+        kind: typeof kind === 'number' ? (EDGE_KINDS[kind] ?? String(kind)) : kind,
+      }),
+    );
   const selectChanges = db.prepare(`SELECT seq, body FROM change_log WHERE seq > ? ORDER BY seq`);
   const selectChangesForSession = db.prepare(
     `SELECT seq, body FROM change_log WHERE seq > ? AND session_id = ? ORDER BY seq`,
@@ -738,7 +778,7 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     pendingDetails.clear();
   }
 
-  function applyOne(c: Change): void {
+  function applyOne(c: Change, seq: number): void {
     switch (c.type) {
       case 'session_upserted':
         upsertSession.run({
@@ -770,11 +810,19 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
         }
         break;
       }
-      case 'edge_added':
-        insertEdge.run(c.edge.sessionId, c.edge.id, JSON.stringify(c.edge));
+      case 'edge_added': {
+        const e = c.edge;
+        // An id that more than one key could spell (node ids with '->' or ending in ':fork'): it names one edge, so
+        // whatever was stored under another spelling of it goes first.
+        if (edgeKeysOf(e.id).length > 1) deleteEdgeById(e.sessionId, e.id, false);
+        const base = `${e.from}->${e.to}`;
+        const tag = e.id.startsWith(base) && (e.id.length === base.length || e.id.slice(base.length) === ':fork') ? e.id.slice(base.length) : `${ODD_EDGE_TAG}${e.id}`;
+        const kind = EDGE_KINDS.indexOf(e.kind);
+        insertEdge.run(e.sessionId, e.from, e.to, tag, kind >= 0 ? kind : e.kind, seq);
         break;
+      }
       case 'edge_removed':
-        deleteEdge.run(c.sessionId, c.id);
+        deleteEdgeById(c.sessionId, c.id);
         break;
     }
   }
@@ -800,9 +848,9 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     try {
       changes.forEach((c, i) => {
         if (c.type === 'session_upserted' && lastUpsert.get(c.session.id) !== i) return;
-        applyOne(c);
         const logged = withoutDetail(c);
         const seq = Number(insertChange.run(changeSessionId(c), JSON.stringify(logged)).lastInsertRowid);
+        applyOne(c, seq);
         out.push({ ...logged, seq });
       });
       flushDetails();
@@ -842,7 +890,7 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     const session = selectSession.get(sessionId) as string | undefined;
     if (session === undefined) return null;
     const nodes = selectNodeBodies.all(sessionId) as string[];
-    const edges = selectEdgeBodies.all(sessionId) as string[];
+    const edges = edgeJsons(sessionId);
     // The last assigned seq (not the session's own max): the snapshot reflects every change up to it, and it is never
     // below minSeq() - 1, so a client resubscribing with it is never told to resync again.
     const seq = lastSeq();
