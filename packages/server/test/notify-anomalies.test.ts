@@ -302,6 +302,24 @@ describe('NotificationService: anomaly kinds', () => {
     }
   });
 
+  test('a page opened before the upgrade (no loop / failures in its PUT) keeps their current values', async () => {
+    const store = openStore(':memory:');
+    try {
+      const svc = new NotificationService({ store, pipeline: pipeline as never, notifier: new FakeNotifier(), timers: noTimers });
+      expect(svc.putSettings({ ...DEFAULT_NOTIFICATION_SETTINGS, enabled: true, failures: true }).ok).toBe(true);
+      const { loop: _l, failures: _f, ...old } = { ...DEFAULT_NOTIFICATION_SETTINGS, enabled: true, stuckMinutes: 20 };
+      const r = svc.putSettings(old);
+      expect(r.ok).toBe(true);
+      expect(svc.getSettings().settings).toMatchObject({ enabled: true, stuckMinutes: 20, loop: false, failures: true });
+      // Anything else missing is still an error.
+      const { stuck: _s, ...missing } = svc.getSettings().settings;
+      expect(svc.putSettings(missing).ok).toBe(false);
+      await svc.close();
+    } finally {
+      store.close();
+    }
+  });
+
   test('handleAnomalies delivers through the notifier with the node address on this server, and records the kind', async () => {
     const store = openStore(':memory:');
     try {

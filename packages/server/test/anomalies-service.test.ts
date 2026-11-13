@@ -83,7 +83,7 @@ class FakeSource implements AnomaliesSource {
 }
 
 const make = (source: AnomaliesSource, o: AnomaliesServiceOptions = {}): AnomaliesService =>
-  new AnomaliesService(source, { now: () => NOW, answerWaitMs: 5000, ...o });
+  new AnomaliesService(source, { now: () => NOW, answerWaitMs: 5000, liveDelayMs: 0, liveCostFactor: 0, ...o }); // unpaced unless a test says otherwise
 const ALL = { range: 'all' as const, origin: null, projectId: null, kind: null };
 
 describe('parseAnomalyListQuery', () => {
@@ -476,5 +476,107 @@ describe('AnomaliesService: background recompute of running sessions', () => {
     await timers.fire();
     // Seen running until it left (NOW on the service's clock).
     expect(events.map((e) => [e.session.id, e.runningUntil, e.anomalies.length])).toEqual([['run', NOW, 1]]);
+  });
+});
+
+describe('AnomaliesService: one pacing rule for every recompute (requests included)', () => {
+  class Timers implements LiveTimers {
+    pending: { fn: () => void; ms: number }[] = [];
+    setTimeout(fn: () => void, ms: number): unknown {
+      const t = { fn, ms };
+      this.pending.push(t);
+      return t;
+    }
+    clearTimeout(h: unknown): void {
+      this.pending = this.pending.filter((t) => t !== h);
+    }
+    async fire(): Promise<void> {
+      const due = this.pending;
+      this.pending = [];
+      for (const t of due) t.fn();
+      for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+    }
+  }
+
+  /** A "big" session whose read + summarize takes 500 ms of the fake clock: window max(1 s, 6 × 0.5 s) = 3 s. */
+  const setup = (live = false, readMs = 500) => {
+    const src = new FakeSource();
+    src.set('big', loopTurn('big', 'T1', NOW - MIN, 2), { status: 'running' });
+    src.set('small', loopTurn('small', 'T1', NOW - MIN, 2));
+    const timers = new Timers();
+    let clock = 0;
+    const read = src.readSession.bind(src);
+    src.readSession = async (id) => {
+      if (id === 'big') clock += readMs;
+      return read(id);
+    };
+    const svc = make(src, { live: () => live, timers, clock: () => clock, liveDelayMs: 1000, liveCostFactor: 6 });
+    const events: AnomalySummaryEvent[] = [];
+    svc.onSummary((e) => events.push(e));
+    return { src, timers, svc, events, tick: (ms: number) => { clock += ms; } };
+  };
+  const failure = (id: string, n: number): GraphNode =>
+    mkNode(id, `${id}-x${n}`, NOW - 10_000 + n, { turnId: 'T1', status: 'failed', inputKey: 'aaaaaaaaaaaaaaaa' });
+
+  test('5 change + request pairs in quick succession: answered from the previous summary, recomputed once afterwards', async () => {
+    const { src, timers, svc, tick } = setup();
+    await svc.counts(); // first summaries: at once
+    const base = svc.summaryCount();
+    expect(base).toBe(2);
+    for (let i = 0; i < 5; i++) {
+      tick(300);
+      svc.noteChanges(src.add('big', [failure('big', i)]));
+      const counts = await svc.counts();
+      expect(counts.computing).toBe(false); // bounded staleness is not "computing"
+      expect(counts.counts.big).toBeUndefined(); // still the previous summary (2 failures)
+      await svc.session('big');
+    }
+    expect(svc.summaryCount() - base).toBe(0);
+    // One recompute, armed by the first stale answer for the end of the window (3 s after the first summary ended).
+    expect(timers.pending.map((t) => t.ms)).toEqual([2700]);
+    // Without any further request, the dirty session is recomputed when the window ends.
+    tick(1500);
+    await timers.fire();
+    expect(svc.summaryCount() - base).toBe(1);
+    expect((await svc.counts()).counts.big).toEqual({ total: 2, byKind: { loop: 1, failures: 1 } });
+  });
+
+  test('a small session stays live: a change is visible within about 1 s', async () => {
+    const { src, timers, svc, tick } = setup();
+    await svc.counts();
+    tick(200);
+    svc.noteChanges(src.add('small', [failure('small', 0)]));
+    expect((await svc.counts()).counts.small).toBeUndefined();
+    expect(timers.pending.map((t) => t.ms)).toEqual([800]); // 1 s after its last recompute
+    tick(800);
+    await timers.fire();
+    expect((await svc.counts()).counts.small).toEqual({ total: 1, byKind: { loop: 1 } });
+    // Outside the window a request recomputes at once.
+    tick(1500);
+    svc.noteChanges(src.add('small', [mkNode('small', 'small-ok', NOW - 9_000, { turnId: 'T1' })]));
+    const before = svc.summaryCount();
+    await svc.counts();
+    expect(svc.summaryCount()).toBe(before + 1);
+  });
+
+  test('a new session gets its first summary at once', async () => {
+    const { src, svc } = setup();
+    await svc.counts();
+    src.set('new', loopTurn('new', 'T1', NOW - MIN, 3));
+    expect((await svc.counts()).counts.new).toEqual({ total: 1, byKind: { loop: 1 } });
+  });
+
+  test('notifications: a request inside the window does not delay or duplicate the background recompute', async () => {
+    const { src, timers, svc, events, tick } = setup(true);
+    await svc.warm();
+    events.length = 0;
+    tick(100);
+    svc.noteChanges(src.add('big', [failure('big', 0)]));
+    expect(timers.pending.map((t) => t.ms)).toEqual([2900]); // the window's end (3 s after the warm-up's summary)
+    await svc.counts(); // a page asks meanwhile: previous summary, same timer
+    expect(timers.pending).toHaveLength(1);
+    tick(2900);
+    await timers.fire();
+    expect(events.map((e) => [e.session.id, e.anomalies.map((a) => a.kind)])).toEqual([['big', ['loop']]]);
   });
 });

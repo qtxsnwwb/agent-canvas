@@ -66,6 +66,8 @@ describe('anomaly routes', () => {
     vi.spyOn(pipeline, 'startupDone').mockReturnValue(true);
     const anomalies = new AnomaliesService(storeStatsSource(store), {
       now: () => NOW,
+      liveDelayMs: 0, // unpaced: every request sees the latest data
+      liveCostFactor: 0,
       startupDone: () => pipeline.startupDone(),
       summarize: (session, nodes) => {
         if (session.id === 'broken') throw new Error('boom');

@@ -45,12 +45,16 @@ import { FAILED_SUMMARY, isRunningStatus, summarizeAnomalies, type AnomalySummar
  * - A session whose summary throws is counted in failedSessions and skipped; its failed summary stays cached until the
  *   session changes, so it is retried then. A failed read is counted too, and retried by every request (as the stats
  *   service does).
+ * - Pacing, one rule for every recompute of a session whatever asks for it (a request, the warm-up, the background):
+ *   once a session has a summary, it is recomputed at most once per max(`liveDelayMs`, `liveCostFactor` × the read +
+ *   summarize time of its last recompute), counted from the end of that recompute. A read inside the window answers the
+ *   previous summary at once (stale while revalidating: `computing` stays false, the staleness is bounded and heals
+ *   itself) and schedules a recompute for the window's end. A session's first summary is computed at once.
  * - Every summary computed is shown to the onSummary listeners (the notification service), with the latest time the
  *   session was seen running. While `live()` holds (a notification switch for loop / failures is on) and the start-up
  *   work is over, a change to a running session schedules a background recompute of that session alone: at most one in
- *   flight per session, armed `liveDelayMs` after the first change of a burst (later changes do not push it back), and
- *   never sooner than `liveCostFactor` times the previous recompute's duration after it ended; a change newer than the
- *   read it used arms another one.
+ *   flight per session, at least `liveDelayMs` after the first change of a burst (later changes do not push it back)
+ *   and not before its window ends; a change newer than the read it used arms another one.
  */
 
 /** What the anomaly service reads: the same as the stats service (storeStatsSource: paged node reads). */
@@ -161,11 +165,17 @@ interface Derived {
   sessions: Map<string, { session: Session; anomalies: Anomaly[] }>;
 }
 
+/** One session's recompute pacing (see the class comment). */
 interface LiveState {
   timer: unknown;
   running: boolean;
+  /** Read + summarize time of the last real recompute, and when it ended (monotonic clock). */
   lastDurationMs: number;
   lastEndAt: number;
+  /** The next read is a real one whatever the window (a scheduled recompute). */
+  force: boolean;
+  /** The last real summary, answerable again without a read: a token node list mapped to it, its read's seq. */
+  prev: { session: Session; token: GraphNode[]; seq: number } | null;
 }
 
 interface RunState {
@@ -214,6 +224,8 @@ export class AnomaliesService {
   private readonly reading = new Map<string, Promise<Read>>();
   /** The summary of a read's node list (one summary per read, whoever asked). */
   private readonly summaryOfRead = new WeakMap<GraphNode[], AnomalySummary>();
+  /** A real read's seq and duration, by its node list. */
+  private readonly readInfo = new WeakMap<GraphNode[], { seq: number; ms: number }>();
   /** Session id -> seq of the latest read / the latest change noted. */
   private readonly readSeq = new Map<string, number>();
   private readonly changedSeq = new Map<string, number>();
@@ -227,6 +239,7 @@ export class AnomaliesService {
   private readonly runState = new Map<string, RunState>();
   private readonly liveState = new Map<string, LiveState>();
   private liveRecomputes = 0;
+  private summaries = 0;
   private closed = false;
 
   constructor(private readonly source: AnomaliesSource, options: AnomaliesServiceOptions = {}) {
@@ -363,9 +376,14 @@ export class AnomaliesService {
     return this.derivations;
   }
 
-  /** How many background recomputes of running sessions ran. */
+  /** How many scheduled (background) recomputes ran. */
   liveRecomputeCount(): number {
     return this.liveRecomputes;
+  }
+
+  /** How many summaries were computed from a real read. */
+  summaryCount(): number {
+    return this.summaries;
   }
 
   /** Sizes of the per-session state (bounded by `capacity`, pruned when a session is no longer listed). */
@@ -394,11 +412,22 @@ export class AnomaliesService {
   private sharedRead(sessionId: string, stopped?: () => boolean): Promise<Read> {
     const current = this.reading.get(sessionId);
     if (current !== undefined) return current;
+    const st = this.liveState.get(sessionId);
+    if (st !== undefined && st.prev !== null && !st.force && this.clock() < this.windowEnd(st)) {
+      // Inside the pacing window: the previous summary again (the cache keeps it stale), a recompute at the window's end.
+      this.scheduleRecompute(sessionId, 0);
+      return Promise.resolve({ session: st.prev.session, nodes: st.prev.token, seq: st.prev.seq });
+    }
+    if (st !== undefined) st.force = false;
     const promise = (async (): Promise<Read> => {
       try {
+        const t0 = this.clock();
         const read = await this.source.readSession(sessionId, stopped);
         this.failedReads.delete(sessionId);
-        if (read !== null) touch(this.readSeq, sessionId, read.seq, this.capacity);
+        if (read !== null) {
+          touch(this.readSeq, sessionId, read.seq, this.capacity);
+          this.readInfo.set(read.nodes, { seq: read.seq, ms: this.clock() - t0 });
+        }
         return read;
       } catch (err) {
         if (!this.closed && this.failedReads.size < this.capacity) this.failedReads.add(sessionId);
@@ -421,12 +450,25 @@ export class AnomaliesService {
     const known = this.summaryOfRead.get(nodes);
     if (known !== undefined) return known;
     let summary: AnomalySummary;
+    const t0 = this.clock();
     try {
       summary = this.summarizeFn(session, nodes);
     } catch {
       summary = FAILED_SUMMARY;
     }
     this.summaryOfRead.set(nodes, summary);
+    const info = this.readInfo.get(nodes);
+    if (info !== undefined) {
+      // A real read: the session's pacing window starts now.
+      const st = this.paceState(session.id);
+      const end = this.clock();
+      st.lastEndAt = end;
+      st.lastDurationMs = info.ms + (end - t0);
+      const token: GraphNode[] = [];
+      this.summaryOfRead.set(token, summary);
+      st.prev = { session, token, seq: info.seq };
+      this.summaries++;
+    }
     touch(this.latest, session.id, { session, summary }, this.capacity);
     this.version++;
     const now = this.now();
@@ -472,36 +514,51 @@ export class AnomaliesService {
     }
   }
 
-  private scheduleLive(sessionId: string): void {
+  private paceState(sessionId: string): LiveState {
     let st = this.liveState.get(sessionId);
     if (st === undefined) {
-      st = { timer: null, running: false, lastDurationMs: 0, lastEndAt: -Infinity };
+      st = { timer: null, running: false, lastDurationMs: 0, lastEndAt: -Infinity, force: false, prev: null };
       touch(this.liveState, sessionId, st, this.capacity);
     }
+    return st;
+  }
+
+  /** The end of the session's pacing window (monotonic clock). */
+  private windowEnd(st: LiveState): number {
+    return st.lastEndAt + Math.max(this.liveDelayMs, this.liveCostFactor * st.lastDurationMs);
+  }
+
+  /** A background recompute after a change of a running session: at least liveDelayMs from now. */
+  private scheduleLive(sessionId: string): void {
+    this.scheduleRecompute(sessionId, this.liveDelayMs);
+  }
+
+  /** Arms the session's recompute for max(minDelayMs, the end of its window); nothing when armed or in flight. */
+  private scheduleRecompute(sessionId: string, minDelayMs: number): void {
+    if (this.closed) return;
+    const st = this.paceState(sessionId);
     if (st.timer !== null || st.running) return; // armed, or in flight (it re-arms itself when a change is newer)
-    const sinceEnd = this.clock() - st.lastEndAt;
-    const delay = Math.max(this.liveDelayMs, this.liveCostFactor * st.lastDurationMs - sinceEnd);
-    const state = st;
+    const delay = Math.max(minDelayMs, this.windowEnd(st) - this.clock(), 0);
     st.timer = this.timers.setTimeout(() => {
-      state.timer = null;
-      void this.runLive(sessionId, state);
+      st.timer = null;
+      void this.runRecompute(sessionId, st);
     }, delay);
   }
 
-  private async runLive(sessionId: string, st: LiveState): Promise<void> {
+  private async runRecompute(sessionId: string, st: LiveState): Promise<void> {
     if (this.closed) return;
     st.running = true;
-    const t0 = this.clock();
+    st.force = true; // the timer kept the window: this read is a real one
     try {
       this.liveRecomputes++;
       await this.cache.one(sessionId);
     } catch {
-      // a failed read: the next change tries again
+      // a failed read: the next change or request tries again
     } finally {
       st.running = false;
-      st.lastEndAt = this.clock();
-      st.lastDurationMs = st.lastEndAt - t0;
-      // A change newer than the read used (e.g. a shared read begun before it): once more.
+      st.force = false;
+      // A change newer than the read used (e.g. a shared read begun before it): once more, for a running session while
+      // the notifications want it (otherwise the next request schedules its own).
       const stale = (this.changedSeq.get(sessionId) ?? -Infinity) > (this.readSeq.get(sessionId) ?? -Infinity);
       if (stale && !this.closed && this.wantLive() && this.runningUntil(sessionId, this.now()) !== null) this.scheduleLive(sessionId);
     }

@@ -159,6 +159,11 @@ export class NotificationService {
 
   /** PUT: replaces the settings as a whole; invalid -> { ok: false, error } and nothing changes. */
   putSettings(value: unknown): { ok: true; response: NotificationSettingsResponse } | { ok: false; error: string } {
+    // A page loaded before the anomaly switches existed sends no `loop` / `failures`: they keep their current values.
+    if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+      const o = value as Record<string, unknown>;
+      value = { ...o, ...(!('loop' in o) ? { loop: this.settings.loop } : {}), ...(!('failures' in o) ? { failures: this.settings.failures } : {}) };
+    }
     const checked = validateNotificationSettings(value);
     if (!checked.ok) return checked;
     saveNotificationSettings(this.deps.store, checked.settings);

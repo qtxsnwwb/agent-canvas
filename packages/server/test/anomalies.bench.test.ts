@@ -131,7 +131,8 @@ describe.skipIf(!BENCH)('anomalies benchmark', () => {
       // Start-up warm-up as start() runs it: stats (sharing reads with files), files, anomalies (its own reads).
       const stats = new StatsService(counting, { now: () => NOW });
       const files = new FilesService(counting, { now: () => NOW });
-      const anomalies = new AnomaliesService(counting, { now: () => NOW });
+      // Unpaced, so the steps below measure the recompute itself (the pacing scenario is at the end).
+      const anomalies = new AnomaliesService(counting, { now: () => NOW, liveDelayMs: 0, liveCostFactor: 0 });
       files.shareReadsWith(stats);
       const warm = await measured(async () => {
         await stats.warm();
@@ -206,6 +207,53 @@ describe.skipIf(!BENCH)('anomalies benchmark', () => {
         expect(unchanged.ms).toBeLessThan(50);
         expect(changed.ms).toBeLessThan(1000);
       }
+      // The 100,000-node session changing every second for SCENARIO_MS while the home page polls the counts 500 ms after
+      // each change; notifications off. Unpaced (each request recomputes, as before the pacing) vs paced (default).
+      const SCENARIO_MS = Number(process.env.AGENT_CANVAS_BENCH_SCENARIO_MS ?? 30_000);
+      const scenario = async (paced: boolean): Promise<string> => {
+        let summaries = 0;
+        let summarizeMs = 0;
+        const svc = new AnomaliesService(storeStatsSource(store), {
+          now: () => NOW,
+          ...(paced ? {} : { liveDelayMs: 0, liveCostFactor: 0 }),
+          summarize: (s, n) => {
+            const t0 = performance.now();
+            try {
+              return summarizeAnomalies(s, n);
+            } finally {
+              if (s.id === 'bench-s000') {
+                summaries++;
+                summarizeMs += performance.now() - t0;
+              }
+            }
+          },
+        });
+        await svc.counts();
+        summaries = 0;
+        summarizeMs = 0;
+        const base = store.getSession('bench-s000')!;
+        let k = 0;
+        const run = await measured(async () => {
+          const until = performance.now() + SCENARIO_MS;
+          while (performance.now() < until) {
+            k++;
+            svc.noteChanges(store.applyChanges([
+              { type: 'node_added', node: { ...firstNode, id: `bench-s000-live${paced ? 'p' : 'u'}${k}`, sessionId: 'bench-s000', turnId: null, agentId: null, timestamp: iso(NOW - 1000 + k) }, detail: {} },
+              { type: 'session_upserted', session: { ...base, lastActivityAt: iso(NOW + k) } },
+            ]));
+            await new Promise((r) => setTimeout(r, 500));
+            await svc.counts();
+            await new Promise((r) => setTimeout(r, 500));
+          }
+        });
+        svc.close();
+        const perMin = 60_000 / SCENARIO_MS;
+        return `${paced ? 'paced' : 'unpaced'}: ${(summaries * perMin).toFixed(0)} recomputes/min of the 100,000-node session, ` +
+          `summarize ${(summarizeMs * perMin).toFixed(0)} ms/min blocking (+ the paged reads, which yield), longest stall ${run.stallMs.toFixed(0)} ms`;
+      };
+      const unpacedLine = await scenario(false);
+      const pacedLine = await scenario(true);
+      console.log(`  home page polling, 100,000-node session changing every second (${SCENARIO_MS / 1000} s):\n    ${unpacedLine}\n    ${pacedLine}`);
       stats.close();
       files.close();
       anomalies.close();
