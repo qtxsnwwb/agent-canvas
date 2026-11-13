@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Worker } from 'node:worker_threads';
+import { fork } from 'node:child_process';
 import type { Diagnostics } from '@agent-canvas/shared';
 import type { Store } from './store.js';
 
@@ -36,6 +36,8 @@ export const STORAGE_META = {
   failed: 'storage:failed',
   /** 'done' | 'skipped:<reason>' (absent: pending). */
   vacuum: 'storage:vacuum',
+  /** When VACUUM last failed (error, timeout, checkpoint kept busy, no shrink); it is not retried for 24 h. */
+  vacuumFailedAt: 'storage:vacuum_failed_at',
 } as const;
 
 /**
@@ -100,6 +102,13 @@ export function vacuumSpaceProblem(
   if (dbFree < need) return `low-space: database volume needs ${MB(need)} free, ${MB(dbFree)} available`;
   return null;
 }
+/** VACUUM + checkpoint must answer within this; the child process is killed otherwise (writes are held meanwhile). */
+export const VACUUM_DEADLINE_MS = 120_000;
+/** The truncating checkpoint after VACUUM: busy timeout per attempt and attempts (a reader's snapshot blocks it). */
+export const VACUUM_CHECKPOINT_BUSY_MS = 2000;
+export const VACUUM_CHECKPOINT_ATTEMPTS = 3;
+/** A failed VACUUM is not tried again (by the service or a plain `compact`) for this long; `compact --force` does. */
+export const VACUUM_RETRY_AFTER_MS = 24 * 60 * 60 * 1000;
 /** How long the service waits for the pipeline to stop importing before postponing VACUUM to the next start. */
 export const VACUUM_QUIESCE_TIMEOUT_MS = 30_000;
 /** The background job checks `startupDone` / `importing` this often, and starts anyway after STORAGE_MAX_WAIT_MS. */
@@ -233,12 +242,24 @@ export interface VacuumOptions {
   log?: (line: string) => void;
   /** Checked while waiting for the host to stop importing: true gives up at once (outcome 'stopped', nothing recorded). */
   stopped?: () => boolean;
+  /** Try even when VACUUM failed within VACUUM_RETRY_AFTER_MS (`compact --force`). */
+  ignoreBackoff?: boolean;
+  /** Tests: deadline, checkpoint busy timeout and attempts, clock. */
+  deadlineMs?: number;
+  checkpointBusyMs?: number;
+  checkpointAttempts?: number;
+  now?: () => number;
 }
 
 export interface VacuumResult {
-  /** 'already': it was done before (nothing ran). 'stopped': given up before starting (see VacuumOptions.stopped). */
-  outcome: 'done' | 'skipped' | 'already' | 'stopped';
+  /**
+   * 'already': it was done before (nothing ran). 'stopped': given up before starting (see VacuumOptions.stopped).
+   * 'backoff': it failed recently and was not tried (reason says until when). 'skipped' with `failed`: it ran and
+   * failed (error, timeout, checkpoint kept busy, no shrink); without: it did not run (space, import).
+   */
+  outcome: 'done' | 'skipped' | 'already' | 'stopped' | 'backoff';
   reason?: string;
+  failed?: boolean;
   before?: { fileBytes: number; walBytes: number };
   after?: { fileBytes: number; walBytes: number };
 }
@@ -250,15 +271,41 @@ const sleep = (ms: number): Promise<void> =>
   });
 
 /**
- * Runs VACUUM unless it is done already (see VacuumOptions.evenIfDone), records the outcome in `meta` (`storage:vacuum`)
- * and returns it with the file sizes before and after. Never throws: a failure is recorded as `skipped:error: ...`.
+ * Runs VACUUM unless it is done already (see VacuumOptions.evenIfDone) or failed within VACUUM_RETRY_AFTER_MS (unless
+ * ignoreBackoff), records the outcome in `meta` (`storage:vacuum`) and returns it with the file sizes before and after.
+ * Never throws.
+ *
+ * VACUUM itself runs in a child process (vacuumInChild) with a hard deadline; in the service the host's writes and the
+ * store's meta writes are held meanwhile and released in `finally` blocks that run whatever happens. It counts as done
+ * only when the truncating checkpoint completed and the file shrank (or had no free pages to give back); a VACUUM that
+ * errs, times out, cannot complete its checkpoint (a reader holds a snapshot) or does not shrink the file is recorded
+ * as skipped, with the time (`storage:vacuum_failed_at`), and not retried for VACUUM_RETRY_AFTER_MS.
  */
 export async function vacuumIfDue(store: Store, options: VacuumOptions = {}): Promise<VacuumResult> {
+  const log = options.log ?? (() => {});
+  try {
+    return await vacuumUnsafe(store, options, log);
+  } catch (err) {
+    // Only a failing meta write can get here (recording the outcome); nothing is held any more.
+    const reason = `error: ${err instanceof Error ? err.message : String(err)}`;
+    log(`agent-canvas: database compaction (VACUUM) failed: ${reason}`);
+    return { outcome: 'skipped', reason, failed: true };
+  }
+}
+
+async function vacuumUnsafe(store: Store, options: VacuumOptions, log: (line: string) => void): Promise<VacuumResult> {
   if (store.getMeta(STORAGE_META.vacuum) === 'done' && options.evenIfDone !== true) return { outcome: 'already' };
-  const skip = (reason: string): VacuumResult => {
+  const failedAt = Date.parse(store.getMeta(STORAGE_META.vacuumFailedAt) ?? '');
+  const now = (options.now ?? Date.now)();
+  if (options.ignoreBackoff !== true && Number.isFinite(failedAt) && now - failedAt < VACUUM_RETRY_AFTER_MS) {
+    const retryAt = new Date(failedAt + VACUUM_RETRY_AFTER_MS).toISOString();
+    return { outcome: 'backoff', reason: `failed at ${new Date(failedAt).toISOString()}; retried after ${retryAt}` };
+  }
+  const skip = (reason: string, failed = false): VacuumResult => {
     store.setMeta(STORAGE_META.vacuum, `skipped:${reason}`);
-    options.log?.(`agent-canvas: database compaction (VACUUM) skipped: ${reason}`);
-    return { outcome: 'skipped', reason };
+    if (failed) store.setMeta(STORAGE_META.vacuumFailedAt, new Date(now).toISOString());
+    log(`agent-canvas: database compaction (VACUUM) ${failed ? 'failed' : 'skipped'}: ${reason}`);
+    return { outcome: 'skipped', reason, ...(failed ? { failed: true } : {}) };
   };
   const before = store.dbFileSizes();
   if (options.skipSpaceCheck !== true) {
@@ -275,59 +322,102 @@ export async function vacuumIfDue(store: Store, options: VacuumOptions = {}): Pr
     if (problem !== null) return skip(problem);
   }
   const host = options.host;
-  try {
-    if (host === undefined) {
-      store.vacuum();
-    } else {
-      const deadline = Date.now() + (options.quiesceTimeoutMs ?? VACUUM_QUIESCE_TIMEOUT_MS);
-      while (host.importing()) {
-        if (options.stopped?.() === true) return { outcome: 'stopped' };
-        if (Date.now() >= deadline) return skip('busy');
-        await sleep(Math.min(100, Math.max(1, deadline - Date.now())));
-      }
+  if (host !== undefined) {
+    const deadline = Date.now() + (options.quiesceTimeoutMs ?? VACUUM_QUIESCE_TIMEOUT_MS);
+    while (host.importing()) {
       if (options.stopped?.() === true) return { outcome: 'stopped' };
-      const releaseWrites = host.holdWrites();
-      const releaseMeta = store.holdMetaWrites();
-      try {
-        await vacuumOnOwnConnection(store);
-      } finally {
-        releaseMeta();
-        releaseWrites();
-      }
+      if (Date.now() >= deadline) return skip('busy: the service kept importing');
+      await sleep(Math.min(100, Math.max(1, deadline - Date.now())));
     }
+    if (options.stopped?.() === true) return { outcome: 'stopped' };
+  }
+  let result: ChildResult;
+  let releaseWrites: (() => void) | null = null;
+  let releaseMeta: (() => void) | null = null;
+  try {
+    if (host !== undefined) {
+      releaseWrites = host.holdWrites();
+      releaseMeta = store.holdMetaWrites();
+    }
+    result = await vacuumInChild(store, options);
   } catch (err) {
-    return skip(`error: ${err instanceof Error ? err.message : String(err)}`);
+    result = { kind: 'error', message: err instanceof Error ? err.message : String(err) };
+  } finally {
+    // Each release on its own: a failing one (the held meta flush on a full disk) never keeps the other held.
+    try {
+      releaseMeta?.();
+    } catch (err) {
+      log(`agent-canvas: writing the settings held during VACUUM failed (kept in memory, retried): ${err instanceof Error ? err.message : String(err)}`);
+    }
+    try {
+      releaseWrites?.();
+    } catch (err) {
+      log(`agent-canvas: releasing the held writes failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  if (result.kind === 'error') return skip(`error: ${result.message}`, true);
+  if (result.kind === 'timeout') return skip(`timeout: VACUUM did not finish within ${Math.round(result.ms / 1000)} s`, true);
+  if (result.checkpoint === null || result.checkpoint.busy !== 0) {
+    return skip('busy: another connection held a read snapshot, so the file could not be truncated', true);
   }
   const after = store.dbFileSizes();
+  if (!(after.fileBytes < before.fileBytes || result.freelistBefore === 0)) {
+    return skip(`not-shrunk: ${MB(before.fileBytes)} before, ${MB(after.fileBytes)} after`, true);
+  }
   store.setMeta(STORAGE_META.vacuum, 'done');
-  options.log?.(`agent-canvas: database compacted: ${MB(before.fileBytes + before.walBytes)} -> ${MB(after.fileBytes + after.walBytes)}`);
+  store.deleteMeta(STORAGE_META.vacuumFailedAt);
+  log(`agent-canvas: database compacted: ${MB(before.fileBytes + before.walBytes)} -> ${MB(after.fileBytes + after.walBytes)}`);
   return { outcome: 'done', before, after };
 }
 
-/** VACUUM plus a truncating checkpoint in a worker thread (vacuum-worker), or on the store's connection when none can run. */
-function vacuumOnOwnConnection(store: Store): Promise<void> {
+type ChildResult =
+  | { kind: 'error'; message: string }
+  | { kind: 'timeout'; ms: number }
+  | { kind: 'ok'; freelistBefore: number; checkpoint: { busy: number; log: number; checkpointed: number } | null };
+
+/**
+ * VACUUM plus a truncating checkpoint in a child process (vacuum-child), killed when it has not answered within the
+ * deadline (VACUUM_DEADLINE_MS: SQLite rolls the unfinished VACUUM back). An in-memory database is vacuumed on the
+ * store's own connection.
+ */
+function vacuumInChild(store: Store, options: VacuumOptions): Promise<ChildResult> {
   const dbPath = store.dbPath();
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  const script = ['vacuum-worker.js', 'vacuum-worker.ts'].map((f) => path.join(here, f)).find((f) => fs.existsSync(f));
-  if (dbPath === ':memory:' || dbPath === '' || script === undefined) {
+  if (dbPath === ':memory:' || dbPath === '') {
     store.vacuum();
-    return Promise.resolve();
+    return Promise.resolve({ kind: 'ok', freelistBefore: 0, checkpoint: { busy: 0, log: 0, checkpointed: 0 } });
   }
-  return new Promise((resolve, reject) => {
-    const worker = new Worker(script, { workerData: { dbPath } });
-    let settled = false;
-    worker.once('message', (m: { ok?: unknown; error?: unknown }) => {
-      settled = true;
-      if (m?.ok === true) resolve();
-      else reject(new Error(typeof m?.error === 'string' ? m.error : 'VACUUM failed'));
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const script = ['vacuum-child.js', 'vacuum-child.ts'].map((f) => path.join(here, f)).find((f) => fs.existsSync(f));
+  if (script === undefined) return Promise.resolve({ kind: 'error', message: 'vacuum-child script not found' });
+  const deadlineMs = options.deadlineMs ?? VACUUM_DEADLINE_MS;
+  const args = [path.resolve(dbPath), String(options.checkpointBusyMs ?? VACUUM_CHECKPOINT_BUSY_MS), String(options.checkpointAttempts ?? VACUUM_CHECKPOINT_ATTEMPTS)];
+  return new Promise((resolve) => {
+    let settled: ChildResult | null = null;
+    const child = fork(script, args, { execArgv: [], stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+    let stderr = '';
+    child.stderr?.on('data', (chunk: Buffer) => {
+      if (stderr.length < 2000) stderr += chunk.toString('utf8');
     });
-    worker.once('error', (err) => {
-      if (!settled) reject(err);
-      settled = true;
+    const timer = setTimeout(() => {
+      settled ??= { kind: 'timeout', ms: deadlineMs };
+      child.kill();
+    }, deadlineMs);
+    child.on('message', (m: { ok?: unknown; error?: unknown; freelistBefore?: unknown; checkpoint?: unknown }) => {
+      if (settled !== null) return;
+      if (m?.ok === true) {
+        settled = {
+          kind: 'ok',
+          freelistBefore: typeof m.freelistBefore === 'number' ? m.freelistBefore : -1,
+          checkpoint: (m.checkpoint as { busy: number; log: number; checkpointed: number } | null) ?? null,
+        };
+      } else settled = { kind: 'error', message: typeof m?.error === 'string' ? m.error : 'VACUUM failed' };
     });
-    worker.once('exit', (code) => {
-      if (!settled) reject(new Error(`VACUUM worker exited with code ${code}`));
-      settled = true;
+    child.on('error', (err) => {
+      settled ??= { kind: 'error', message: err.message };
+    });
+    child.on('exit', (code) => {
+      clearTimeout(timer);
+      resolve(settled ?? { kind: 'error', message: `VACUUM process exited with code ${String(code)}${stderr === '' ? '' : `: ${stderr.trim().split('\n').pop()}`}` });
     });
   });
 }
@@ -424,7 +514,7 @@ export function startStorageMaintenance(store: Store, host: StorageHost, options
       ...(options.freeBytes !== undefined ? { freeBytes: options.freeBytes } : {}),
       ...(options.quiesceTimeoutMs !== undefined ? { quiesceTimeoutMs: options.quiesceTimeoutMs } : {}),
     });
-    if (result.outcome === 'skipped' && result.reason?.startsWith('error:')) lastError = `vacuum: ${result.reason.slice(7)}`;
+    if (result.failed === true) lastError = `vacuum: ${result.reason ?? 'failed'}`;
   };
   const done = run().catch((err: unknown) => {
     lastError = err instanceof Error ? err.message : String(err);

@@ -346,6 +346,8 @@ export function buildServer(deps: {
   if (notifications !== undefined) {
     app.get('/api/notifications/settings', async (): Promise<NotificationSettingsResponse> => notifications.getSettings());
     app.put('/api/notifications/settings', async (req, reply) => {
+      // While the database is being compacted (VACUUM) writes are held; a settings change would only live in memory.
+      if (pipeline.writesHeld()) return reply.code(503).send({ error: '数据库正在整理，稍后再试' });
       const result = notifications.putSettings(req.body);
       if (!result.ok) return reply.code(400).send({ error: result.error });
       return result.response;

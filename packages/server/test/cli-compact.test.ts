@@ -121,6 +121,29 @@ test('main compact：进度写到 stderr，前后大小写到 stdout；用法里
   expect(out.join('\n')).toMatch(/agent-canvas compact \[--force\]/);
 });
 
+test('main compact：VACUUM 失败（读快照让检查点做不完）时退出码 1；之后 24 小时内不再试，--force 再试', async () => {
+  vi.stubEnv('AGENT_CANVAS_DATA_DIR', dataDir);
+  vi.stubEnv('AGENT_CANVAS_PROJECTS_DIR', projectsDir);
+  oldDatabase(300);
+  const out: string[] = [];
+  vi.spyOn(console, 'log').mockImplementation((line: string) => void out.push(line));
+  vi.spyOn(process.stderr, 'write').mockImplementation((() => true) as typeof process.stderr.write);
+  const reader = new Database(dbPath(), { readonly: true });
+  reader.exec('BEGIN');
+  reader.prepare('SELECT COUNT(*) FROM raw_event').get();
+  try {
+    expect(await main(['compact', '--force'])).toBe(1);
+  } finally {
+    reader.exec('COMMIT');
+    reader.close();
+  }
+  expect(out.join('\n')).toMatch(/VACUUM failed: busy/);
+  out.length = 0;
+  expect(await main(['compact'])).toBe(0);
+  expect(out.join('\n')).toMatch(/VACUUM not tried/);
+  expect(await main(['compact', '--force'])).toBe(0);
+}, 60_000);
+
 test('start：旧库在后台迁移并 VACUUM，诊断里看得到；之后重启什么都不做', async () => {
   oldDatabase(400);
   const app = await start({ projectsDir, dataDir, port: 0 }, { storage: { pollMs: 5, freeBytes: () => 10 ** 12 } });

@@ -41,6 +41,7 @@ import {
   vacuumIfDue,
   type StorageMaintenance,
   type StorageMaintenanceOptions,
+  type VacuumOptions,
   type VacuumResult,
 } from './store/migrate-storage.js';
 import { openStore, type Store } from './store/store.js';
@@ -327,12 +328,14 @@ export function rebuild(overrides: Partial<Config> = {}, options: { progress?: (
 }
 
 export interface CompactOptions {
-  /** Skip the free-disk-space check before VACUUM. */
+  /** VACUUM even when not needed or failed recently, without the free-disk-space check. */
   force?: boolean;
   /** Migration progress (positions done, total), after each batch. */
   progress?: (migrated: number, total: number) => void;
   /** Free bytes of a directory's volume (tests); default fs.statfsSync. */
   freeBytes?: (dir: string) => number;
+  /** Tests: VACUUM's deadline and checkpoint settings. */
+  vacuum?: Pick<VacuumOptions, 'deadlineMs' | 'checkpointBusyMs' | 'checkpointAttempts'>;
 }
 
 export interface CompactResult {
@@ -346,8 +349,9 @@ export interface CompactResult {
 /**
  * `agent-canvas compact`: with the lock of start / rebuild (refused while the service runs), the remaining storage
  * migration synchronously, then VACUUM on this connection, unless one was done and nothing was migrated since (outcome
- * 'already'); skipped when there is not enough free space (vacuumSpaceProblem). `force` runs VACUUM in any case,
- * without the space check.
+ * 'already'), or one failed within the last 24 hours ('backoff'); skipped when there is not enough free space
+ * (vacuumSpaceProblem). `force` runs VACUUM in any case, without the space check. VACUUM runs in a child process with
+ * a deadline (vacuumIfDue).
  */
 export async function compact(overrides: Partial<Config> = {}, options: CompactOptions = {}): Promise<CompactResult> {
   const config = resolveConfig(overrides);
@@ -361,8 +365,9 @@ export async function compact(overrides: Partial<Config> = {}, options: CompactO
       // A VACUUM done after the migration finished leaves nothing to reclaim: run it again only when forced.
       const vacuum = await vacuumIfDue(store, {
         evenIfDone: options.force === true || !migratedBefore,
-        ...(options.force === true ? { skipSpaceCheck: true } : {}),
+        ...(options.force === true ? { skipSpaceCheck: true, ignoreBackoff: true } : {}),
         ...(options.freeBytes !== undefined ? { freeBytes: options.freeBytes } : {}),
+        ...options.vacuum,
       });
       return { converted, failed, vacuum, before, after: store.dbFileSizes() };
     } finally {
@@ -374,6 +379,25 @@ export async function compact(overrides: Partial<Config> = {}, options: CompactO
 }
 
 const megabytes = (n: number): string => `${(n / 1024 / 1024).toFixed(1)} MB`;
+
+/**
+ * A progress callback that writes `compact: done/total (p%)` at most once a second and only when the whole percent has
+ * moved on, plus the final line: a few dozen lines for a migration of any size.
+ */
+export function throttledProgress(write: (line: string) => void, now: () => number = Date.now): (done: number, total: number) => void {
+  let lastAt = -Infinity;
+  let lastPercent = -1;
+  return (done, total) => {
+    const percent = total > 0 ? Math.floor((done / total) * 100) : 100;
+    const final = done >= total;
+    const t = now();
+    if (!final && (percent <= lastPercent || t - lastAt < 1000)) return;
+    if (final && lastPercent === 100) return;
+    lastAt = t;
+    lastPercent = final ? 100 : percent;
+    write(`compact: ${done}/${total} (${final ? 100 : percent}%)\n`);
+  };
+}
 
 function terminalIo(): HooksCliIo {
   return {
@@ -477,15 +501,16 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
     }
     if (command === 'compact') {
       const { values } = parseArgs({ args: rest, options: { force: { type: 'boolean' } }, allowPositionals: false });
-      const r = await compact({}, { force: values.force === true, progress: (done, total) => process.stderr.write(`compact: ${done}/${total}\n`) });
+      const r = await compact({}, { force: values.force === true, progress: throttledProgress((line) => process.stderr.write(line)) });
       const size = (s: { fileBytes: number; walBytes: number }): string => megabytes(s.fileBytes + s.walBytes);
       if (r.failed > 0) console.log(`agent-canvas compact: ${r.failed} stored rows could not be compressed (kept as they were)`);
-      if (r.vacuum.outcome === 'skipped') console.log(`agent-canvas compact: VACUUM skipped: ${r.vacuum.reason ?? ''}`);
+      if (r.vacuum.outcome === 'skipped') console.log(`agent-canvas compact: VACUUM ${r.vacuum.failed === true ? 'failed' : 'skipped'}: ${r.vacuum.reason ?? ''}`);
+      if (r.vacuum.outcome === 'backoff') console.log(`agent-canvas compact: VACUUM not tried: it ${r.vacuum.reason ?? 'failed recently'}; --force runs it now`);
       if (r.vacuum.outcome === 'already') {
         console.log('agent-canvas compact: VACUUM not needed (done before, nothing compressed since); --force runs it anyway');
       }
       console.log(`agent-canvas compact: database file: ${size(r.before)} -> ${size(r.after)}`);
-      return 0;
+      return r.vacuum.failed === true ? 1 : 0;
     }
   } catch (err) {
     console.error(err instanceof Error ? err.message : String(err));

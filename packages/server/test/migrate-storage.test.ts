@@ -399,7 +399,7 @@ describe('VACUUM', () => {
     await migratedOld();
     const out = await vacuumIfDue(store!, { host: host({ importing: () => true }), quiesceTimeoutMs: 30, freeBytes: () => 10 ** 12 });
     expect(out.outcome).toBe('skipped');
-    expect(store!.getMeta(STORAGE_META.vacuum)).toBe('skipped:busy');
+    expect(store!.getMeta(STORAGE_META.vacuum)).toMatch(/^skipped:busy/);
   });
 
   test('VACUUM 期间 meta 写入先记在内存，读得到，结束后落盘', async () => {

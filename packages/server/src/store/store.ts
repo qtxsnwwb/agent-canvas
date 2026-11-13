@@ -280,12 +280,13 @@ export interface Store {
   dbFileSizes(): { fileBytes: number; walBytes: number };
   /** The path the store was opened with. */
   dbPath(): string;
-  /** VACUUM on this connection, then a truncating checkpoint (so the file shrinks and the WAL is emptied). */
+  /** VACUUM on this connection (an in-memory database; files are vacuumed by migrate-storage's child process). */
   vacuum(): void;
   /**
    * Until the returned function is called (once), setMeta / deleteMeta are kept in memory (getMeta and metaWithPrefix
-   * see them) instead of written: for the time another connection holds the write lock (VACUUM). The release writes
-   * them in one transaction.
+   * see them) instead of written: for the time another connection holds the write lock (VACUUM). Calling them inside a
+   * transaction meanwhile throws. The release writes them in one transaction; when that fails it throws and keeps them
+   * (still visible) to be written with the next meta write or hold. Lost if the process dies while they are held.
    */
   holdMetaWrites(): () => void;
   close(): void;
@@ -809,6 +810,39 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   };
   /** setMeta / deleteMeta kept in memory while held (holdMetaWrites); null when not held. */
   let heldMeta: Map<string, string | null> | null = null;
+  /** Held meta writes whose flush failed: still visible to getMeta, written again with the next meta write. */
+  let unflushedMeta: Map<string, string | null> | null = null;
+  /** Writes held meta values in one transaction; on failure keeps them in unflushedMeta and rethrows. */
+  const flushMeta = (entries: Map<string, string | null>): void => {
+    try {
+      db.transaction(() => {
+        for (const [key, value] of entries) {
+          if (value === null) deleteMeta.run(key);
+          else upsertMeta.run(key, value);
+        }
+      })();
+    } catch (err) {
+      unflushedMeta = new Map([...(unflushedMeta ?? []), ...entries]);
+      throw err;
+    }
+  };
+  /** The value of `key` among the held or unflushed meta writes (undefined: none). */
+  const pendingMeta = (key: string): string | null | undefined => {
+    if (heldMeta?.has(key)) return heldMeta.get(key);
+    if (unflushedMeta?.has(key)) return unflushedMeta.get(key);
+    return undefined;
+  };
+  /** Before a direct meta write: the unflushed ones first (best effort, kept on failure). */
+  const retryUnflushed = (): void => {
+    if (unflushedMeta === null) return;
+    const entries = unflushedMeta;
+    unflushedMeta = null;
+    try {
+      flushMeta(entries);
+    } catch {
+      // kept in unflushedMeta by flushMeta
+    }
+  };
   const selectUnknown = db.prepare(`SELECT record_type, count, sample FROM unknown_stat ORDER BY record_type`);
   const selectFiles = db.prepare(`SELECT file, "offset", size FROM file_offset ORDER BY file`);
 
@@ -1201,16 +1235,17 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     },
     epoch: () => epoch,
     getMeta(key) {
-      if (heldMeta?.has(key)) return heldMeta.get(key) ?? null;
+      const pending = pendingMeta(key);
+      if (pending !== undefined) return pending;
       return (selectMeta.get(key) as string | undefined) ?? null;
     },
     metaWithPrefix(prefix) {
       if (prefix === '') throw new Error('metaWithPrefix: empty prefix');
       const end = prefix.slice(0, -1) + String.fromCharCode(prefix.charCodeAt(prefix.length - 1) + 1);
       const rows = selectMetaRange.all(prefix, end) as [string, string][];
-      if (heldMeta === null) return rows;
+      if (heldMeta === null && unflushedMeta === null) return rows;
       const merged = new Map(rows);
-      for (const [key, value] of heldMeta) {
+      for (const [key, value] of [...(unflushedMeta ?? []), ...(heldMeta ?? [])]) {
         if (key < prefix || key >= end) continue;
         if (value === null) merged.delete(key);
         else merged.set(key, value);
@@ -1218,12 +1253,25 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
       return [...merged].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
     },
     setMeta(key, value) {
-      if (heldMeta !== null) heldMeta.set(key, value);
-      else upsertMeta.run(key, value);
+      if (heldMeta !== null) {
+        // Held writes are flushed outside any transaction: one made inside a transaction could outlive its rollback.
+        if (db.inTransaction) throw new Error('setMeta inside a transaction while meta writes are held');
+        heldMeta.set(key, value);
+        return;
+      }
+      retryUnflushed();
+      upsertMeta.run(key, value);
+      unflushedMeta?.delete(key);
     },
     deleteMeta(key) {
-      if (heldMeta !== null) heldMeta.set(key, null);
-      else deleteMeta.run(key);
+      if (heldMeta !== null) {
+        if (db.inTransaction) throw new Error('deleteMeta inside a transaction while meta writes are held');
+        heldMeta.set(key, null);
+        return;
+      }
+      retryUnflushed();
+      deleteMeta.run(key);
+      unflushedMeta?.delete(key);
     },
     hookEventStats: (origin = 'claude') => selectHookStats.all(origin) as HookEventStat[],
     allHookEventStats: () => selectAllHookStats.all() as Diagnostics['hookEvents'],
@@ -1302,17 +1350,13 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     },
     holdMetaWrites() {
       if (heldMeta !== null) throw new Error('meta writes are already held');
-      const held = new Map<string, string | null>();
+      const held = new Map<string, string | null>(unflushedMeta ?? []);
+      unflushedMeta = null;
       heldMeta = held;
       return () => {
         if (heldMeta !== held) return;
         heldMeta = null;
-        db.transaction(() => {
-          for (const [key, value] of held) {
-            if (value === null) deleteMeta.run(key);
-            else upsertMeta.run(key, value);
-          }
-        })();
+        flushMeta(held);
       };
     },
     close() {
