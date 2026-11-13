@@ -263,6 +263,19 @@ describe('后台任务', () => {
   });
 });
 
+test('后台任务：等导入停下来再 VACUUM 时，stop() 立刻结束，什么都不记', async () => {
+  oldDatabase(10, 0);
+  store = openStore(file);
+  migrateAll(store);
+  // An import that does not end: the VACUUM step waits for it (up to 30 s).
+  const job = startStorageMaintenance(store, host({ importing: () => true }), { pollMs: 1, freeBytes: () => 10 ** 12 });
+  await new Promise((r) => setTimeout(r, 30));
+  const t0 = Date.now();
+  await job.stop();
+  expect(Date.now() - t0).toBeLessThan(1000);
+  expect(store.getMeta(STORAGE_META.vacuum)).toBeNull();
+});
+
 describe('VACUUM', () => {
   async function migratedOld(): Promise<void> {
     oldDatabase(3000, 1000);

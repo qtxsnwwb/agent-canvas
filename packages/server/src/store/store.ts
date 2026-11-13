@@ -726,6 +726,18 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   const selectUnknown = db.prepare(`SELECT record_type, count, sample FROM unknown_stat ORDER BY record_type`);
   const selectFiles = db.prepare(`SELECT file, "offset", size FROM file_offset ORDER BY file`);
 
+  /**
+   * Node details written by the applyChanges call in progress, by session and node id, written (encoded once each) when
+   * the call ends: a node added and then updated in the same call (a tool call and its result, a whole session during a
+   * rebuild) is compressed once instead of written, read back, decoded, merged and compressed again.
+   */
+  const pendingDetails = new Map<string, { sessionId: string; nodeId: string; detail: object }>();
+  const detailKey = (sessionId: string, nodeId: string): string => `${sessionId}\u0000${nodeId}`;
+  function flushDetails(): void {
+    for (const { sessionId, nodeId, detail } of pendingDetails.values()) upsertDetail(sessionId, nodeId, JSON.stringify(detail));
+    pendingDetails.clear();
+  }
+
   function applyOne(c: Change): void {
     switch (c.type) {
       case 'session_upserted':
@@ -739,7 +751,7 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
         break;
       case 'node_added':
         insertNode.run(c.node.sessionId, c.node.id, JSON.stringify(c.node));
-        upsertDetail(c.node.sessionId, c.node.id, JSON.stringify(c.detail ?? {}));
+        pendingDetails.set(detailKey(c.node.sessionId, c.node.id), { sessionId: c.node.sessionId, nodeId: c.node.id, detail: c.detail ?? {} });
         break;
       case 'node_updated': {
         const body = selectNodeBody.get(c.sessionId, c.id) as string | undefined;
@@ -748,9 +760,13 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
         if (c.detail !== undefined) {
           // node_detail is touched only when the update carries detail.
           // A stored detail that cannot be decoded is replaced by the update's (it is unreadable either way).
-          const prev = selectDetail.get(c.sessionId, c.id) as { detail: unknown; enc: number } | undefined;
-          const merged = { ...(prev === undefined ? {} : (readDetail(prev.detail, prev.enc) ?? {})), ...c.detail };
-          upsertDetail(c.sessionId, c.id, JSON.stringify(merged));
+          const key = detailKey(c.sessionId, c.id);
+          let prev: object | undefined = pendingDetails.get(key)?.detail;
+          if (prev === undefined) {
+            const row = selectDetail.get(c.sessionId, c.id) as { detail: unknown; enc: number } | undefined;
+            prev = row === undefined ? {} : (readDetail(row.detail, row.enc) ?? {});
+          }
+          pendingDetails.set(key, { sessionId: c.sessionId, nodeId: c.id, detail: { ...prev, ...c.detail } });
         }
         break;
       }
@@ -780,13 +796,19 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
       if (c.type === 'session_upserted') lastUpsert.set(c.session.id, i);
     });
     const out: SeqChange[] = [];
-    changes.forEach((c, i) => {
-      if (c.type === 'session_upserted' && lastUpsert.get(c.session.id) !== i) return;
-      applyOne(c);
-      const logged = withoutDetail(c);
-      const seq = Number(insertChange.run(changeSessionId(c), JSON.stringify(logged)).lastInsertRowid);
-      out.push({ ...logged, seq });
-    });
+    pendingDetails.clear();
+    try {
+      changes.forEach((c, i) => {
+        if (c.type === 'session_upserted' && lastUpsert.get(c.session.id) !== i) return;
+        applyOne(c);
+        const logged = withoutDetail(c);
+        const seq = Number(insertChange.run(changeSessionId(c), JSON.stringify(logged)).lastInsertRowid);
+        out.push({ ...logged, seq });
+      });
+      flushDetails();
+    } finally {
+      pendingDetails.clear();
+    }
     maybePrune(out.length);
     return out;
   });

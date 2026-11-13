@@ -194,3 +194,26 @@ test('encodeBody 的结果按 enc 写入（直接写 BLOB 也能读回）', () =
   db.close();
   expect(store.rawForSession('sx')).toMatchObject([{ line: LONG }]);
 });
+
+test('同一次 applyChanges 里先新增再更新的详情只写一次（不先压缩再解压合并）', () => {
+  const sql: string[] = [];
+  const s = openStore(':memory:', { verbose: (q) => sql.push(String(q)) });
+  try {
+    sql.length = 0;
+    s.applyChanges([
+      { type: 'node_added', node: node('n1'), detail: { input: { command: 'x'.repeat(500) } } },
+      { type: 'node_updated', sessionId: 's1', id: 'n1', patch: { status: 'succeeded' }, detail: { output: 'y'.repeat(500) } },
+      { type: 'node_updated', sessionId: 's1', id: 'n1', patch: {}, detail: { text: 'z' } },
+      { type: 'node_updated', sessionId: 's1', id: 'missing', patch: {}, detail: { text: 'ignored' } },
+    ]);
+    expect(sql.filter((q) => /INTO node_detail/.test(q))).toHaveLength(1);
+    expect(sql.filter((q) => /SELECT detail/.test(q))).toHaveLength(0);
+    expect(s.getNodeDetail('s1', 'n1')).toMatchObject({ input: { command: 'x'.repeat(500) }, output: 'y'.repeat(500), text: 'z' });
+    expect(s.getNodeDetail('s1', 'missing')).toBeNull();
+    // a later call merges with what the earlier one stored
+    s.applyChanges([{ type: 'node_updated', sessionId: 's1', id: 'n1', patch: {}, detail: { raw: 1 } }]);
+    expect(s.getNodeDetail('s1', 'n1')).toMatchObject({ input: { command: 'x'.repeat(500) }, text: 'z', raw: 1 });
+  } finally {
+    s.close();
+  }
+});

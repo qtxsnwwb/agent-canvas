@@ -38,8 +38,12 @@ export const STORAGE_META = {
   vacuum: 'storage:vacuum',
 } as const;
 
+/**
+ * A batch stops at this many rows or this much text, whichever comes first. Measured (storage.bench.test.ts): a batch
+ * of 8 MB stalled the event loop for about 335 ms (compress, verify, write); 1 MB keeps a batch's stall near 50 ms.
+ */
 export const MIGRATION_BATCH_ROWS = 2000;
-export const MIGRATION_BATCH_BYTES = 8 * 1024 * 1024;
+export const MIGRATION_BATCH_BYTES = 1024 * 1024;
 /** VACUUM needs about the file's size again (the copy, then the WAL): this much free space is required. */
 export const VACUUM_SPACE_FACTOR = 1.2;
 /** How long the service waits for the pipeline to stop importing before postponing VACUUM to the next start. */
@@ -170,11 +174,13 @@ export interface VacuumOptions {
   host?: StorageHost;
   quiesceTimeoutMs?: number;
   log?: (line: string) => void;
+  /** Checked while waiting for the host to stop importing: true gives up at once (outcome 'stopped', nothing recorded). */
+  stopped?: () => boolean;
 }
 
 export interface VacuumResult {
-  /** 'already': it was done before (nothing ran). */
-  outcome: 'done' | 'skipped' | 'already';
+  /** 'already': it was done before (nothing ran). 'stopped': given up before starting (see VacuumOptions.stopped). */
+  outcome: 'done' | 'skipped' | 'already' | 'stopped';
   reason?: string;
   before?: { fileBytes: number; walBytes: number };
   after?: { fileBytes: number; walBytes: number };
@@ -215,9 +221,11 @@ export async function vacuumIfDue(store: Store, options: VacuumOptions = {}): Pr
     } else {
       const deadline = Date.now() + (options.quiesceTimeoutMs ?? VACUUM_QUIESCE_TIMEOUT_MS);
       while (host.importing()) {
+        if (options.stopped?.() === true) return { outcome: 'stopped' };
         if (Date.now() >= deadline) return skip('busy');
         await sleep(Math.min(100, Math.max(1, deadline - Date.now())));
       }
+      if (options.stopped?.() === true) return { outcome: 'stopped' };
       const releaseWrites = host.holdWrites();
       const releaseMeta = store.holdMetaWrites();
       try {
@@ -352,6 +360,7 @@ export function startStorageMaintenance(store: Store, host: StorageHost, options
     const result = await vacuumIfDue(store, {
       host,
       log,
+      stopped: () => stopped,
       ...(options.freeBytes !== undefined ? { freeBytes: options.freeBytes } : {}),
       ...(options.quiesceTimeoutMs !== undefined ? { quiesceTimeoutMs: options.quiesceTimeoutMs } : {}),
     });
