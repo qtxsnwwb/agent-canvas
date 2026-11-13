@@ -498,6 +498,11 @@ export class CursorNormalizer implements AgentNormalizer {
     } else {
       const old = thread.bubbles.get(bubble.view.bubbleId);
       let view = bubble.view;
+      // A call record without params keeps the key of the bubble's last record with params: carried in the record
+      // state, so the key is a function of the records read (whatever the batching, as a rebuild replays them).
+      if (view.inputKey === undefined && old?.inputKey !== undefined && (view.kind === 'tool' || view.kind === 'subagent')) {
+        view = { ...view, inputKey: old.inputKey };
+      }
       if (view.unknown !== null) {
         // Counted once per shape change of a bubble, not once per version.
         if (old?.unknown !== view.unknown) unknown = view.unknown;
@@ -1002,13 +1007,8 @@ export class CursorNormalizer implements AgentNormalizer {
    */
   private emit(state: SessionState, derived: Derived, changes: Change[]): void {
     const sid = state.session.id;
-    for (const derivedNode of derived.nodes) {
-      const { note, isCall } = derivedNode;
-      const old = state.nodes.get(derivedNode.node.id);
-      // A bubble whose newer record has no params keeps the key of its last params (as a bubble keeps the node of its
-      // last recognised shape): a patch cannot clear a key through JSON, and the state must stay what was emitted.
-      const node =
-        old?.inputKey !== undefined && derivedNode.node.inputKey === undefined ? { ...derivedNode.node, inputKey: old.inputKey } : derivedNode.node;
+    for (const { node, note, isCall } of derived.nodes) {
+      const old = state.nodes.get(node.id);
       const pending = state.pending.get(node.id);
       state.pending.delete(node.id);
       const withNote = (d: Partial<NodeDetail>): Partial<NodeDetail> => (isCall ? { ...d, text: note } : d);
