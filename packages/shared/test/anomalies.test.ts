@@ -61,7 +61,7 @@ function shuffle<T>(list: T[], seed: number): T[] {
 
 test('thresholds have the spec values', () => {
   expect([LOOP_FAILED_MIN, LOOP_REPEAT_MIN, FAILURE_STREAK_MIN, CHURN_MIN]).toEqual([3, 5, 5, 15]);
-  expect([COST_FACTOR, COST_MIN_TURNS, COST_MIN_ACTIVE_MS, COST_MIN_TOKENS]).toEqual([2, 20, 600_000, 200_000]);
+  expect([COST_FACTOR, COST_MIN_TURNS, COST_MIN_ACTIVE_MS, COST_MIN_TOKENS]).toEqual([3, 20, 600_000, 200_000]);
 });
 
 // ---- loop ----
@@ -406,17 +406,17 @@ test('costAnomalies: at least COST_FACTOR × p95 and at least the floor; unfinis
   const baseline = { activeP95: 400_000, tokensP95: 150_000 };
   const out = costAnomalies(
     [
-      cost('exact', 800_000, 300_000),
-      cost('below', 799_999, 299_999),
+      cost('exact', 1_200_000, 450_000),
+      cost('below', 1_199_999, 449_999),
       cost('open', 9_000_000, 9_000_000, false),
     ],
     baseline,
   );
   expect(out).toEqual([
-    { id: 'cost:exact:time', kind: 'cost', sessionId: 's1', agentId: null, turnKey: 'exact', basis: 'time', value: 800_000, baselineValue: 400_000, firstNodeId: 'exact-first', lastNodeId: 'exact-last', at: iso(0) },
-    { id: 'cost:exact:tokens', kind: 'cost', sessionId: 's1', agentId: null, turnKey: 'exact', basis: 'tokens', value: 300_000, baselineValue: 150_000, firstNodeId: 'exact-first', lastNodeId: 'exact-last', at: iso(0) },
+    { id: 'cost:exact:time', kind: 'cost', sessionId: 's1', agentId: null, turnKey: 'exact', basis: 'time', value: 1_200_000, baselineValue: 400_000, firstNodeId: 'exact-first', lastNodeId: 'exact-last', at: iso(0) },
+    { id: 'cost:exact:tokens', kind: 'cost', sessionId: 's1', agentId: null, turnKey: 'exact', basis: 'tokens', value: 450_000, baselineValue: 150_000, firstNodeId: 'exact-first', lastNodeId: 'exact-last', at: iso(0) },
   ]);
-  // The floor: twice a small p95 is not enough under 10 minutes / 200,000 tokens.
+  // The floor: three times a small p95 is not enough under 10 minutes / 200,000 tokens.
   const small = { activeP95: 60_000, tokensP95: 10_000 };
   expect(costAnomalies([cost('a', 599_999, 199_999)], small)).toEqual([]);
   expect(costAnomalies([cost('a', 600_000, 200_000)], small).map((a) => a.basis)).toEqual(['time', 'tokens']);

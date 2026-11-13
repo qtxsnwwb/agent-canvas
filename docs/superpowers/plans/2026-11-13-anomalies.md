@@ -15,7 +15,7 @@
 - Existing behaviour and tests stay unchanged except: tool/subagent nodes gain `inputKey`, the normalizer version pin, `NotificationKind` gains two members.
 - Detection is a pure function of the current node set: rebuild equals live; node input order does not matter.
 - Anomaly records and the new routes carry kinds, counts, numbers, times, ids and file paths only — never conversation text, tool input or output. `inputKey` is a hash only.
-- Thresholds are named constants in `packages/shared/src/anomalies.ts` with the spec's values: `LOOP_FAILED_MIN = 3`, `LOOP_REPEAT_MIN = 5`, `FAILURE_STREAK_MIN = 5`, `CHURN_MIN = 15`, `COST_FACTOR = 2`, `COST_MIN_TURNS = 20`, `COST_MIN_ACTIVE_MS = 600_000`, `COST_MIN_TOKENS = 200_000`.
+- Thresholds are named constants in `packages/shared/src/anomalies.ts` with the spec's values: `LOOP_FAILED_MIN = 3`, `LOOP_REPEAT_MIN = 5`, `FAILURE_STREAK_MIN = 5`, `CHURN_MIN = 15`, `COST_FACTOR = 3`, `COST_MIN_TURNS = 20`, `COST_MIN_ACTIVE_MS = 600_000`, `COST_MIN_TOKENS = 200_000`.
 - TDD for logic: failing test first. Vitest, node environment, no jsdom, no component tests.
 - Tests use temp dirs only (`AGENT_CANVAS_PROJECTS_DIR`, `AGENT_CANVAS_DATA_DIR`, `AGENT_CANVAS_CODEX_DIR`, `AGENT_CANVAS_CURSOR_DB`); never read or write under the user's real home directory; the real service on port 4317 is not touched and its port not used. The real database is never opened by an implementer.
 - Fixtures are synthetic.

@@ -18,7 +18,7 @@ export const FAILURE_STREAK_MIN = 5;
 /** This many edit / write touches of one file in one turn: `churn`. */
 export const CHURN_MIN = 15;
 /** A finished main-thread turn at least this many times its group's 95th percentile: `cost`. */
-export const COST_FACTOR = 2;
+export const COST_FACTOR = 3;
 /** A cost baseline needs at least this many finished turns (for tokens: finished turns with tokens). */
 export const COST_MIN_TURNS = 20;
 /** Floor of a `cost` anomaly by active time: 10 minutes. */
