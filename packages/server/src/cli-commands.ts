@@ -34,6 +34,15 @@ import { startWatcher } from './sources/transcript/watcher.js';
 import { FilesService } from './files/service.js';
 import { StatsService, storeStatsSource } from './stats/service.js';
 import { startStatsWarmup, type StatsWarmup } from './stats/warmup.js';
+import {
+  migrateAll,
+  startStorageMaintenance,
+  STORAGE_META,
+  vacuumIfDue,
+  type StorageMaintenance,
+  type StorageMaintenanceOptions,
+  type VacuumResult,
+} from './store/migrate-storage.js';
 import { openStore, type Store } from './store/store.js';
 
 export interface Running {
@@ -53,6 +62,8 @@ const USAGE = `Usage:
   agent-canvas start [--port <n>]   Watch transcripts and serve the canvas
   agent-canvas --version            Print the version
   agent-canvas rebuild              Re-derive the graph from the stored raw log
+  agent-canvas compact [--force]    Compress the stored records still uncompressed and reclaim free space (VACUUM);
+                                     the service must not be running. --force: skip the free-disk-space check
   agent-canvas hooks install [--port <n>] [--yes] [--settings <file>]
                                      Add the agent-canvas hooks to Claude Code's settings.json
   agent-canvas hooks uninstall [--port <n>] [--yes] [--settings <file>]
@@ -178,6 +189,16 @@ export interface StartOptions {
    * AGENT_CANVAS_STATS_WARMUP=0 (the test configuration does).
    */
   statsWarmup?: boolean;
+  /**
+   * The storage job (migrate-storage.ts: compress records stored before compression, then VACUUM), run in the
+   * background once start-up is done when the database still needs it; options for tests, false: never.
+   */
+  storage?: StorageMaintenanceOptions | false;
+}
+
+/** True while the database still needs the storage job (its migration or its VACUUM is not done). */
+function storageWorkDue(store: Store): boolean {
+  return store.getMeta(STORAGE_META.migration) !== 'done' || store.getMeta(STORAGE_META.vacuum) !== 'done';
 }
 
 export async function start(overrides: Partial<Config> = {}, options: StartOptions = {}): Promise<Running> {
@@ -190,6 +211,7 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
   let stats: StatsService | null = null;
   let files: FilesService | null = null;
   let warmup: StatsWarmup | null = null;
+  let storage: StorageMaintenance | null = null;
   let pipeline: Pipeline;
   try {
     store = openStore(config.dbPath, options.log ? { log: options.log } : {});
@@ -211,7 +233,12 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
     });
     stats = new StatsService(storeStatsSource(store));
     files = new FilesService(storeStatsSource(store));
-    app = buildServer({ store, pipeline, config, notifications, stats, files });
+    // After the (automatic) rebuild above; the job itself waits for the initial scan and the first poll rounds.
+    if (options.storage !== false && storageWorkDue(store)) {
+      storage = startStorageMaintenance(store, pipeline, { log: (line) => process.stderr.write(`${line}\n`), ...options.storage });
+    }
+    const storageJob = storage;
+    app = buildServer({ store, pipeline, config, notifications, stats, files, ...(storageJob !== null ? { storage: storageJob } : {}) });
     await app.listen({ port: config.port, host: config.host });
     // After the (automatic) rebuild above, before the initial scan: its changes arrive while importing() holds.
     notifications.start(`http://${config.host}:${(app.server.address() as AddressInfo).port}`);
@@ -234,6 +261,7 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
     stats?.close();
     files?.close();
     await warmup?.stop();
+    await storage?.stop();
     await notifications?.close().catch(() => undefined);
     await app?.close().catch(() => undefined);
     store?.close();
@@ -249,6 +277,7 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
   const statsService = stats!;
   const filesService = files!;
   const statsWarmup = warmup;
+  const storageJob = storage;
   return {
     url,
     address: { address: bound.address, port: bound.port },
@@ -258,6 +287,8 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
         try {
           // The warm-up first: it stops waiting, and a summary build in progress stops at its next page.
           await statsWarmup?.stop();
+          // The storage job stops before its next batch (a VACUUM in progress ends first, releasing held writes).
+          await storageJob?.stop();
           statsService.close();
           filesService.close();
           await statsWarmup?.done;
@@ -293,6 +324,52 @@ export function rebuild(overrides: Partial<Config> = {}, options: { progress?: (
     lock.release();
   }
 }
+
+export interface CompactOptions {
+  /** Skip the free-disk-space check before VACUUM. */
+  force?: boolean;
+  /** Migration progress (positions done, total), after each batch. */
+  progress?: (migrated: number, total: number) => void;
+  /** Free bytes of a directory's volume (tests); default fs.statfsSync. */
+  freeBytes?: (dir: string) => number;
+}
+
+export interface CompactResult {
+  converted: number;
+  failed: number;
+  vacuum: VacuumResult;
+  before: { fileBytes: number; walBytes: number };
+  after: { fileBytes: number; walBytes: number };
+}
+
+/**
+ * `agent-canvas compact`: with the lock of start / rebuild (refused while the service runs), the remaining storage
+ * migration synchronously, then VACUUM on this connection (even when one was done before; skipped when the volume has
+ * less than 1.2 times the database's size free, unless `force`).
+ */
+export async function compact(overrides: Partial<Config> = {}, options: CompactOptions = {}): Promise<CompactResult> {
+  const config = resolveConfig(overrides);
+  const lock = acquireLock(config.dataDir);
+  try {
+    const store = openStore(config.dbPath);
+    try {
+      const before = store.dbFileSizes();
+      const { converted, failed } = migrateAll(store, options.progress !== undefined ? { progress: options.progress } : {});
+      const vacuum = await vacuumIfDue(store, {
+        evenIfDone: true,
+        ...(options.force === true ? { skipSpaceCheck: true } : {}),
+        ...(options.freeBytes !== undefined ? { freeBytes: options.freeBytes } : {}),
+      });
+      return { converted, failed, vacuum, before, after: store.dbFileSizes() };
+    } finally {
+      store.close();
+    }
+  } finally {
+    lock.release();
+  }
+}
+
+const megabytes = (n: number): string => `${(n / 1024 / 1024).toFixed(1)} MB`;
 
 function terminalIo(): HooksCliIo {
   return {
@@ -392,6 +469,15 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
       parseArgs({ args: rest, options: {}, allowPositionals: false });
       rebuild({}, { progress: (done, total) => process.stderr.write(`rebuild: ${done}/${total} sessions\n`) });
       console.log('agent-canvas rebuild complete');
+      return 0;
+    }
+    if (command === 'compact') {
+      const { values } = parseArgs({ args: rest, options: { force: { type: 'boolean' } }, allowPositionals: false });
+      const r = await compact({}, { force: values.force === true, progress: (done, total) => process.stderr.write(`compact: ${done}/${total}\n`) });
+      const size = (s: { fileBytes: number; walBytes: number }): string => megabytes(s.fileBytes + s.walBytes);
+      if (r.failed > 0) console.log(`agent-canvas compact: ${r.failed} stored rows could not be compressed (kept as they were)`);
+      if (r.vacuum.outcome === 'skipped') console.log(`agent-canvas compact: VACUUM skipped: ${r.vacuum.reason ?? ''}`);
+      console.log(`agent-canvas compact: database file: ${size(r.before)} -> ${size(r.after)}`);
       return 0;
     }
   } catch (err) {

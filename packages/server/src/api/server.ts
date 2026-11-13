@@ -22,6 +22,7 @@ import { NORMALIZER_VERSION } from '../normalize/version.js';
 import type { NotificationService } from '../notify/service.js';
 import type { Pipeline } from '../pipeline.js';
 import { KEY_PREFIXES } from '../sources/source.js';
+import { storageStatus, type StorageDiagnostics } from '../store/migrate-storage.js';
 import type { Store } from '../store/store.js';
 import { FilesService, parseFilesQuery } from '../files/service.js';
 import { parseStatsQuery, StatsService, storeStatsSource } from '../stats/service.js';
@@ -165,6 +166,8 @@ export function buildServer(deps: {
   notifications?: NotificationService;
   stats?: StatsService;
   files?: FilesService;
+  /** The storage job (start()); without one, Diagnostics.storage is read from the database alone. */
+  storage?: { status(): StorageDiagnostics };
 }): FastifyInstance {
   const { store, pipeline, config, notifications } = deps;
   const stats = deps.stats ?? new StatsService(storeStatsSource(store));
@@ -335,6 +338,7 @@ export function buildServer(deps: {
           hasData: store.transcriptKeys(KEY_PREFIXES.cursor).length > 0,
         },
         ...(notifications !== undefined ? { notifications: notifications.diagnostics() } : {}),
+        storage: deps.storage?.status() ?? storageStatus(store),
       };
     },
   );
