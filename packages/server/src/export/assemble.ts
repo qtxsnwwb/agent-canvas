@@ -6,7 +6,10 @@ import {
   exportMaskCategories,
   groupTurns,
   ORIGINS,
-  SUMMARY_MAX,
+  SESSION_TITLE_CHARS,
+  cutMaskedText,
+  isCutSummary,
+  isCutTitle,
   type EdgeKind,
   type ExportBundle,
   type ExportOptions,
@@ -159,19 +162,72 @@ class IdAliases {
   }
 }
 
-/**
- * Truncated-mode masking only for text that was actually cut: a summary at its length cap (SUMMARY_MAX) or any text
- * ending with an ellipsis (`…`, `...`).
- */
+/** Truncated-mode masking for a summary that may have been cut (isCutSummary). */
 export function cutOptions(text: unknown): MaskTextOptions | undefined {
-  if (typeof text !== 'string') return undefined;
-  return text.length >= SUMMARY_MAX || text.endsWith('…') || text.endsWith('...') ? { truncated: true } : undefined;
+  return isCutSummary(text) ? { truncated: true } : undefined;
+}
+
+/** Truncated-mode masking for a title that may have been cut (isCutTitle: 60 code points, or an ellipsis). */
+export function titleOptions(text: unknown): MaskTextOptions | undefined {
+  return isCutTitle(text) ? { truncated: true } : undefined;
+}
+
+/** How the normalizers fold a prompt into a title before cutting it (Claude Code; Codex and Cursor). */
+const TITLE_FOLDS: ((text: string) => string)[] = [
+  (text) => text.trim().replace(/\s*(?:\r\n|[\r\n])\s*/g, ' '),
+  (text) => text.trim().replace(/\s+/g, ' '),
+];
+const firstCodePoints = (text: string, n: number): string => Array.from(text).slice(0, n).join('');
+/** Main-thread prompts looked at, earliest first, for the one a cut title was made from. */
+const TITLE_PROMPTS_MAX = 20;
+
+/**
+ * The exported session title. A title that may be cut (isCutTitle) and is the beginning of one of the session's first
+ * main-thread prompts (folded as the normalizers fold it) is rebuilt from the FULL prompt: masked first, then cut to
+ * SESSION_TITLE_CHARS code points, never inside a placeholder (so a key cut by the title is recognised whole). Any other
+ * title is masked as text, in truncated mode when it may be cut.
+ */
+function exportTitle(source: ExportSource, session: Session, nodes: readonly GraphNode[], masker: Masker): string | null {
+  const title = session.title;
+  if (title === null) return null;
+  if (isCutTitle(title)) {
+    const prompts = nodes
+      .filter((n) => n.kind === 'prompt' && n.agentId === null)
+      .sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp) || (a.id < b.id ? -1 : 1))
+      .slice(0, TITLE_PROMPTS_MAX);
+    for (const p of prompts) {
+      const d = readDetail(source, session.id, p.id);
+      const text = d !== null && d !== 'unreadable' && typeof d.text === 'string' ? d.text : null;
+      if (text === null) continue;
+      for (const fold of TITLE_FOLDS) {
+        const folded = fold(text);
+        if (firstCodePoints(folded, SESSION_TITLE_CHARS) === title) return cutMaskedText(masker.mask(folded), SESSION_TITLE_CHARS);
+      }
+    }
+  }
+  return masker.mask(title, titleOptions(title));
+}
+
+/**
+ * Pass-1 learning of one node and its detail (the export's first pass and the page's learned-values route): titles and
+ * summaries (cut ones in truncated mode), tool name, file paths, input, text and — unless `withOutput` is false — output.
+ */
+export function learnNode(masker: Masker, node: GraphNode, d: NodeDetail | null | 'unreadable', withOutput: boolean): void {
+  masker.learn(node.title, titleOptions(node.title));
+  masker.learn(node.summary, cutOptions(node.summary));
+  if (node.toolName !== null) masker.learn(node.toolName);
+  for (const f of node.files ?? []) masker.learn(f.path);
+  if (d !== null && d !== 'unreadable') {
+    masker.learnValue(d.input);
+    if (typeof d.text === 'string') masker.learn(d.text);
+    if (withOutput) masker.learnValue(d.output);
+  }
 }
 
 /** A project id as derived from a working directory (every non-alphanumeric character becomes `-`). */
 const encodeProjectId = (cwd: string): string => cwd.replace(/[^A-Za-z0-9]/g, '-');
 
-function exportSession(session: Session, masker: Masker, ids: IdAliases): Session {
+function exportSession(session: Session, title: string | null, masker: Masker, ids: IdAliases): Session {
   const cwd = session.cwd === null ? null : masker.mask(session.cwd);
   return {
     id: ids.of(session.id),
@@ -179,7 +235,7 @@ function exportSession(session: Session, masker: Masker, ids: IdAliases): Sessio
     projectId: cwd !== null ? encodeProjectId(cwd) : 'unknown',
     origin: oneOf(ORIGINS, session.origin, 'claude'),
     cwd,
-    title: session.title === null ? null : masker.mask(session.title, cutOptions(session.title)),
+    title,
     gitBranch: session.gitBranch === null ? null : masker.mask(session.gitBranch),
     status: oneOf(SESSION_STATUSES, session.status, 'ended'),
     sourceDeleted: session.sourceDeleted === true,
@@ -200,7 +256,7 @@ function exportNode(node: GraphNode, summary: string, masker: Masker, ids: IdAli
     status: NODE_STATUSES.includes(node.status as NodeStatus) ? node.status : null,
     timestamp: timeOf(node.timestamp),
     confirmed: node.confirmed === true,
-    title: masker.mask(typeof node.title === 'string' ? node.title : '', cutOptions(node.title)),
+    title: masker.mask(typeof node.title === 'string' ? node.title : '', titleOptions(node.title)),
     summary,
     toolName: typeof node.toolName === 'string' ? masker.mask(node.toolName) : null,
     toolUseId: ids.ofNullable(node.toolUseId),
@@ -277,7 +333,7 @@ const BUNDLE_OVERHEAD_BYTES = 4096;
  */
 const LEARN_PASS_FACTOR = 2;
 
-function readDetail(source: ExportSource, sessionId: string, nodeId: string): NodeDetail | null | 'unreadable' {
+export function readDetail(source: ExportSource, sessionId: string, nodeId: string): NodeDetail | null | 'unreadable' {
   let d: NodeDetail | null;
   try {
     d = source.getNodeDetail(sessionId, nodeId);
@@ -389,18 +445,13 @@ export async function assembleExport(
   // ---- pass 1: learn the secret values of the whole scope
   if (options.mask.credential || options.mask.assignment) {
     let raw = ctx.extraBytes + BUNDLE_OVERHEAD_BYTES;
-    for (const s of [session.title, session.cwd, session.gitBranch]) if (typeof s === 'string') masker.learn(s, cutOptions(s));
+    if (typeof session.title === 'string') masker.learn(session.title, titleOptions(session.title));
+    for (const s of [session.cwd, session.gitBranch]) if (typeof s === 'string') masker.learn(s);
     for (const node of order) {
-      masker.learn(node.title, cutOptions(node.title));
-      masker.learn(node.summary, cutOptions(node.summary));
-      if (node.toolName !== null) masker.learn(node.toolName);
-      for (const f of node.files ?? []) masker.learn(f.path);
       raw += jsonBytes(node);
       const d = readDetail(source, sessionId, node.id);
+      learnNode(masker, node, d, options.output !== 'none');
       if (d !== null && d !== 'unreadable') {
-        masker.learnValue(d.input);
-        if (typeof d.text === 'string') masker.learn(d.text);
-        if (options.output !== 'none') masker.learnValue(d.output);
         raw += jsonBytes(d.input ?? null) + (typeof d.text === 'string' ? d.text.length : 0);
         if (options.output !== 'none' && d.output !== null && d.output !== undefined) {
           const out = jsonBytes(d.output);
@@ -418,7 +469,7 @@ export async function assembleExport(
     for (const v of [n.id, n.sessionId, n.turnId, n.agentId, n.childAgentId, n.parentId, n.toolUseId, n.messageId]) if (typeof v === 'string') taken.add(v);
   }
   const ids = new IdAliases(masker, taken);
-  const maskedSession = exportSession(session, masker, ids);
+  const maskedSession = exportSession(session, exportTitle(source, session, all, masker), masker, ids);
   const exportedOptions: ExportOptions =
     options.scope.kind === 'turn' ? { ...options, scope: { kind: 'turn', turnKey: ids.of(options.scope.turnKey) } } : options;
   let bytes = ctx.extraBytes + BUNDLE_OVERHEAD_BYTES + jsonBytes(maskedSession) + jsonBytes(exportedOptions);

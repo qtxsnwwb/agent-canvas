@@ -1,4 +1,4 @@
-import { MASK_TYPE_LABELS, MASK_TYPES, type ExportBundle, type GraphNode, type NodeDetail, type NodeStatus, type Origin } from '@agent-canvas/shared';
+import { maskWarnings, MASK_TYPE_LABELS, MASK_TYPES, type ExportBundle, type GraphNode, type NodeDetail, type NodeStatus, type Origin } from '@agent-canvas/shared';
 import { buildStructure, type DocStep } from './structure.js';
 
 /**
@@ -62,14 +62,8 @@ export function fence(content: string, info = ''): string {
   return `${f}${info}\n${body}${body.endsWith('\n') || body === '' ? '' : '\n'}${f}`;
 }
 
-/** Warning lines about masking limits reached in this export (for the header; the viewer's banner shows the same). */
-export function maskWarnings(report: ExportBundle['report']): string[] {
-  const out: string[] = [];
-  if (report.learnedCapped) out.push('需要逐处查找的密钥值太多，超出上限的值只在原处遮蔽，别处原样出现时可能没有遮住。');
-  if (report.learnedSkipped) out.push(`有 ${report.learnedSkipped} 段文字太长或太特殊，没有逐处查找已认出的密钥值，只按规则遮蔽。`);
-  if (report.numberingCapped) out.push('同一类型的不同值太多，部分占位符没有编号。');
-  return out;
-}
+/** Warning lines (moved to the shared package; re-exported for the server's callers). */
+export { maskWarnings };
 
 function duration(ms: number | null): string | null {
   if (ms === null || !Number.isFinite(ms) || ms < 0) return null;

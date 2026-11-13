@@ -333,7 +333,8 @@ export interface Store {
   close(): void;
 }
 
-const SAMPLE_MAX = 500;
+/** Unknown-record samples are cut to this many characters (Diagnostics.unknownRecords). */
+export const SAMPLE_MAX = 500;
 
 /** edge.kind codes (index = stored value). */
 const EDGE_KINDS = ['sequence', 'fork', 'spawn'] as const;

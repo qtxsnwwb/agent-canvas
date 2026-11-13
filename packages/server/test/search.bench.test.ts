@@ -4,6 +4,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { performance } from 'node:perf_hooks';
 import Database from 'better-sqlite3';
+import { createMasker } from '@agent-canvas/shared';
+import { maskedContentSnippet } from '../src/export/masked-search.js';
 import { describe, expect, test } from 'vitest';
 import type { Change, GraphNode, NodeDetail } from '@agent-canvas/shared';
 import { SEARCH_BUILD_BATCH_BYTES, SEARCH_BUILD_BATCH_ROWS, indexTextOf, type SearchIndexDetail } from '../src/store/search-index.js';
@@ -229,6 +231,15 @@ function queries(dbPath: string, detail: SearchIndexDetail): string[] {
         candidates = String(raw.prepare(`SELECT COUNT(*) FROM search_fts WHERE search_fts MATCH ?`).pluck().get(expr));
         matchMs = (performance.now() - t0).toFixed(1);
       }
+      // The same query with masked snippets (`?mask=1`): every hit's part masked in full.
+      const masker = createMasker({ categories: ['credential', 'assignment', 'custom'], numbered: false });
+      const maskedTimes: number[] = [];
+      for (let i = 0; i < 4; i++) {
+        const t0 = performance.now();
+        store.searchContent(q, { nowMs: END, snippet: (it, at, length, part) => maskedContentSnippet(masker, it, at, length, part) });
+        maskedTimes.push(performance.now() - t0);
+      }
+      lines.push(`  ${label.padEnd(20)} masked snippets: median ${median(maskedTimes).toFixed(1).padStart(7)} ms`);
       lines.push(
         `  ${label.padEnd(20)} ${JSON.stringify(q).padEnd(28)} first ${times[0]!.toFixed(1).padStart(7)} ms, median ${median(times.slice(1)).toFixed(1).padStart(7)} ms; ` +
           `hits ${String(result.hits.length).padStart(3)} in ${new Set(result.hits.map((h) => h.sessionId)).size} sessions, truncated ${result.truncated}; candidates ${candidates} (match ${matchMs} ms)`,

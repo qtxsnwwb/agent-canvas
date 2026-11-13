@@ -4,6 +4,7 @@ import path from 'node:path';
 import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
 import { describe, expect, test } from 'vitest';
 import { defaultExportOptions, groupTurns, type Change, type ExportOptions, type GraphNode, type NodeDetail } from '@agent-canvas/shared';
+import { LearnedValuesService } from '../src/export/learned.js';
 import { ExportService } from '../src/export/service.js';
 import { openStore } from '../src/store/store.js';
 import { FAKE_KEY, makeNode, makeSession } from './export-fixtures.js';
@@ -130,6 +131,14 @@ describe.skipIf(!BENCH)('export benchmark', () => {
       // The worst case of a preview: no size limit, so every detail (all output) is read and masked.
       const unlimited = new ExportService({ store, dataDir: path.join(dir, 'data'), version: 'bench', findTemplate: () => null, maxBytes: Number.MAX_SAFE_INTEGER });
       runs.push(['preview session, full output, no size limit (full scan)', () => unlimited.preview('bench', o({ output: 'full' }))]);
+      // The page's learned-values route: a first pass over the whole session (10 s budget), then a cached call.
+      const learnedService = new LearnedValuesService(store);
+      const learnedRun = async (): Promise<{ status: number; json: unknown }> => {
+        const r = await learnedService.get('bench', ['credential', 'assignment']);
+        return { status: 200, json: { values: r?.values.length, capped: r?.capped } };
+      };
+      runs.push(['mask/learned (first call)', learnedRun]);
+      runs.push(['mask/learned (cached)', learnedRun]);
       for (const [name, run] of runs) {
         const { result, m } = await measure(run);
         const extra = 'json' in result && result.json !== undefined ? JSON.stringify(result.json).slice(0, 200) : `${result.file?.length ?? 0} bytes`;

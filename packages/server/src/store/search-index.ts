@@ -11,6 +11,7 @@ import {
   type NodeDetail,
   type Origin,
   type SearchIndexStatus,
+  keyNameKind,
 } from '@agent-canvas/shared';
 import { decodeBody, parseDetail } from './codec.js';
 
@@ -58,12 +59,19 @@ export function cutUtf8(s: string, maxBytes: number): { text: string; bytes: num
   return { text: s, bytes, cut: false };
 }
 
-/** One part of an index text: [start, end) in UTF-16 units; `cut`: its source went on past `end` (a byte cap). */
-export interface IndexPart { start: number; end: number; cut: boolean }
+/**
+ * One part of an index text: [start, end) in UTF-16 units; `cut`: its source went on past `end` (a byte cap). key: for a
+ * value of a structured input / output, the object key it sat under — the nearest key that names a secret when one of
+ * its ancestors does (`nested`: the value is inside an array or object under that key); used to mask snippets.
+ */
+export interface IndexPart { start: number; end: number; cut: boolean; key?: string; nested?: boolean }
+
+/** Where a structured value sat: its key and whether it is nested under a secret-named key. */
+interface PartKey { key?: string; nested?: boolean }
 
 /** Collects text parts (joined by '\n') up to a byte budget; stops taking anything once it is full. */
 class Parts {
-  readonly parts: { text: string; cut: boolean }[] = [];
+  readonly parts: { text: string; cut: boolean; at?: PartKey }[] = [];
   bytes = 0;
   full = false;
   private readonly max: number;
@@ -71,7 +79,7 @@ class Parts {
     this.max = max;
   }
   /** Adds `s` (cut to the room left); `cut`: `s` itself is already a cut of something longer. */
-  add(s: string, alreadyCut = false): void {
+  add(s: string, alreadyCut = false, at?: PartKey): void {
     if (this.full || s === '') return;
     const sep = this.parts.length > 0 ? 1 : 0;
     const room = this.max - this.bytes - sep;
@@ -82,20 +90,23 @@ class Parts {
     }
     const { text, bytes, cut } = cutUtf8(s, room);
     if (text !== '') {
-      this.parts.push({ text, cut: cut || alreadyCut });
+      this.parts.push(at === undefined ? { text, cut: cut || alreadyCut } : { text, cut: cut || alreadyCut, at });
       this.bytes += bytes + sep;
     } else if (cut && this.parts.length > 0) this.parts[this.parts.length - 1]!.cut = true;
     if (cut) this.full = true;
   }
   /** Adds another collection's parts one by one (keeping their own cut flags). */
   addAll(other: Parts): void {
-    other.parts.forEach((p, i) => this.add(p.text, p.cut || (other.full && i === other.parts.length - 1)));
+    other.parts.forEach((p, i) => this.add(p.text, p.cut || (other.full && i === other.parts.length - 1), p.at));
   }
   result(): IndexText {
     const spans: IndexPart[] = [];
     let at = 0;
     for (const p of this.parts) {
-      spans.push({ start: at, end: at + p.text.length, cut: p.cut });
+      const span: IndexPart = { start: at, end: at + p.text.length, cut: p.cut };
+      if (p.at?.key !== undefined) span.key = p.at.key;
+      if (p.at?.nested) span.nested = true;
+      spans.push(span);
       at += p.text.length + 1;
     }
     return { text: this.parts.map((p) => p.text).join('\n'), parts: spans };
@@ -113,7 +124,7 @@ const BASE64_RUN = /^[A-Za-z0-9+/=\r\n]+$/;
  * walked), numbers; keys, booleans and nulls are not text anyone searches for, and `type` values (content block kinds)
  * and long base64 `data` are noise. Depth-first, in key order.
  */
-function addValues(value: unknown, into: Parts, depth = 0): void {
+function addValues(value: unknown, into: Parts, depth = 0, at?: PartKey): void {
   if (into.full || depth > 32) return;
   if (typeof value === 'string') {
     const t = value.trimStart();
@@ -128,22 +139,29 @@ function addValues(value: unknown, into: Parts, depth = 0): void {
         // not JSON: the text itself
       }
     }
-    into.add(value);
+    into.add(value, false, at);
   } else if (typeof value === 'number' || typeof value === 'bigint') {
-    into.add(String(value));
+    into.add(String(value), false, at);
   } else if (Array.isArray(value)) {
+    const inner = nestedUnder(at);
     for (const v of value) {
       if (into.full) return;
-      addValues(v, into, depth + 1);
+      addValues(v, into, depth + 1, inner);
     }
   } else if (typeof value === 'object' && value !== null) {
+    const inner = nestedUnder(at);
     for (const [k, v] of Object.entries(value)) {
       if (into.full) return;
       if (k === 'type') continue;
       if (k === 'data' && typeof v === 'string' && v.length > 256 && BASE64_RUN.test(v)) continue;
-      addValues(v, into, depth + 1);
+      addValues(v, into, depth + 1, inner !== undefined ? inner : { key: k });
     }
   }
+}
+
+/** The key context of values inside an array or object that sat at `at`: kept (nested) under a secret-named key. */
+function nestedUnder(at: PartKey | undefined): PartKey | undefined {
+  return at?.key !== undefined && keyNameKind(at.key) === 'secret' ? { key: at.key, nested: true } : undefined;
 }
 
 const nonEmptyString = (v: unknown): string | null => (typeof v === 'string' && v !== '' ? v : null);
@@ -455,6 +473,11 @@ export interface ContentSearchOptions {
   nowMs?: number;
   /** Overrides CONTENT_TIME_BUDGET_MS (tests). */
   timeBudgetMs?: number;
+  /**
+   * Builds each hit's snippet instead of cutSnippet (masked snippets, `?mask=1`): from the node's index text, the match's
+   * offset and length in it and the part holding it. Hits built this way carry `masked: true`.
+   */
+  snippet?: (it: IndexText, at: number, length: number, part: IndexPart) => Snippet;
 }
 export interface ContentSearchResult { hits: ContentHit[]; truncated: boolean; shortQuery: boolean }
 
@@ -772,7 +795,8 @@ export class SearchIndex {
         toolName: node.toolName,
         at: node.timestamp,
         agentId: node.agentId,
-        snippet: cutSnippet(it.text, found.at, text.length, found.part),
+        snippet: options.snippet ? options.snippet(it, found.at, text.length, found.part) : cutSnippet(it.text, found.at, text.length, found.part),
+        ...(options.snippet ? { masked: true as const } : {}),
       };
     };
 
