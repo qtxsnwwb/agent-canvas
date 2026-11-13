@@ -23,6 +23,7 @@ import type { NotificationService } from '../notify/service.js';
 import type { Pipeline } from '../pipeline.js';
 import { KEY_PREFIXES } from '../sources/source.js';
 import type { Store } from '../store/store.js';
+import { FilesService, parseFilesQuery } from '../files/service.js';
 import { parseStatsQuery, StatsService, storeStatsSource } from '../stats/service.js';
 
 const HOOK_BODY_LIMIT = 64 * 1024 * 1024;
@@ -155,6 +156,7 @@ function parseClientMessage(raw: string): ClientMessage | null {
  * diagnostics' `notifications` block, and hook events are shown to it before they are ingested.
  * `stats`: the service behind /api/stats (default: one reading `store`); it is told about every change the pipeline
  * reports.
+ * `files`: the service behind /api/files and /api/sessions/:id/files (default: one reading `store`); told the same.
  */
 export function buildServer(deps: {
   store: Store;
@@ -162,9 +164,13 @@ export function buildServer(deps: {
   config: Config;
   notifications?: NotificationService;
   stats?: StatsService;
+  files?: FilesService;
 }): FastifyInstance {
   const { store, pipeline, config, notifications } = deps;
   const stats = deps.stats ?? new StatsService(storeStatsSource(store));
+  const files = deps.files ?? new FilesService(storeStatsSource(store));
+  // One read of a session builds both its stats and its file summary.
+  files.shareReadsWith(stats);
   const app = Fastify();
   const connections = new Set<Connection>();
 
@@ -209,10 +215,14 @@ export function buildServer(deps: {
   });
   // Stats summaries of changed sessions are dropped here and recomputed only when /api/stats next needs them.
   const unsubscribeStats = pipeline.onChanges((changes) => stats.noteChanges(changes));
+  // Likewise the file summaries.
+  const unsubscribeFiles = pipeline.onChanges((changes) => files.noteChanges(changes));
   app.addHook('onClose', async () => {
     unsubscribe();
     unsubscribeResync();
     unsubscribeStats();
+    unsubscribeFiles();
+    if (deps.files === undefined) files.close(); // the default one is ours
     connections.clear();
   });
 
@@ -290,6 +300,19 @@ export function buildServer(deps: {
     const result = await stats.get(query);
     // Read at answer time: the numbers may still be filling in while the pipeline imports.
     return { ...result, coverage: { ...result.coverage, importing: pipeline.importing() } };
+  });
+  // Paths, counts, times, tool names and ids only (no conversation content).
+  app.get<{ Params: { id: string } }>('/api/sessions/:id/files', async (req, reply) => {
+    const result = await files.session(req.params.id);
+    if (result === null) return reply.code(404).send({ error: 'session not found' });
+    return result;
+  });
+  // Paths, counts, times, session titles and ids only. 400 for a missing projectId or a bad parameter; an unknown
+  // project is an empty result. importing: pipeline.importing() at answer time.
+  app.get<{ Querystring: Record<string, unknown> }>('/api/files', async (req, reply) => {
+    const query = parseFilesQuery(req.query);
+    if ('error' in query) return reply.code(400).send({ error: query.error });
+    return files.project(query, pipeline.importing());
   });
   app.get(
     '/api/diagnostics',

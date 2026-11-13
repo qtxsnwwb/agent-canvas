@@ -1,7 +1,9 @@
 import { memo, useCallback, useEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import { openLiveSession, type LiveSession } from '../client';
-import { Canvas } from '../canvas/Canvas';
+import { Canvas, type CanvasFocus } from '../canvas/Canvas';
+import { FilePanel } from '../canvas/FilePanel';
+import { revealPlan } from '../canvas/reveal';
 import { EMPTY_CHAIN, expandCut, upstreamChain } from '../canvas/chain';
 import { isRunId } from '../canvas/compact';
 import { Drawer } from '../canvas/Drawer';
@@ -62,8 +64,31 @@ function DensitySwitch({ compact, disabled, onChange }: { compact: boolean; disa
  * re-renders do not reach React Flow; it re-renders when the canvas snapshot or the selection changes. Every handler
  * passed to Canvas is stable.
  */
-const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: LiveSession; toolbar: HTMLElement | null }) {
+const SessionCanvas = memo(function SessionCanvas({ live, toolbar, filePath }: {
+  live: LiveSession; toolbar: HTMLElement | null;
+  /** The deep link's file (`#/s/<id>/f/<path>`): opens the file panel at it, again whenever it changes. */
+  filePath: string | null;
+}) {
   const canvas = useCanvas(live);
+  // ---- the file panel (spec 4) ----
+  // It sits where the drawer does: while it is open the drawer is not shown (the selection stays on the canvas, and the
+  // drawer comes back when the panel closes); a step the reader opens on the canvas or in the waterfall closes it.
+  const [filesOpen, setFilesOpen] = useState(filePath !== null);
+  const [fileTarget, setFileTarget] = useState<{ path: string; seq: number } | null>(
+    filePath !== null ? { path: filePath, seq: 1 } : null,
+  );
+  const firstPath = useRef(filePath);
+  useEffect(() => {
+    if (firstPath.current === filePath) return; // the initial one is already in the state
+    firstPath.current = filePath;
+    if (filePath === null) return;
+    setFilesOpen(true);
+    setFileTarget((t) => ({ path: filePath, seq: (t?.seq ?? 0) + 1 }));
+  }, [filePath]);
+  const [focus, setFocus] = useState<CanvasFocus | null>(null);
+  const focusSeq = useRef(0);
+  const [pickedStep, setPickedStep] = useState<string | null>(null);
+  const [pickNote, setPickNote] = useState<string | null>(null);
   // Whether the session is progressing; re-evaluated when its status changes (a change that brings no node change
   // publishes no canvas snapshot) and every 30 s (a running session that went silent turns stale).
   // The snapshot is the status plus the last activity in 30 s steps: activity alone (a background agent's records, a
@@ -154,6 +179,7 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
   const openStep = useCallback((id: string) => {
     const cur = now.current;
     if (cur.currentScope === null) return;
+    setFilesOpen(false); // the drawer and the file panel share the right-hand side
     if (cur.selected === null && cur.scopeNodeId !== null) {
       pinned.current = cur.scopeNodeId;
       setSelectedId(cur.scopeNodeId);
@@ -208,6 +234,9 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
       expandRun(id);
     } else {
       if (id !== null) setPanelClosed(false);
+      // A step picked on the canvas opens the drawer, which takes the file panel's place.
+      if (id !== null && !now.current.outline && now.current.view.nodes.get(id)?.type === 'node') setFilesOpen(false);
+      setPickNote(null);
       pinned.current = null; // the reader's own choice
       setSelectedId(id);
     }
@@ -231,6 +260,74 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
       showFullTurn(key);
     }
   }, [view, chain, showFullTurn, expandTurn, setAutoFold]);
+  const { reveal } = canvas;
+  /**
+   * A step picked in the file panel: shown on the canvas in the active view, the panel stays open. Outline: its turn
+   * card (or its agent's node) is selected and the step selected in the waterfall. Step views: its turn and agents are
+   * expanded, then it is selected and centred. When the view cannot draw it, its turn is selected (or centred) instead
+   * and the panel says so.
+   */
+  const pickStep = useCallback((nodeId: string) => {
+    const cur = now.current;
+    const graph = live.getGraph();
+    const node = graph.nodes[nodeId];
+    const plan = revealPlan(graph, nodeId);
+    const focusOn = (target: Omit<CanvasFocus, 'seq'>): void => setFocus({ ...target, seq: ++focusSeq.current });
+    setPickedStep(nodeId);
+    if (node === undefined || plan === null) {
+      setPickNote('这一步已经不在画布上了。');
+      return;
+    }
+    const turnId = plan.turnKey !== null ? `turn:${plan.turnKey}` : null;
+    if (cur.outline) {
+      pinned.current = null;
+      setPanelClosed(false);
+      const target = node.agentId === null ? turnId : plan.dispatchId;
+      if (target !== null && cur.view.nodes.has(target)) {
+        setSelectedId(target);
+        setDetail({ id: nodeId, scope: node.agentId === null ? target : `agent:${node.agentId}` });
+        setPickNote(null);
+        focusOn({ id: target });
+      } else if (turnId !== null && cur.view.nodes.has(turnId)) {
+        setSelectedId(turnId);
+        setDetail(null);
+        setPickNote('概览里找不到这一步所在的子代理，已选中它所在的轮次。');
+        focusOn({ id: turnId });
+      } else {
+        setPickNote('这一步在概览里画不出来。');
+      }
+      return;
+    }
+    // Like the drawer's 展开: auto-fold off first, so nothing opened here is folded away again by later updates.
+    setAutoFold(false);
+    setStopFollowingSignal((n) => n + 1);
+    if (reveal(nodeId)) {
+      setSelectedId(nodeId);
+      setPickNote(null);
+      focusOn({ id: nodeId });
+      return;
+    }
+    const why = cur.view.mode === 'replay' ? '复盘时间还没到这一步' : '这一步在当前视角里画不出来';
+    if (plan.turnKey === null) {
+      setPickNote(`${why}。`);
+    } else if (turnId !== null && cur.view.nodes.has(turnId)) {
+      setSelectedId(turnId);
+      setPickNote(`${why}，已选中它所在的轮次。`);
+      focusOn({ id: turnId });
+    } else {
+      setSelectedId(null);
+      setPickNote(`${why}，已定位到它所在的轮次。`);
+      focusOn({ turnKey: plan.turnKey });
+    }
+  }, [live, reveal, setAutoFold]);
+  const closeFiles = useCallback(() => {
+    setFilesOpen(false);
+    setPickNote(null);
+  }, []);
+  const toggleFiles = useCallback(() => {
+    setFilesOpen((o) => !o);
+    setPickNote(null);
+  }, []);
   // "暂无节点" only when the live graph really has no nodes; "布局中…" while the model is starting or the view has
   // nodes none of which is placed yet.
   const empty = !hasKeys(live.getGraph().nodes);
@@ -240,13 +337,15 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
     <>
       {toolbar !== null && createPortal(
         <>
+          <button type="button" className="files-toggle" aria-pressed={filesOpen}
+            onClick={toggleFiles} title="这个会话读过、改过哪些文件">文件</button>
           <DensitySwitch compact={canvas.compact} disabled={!canvas.ready} onChange={canvas.setCompact} />
           <ViewSwitch mode={canvas.view.mode} disabled={!canvas.ready} onChange={canvas.setMode} />
         </>,
         toolbar,
       )}
       {canvas.layoutError !== null && <div className="canvas-error">布局失败，正在自动重试：{canvas.layoutError}</div>}
-      <div className={`canvas-area${selectedNode !== null ? ' cc-drawer-open' : ''}${canvas.replay !== null ? ' cc-replay' : ''}${scope !== null ? ' cc-waterfall-open' : ''}`}>
+      <div className={`canvas-area${selectedNode !== null || filesOpen ? ' cc-drawer-open' : ''}${canvas.replay !== null ? ' cc-replay' : ''}${scope !== null ? ' cc-waterfall-open' : ''}`}>
         <Canvas
           snapshot={canvas}
           selectedId={outline ? scopeNodeId : selected}
@@ -257,10 +356,12 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
           onToggleAgent={canvas.toggleAgent}
           onFollowingChange={canvas.setAutoFold}
           stopFollowingSignal={stopFollowingSignal}
+          focus={focus}
+          rightCovered={filesOpen}
           // The replay view shows history: "running" there is what was running at the replay time.
           progressing={replaying ? ALL_PROGRESSING : progressing}
         />
-        {selectedNode !== null && (
+        {selectedNode !== null && !filesOpen && (
           <Drawer
             sessionId={live.getSession().id}
             node={selectedNode}
@@ -273,6 +374,18 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
             onSelect={outline ? openChainStep : setSelectedId}
             onExpandCut={expandChainCut}
             onClose={closeDrawer}
+          />
+        )}
+        {filesOpen && (
+          <FilePanel
+            sessionId={live.getSession().id}
+            origin={live.getSession().origin}
+            subscribe={live.subscribe}
+            target={fileTarget}
+            pickedNode={pickedStep}
+            note={pickNote}
+            onPick={pickStep}
+            onClose={closeFiles}
           />
         )}
         {canvas.replay !== null && <Timeline replay={canvas.replay} onSeek={canvas.setReplayTime} />}
@@ -298,7 +411,7 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar }: { live: Liv
   );
 });
 
-export function SessionPage({ sessionId }: { sessionId: string }) {
+export function SessionPage({ sessionId, filePath = null }: { sessionId: string; filePath?: string | null }) {
   const [live, setLive] = useState<LiveSession | null>(null);
   /** The failure of openLiveSession (null while there is none); see sessionLoadState. */
   const [error, setError] = useState<unknown>(null);
@@ -352,7 +465,7 @@ export function SessionPage({ sessionId }: { sessionId: string }) {
         {session.sourceDeleted && <span className="tag">源文件已删除</span>}
         <div className="session-bar-end" ref={setToolbar} />
       </div>
-      <SessionCanvas key={session.id} live={live} toolbar={toolbar} />
+      <SessionCanvas key={session.id} live={live} toolbar={toolbar} filePath={filePath} />
     </div>
   );
 }

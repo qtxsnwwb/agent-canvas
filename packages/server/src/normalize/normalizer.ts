@@ -9,6 +9,7 @@ import {
   type Session,
 } from '@agent-canvas/shared';
 import type { RawEvent } from '../store/store.js';
+import { claudeTouches, filesFields, filesPatch, nodeFiles } from './files.js';
 import { parseHook, type HookDescription, type HookNodeEffect } from './hooks.js';
 import { summarize } from './summary.js';
 import {
@@ -346,6 +347,7 @@ export class Normalizer implements AgentNormalizer {
       systemSubtype: null,
       childAgentId: null,
       endedAt: null,
+      ...filesFields(nodeFiles(claudeTouches(spec.toolName, spec.input), state.session.cwd)),
     };
     state.nodes.set(id, node);
     state.toolInputs.set(id, spec.input);
@@ -1114,6 +1116,7 @@ export class Normalizer implements AgentNormalizer {
         usage: meta.usage,
       };
       this.earlierStart(state, existing, str(record.timestamp), patch);
+      Object.assign(patch, filesPatch(existing, nodeFiles(claudeTouches(c.name, c.input), state.session.cwd)));
       // An agent meta's description already owns the summary of a dispatch node.
       if (!pending) patch.summary = summary;
       state.nodes.set(id, { ...existing, ...patch });
@@ -1135,6 +1138,7 @@ export class Normalizer implements AgentNormalizer {
       toolUseId: c.toolUseId,
       messageId: meta.messageId,
       usage: meta.usage,
+      ...filesFields(nodeFiles(claudeTouches(c.name, c.input), state.session.cwd)),
     };
     this.emitNode(state, record.uuid, node, { input: c.input }, agentId, true, changes);
     const agentMeta = state.agentMetas.get(c.toolUseId);

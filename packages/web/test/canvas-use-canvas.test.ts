@@ -1421,3 +1421,35 @@ test('停止跟随时展开过的合并节点：它的编号不会让之后形�
   expect(shownIds(model)).toEqual(['a', 'b', 'c', 'd', 'f', 'g', 'h', 'p']); // no new run under the reader
   model.dispose();
 });
+
+test('reveal：展开折叠的轮次和它所在的子代理，选中的节点出现在视图里', () => {
+  // five turns: the first two are collapsed by the "last 3" rule; t1 dispatches agent A, whose step x is the target
+  const nodes = [
+    node('p1', 't1', 0),
+    { ...node('d1', 't1', 1), kind: 'subagent' as const, childAgentId: 'A' },
+    { ...node('x', 't1', 2), turnId: null, agentId: 'A', kind: 'tool' as const, status: 'succeeded' as const, toolName: 'Edit' },
+    node('p2', 't2', 10), node('p3', 't3', 20), node('p4', 't4', 30), node('p5', 't5', 40),
+  ];
+  const live = fakeLive(graph(nodes));
+  const layout = fakeLayout();
+  const model = createCanvasModel(live, layout.client);
+  expect(model.getSnapshot().view.nodes.has('turn:t1')).toBe(true);
+  expect(model.reveal('x')).toBe(true);
+  const view = model.getSnapshot().view;
+  expect(view.nodes.has('x')).toBe(true);
+  expect(view.turns.find((t) => t.key === 't1')?.collapsed).toBe(false);
+  expect(view.agentGroups.map((g) => g.agentId)).toEqual(['A']);
+  expect(model.reveal('nope')).toBe(false);
+  model.dispose();
+});
+
+test('reveal：复盘时间在这一步之前时画不出来，返回 false', () => {
+  const live = fakeLive(graph([node('a', 't1', 0), node('b', 't1', 5_000)]));
+  const layout = fakeLayout();
+  const model = createCanvasModel(live, layout.client, { mode: 'replay' });
+  model.setReplayTime(EPOCH);
+  vi.advanceTimersByTime(100);
+  expect(model.getSnapshot().view.nodes.has('b')).toBe(false);
+  expect(model.reveal('b')).toBe(false);
+  model.dispose();
+});

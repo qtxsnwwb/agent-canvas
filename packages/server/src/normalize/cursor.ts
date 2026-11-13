@@ -14,6 +14,7 @@ import {
   type ComposerFacts,
 } from './cursor-bubbles.js';
 import { parseCursorHook } from './cursor-hooks.js';
+import { filesFields, filesPatch, nodeFiles } from './files.js';
 import type { AgentNormalizer, BatchItem, BatchResult, NormalizeResult } from './types.js';
 
 /*
@@ -350,6 +351,7 @@ function nodePatch(old: GraphNode, next: GraphNode): Partial<GraphNode> {
   const ou = old.usage;
   const nu = next.usage;
   if ((ou === null) !== (nu === null) || (ou !== null && nu !== null && (ou.inputTokens !== nu.inputTokens || ou.outputTokens !== nu.outputTokens))) patch.usage = nu;
+  Object.assign(patch, filesPatch(old, next));
   return patch;
 }
 
@@ -849,6 +851,8 @@ export class CursorNormalizer implements AgentNormalizer {
     let prevTs: string | null = null;
     let batch: Scan['batch'] = null;
     const fallbackTs = isoOf(thread.composer?.createdAt ?? null) ?? EPOCH;
+    // Relative file paths resolve against the conversation's own working directory.
+    const cwd = thread.composer?.cwd ?? null;
     const copyBatch = (b: Scan['batch']): Scan['batch'] => (b === null ? null : { ...b, members: [...b.members] });
 
     const affected = from <= 0 ? 0 : this.firstAffected(thread, a, from);
@@ -887,7 +891,7 @@ export class CursorNormalizer implements AgentNormalizer {
       let before: Scan | null = null;
       if (!this.reference) {
         const childFacts = ca === null ? `${child ?? ''}` : `${child}|${childThread!.composer?.subagentTypeName ?? ''}|${ca.sorted.length}|${ca.open}|${ca.maxMs}`;
-        inputs = `${turn.promptNodeId}|${turnSig(turn)}|${past}|${nextStart}|${childFacts}|${dispatch}|${fallbackTs}`;
+        inputs = `${turn.promptNodeId}|${turnSig(turn)}|${past}|${nextStart}|${childFacts}|${dispatch}|${fallbackTs}|${cwd}`;
         const memo = thread.memo.get(b.bubbleId);
         if (memo !== undefined && memo.view === b && memo.inputs === inputs && sameScan(memo.before, { prevNode, prevTs, batch })) {
           prevNode = memo.after.prevNode;
@@ -979,6 +983,7 @@ export class CursorNormalizer implements AgentNormalizer {
           endedAt: isCall ? isoOf(endedMs) : null,
           usage: b.usage,
           systemSubtype: b.kind === 'notification' ? 'task_notification' : null,
+          ...filesFields(nodeFiles(b.fileTouches, cwd)),
         },
       });
       prevNode = b.nodeId;

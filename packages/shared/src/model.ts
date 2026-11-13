@@ -39,7 +39,30 @@ export interface GraphNode {
   endedAt: string | null;       // ISO 8601；仅 tool、subagent：第一次进入终态的事件的时间，之后的状态纠正不改；其余为 null
   usage: Usage | null;
   systemSubtype: string | null;
+  /**
+   * Files this tool call read or changed, from tools that name a file in a structured way (never guessed from command
+   * lines). Absent or empty when the node touches no file (a node that had files and lost them carries an empty list).
+   * At most MAX_FILES_PER_NODE entries; one entry per (path, action).
+   */
+  files?: FileTouch[];
+  /** True when the call named more files than MAX_FILES_PER_NODE and the rest were dropped. */
+  filesTruncated?: boolean;
 }
+
+/** What a tool call did to a file. `write` is "created or overwrote" (the tool does not say which). */
+export type FileAction = 'read' | 'edit' | 'write' | 'delete';
+export const FILE_ACTIONS: readonly FileAction[] = ['read', 'edit', 'write', 'delete'];
+
+/**
+ * One file a tool call touched. `path` is absolute and normalized: `/` separators, upper-case Windows drive letter,
+ * no `.` / `..` segments; a relative path the session's working directory could not resolve is kept as given.
+ */
+export interface FileTouch {
+  path: string;
+  action: FileAction;
+}
+
+export const MAX_FILES_PER_NODE = 50;
 
 export interface GraphEdge { id: string; sessionId: string; from: string; to: string; kind: EdgeKind }
 

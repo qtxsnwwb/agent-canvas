@@ -1,33 +1,25 @@
-import { performance } from 'node:perf_hooks';
 import {
   ORIGINS,
   STATS_DEFAULT_RANGE,
   STATS_RANGES,
-  type Change,
   type GraphNode,
   type Origin,
   type Project,
   type SeqChange,
-  type Session,
   type StatsRange,
   type StatsResponse,
 } from '@agent-canvas/shared';
 import type { Store } from '../store/store.js';
-import { aggregateStats, localDayKey, type AggregateInput } from './aggregate.js';
+import { aggregateStats, localDayKey } from './aggregate.js';
+import { SessionSummaryCache, turn, type SessionSummarySource } from './session-cache.js';
 import { summarizeSession, type SessionSummary } from './summary.js';
 
-/** Gives the event loop a turn. */
-const turn = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
-
 /** What the stats service reads: the session list, one session's derived nodes, the projects (for names). */
-export interface StatsSource {
-  sessions(): Session[];
-  /**
-   * `nodes` in snapshot order (store rowid order). `seq`: a change seq taken before the read began; any change committed
-   * to the session during the read has a higher seq, so it marks the summary stale (noteChanges) for the next request.
-   * `stopped`: checked between pages of a long read; once true the read gives up (throws).
-   */
-  readSession(sessionId: string, stopped?: () => boolean): Promise<{ session: Session; nodes: GraphNode[]; seq: number } | null>;
+/**
+ * What the stats service reads: the session list, one session's derived nodes (see SessionSummarySource), the projects
+ * (for names).
+ */
+export interface StatsSource extends SessionSummarySource {
   projects(): Pick<Project, 'id' | 'cwd'>[];
 }
 
@@ -110,66 +102,35 @@ export interface StatsServiceOptions {
   yieldAfterMs?: number;
 }
 
-interface CacheEntry { seq: number; summary: SessionSummary; pass: number }
-interface Snapshot { entries: AggregateInput['entries']; failed: number; projects: AggregateInput['projects'] }
-
-function sessionIdOf(c: Change): string {
-  switch (c.type) {
-    case 'session_upserted':
-      return c.session.id;
-    case 'node_added':
-      return c.node.sessionId;
-    case 'node_updated':
-    case 'edge_removed':
-      return c.sessionId;
-    case 'edge_added':
-      return c.edge.sessionId;
-  }
-}
-
-
 /**
- * Session summaries cached by session id, valid while no change newer than the graph they were built from has been
- * reported for that session (noteChanges, fed from pipeline.onChanges); nothing is recomputed until a request needs it.
- * Concurrent requests share one refresh (a request arriving after a change waits for a refresh that includes it).
- * The cache is an LRU of at most `capacity` summaries; a refresh never evicts a summary it has itself used (with more
- * sessions than capacity, the overflow is recomputed each time rather than everything).
+ * Session summaries in a SessionSummaryCache (see session-cache.ts): cached by session id, invalidated through
+ * noteChanges (fed from pipeline.onChanges), recomputed only when a request needs them; concurrent requests share one
+ * refresh; an LRU of at most `capacity` summaries and `maxCalls` retained calls.
  */
 export class StatsService {
-  private readonly cache = new Map<string, CacheEntry>();
-  /** Session id -> seq of the latest change reported for it. */
-  private readonly changed = new Map<string, number>();
-  private readonly capacity: number;
-  private readonly maxCalls: number;
-  private retainedCalls = 0;
+  private readonly cache: SessionSummaryCache<SessionSummary>;
   private readonly now: () => number;
   private readonly dayKey: (ms: number) => string;
-  private readonly yieldAfterMs: number;
-  /** Bumped by every noteChanges; a refresh started at an older generation may miss a change. */
-  private generation = 0;
-  private pass = 0;
-  private inflight: { generation: number; promise: Promise<Snapshot> } | null = null;
-  private closed = false;
 
   constructor(private readonly source: StatsSource, options: StatsServiceOptions = {}) {
-    this.capacity = Math.max(1, options.capacity ?? STATS_CACHE_CAPACITY);
-    this.maxCalls = Math.max(0, options.maxCalls ?? STATS_CACHE_MAX_CALLS);
+    this.cache = new SessionSummaryCache(source, {
+      summarize: summarizeSession,
+      weight: (summary) => summary.calls.length,
+      capacity: options.capacity ?? STATS_CACHE_CAPACITY,
+      maxWeight: options.maxCalls ?? STATS_CACHE_MAX_CALLS,
+      yieldAfterMs: options.yieldAfterMs ?? STATS_YIELD_AFTER_MS,
+      closedMessage: CLOSED,
+    });
     this.now = options.now ?? Date.now;
     this.dayKey = options.dayKey ?? localDayKey;
-    this.yieldAfterMs = options.yieldAfterMs ?? STATS_YIELD_AFTER_MS;
   }
 
   noteChanges(changes: readonly SeqChange[]): void {
-    if (changes.length === 0) return;
-    for (const c of changes) {
-      const id = sessionIdOf(c);
-      if ((this.changed.get(id) ?? -Infinity) < c.seq) this.changed.set(id, c.seq);
-    }
-    this.generation++;
+    this.cache.noteChanges(changes);
   }
 
   cacheSize(): number {
-    return this.cache.size;
+    return this.cache.size();
   }
 
   /**
@@ -178,7 +139,7 @@ export class StatsService {
    */
   async warm(): Promise<void> {
     try {
-      await this.snapshot();
+      await this.cache.snapshot();
     } catch {
       // closed, or the source failed: a request will try again
     }
@@ -186,104 +147,24 @@ export class StatsService {
 
   /** Stops a refresh in progress at its next session or page boundary; every later request is refused. */
   close(): void {
-    this.closed = true;
+    this.cache.close();
   }
 
   async get(query: StatsQuery): Promise<StatsResponse> {
-    const snap = await this.snapshot();
-    return aggregateStats({ ...snap, ...query, nowMs: this.now(), dayKey: this.dayKey, failedSessions: snap.failed });
-  }
-
-  private async snapshot(): Promise<Snapshot> {
-    for (;;) {
-      if (this.closed) throw new Error(CLOSED);
-      const current = this.inflight;
-      if (current !== null && current.generation === this.generation) return current.promise;
-      if (current !== null) {
-        await current.promise.catch(() => undefined);
-        if (this.inflight === current) this.inflight = null;
-        continue;
-      }
-      const generation = this.generation;
-      const promise = this.refresh();
-      const entry = { generation, promise };
-      this.inflight = entry;
-      void promise.then(
-        () => this.clearInflight(entry),
-        () => this.clearInflight(entry),
-      );
-      return promise;
-    }
-  }
-
-  private clearInflight(entry: { generation: number; promise: Promise<Snapshot> }): void {
-    if (this.inflight === entry) this.inflight = null;
-  }
-
-  private async refresh(): Promise<Snapshot> {
-    const pass = ++this.pass;
-    const sessions = this.source.sessions();
+    const snap = await this.cache.snapshot();
     const projects = this.source.projects();
-    const entries: Snapshot['entries'] = [];
-    let failed = 0;
-    let lastYield = performance.now();
-    const stopped = (): boolean => this.closed;
-    for (const session of sessions) {
-      if (performance.now() - lastYield >= this.yieldAfterMs) {
-        await turn();
-        lastYield = performance.now();
-      }
-      if (this.closed) throw new Error(CLOSED);
-      const id = session.id;
-      const cached = this.cache.get(id);
-      if (cached !== undefined && cached.seq >= (this.changed.get(id) ?? -Infinity)) {
-        this.cache.delete(id); // LRU: move to the most recent end
-        cached.pass = pass;
-        this.cache.set(id, cached);
-        entries.push({ session, summary: cached.summary });
-        continue;
-      }
-      try {
-        const read = await this.source.readSession(id, stopped);
-        if (read === null) continue; // gone since the listing
-        const summary = summarizeSession(read.session, read.nodes);
-        this.remember(id, { seq: read.seq, summary, pass });
-        entries.push({ session, summary });
-      } catch {
-        if (this.closed) throw new Error(CLOSED);
-        failed++;
-      }
-    }
-    return { entries, failed, projects };
+    return aggregateStats({
+      entries: snap.entries, projects, ...query, nowMs: this.now(), dayKey: this.dayKey, failedSessions: snap.failed,
+    });
   }
 
-  /**
-   * Caches `entry`, evicting least recently used summaries while over capacity or over maxCalls; a summary used by the
-   * current refresh is never evicted for it (the new one is then not cached), nor is one larger than maxCalls cached.
-   */
-  private remember(id: string, entry: CacheEntry): void {
-    this.forget(id);
-    const calls = entry.summary.calls.length;
-    if (calls > this.maxCalls) return;
-    while (this.cache.size >= this.capacity || this.retainedCalls + calls > this.maxCalls) {
-      const [oldestId, oldest] = this.cache.entries().next().value as [string, CacheEntry];
-      if (oldest.pass === entry.pass) return; // everything cached was used by this refresh: keep it
-      this.forget(oldestId);
-    }
-    this.cache.set(id, entry);
-    this.retainedCalls += calls;
-    if ((this.changed.get(id) ?? -Infinity) <= entry.seq) this.changed.delete(id);
-  }
-
-  private forget(id: string): void {
-    const old = this.cache.get(id);
-    if (old === undefined) return;
-    this.cache.delete(id);
-    this.retainedCalls -= old.summary.calls.length;
+  /** The summary cache, for linking with another service's (SessionSummaryCache.shareReadsWith). */
+  summaryCache(): SessionSummaryCache<SessionSummary> {
+    return this.cache;
   }
 
   /** Calls retained over all cached summaries (for tests). */
   retainedCallCount(): number {
-    return this.retainedCalls;
+    return this.cache.retainedWeight();
   }
 }

@@ -31,6 +31,7 @@ import { CursorSource } from './sources/cursor/source.js';
 import type { PollSource } from './sources/poll.js';
 import type { FileSource } from './sources/source.js';
 import { startWatcher } from './sources/transcript/watcher.js';
+import { FilesService } from './files/service.js';
 import { StatsService, storeStatsSource } from './stats/service.js';
 import { startStatsWarmup, type StatsWarmup } from './stats/warmup.js';
 import { openStore, type Store } from './store/store.js';
@@ -40,8 +41,8 @@ export interface Running {
   /** The address the server is actually bound to. */
   address: { address: string; port: number };
   /**
-   * The stats warm-up (see stats/warmup.ts): resolves once it has run, or was stopped by close(); never rejects. null
-   * when it is off.
+   * The stats warm-up (see stats/warmup.ts; it builds the stats summaries, then the file summaries): resolves once it
+   * has run, or was stopped by close(); never rejects. null when it is off.
    */
   statsWarmup: Promise<void> | null;
   close(): Promise<void>;
@@ -173,7 +174,7 @@ export interface StartOptions {
   /** Delivery of desktop notifications (tests); default: the system's own (DesktopNotifier). */
   notifier?: ServiceNotifier;
   /**
-   * Build the stats summaries in the background once start-up is done. Default: on, unless the environment sets
+   * Build the stats and file summaries in the background once start-up is done. Default: on, unless the environment sets
    * AGENT_CANVAS_STATS_WARMUP=0 (the test configuration does).
    */
   statsWarmup?: boolean;
@@ -187,6 +188,7 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
   let watcher: ReturnType<typeof startWatcher> | null = null;
   let notifications: NotificationService | null = null;
   let stats: StatsService | null = null;
+  let files: FilesService | null = null;
   let warmup: StatsWarmup | null = null;
   let pipeline: Pipeline;
   try {
@@ -208,7 +210,8 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
       log: (line) => process.stderr.write(`${line}\n`),
     });
     stats = new StatsService(storeStatsSource(store));
-    app = buildServer({ store, pipeline, config, notifications, stats });
+    files = new FilesService(storeStatsSource(store));
+    app = buildServer({ store, pipeline, config, notifications, stats, files });
     await app.listen({ port: config.port, host: config.host });
     // After the (automatic) rebuild above, before the initial scan: its changes arrive while importing() holds.
     notifications.start(`http://${config.host}:${(app.server.address() as AddressInfo).port}`);
@@ -216,11 +219,20 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
     watcher = startWatcher(pipeline, config);
     if (options.statsWarmup ?? process.env.AGENT_CANVAS_STATS_WARMUP !== '0') {
       const statsNow = stats;
+      const filesNow = files;
       const pipelineNow = pipeline;
-      warmup = startStatsWarmup({ warm: () => statsNow.warm(), settled: () => pipelineNow.startupDone() });
+      // One after the other: the file summaries are built once the stats ones are (each warm() never rejects).
+      warmup = startStatsWarmup({
+        warm: async () => {
+          await statsNow.warm();
+          await filesNow.warm();
+        },
+        settled: () => pipelineNow.startupDone(),
+      });
     }
   } catch (err) {
     stats?.close();
+    files?.close();
     await warmup?.stop();
     await notifications?.close().catch(() => undefined);
     await app?.close().catch(() => undefined);
@@ -235,6 +247,7 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
   const server = app;
   const service = notifications!;
   const statsService = stats!;
+  const filesService = files!;
   const statsWarmup = warmup;
   return {
     url,
@@ -246,6 +259,7 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
           // The warm-up first: it stops waiting, and a summary build in progress stops at its next page.
           await statsWarmup?.stop();
           statsService.close();
+          filesService.close();
           await statsWarmup?.done;
           // Unsubscribes and stops the timer at once; deliveries in flight end within their timeout meanwhile.
           const notificationsClosed = service.close();

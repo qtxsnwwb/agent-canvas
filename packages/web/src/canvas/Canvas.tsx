@@ -57,6 +57,23 @@ export interface CanvasProps {
    * the drawer's 展开). The caller turns auto-fold off itself before making the change.
    */
   stopFollowingSignal?: number;
+  /** Centres the view on a node or a turn once it has a position (see CanvasFocus); stops following. */
+  focus?: CanvasFocus | null;
+  /** A panel covers the right-hand side (the drawer's width): a focus target is centred in the part left visible. */
+  rightCovered?: boolean;
+}
+
+/**
+ * One request to bring something into view: a view node (`id`) or, when it has no node of its own, a turn's box
+ * (`turnKey`). Each new `seq` is a new request; it waits for the layout (up to FOCUS_WAIT_MS) and is done once.
+ */
+export interface CanvasFocus { seq: number; id?: string; turnKey?: string }
+const FOCUS_WAIT_MS = 5_000;
+const FOCUS_SETTLE_MS = 1_500;
+/** The drawer's width (canvas.css `--cc-drawer-width`), at most half the window. */
+function coveredWidth(): number {
+  const w = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--cc-drawer-width'));
+  return Math.min(Number.isFinite(w) ? w : 440, window.innerWidth / 2);
 }
 
 const EDGE_COLOR = { sequence: '#b3a8d6', fork: '#ff8fc0' } as const;
@@ -460,7 +477,7 @@ function useDeferredFocus(): (selector: string) => void {
 
 function CanvasInner({
   snapshot, selectedId, chain, onSelect, onToggleTurn, onShowFullTurn, onToggleAgent, onFollowingChange, stopFollowingSignal,
-  progressing = ALL_PROGRESSING,
+  progressing = ALL_PROGRESSING, focus = null, rightCovered = false,
 }: CanvasProps) {
   const nodes = useFlowNodes(snapshot, selectedId, chain, progressing);
   const edges = useFlowEdges(snapshot, chain, progressing);
@@ -536,6 +553,40 @@ function CanvasInner({
     lastSignal.current = stopFollowingSignal;
     stopFollowing();
   }, [stopFollowingSignal, stopFollowing]);
+
+  // A focus request: centre on its target once the layout has placed it (keeping the zoom unless it is too small to
+  // read). Like a canvas button it stops following, so later updates do not pull the view away.
+  const { setCenter, getZoom } = useReactFlow();
+  const flowReady = useStore((s) => s.width > 0 && s.height > 0 && s.panZoom !== null);
+  const focusState = useRef<{ seq: number; since: number; at: { x: number; y: number } | null } | null>(null);
+  const turnBoxes = snapshot.turnBoxes;
+  useEffect(() => {
+    if (focus === null) return;
+    if (focusState.current?.seq !== focus.seq) focusState.current = { seq: focus.seq, since: Date.now(), at: null };
+    const st = focusState.current;
+    if (!flowReady) return;
+    // Waiting for a first position, or following the target while a layout it triggered settles (an expanded turn or
+    // agent above it moves it): within FOCUS_WAIT_MS / FOCUS_SETTLE_MS of the request only.
+    const age = Date.now() - st.since;
+    if (age > (st.at === null ? FOCUS_WAIT_MS : FOCUS_SETTLE_MS)) return;
+    let box: { x: number; y: number; w: number; h: number } | null = null;
+    if (focus.id !== undefined) {
+      const n = nodes.find((x) => x.id === focus.id);
+      if (n !== undefined) box = { x: n.position.x, y: n.position.y, w: n.width ?? 0, h: n.height ?? 0 };
+    } else if (focus.turnKey !== undefined) {
+      const b = turnBoxes[focus.turnKey];
+      if (b !== undefined) box = { x: b.x, y: b.y, w: b.width, h: Math.min(b.height, 400) };
+    }
+    if (box === null) return; // not placed yet: the next layout runs this again
+    const at = { x: box.x + box.w / 2, y: box.y + box.h / 2 };
+    if (st.at !== null && st.at.x === at.x && st.at.y === at.y) return;
+    const first = st.at === null;
+    st.at = at;
+    if (first) actions.stopFollowing();
+    const zoom = Math.max(getZoom(), 0.6);
+    const covered = rightCovered ? coveredWidth() : 0;
+    void setCenter(at.x + covered / 2 / zoom, at.y, prefersReducedMotion() ? { zoom } : { zoom, duration: FOLLOW_DURATION });
+  }, [focus, nodes, turnBoxes, flowReady, actions, setCenter, getZoom, rightCovered]);
 
   // Enter / Space on a focused node. React Flow's own key handler on the node wrapper only updates its internal
   // selection and never calls onNodeClick; the wrapper (not our node component) holds the focus, so the key is

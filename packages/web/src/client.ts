@@ -9,10 +9,12 @@ import {
   type NotificationSettingsResponse,
   type NotificationTestResponse,
   type Project,
+  type ProjectFilesResponse,
   type SeqChange,
   type SearchHit,
   type ServerMessage,
   type Session,
+  type SessionFilesResponse,
   type StatsResponse,
 } from '@agent-canvas/shared';
 
@@ -63,6 +65,9 @@ export const api = {
   search: (q: string) => getJson<SearchHit[]>(`/api/search?q=${enc(q)}`),
   /** `query` is built by stats.ts `statsQueryString`. */
   stats: (query: string) => getJson<StatsResponse>(`/api/stats?${query}`),
+  sessionFiles: (sessionId: string) => getJson<SessionFilesResponse>(`/api/sessions/${enc(sessionId)}/files`),
+  /** `query` is built by files.ts `filesQueryString`. */
+  files: (query: string) => getJson<ProjectFilesResponse>(`/api/files?${query}`),
 };
 
 export interface WebSocketLike {

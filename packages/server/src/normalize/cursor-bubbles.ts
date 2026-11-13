@@ -1,5 +1,6 @@
 import type { NodeDetail, Usage } from '@agent-canvas/shared';
 import { promptTitle } from './codex.js';
+import { cursorTouches, type RawTouch } from './files.js';
 import { summarize } from './summary.js';
 
 /*
@@ -118,6 +119,8 @@ export interface BubbleView {
   agentType: string | null;
   /** task_v2: the subagent conversation named in its result (`agentId`). */
   resultAgentId: string | null;
+  /** The files the call names, as its params wrote them (resolved against the composer's cwd when derived). */
+  fileTouches: RawTouch[];
 }
 
 /** `params` keys naming a call's main argument for tools without their own entry (camelCase and snake_case). */
@@ -278,6 +281,7 @@ export function bubbleView(rec: Obj, bubbleId: string, nodeId: string): { view: 
     exitCode: null,
     agentType: null,
     resultAgentId: null,
+    fileTouches: [],
   };
   let detail: Partial<NodeDetail> = {};
   switch (kind) {
@@ -318,6 +322,7 @@ export function bubbleView(rec: Obj, bubbleId: string, nodeId: string): { view: 
       view.toolStatus = str(t.status);
       view.toolCallId = str(t.toolCallId);
       view.summary = toolSummary(name, input);
+      view.fileTouches = cursorTouches(name, input);
       view.rejected = isObject(output) && output.rejected === true;
       if (name === TERMINAL_TOOL && isObject(output)) view.exitCode = num(output.exitCode);
       if (kind === 'subagent') {
