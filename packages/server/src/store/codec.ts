@@ -1,4 +1,5 @@
 import zlib from 'node:zlib';
+import type { NodeDetail } from '@agent-canvas/shared';
 
 /**
  * Storage codec of the large text columns (`raw_event.data`, `node_detail.data`). Each row carries an encoding marker
@@ -75,4 +76,14 @@ export function decodeBody(data: unknown, enc: number): string {
     }
   }
   throw new UnknownEncodingError(enc);
+}
+
+/** A stored node detail as an object, or null when it cannot be decoded (any CorruptBodyError) or is not a JSON object. */
+export function parseDetail(data: unknown, enc: number): Partial<NodeDetail> | null {
+  try {
+    const parsed: unknown = JSON.parse(decodeBody(data, enc));
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? (parsed as Partial<NodeDetail>) : null;
+  } catch {
+    return null;
+  }
 }

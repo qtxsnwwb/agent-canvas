@@ -246,7 +246,7 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
     if (options.storage !== false && storageWorkDue(store)) {
       storage = startStorageMaintenance(store, pipeline, { log: (line) => process.stderr.write(`${line}\n`), ...options.storage });
     }
-    // After the (automatic) rebuild above, which indexes every node it writes: then there is nothing left to build.
+    // After the (automatic) rebuild above, which leaves the index to this background build (it marks it incomplete).
     if (options.searchIndex !== false && store.searchIndexStatus().indexing) {
       searchBuild = startSearchIndexBuild(store, pipeline, { log: (line) => process.stderr.write(`${line}\n`), ...options.searchIndex });
     }
@@ -373,7 +373,7 @@ export interface CompactResult {
 
 /**
  * `agent-canvas compact`: with the lock of start / rebuild (refused while the service runs), the remaining storage
- * migration synchronously, then VACUUM on this connection, unless one was done and nothing was migrated since (outcome
+ * migration synchronously, then VACUUM (in a child process), unless one was done and nothing was migrated since (outcome
  * 'already'), or one failed within the last 24 hours ('backoff'); skipped when there is not enough free space
  * (vacuumSpaceProblem). `force` runs VACUUM in any case, without the space check. VACUUM runs in a child process with
  * a deadline (vacuumIfDue).

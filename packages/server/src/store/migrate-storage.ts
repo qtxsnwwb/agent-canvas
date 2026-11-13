@@ -17,7 +17,8 @@ import type { Store } from './store.js';
  * text; a row that cannot be converted is left as it is and counted (`storage:failed`). Running it when done is a
  * no-op; a database created by this version is marked done when it is created.
  *
- * VACUUM: once, after the migration; only when there is room for it (vacuumSpace). In the service it runs on its own connection in a worker thread while the
+ * VACUUM: once, after the migration; only when there is room for it (vacuumSpaceProblem). It runs in a child process
+ * (vacuumInChild) with the store's checkpointer paused; in the service, meanwhile, the
  * pipeline's writes are held (they queue and are applied afterwards) and meta writes are kept in memory; reads go on.
  * A skipped VACUUM is retried on later starts and by `agent-canvas compact` (which can skip the space check).
  */
@@ -121,8 +122,6 @@ export type BodyTable = 'raw_event' | 'node_detail';
 export interface ConvertResult {
   /** Key of the last row visited (the range's end when `done`). */
   last: number;
-  /** enc-0 rows read. */
-  examined: number;
   converted: number;
   failed: number;
   /** No enc-0 row is left in (after, end]. */
@@ -181,7 +180,7 @@ export function migrateBatch(store: Store, options: MigrationOptions = {}): { mo
       store.setMeta(STORAGE_META.detailAfter, String(r.last));
       more = !r.done;
     } else {
-      r = { last: 0, examined: 0, converted: 0, failed: 0, done: true };
+      r = { last: 0, converted: 0, failed: 0, done: true };
       more = false;
     }
     if (r.failed > 0) store.setMeta(STORAGE_META.failed, String(num(store, STORAGE_META.failed) + r.failed));
@@ -239,7 +238,7 @@ export interface VacuumOptions {
   /** SQLite's temp directory (default sqliteTempDir()) and the volume id of a directory (default volumeOf); tests. */
   tempDir?: string;
   volumeOf?: (dir: string) => string;
-  /** In the service: VACUUM runs in a worker thread while the host's writes are held. Absent: on the store's connection. */
+  /** In the service: the host's writes are held while VACUUM runs (in its child process). Absent: nothing is held (compact). */
   host?: StorageHost;
   quiesceTimeoutMs?: number;
   log?: (line: string) => void;
@@ -461,7 +460,7 @@ export interface StorageMaintenance {
 /**
  * The service's background job: waits for the start-up work to be over (host.startupDone, or STORAGE_MAX_WAIT_MS),
  * then runs the migration batch by batch, yielding to the event loop between batches and pausing while the host is
- * importing, then VACUUM (vacuumIfDue, in a worker thread with the host's writes held). A failing batch stops the job
+ * importing, then VACUUM (vacuumIfDue: in a child process, with the host's writes held). A failing batch stops the job
  * until the next start (the error is reported in status() and logged). Its timers never keep the process alive.
  */
 export function startStorageMaintenance(store: Store, host: StorageHost, options: StorageMaintenanceOptions = {}): StorageMaintenance {

@@ -26,13 +26,14 @@ import {
   type SeqChange,
   type Session,
 } from '@agent-canvas/shared';
-import { CorruptBodyError, decodeBody, encodeBody } from './codec.js';
+import { CorruptBodyError, decodeBody, encodeBody, parseDetail } from './codec.js';
 import { STORAGE_META, type BodyTable, type ConvertResult } from './migrate-storage.js';
 import { DERIVED_TABLES, MIGRATIONS, SCHEMA_SQL } from './schema.js';
 import {
   DEFAULT_SEARCH_DETAIL,
   INDEXED_NODE_FIELDS,
   SearchIndex,
+  asciiLower,
   indexTextOf,
   type ContentSearchOptions,
   type ContentSearchResult,
@@ -125,10 +126,6 @@ function likePattern(query: string): string {
   return `%${query.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
 }
 
-/** Lower-cases ASCII letters only (like SQLite LIKE), so string indexes stay aligned with the original. */
-function asciiLower(s: string): string {
-  return s.replace(/[A-Z]/g, (c) => c.toLowerCase());
-}
 
 /**
  * At most SEARCH_SNIPPET_CHARS characters including the `…` marks on truncated sides, centred on the match. A match
@@ -362,14 +359,7 @@ function withBody<T extends object>(event: T, text: string): T & { body: Buffer 
 }
 
 /** A stored node detail as an object, or null when it cannot be decoded or parsed. */
-function readDetail(data: unknown, enc: number): Partial<NodeDetail> | null {
-  try {
-    const parsed: unknown = JSON.parse(decodeBody(data, enc));
-    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? (parsed as Partial<NodeDetail>) : null;
-  } catch {
-    return null;
-  }
-}
+const readDetail = parseDetail;
 /** meta key set once hook_stat holds every stored hook row (backfilled, or created empty with a new database). */
 const HOOK_STAT_READY = 'hook_stat_ready';
 /** The one-time hook_stat backfill query; served by the old raw_event_hook partial index when the database has it. */
@@ -925,7 +915,9 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   >();
   function flushDetails(): void {
     for (const { sessionId, nodeId, detail } of pendingDetails.values()) upsertDetail(sessionId, nodeId, JSON.stringify(detail));
-    // Index rows, from the final detail in memory (no detail is read back except for a patch without one).
+    // Index rows, from the final detail in memory (no detail is read back except for a patch without one). Nothing to
+    // compute while the index skips node writes (a full rebuild: the background build indexes every node afterwards).
+    if (!search.writesIndex()) pendingIndex.clear();
     for (const [key, entry] of pendingIndex) {
       let detail: Partial<NodeDetail> | null | undefined = pendingDetails.get(key)?.detail as Partial<NodeDetail> | undefined;
       if (detail === undefined && entry.storedDetail) {
@@ -1440,7 +1432,7 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
         }
       }
       const done = !cut && rows.length < maxRows;
-      return { last: done || rows.length === 0 ? end : rows[rows.length - 1]!.id, examined: rows.length, converted, failed, done };
+      return { last: done || rows.length === 0 ? end : rows[rows.length - 1]!.id, converted, failed, done };
     },
     dbFileSizes() {
       const size = (f: string): number => {

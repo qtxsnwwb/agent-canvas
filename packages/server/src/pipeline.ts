@@ -267,7 +267,14 @@ export class Pipeline {
   private holdHook(event: RawEvent): boolean {
     try {
       fs.mkdirSync(this.config.dataDir, { recursive: true });
-      fs.appendFileSync(this.heldHooksPath(), `${JSON.stringify(event)}\n`);
+      // Next to the database and with its permissions (it holds the same kind of content).
+      let mode = 0o600;
+      try {
+        mode = fs.statSync(this.config.dbPath).mode & 0o777;
+      } catch {
+        // no database file (an in-memory store): owner only
+      }
+      fs.appendFileSync(this.heldHooksPath(), `${JSON.stringify(event)}\n`, { mode });
       return true;
     } catch {
       return false;

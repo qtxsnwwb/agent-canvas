@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3';
 import {
   CONTENT_MAX_HITS_PER_SESSION,
+  CONTENT_SNIPPET_SIDE_CHARS,
   CONTENT_MAX_SESSIONS,
   CONTENT_SHORT_QUERY_DAYS,
   SEARCH_MAX_CHARS,
@@ -11,7 +12,7 @@ import {
   type Origin,
   type SearchIndexStatus,
 } from '@agent-canvas/shared';
-import { decodeBody } from './codec.js';
+import { decodeBody, parseDetail } from './codec.js';
 
 /**
  * Full-text search over node contents (spec 2026-11-13 section 3): one index text per node, built by indexTextOf from
@@ -244,7 +245,7 @@ export function asciiLower(s: string): string {
 }
 
 /** Code points shown on each side of a match in a content snippet. */
-export const SNIPPET_SIDE_CHARS = 40;
+export const SNIPPET_SIDE_CHARS = CONTENT_SNIPPET_SIDE_CHARS;
 /** A match longer than this many code points is cut in the snippet. */
 export const SNIPPET_MATCH_MAX_CHARS = 120;
 /** Code units looked at on each side before collapsing whitespace (a longer whitespace run only shortens a side). */
@@ -428,7 +429,9 @@ const SEARCH_AUTOMERGE = 16;
 export const DEFAULT_SEARCH_DETAIL: SearchIndexDetail = 'none';
 
 /**
- * The index: one row per node with a non-empty index text, rowid = the node row's rowid. Contentless (the text is not
+ * The index: one row per node with a non-empty index text, rowid = the node row's rowid. That relies on the node rowids
+ * surviving VACUUM: SQLite may renumber the rowids of a table without an INTEGER PRIMARY KEY, but keeps them for one
+ * with an index (node has its primary-key index); upgrade-path.test.ts searches after a VACUUM. Contentless (the text is not
  * stored; it is recomputed from the node and its detail to verify a candidate and cut its snippet), rows deletable by
  * rowid (contentless_delete), trigram tokens folded to lower case.
  */
@@ -459,14 +462,6 @@ interface SessionRow { id: string; projectId: string; origin: Origin; title: str
 interface NodeRow { rowid: number; node: GraphNode }
 
 /** A stored node detail as an object, or null when it cannot be decoded or parsed. */
-function parseDetail(data: unknown, enc: number): Partial<NodeDetail> | null {
-  try {
-    const parsed: unknown = JSON.parse(decodeBody(data, enc));
-    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? (parsed as Partial<NodeDetail>) : null;
-  } catch {
-    return null;
-  }
-}
 
 /** Newest first; ties by rowid, newest first. */
 const byTimeDesc = (a: NodeRow, b: NodeRow): number =>
@@ -641,6 +636,11 @@ export class SearchIndex {
       this.suspended = true;
     } else this.markComplete();
     this.deleteMeta.run(SEARCH_META.skipped);
+  }
+
+  /** False while node writes skip the index (not maintained, or suspended during a full rebuild). */
+  writesIndex(): boolean {
+    return this.maintained && !this.suspended;
   }
 
   /** Ends clear(true)'s suspension: node writes maintain the index again. */
