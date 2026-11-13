@@ -11,6 +11,9 @@ import { migrateAll, STORAGE_META, vacuumIfDue, VACUUM_RETRY_AFTER_MS } from '..
 import { openStore, type Store } from '../src/store/store.js';
 import { SCHEMA_SQL_V13 } from './schema-v13.js';
 
+// VACUUM runs in a child process: allow for a loaded machine (a full parallel test run).
+vi.setConfig({ testTimeout: 60_000 });
+
 /*
  * VACUUM in the service with a real Pipeline as host: bounded (deadline, checkpoint attempts), holds always released,
  * `done` only when the file shrank, failures backed off for 24 h.

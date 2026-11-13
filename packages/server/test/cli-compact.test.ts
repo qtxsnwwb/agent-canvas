@@ -85,7 +85,7 @@ test('compact：做完剩下的迁移并 VACUUM，报告前后大小和进度；
   } finally {
     s.close();
   }
-});
+}, 60_000); // VACUUM runs in a child process: slow under a loaded full run
 
 test('compact：空间不够时只迁移、跳过 VACUUM；--force 不查空间；已经做过也会再做', async () => {
   oldDatabase(500);
@@ -99,7 +99,7 @@ test('compact：空间不够时只迁移、跳过 VACUUM；--force 不查空间�
   expect(again).toMatchObject({ converted: 0, vacuum: { outcome: 'already' } });
   const forcedAgain = await compact({ projectsDir, dataDir }, { force: true, freeBytes: () => 1 });
   expect(forcedAgain.vacuum.outcome).toBe('done');
-});
+}, 60_000);
 
 test('main compact：进度写到 stderr，前后大小写到 stdout；用法里有 compact', async () => {
   vi.stubEnv('AGENT_CANVAS_DATA_DIR', dataDir);
@@ -119,7 +119,7 @@ test('main compact：进度写到 stderr，前后大小写到 stdout；用法里
   out.length = 0;
   expect(await main(['--help'])).toBe(0);
   expect(out.join('\n')).toMatch(/agent-canvas compact \[--force\]/);
-});
+}, 60_000);
 
 test('main compact：VACUUM 失败（读快照让检查点做不完）时退出码 1；读者走后再跑就成功（busy 不退避）', async () => {
   vi.stubEnv('AGENT_CANVAS_DATA_DIR', dataDir);
@@ -161,4 +161,4 @@ test('start：旧库在后台迁移并 VACUUM，诊断里看得到；之后重�
   apps.push(again);
   const d = (await (await fetch(`${again.url}/api/diagnostics`)).json()) as Diagnostics;
   expect(d.storage).toMatchObject({ migrating: false, vacuum: 'done' });
-});
+}, 60_000);

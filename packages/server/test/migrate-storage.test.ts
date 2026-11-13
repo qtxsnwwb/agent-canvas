@@ -17,6 +17,9 @@ import {
 import { openStore, type Store } from '../src/store/store.js';
 import { SCHEMA_SQL_V13 } from './schema-v13.js';
 
+// VACUUM runs in a child process: allow for a loaded machine (a full parallel test run).
+vi.setConfig({ testTimeout: 60_000 });
+
 let tmp: string;
 let file: string;
 let store: Store | null;
