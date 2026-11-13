@@ -12,13 +12,15 @@ export const VIEWER_TEMPLATE_FILE = 'viewer-template.html';
 export const TEMPLATE_SLOT = `<script id="${EXPORT_SCRIPT_ID}" type="application/json">${EXPORT_TEMPLATE_PLACEHOLDER}</script>`;
 
 /**
- * Where the viewer template may be, given the directory this module runs from (src/export or dist/export): the
- * repository's `packages/web/dist`, then `web/` next to `dist/` in the published package (the pack script's layout).
+ * Where the viewer template may be, given the directory this module runs from: in the repository (src/export or
+ * dist/export) the web package's `packages/web/dist`; in the published package, where the server is bundled into
+ * `dist/` (this module's code is in a file directly under it), `web/` next to `dist/` (scripts/pack.mjs copies the web
+ * build there, like webDistCandidates in cli-commands.ts).
  */
 export function viewerTemplateCandidates(here: string = HERE): string[] {
   return [
     path.resolve(here, '..', '..', '..', 'web', 'dist', VIEWER_TEMPLATE_FILE),
-    path.resolve(here, '..', '..', 'web', VIEWER_TEMPLATE_FILE),
+    path.resolve(here, '..', 'web', VIEWER_TEMPLATE_FILE),
   ];
 }
 

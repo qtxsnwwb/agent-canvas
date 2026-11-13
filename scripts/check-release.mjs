@@ -1,5 +1,8 @@
 // Checks the package assembled in release/ (run after scripts/pack.mjs; `pnpm release` runs both): the packed CLI must
-// be able to run `compact` — a migration and a VACUUM in its child process — on a temporary data directory.
+// be able to run `compact` — a migration and a VACUUM in its child process — on a temporary data directory, and its
+// server must export a synthetic session as a self-contained HTML file (scripts/export-smoke.mjs: started on a port the
+// system picks, with temporary directories, then stopped), which headless Chrome, when installed, opens from disk
+// with no network request.
 // The release directory is copied to a temp directory whose node_modules points at the server's installed dependencies
 // (what `npm install` of the package would provide). Nothing outside temp directories is touched.
 import { execFileSync } from 'node:child_process';
@@ -8,6 +11,7 @@ import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { checkInBrowser, exportSynthetic } from './export-smoke.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const release = path.join(root, 'release');
@@ -56,6 +60,21 @@ try {
   if (m === null) fail(`unexpected output of packed "compact": ${out}`);
   if (!(Number(m[2]) < Number(m[1]))) fail(`VACUUM did not shrink the file: ${m[0]}`);
   console.log(`check-release: packed CLI ran compact (VACUUM in its child process): ${m[1]} MB -> ${m[2]} MB`);
+
+  let html;
+  try {
+    html = await exportSynthetic({ cli: path.join(pkg, 'dist/cli.js'), log: (line) => console.log(`check-release: ${line}`) });
+  } catch (err) {
+    fail(`packed server: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const file = path.join(tmp, 'export.html');
+  fs.writeFileSync(file, html);
+  try {
+    const r = await checkInBrowser(file, { log: (line) => console.log(`check-release: ${line}`) });
+    if (r === null) console.log('check-release: browser check skipped: Chrome not found (AGENT_CANVAS_CHROME names one)');
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
+  }
 } finally {
   fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 10 });
 }
