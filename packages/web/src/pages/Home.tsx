@@ -8,7 +8,7 @@ import {
   type OriginFilter,
 } from '../home';
 import { OriginBadge } from '../OriginBadge';
-import { createSearcher, highlightParts, type SearchResult } from '../search';
+import { contentView, createSearcher, highlightParts, type ContentResult, type SearchResult, type SnippetPart } from '../search';
 import { createThrottle } from '../throttle';
 import { useNow } from '../useNow';
 
@@ -53,7 +53,7 @@ function OriginFilterSwitch({ value, onChange }: { value: OriginFilter; onChange
   );
 }
 
-function SearchResults({ result, q, now, filter }: { result: SearchResult | null; q: string; now: number; filter: OriginFilter }) {
+function SessionResults({ result, q, now, filter }: { result: SearchResult | null; q: string; now: number; filter: OriginFilter }) {
   if (result === null || result.q !== q) return <p className="muted search-note">搜索中…</p>;
   if (result.error !== null) return <p className="error">搜索失败：{result.error}</p>;
   const all: SearchHit[] = result.hits ?? [];
@@ -90,6 +90,70 @@ function SearchResults({ result, q, now, filter }: { result: SearchResult | null
         );
       })}
     </ul>
+  );
+}
+
+/** Snippet text as text nodes, the match in a <mark>. */
+function SnippetText({ parts }: { parts: SnippetPart[] }) {
+  return <>{parts.map((p, i) => (p.match ? <mark key={i}>{p.text}</mark> : <span key={i}>{p.text}</span>))}</>;
+}
+
+function ContentResults({ result, q, now, filter }: { result: ContentResult | null; q: string; now: number; filter: OriginFilter }) {
+  const view = contentView(result, q, filter);
+  if (view.state === 'loading') return <p className="muted search-note">搜索中…</p>;
+  if (view.state === 'error') return <p className="error search-group-error">{view.message}</p>;
+  if (view.state === 'short') return <p className="muted search-note">{view.message}</p>;
+  const notes = view.notes.length > 0 && (
+    <ul className="content-notes">{view.notes.map((n) => <li key={n}>{n}</li>)}</ul>
+  );
+  if (view.state === 'empty') return <>{notes}<p className="muted search-note">{view.message}</p></>;
+  return (
+    <>
+      {notes}
+      <ul className="content-sessions">
+        {view.groups.map((g) => (
+          <li key={g.key} className="content-session">
+            <h3 className="content-session-head">
+              <OriginBadge origin={g.origin} />
+              <span className="content-session-title">{g.title}</span>
+            </h3>
+            <ul className="content-hits">
+              {g.rows.map((r) => (
+                <li key={r.key}>
+                  <a className="content-hit" href={r.href}>
+                    <span className="content-hit-meta">
+                      <span className="search-field">{r.kindLabel}</span>
+                      {r.toolName !== null && <span className="content-hit-tool">{r.toolName}</span>}
+                      {r.inSubagent && <span className="content-hit-agent">子代理</span>}
+                      <span className="muted" title={formatTime(r.at)}>{relativeTime(r.at, now)}</span>
+                    </span>
+                    <span className="content-snippet"><SnippetText parts={r.parts} /></span>
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </li>
+        ))}
+      </ul>
+    </>
+  );
+}
+
+/** Search results in two groups: sessions (title, branch, directory, prompt starts) and content inside sessions. */
+function SearchResults({ result, content, q, now, filter }: {
+  result: SearchResult | null; content: ContentResult | null; q: string; now: number; filter: OriginFilter;
+}) {
+  return (
+    <div className="search-groups">
+      <section className="search-group" aria-labelledby="search-group-sessions">
+        <h2 id="search-group-sessions">会话</h2>
+        <SessionResults result={result} q={q} now={now} filter={filter} />
+      </section>
+      <section className="search-group" aria-labelledby="search-group-content">
+        <h2 id="search-group-content">内容</h2>
+        <ContentResults result={content} q={q} now={now} filter={filter} />
+      </section>
+    </div>
   );
 }
 
@@ -163,9 +227,10 @@ export function Home({ projectId }: { projectId: string | null }) {
 
   const [query, setQuery] = useState('');
   const [result, setResult] = useState<SearchResult | null>(null);
+  const [content, setContent] = useState<ContentResult | null>(null);
   const searcher = useRef<ReturnType<typeof createSearcher> | null>(null);
   useEffect(() => {
-    const s = createSearcher({ search: api.search, onResult: setResult });
+    const s = createSearcher({ search: api.search, onResult: setResult, searchContent: api.searchContent, onContent: setContent });
     searcher.current = s;
     return () => { s.dispose(); searcher.current = null; };
   }, []);
@@ -208,7 +273,7 @@ export function Home({ projectId }: { projectId: string | null }) {
       </div>
     </div>
     {searching ? (
-      <SearchResults result={result} q={q} now={now} filter={filter} />
+      <SearchResults result={result} content={content} q={q} now={now} filter={filter} />
     ) : (
     <div className="home">
       {error !== null && <p className="error">加载失败：{error}</p>}
