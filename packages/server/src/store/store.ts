@@ -21,6 +21,7 @@ import {
   type Origin,
   type Project,
   type SearchHit,
+  type SearchIndexStatus,
   type SearchMatch,
   type SeqChange,
   type Session,
@@ -28,6 +29,15 @@ import {
 import { CorruptBodyError, decodeBody, encodeBody } from './codec.js';
 import { STORAGE_META, type BodyTable, type ConvertResult } from './migrate-storage.js';
 import { DERIVED_TABLES, MIGRATIONS, SCHEMA_SQL } from './schema.js';
+import {
+  DEFAULT_SEARCH_DETAIL,
+  INDEXED_NODE_FIELDS,
+  SearchIndex,
+  indexTextOf,
+  type ContentSearchOptions,
+  type ContentSearchResult,
+  type SearchIndexDetail,
+} from './search-index.js';
 
 /**
  * `source` is the channel an event came through (a session file, a hook, a file read whole); `origin` is the agent it
@@ -104,6 +114,8 @@ export interface StoreOptions {
   verbose?: (sql: unknown) => void;
   /** Receives notices about slow one-time work done while opening (start prints them); silent when omitted. */
   log?: (line: string) => void;
+  /** Detail level of a newly created search index (benchmark); default DEFAULT_SEARCH_DETAIL. */
+  searchDetail?: SearchIndexDetail;
 }
 
 /** `%x%` with `\`, `%` and `_` escaped (use with ESCAPE '\\'). */
@@ -174,6 +186,15 @@ export interface Store {
   searchSessions(query: string, limit: number): SearchHit[];
   /** Query plans (EXPLAIN QUERY PLAN detail lines) of the two statements searchSessions runs; for tests. */
   searchPlans(): { sessions: string[]; prompts: string[] };
+  /** Search inside sessions (node contents; search-index.ts SearchIndex.search). */
+  searchContent(query: string, options?: ContentSearchOptions): ContentSearchResult;
+  /**
+   * The content index: indexing = it does not cover every node yet (built in the background by
+   * startSearchIndexBuild); indexed / total in node row positions.
+   */
+  searchIndexStatus(): SearchIndexStatus;
+  /** One batch of the background index build in its own transaction (SearchIndex.buildBatch). */
+  searchIndexBatch(maxRows: number, maxBytes: number): { more: boolean; indexed: number };
   getGraph(sessionId: string): GraphSnapshot | null;
   /** The GraphSnapshot already serialized, built from the stored bodies without parsing them. */
   getGraphJson(sessionId: string): string | null;
@@ -533,6 +554,7 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   db.pragma(`journal_size_limit = ${options.walSizeLimitBytes ?? WAL_SIZE_LIMIT_BYTES}`);
   db.exec(SCHEMA_SQL);
   migrateSchema(db);
+  const search = new SearchIndex(db, options.searchDetail ?? DEFAULT_SEARCH_DETAIL);
   db.prepare(`INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE CAST(meta.value AS INTEGER) < ${STORAGE_FORMAT}`).run(
     STORAGE_FORMAT_KEY,
     String(STORAGE_FORMAT),
@@ -633,7 +655,8 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
        last_activity_at = excluded.last_activity_at, body = excluded.body`,
   );
   const insertNode = db.prepare(`INSERT OR REPLACE INTO node (session_id, id, body) VALUES (?, ?, ?)`);
-  const selectNodeBody = db.prepare(`SELECT body FROM node WHERE session_id = ? AND id = ?`).pluck();
+  const selectNodeRowid = db.prepare(`SELECT rowid FROM node WHERE session_id = ? AND id = ?`).pluck();
+  const selectNodeRow = db.prepare(`SELECT rowid, body FROM node WHERE session_id = ? AND id = ?`);
   const updateNode = db.prepare(`UPDATE node SET body = ? WHERE session_id = ? AND id = ?`);
   const insertDetail = db.prepare(`INSERT OR REPLACE INTO node_detail (session_id, node_id, data, enc) VALUES (?, ?, ?, ?)`);
   const upsertDetail = (sessionId: string, nodeId: string, detail: string): void => {
@@ -857,9 +880,27 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   /** Sessions this store marked dirty itself (an undecodable detail met by a merge), until takeNewlyDirty(). */
   const newlyDirty = new Set<string>();
   const detailKey = (sessionId: string, nodeId: string): string => `${sessionId}\u0000${nodeId}`;
+  /**
+   * Search index rows to rewrite when the applyChanges call in progress ends, by the same key as pendingDetails: the
+   * node's current row (rowid, body) and the rowid its index row is stored under (`stale`, null: none yet; a node
+   * re-added by INSERT OR REPLACE gets a new rowid). `storedDetail`: the index text needs the stored detail (a patch
+   * changed an indexed field and the call carries no detail for the node).
+   */
+  const pendingIndex = new Map<string, { rowid: number; node: GraphNode; stale: number | null; storedDetail: boolean }>();
   function flushDetails(): void {
     for (const { sessionId, nodeId, detail } of pendingDetails.values()) upsertDetail(sessionId, nodeId, JSON.stringify(detail));
+    // Index rows, from the final detail in memory (no detail is read back except for a patch without one).
+    for (const [key, entry] of pendingIndex) {
+      let detail: Partial<NodeDetail> | null | undefined = pendingDetails.get(key)?.detail as Partial<NodeDetail> | undefined;
+      if (detail === undefined && entry.storedDetail) {
+        const row = selectDetail.get(entry.node.sessionId, entry.node.id) as { data: unknown; enc: number } | undefined;
+        detail = row === undefined ? {} : readDetail(row.data, row.enc);
+        if (detail === null) continue; // an undecodable detail: its index row stays as it is (the session is re-derived)
+      }
+      search.write(entry.stale, entry.rowid, indexTextOf(entry.node, detail ?? {}));
+    }
     pendingDetails.clear();
+    pendingIndex.clear();
   }
 
   function applyOne(c: Change, seq: number): void {
@@ -873,14 +914,28 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
           body: JSON.stringify(c.session),
         });
         break;
-      case 'node_added':
-        insertNode.run(c.node.sessionId, c.node.id, JSON.stringify(c.node));
-        pendingDetails.set(detailKey(c.node.sessionId, c.node.id), { sessionId: c.node.sessionId, nodeId: c.node.id, detail: c.detail ?? {} });
+      case 'node_added': {
+        const key = detailKey(c.node.sessionId, c.node.id);
+        // The rowid the node's index row is under now: the pending entry's, else the existing row's (replaced below).
+        const prior = pendingIndex.get(key);
+        const stale = prior !== undefined ? prior.stale : ((selectNodeRowid.get(c.node.sessionId, c.node.id) as number | undefined) ?? null);
+        const rowid = Number(insertNode.run(c.node.sessionId, c.node.id, JSON.stringify(c.node)).lastInsertRowid);
+        pendingDetails.set(key, { sessionId: c.node.sessionId, nodeId: c.node.id, detail: c.detail ?? {} });
+        pendingIndex.set(key, { rowid, node: c.node, stale, storedDetail: false });
         break;
+      }
       case 'node_updated': {
-        const body = selectNodeBody.get(c.sessionId, c.id) as string | undefined;
-        if (body === undefined) break; // updates to unknown nodes are ignored, as in shared applyChange
-        updateNode.run(JSON.stringify({ ...(JSON.parse(body) as object), ...c.patch }), c.sessionId, c.id);
+        const row = selectNodeRow.get(c.sessionId, c.id) as { rowid: number; body: string } | undefined;
+        if (row === undefined) break; // updates to unknown nodes are ignored, as in shared applyChange
+        const merged = { ...(JSON.parse(row.body) as GraphNode), ...c.patch } as GraphNode;
+        updateNode.run(JSON.stringify(merged), c.sessionId, c.id);
+        const indexKey = detailKey(c.sessionId, c.id);
+        const indexed = pendingIndex.get(indexKey);
+        if (indexed !== undefined) indexed.node = merged;
+        else if (c.detail !== undefined || Object.keys(c.patch).some((k) => INDEXED_NODE_FIELDS.includes(k))) {
+          // storedDetail: refined below once the detail merge is known
+          pendingIndex.set(indexKey, { rowid: row.rowid, node: merged, stale: row.rowid, storedDetail: c.detail === undefined });
+        }
         if (c.detail !== undefined) {
           // node_detail is touched only when the update carries detail.
           const key = detailKey(c.sessionId, c.id);
@@ -895,6 +950,7 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
               unreadableDetails.add(key);
               insertDirty.run(c.sessionId);
               newlyDirty.add(c.sessionId);
+              pendingIndex.delete(indexKey); // nor is its index row rewritten from a partial detail
               break;
             }
             prev = stored;
@@ -938,6 +994,7 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     });
     const out: SeqChange[] = [];
     pendingDetails.clear();
+    pendingIndex.clear();
     try {
       changes.forEach((c, i) => {
         if (c.type === 'session_upserted' && lastUpsert.get(c.session.id) !== i) return;
@@ -949,6 +1006,7 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
       flushDetails();
     } finally {
       pendingDetails.clear();
+      pendingIndex.clear();
     }
     maybePrune(out.length);
     return out;
@@ -967,6 +1025,7 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
 
   const clearDerivedTx = db.transaction(() => {
     for (const t of DERIVED_TABLES) db.exec(`DELETE FROM ${t}`);
+    search.clear(); // no nodes, no index rows: complete (a rebuild then indexes every node as it writes it)
     // seq (AUTOINCREMENT) is deliberately NOT reset: it must stay monotonic so clients
     // holding an old sinceSeq still receive the rebuilt changes.
   });
@@ -1116,6 +1175,11 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
       }
       return hits;
     },
+    searchContent(query, options) {
+      return search.search(query, options);
+    },
+    searchIndexStatus: () => search.status(),
+    searchIndexBatch: (maxRows, maxBytes) => search.buildBatch(maxRows, maxBytes),
     searchPlans() {
       const params = { pattern: '%x%', limit: 1, sessionId: 's' };
       const plan = (stmt: { source: string }) =>
@@ -1209,6 +1273,7 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
       clearDerivedTx();
     },
     deleteDerivedForSession(sessionId) {
+      search.deleteForSession(sessionId); // while the node rows still name the index rows
       for (const stmt of deleteSessionDerived) stmt.run(sessionId);
     },
     markDirty(sessionId) {

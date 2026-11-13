@@ -1,5 +1,5 @@
 import type { SeqChange } from './change.js';
-import type { GraphEdge, GraphNode, Origin, Session } from './model.js';
+import type { GraphEdge, GraphNode, NodeKind, Origin, Session } from './model.js';
 import type { NotificationKind } from './notifications.js';
 
 export interface GraphSnapshot { session: Session; nodes: GraphNode[]; edges: GraphEdge[]; seq: number }
@@ -64,7 +64,49 @@ export interface Diagnostics {
     lastError: string | null;
     unreadableDetails: number;
   };
+  /** The content search index; absent from servers before it existed. */
+  search?: SearchIndexStatus;
 }
+
+/**
+ * The content search index (Diagnostics.search). indexing: the index is incomplete (a database from before it existed,
+ * or one whose index was found inconsistent at start-up) and is being built in the background; content search then
+ * answers from what is indexed. indexed / total: progress in node row positions (about nodes; equal once done).
+ */
+export interface SearchIndexStatus { indexing: boolean; indexed: number; total: number }
+
+/**
+ * One place in a session's contents that contains the query: the node and a plain-text snippet around the first
+ * occurrence in the node's searchable text. before / match / after are plain text (never HTML), whitespace collapsed,
+ * about CONTENT_SNIPPET_SIDE_CHARS code points on each side; clippedStart / clippedEnd: text was left out there.
+ * `at` is the node's timestamp; agentId the subagent thread the node belongs to (null: the main thread).
+ */
+export interface ContentHit {
+  sessionId: string;
+  projectId: string;
+  origin: Origin;
+  sessionTitle: string | null;
+  nodeId: string;
+  kind: NodeKind;
+  toolName: string | null;
+  at: string;
+  agentId: string | null;
+  snippet: { before: string; match: string; after: string; clippedStart: boolean; clippedEnd: boolean };
+}
+
+/**
+ * GET /api/search/content?q=&origin=&projectId= (400 for an unknown origin). hits: sessions by last activity (newest
+ * first), within a session by node time (newest first); at most CONTENT_MAX_HITS_PER_SESSION per session and
+ * CONTENT_MAX_SESSIONS sessions. truncated: a limit (or the per-request work budget) left matches out. shortQuery: the
+ * query has exactly 2 characters, so only the prompts and replies of sessions active in the last
+ * CONTENT_SHORT_QUERY_DAYS days were scanned. indexing: the index is still being built, results may be incomplete.
+ * A query under SEARCH_MIN_CHARS characters (after trimming) gives no hits.
+ */
+export interface ContentSearchResponse { hits: ContentHit[]; truncated: boolean; shortQuery: boolean; indexing: boolean }
+export const CONTENT_MAX_HITS_PER_SESSION = 5;
+export const CONTENT_MAX_SESSIONS = 50;
+export const CONTENT_SHORT_QUERY_DAYS = 30;
+export const CONTENT_SNIPPET_SIDE_CHARS = 40;
 
 export type SearchField = 'title' | 'id' | 'branch' | 'cwd' | 'prompt';
 /** nodeId is set only for `prompt` matches. */
