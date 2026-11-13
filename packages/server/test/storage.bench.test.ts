@@ -8,6 +8,7 @@ import { describe, expect, test, vi } from 'vitest';
 import { loadConfig, type Config } from '../src/config.js';
 import { Pipeline } from '../src/pipeline.js';
 import { migrateAll, startStorageMaintenance, vacuumIfDue } from '../src/store/migrate-storage.js';
+import { SEARCH_BUILD_BATCH_BYTES, SEARCH_BUILD_BATCH_ROWS } from '../src/store/search-index.js';
 import { openStore, type Store } from '../src/store/store.js';
 
 /*
@@ -153,8 +154,12 @@ async function withStall<T>(fn: () => Promise<T>): Promise<{ value: T; stallMs: 
   }
 }
 
-async function ingestAndRebuild(config: Config, dbFile: string): Promise<{ ingestMs: number; rebuildMs: number; store: Store }> {
-  const store = openStore(dbFile);
+async function ingestAndRebuild(
+  config: Config,
+  dbFile: string,
+  searchDetail?: 'off' | 'none',
+): Promise<{ ingestMs: number; rebuildMs: number; store: Store }> {
+  const store = openStore(dbFile, searchDetail !== undefined ? { searchDetail } : {});
   const p = new Pipeline(store, config);
   const t0 = performance.now();
   await p.scanAll();
@@ -294,6 +299,55 @@ describe.skipIf(!BENCH)('storage benchmark', () => {
       fs.rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 500 });
     }
   }, 3_600_000);
+
+  // The search index's cost end to end (Task 2): the same transcripts ingested and rebuilt through the real Pipeline with
+  // the index maintained (detail=none, as shipped) and without it (store option searchDetail 'off'), compressed storage,
+  // back to back, twice each (alternating). Run alone: -t "search index cost".
+  test(`${ROWS} raw rows: search index cost end to end (ingest and rebuild, index on / off)`, async () => {
+    const root = fs.mkdtempSync(path.join(process.env.AGENT_CANVAS_BENCH_TMP ?? os.tmpdir(), 'cc-search-cost-'));
+    try {
+      const projectsDir = path.join(root, 'projects');
+      const config = loadConfig({}, { projectsDir, dataDir: path.join(root, 'data'), cursorDbPath: null, codexSessionsDir: null });
+      const gen = writeTranscripts(projectsDir, ROWS);
+      mode.plain = false;
+      const results: { detail: 'off' | 'none'; ingestMs: number; rebuildMs: number; nodes: number }[] = [];
+      for (let round = 0; round < 2; round++) {
+        for (const detail of ['off', 'none'] as const) {
+          const file = path.join(root, `${detail}-${round}.db`);
+          const run = await ingestAndRebuild(config, file, detail);
+          // A full rebuild leaves the index to the background build: its time, in the same batches as the service's.
+          const b0 = performance.now();
+          let buildBatches = 0;
+          if (detail === 'none') while (run.store.searchIndexBatch(SEARCH_BUILD_BATCH_ROWS, SEARCH_BUILD_BATCH_BYTES).more) buildBatches += 1;
+          const buildMs = performance.now() - b0;
+          if (detail === 'none') console.log(`  index build after the rebuild: ${(buildMs / 1000).toFixed(1)} s in ${buildBatches + 1} batches`);
+          run.store.close();
+          const counter = new Database(file, { readonly: true });
+          const nodes = Number(counter.prepare('SELECT COUNT(*) FROM node').pluck().get());
+          counter.close();
+          results.push({ detail, ingestMs: run.ingestMs, rebuildMs: run.rebuildMs, nodes });
+          console.log(`search index cost, round ${round}: ${detail} ingest ${(run.ingestMs / 1000).toFixed(1)} s, rebuild ${(run.rebuildMs / 1000).toFixed(1)} s, ${nodes} nodes`);
+          await new Promise((r) => setTimeout(r, 2000));
+          // Best effort: the closed store's checkpointer thread may still hold the file (removed with the directory).
+          for (const f of [file, `${file}-wal`, `${file}-shm`]) await fs.promises.rm(f, { force: true, maxRetries: 20 }).catch(() => undefined);
+        }
+      }
+      const avg = (d: 'off' | 'none', k: 'ingestMs' | 'rebuildMs'): number => {
+        const xs = results.filter((r) => r.detail === d).map((r) => r[k]);
+        return xs.reduce((a, b) => a + b, 0) / xs.length;
+      };
+      console.log(
+        [
+          `search index cost: ${gen.rows} raw rows, ${MB(gen.bytes)} MB JSONL, ${results[0]!.nodes} nodes`,
+          ...results.map((r) => `  ${r.detail.padEnd(5)} ingest ${(r.ingestMs / 1000).toFixed(1)} s, rebuild ${(r.rebuildMs / 1000).toFixed(1)} s`),
+          `  ratio (mean, none / off): ingest ${(avg('none', 'ingestMs') / avg('off', 'ingestMs')).toFixed(2)}, rebuild ${(avg('none', 'rebuildMs') / avg('off', 'rebuildMs')).toFixed(2)}`,
+        ].join('\n'),
+      );
+    } finally {
+      await new Promise((r) => setTimeout(r, 2000));
+      await fs.promises.rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 500 }).catch(() => undefined);
+    }
+  }, 7_200_000);
 
   test('edge storage: bytes per edge with Cursor-length node ids', async () => {
     const root = fs.mkdtempSync(path.join(process.env.AGENT_CANVAS_BENCH_TMP ?? os.tmpdir(), 'cc-edge-bench-'));

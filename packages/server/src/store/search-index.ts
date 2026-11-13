@@ -420,6 +420,8 @@ export const SEARCH_META = {
   end: 'search_index:end',
   skipped: 'search_index:skipped',
 } as const;
+/** FTS5 automerge / usermerge of the index (spec 3.2). */
+const SEARCH_AUTOMERGE = 16;
 /** The detail level chosen by measurement (spec 3.2). */
 export const DEFAULT_SEARCH_DETAIL: SearchIndexDetail = 'none';
 
@@ -499,6 +501,12 @@ export class SearchIndex {
   readonly detail: SearchIndexDetail;
   /** False only for the benchmark's baseline (detail 'off'): no row is written. */
   private readonly maintained: boolean;
+  /**
+   * True during a full rebuild (clear with defer): node writes write no index rows; the index is marked incomplete and
+   * built afterwards in the background (cheaper in bulk, and off the rebuild's critical path). In memory only: a process
+   * that dies meanwhile left the rebuild flag set, so the next start rebuilds again.
+   */
+  private suspended = false;
   /** Told about every node detail found undecodable (Diagnostics.storage.unreadableDetails). */
   private readonly onUnreadable: (sessionId: string, nodeId: string) => void;
 
@@ -514,6 +522,12 @@ export class SearchIndex {
     this.maintained = detail !== 'off';
     const existed = db.prepare(`SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'search_fts'`).get() !== undefined;
     db.exec(searchIndexSql(this.detail));
+    if (!existed) {
+      // Merge segments in larger steps than the defaults (4 / 4): measured about 15% less insert time, same size and
+      // query time (spec 3.2). Stored in the table's own config.
+      db.exec(`INSERT INTO search_fts (search_fts, rank) VALUES ('automerge', ${SEARCH_AUTOMERGE})`);
+      db.exec(`INSERT INTO search_fts (search_fts, rank) VALUES ('usermerge', ${SEARCH_AUTOMERGE})`);
+    }
     this.insertRow = db.prepare(`INSERT INTO search_fts (rowid, text) VALUES (?, ?)`);
     this.deleteRow = db.prepare(`DELETE FROM search_fts WHERE rowid = ?`);
     this.deleteAllRows = db.prepare(`INSERT INTO search_fts (search_fts) VALUES ('delete-all')`);
@@ -600,7 +614,7 @@ export class SearchIndex {
    * and keeps both texts' tokens, which nothing would notice (verification filters the false matches).
    */
   write(stale: number | null, rowid: number, text: string): void {
-    if (!this.maintained) return;
+    if (!this.maintained || this.suspended) return;
     if (stale !== null) this.deleteRow.run(stale);
     if (stale !== rowid) this.deleteRow.run(rowid);
     if (text !== '') this.insertRow.run(rowid, text);
@@ -608,16 +622,28 @@ export class SearchIndex {
 
   /** Removes the rows of one session's nodes (before the nodes themselves are deleted). */
   deleteForSession(sessionId: string): void {
-    if (!this.maintained) return;
+    if (!this.maintained || this.suspended) return;
     for (const rowid of this.sessionRowids.all(sessionId) as number[]) this.deleteRow.run(rowid);
   }
 
 
-  /** Empties the index along with every node (clearDerived): an empty index of no nodes is complete. */
-  clear(): void {
+  /**
+   * Empties the index along with every node (clearDerived): an empty index of no nodes is complete. With `defer` (a
+   * full rebuild follows): marked incomplete instead, and node writes skip the index until resume(); the background build
+   * then indexes every node once.
+   */
+  clear(defer = false): void {
     this.deleteAllRows.run();
-    this.markComplete();
+    if (defer) {
+      this.markIncomplete();
+      this.suspended = true;
+    } else this.markComplete();
     this.deleteMeta.run(SEARCH_META.skipped);
+  }
+
+  /** Ends clear(true)'s suspension: node writes maintain the index again. */
+  resume(): void {
+    this.suspended = false;
   }
 
   /**

@@ -607,7 +607,9 @@ export class Pipeline {
 
   private rebuildAll(progress?: (done: number, total: number) => void): void {
     this.store.setMeta(REBUILD_FLAG, '1');
-    this.store.clearDerived();
+    // The search index is not written during the rebuild but built afterwards by the background build (start-up): node by
+    // node it made the rebuild about 2.6x slower (spec 3.2). Killed meanwhile: the index stays marked incomplete.
+    this.store.clearDerived({ deferSearchIndex: true });
     this.normalizer = this.newNormalizer();
     this.lastTouch.clear();
     const ids = this.store.allSessionIdsInRaw();
@@ -639,6 +641,7 @@ export class Pipeline {
       // Sessions are re-hydrated on demand; leave nothing loaded-but-untracked.
       this.normalizer = this.newNormalizer();
       this.lastTouch.clear();
+      this.store.resumeSearchIndex();
     }
     this.store.setMeta(NORMALIZER_VERSION_KEY, String(NORMALIZER_VERSION));
     // Every session was just re-derived from its raw events: no session is behind any more.

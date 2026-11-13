@@ -576,6 +576,52 @@ describe('content search', () => {
       expect(indexRows()).toBe(1);
     });
 
+    test('a full rebuild defers the index: killed before the build ends, the next start finds it incomplete and builds it once', () => {
+      store.applyChanges([session('s1', 5), text('s1', 'old', 1, 'before-rebuild')]);
+      // what Pipeline.rebuildAll does, killed before resumeSearchIndex()
+      store.clearDerived({ deferSearchIndex: true });
+      expect(store.searchIndexStatus().indexing).toBe(true);
+      store.applyChanges([session('s1', 5), ...Array.from({ length: 30 }, (_, i) => text('s1', `n${i}`, i, `rebuilt-row <${i}>`))]);
+      expect(indexRows()).toBe(0); // nothing indexed during the rebuild
+      store.close();
+      store = openStore(dbPath());
+      expect(store.searchIndexStatus().indexing).toBe(true);
+      while (store.searchIndexBatch(7, 1 << 20).more);
+      expect(store.searchIndexStatus().indexing).toBe(false);
+      expect(indexRows()).toBe(30);
+      for (const i of [0, 13, 29]) expect(ids(`rebuilt-row <${i}>`)).toEqual([`n${i}`]);
+      expect(ids('before-rebuild')).toEqual([]);
+    });
+
+    test('live writes after a deferred rebuild, before and during its build, are indexed once with their latest text', () => {
+      store.applyChanges([session('s1', 5)]);
+      store.clearDerived({ deferSearchIndex: true });
+      store.applyChanges([session('s1', 5), ...Array.from({ length: 40 }, (_, i) => text('s1', `n${i}`, i, `deferred-row <${i}>`))]);
+      store.resumeSearchIndex(); // the rebuild ends; the background build has not started yet
+      const update = (id: string, body: string): void =>
+        void store.applyChanges([{ type: 'node_updated', sessionId: 's1', id, patch: { summary: body }, detail: { text: body } }]);
+      update('n1', 'early-update one'); // before the build starts
+      store.applyChanges([text('s1', 'fresh', 50, 'fresh-node')]); // a new node before the build starts
+      store.applyChanges([text('s1', 'n2', 2, 're-added two')]); // re-added: a new rowid
+      update('n3', 'deferred-row <3>'); // unchanged text: no index write, the build covers it
+      store.searchIndexBatch(10, 1 << 20); // the build's first batch (it empties the index and starts over)
+      update('n4', 'behind-the-build four');
+      update('n30', 'ahead-of-the-build thirty');
+      store.applyChanges([text('s1', 'late', 60, 'late-node')]);
+      store.transaction(() => store.deleteDerivedForSession('nobody'));
+      while (store.searchIndexBatch(10, 1 << 20).more);
+      expect(ids('early-update one')).toEqual(['n1']);
+      expect(ids('fresh-node')).toEqual(['fresh']);
+      expect(ids('re-added two')).toEqual(['n2']);
+      expect(ids('deferred-row <2>')).toEqual([]);
+      expect(ids('deferred-row <3>')).toEqual(['n3']);
+      expect(ids('behind-the-build four')).toEqual(['n4']);
+      expect(ids('deferred-row <4>')).toEqual([]);
+      expect(ids('ahead-of-the-build thirty')).toEqual(['n30']);
+      expect(ids('late-node')).toEqual(['late']);
+      expect(indexRows()).toBe(42); // 40 + fresh + late, each once
+    });
+
     test('node rowids, and with them the index, survive VACUUM', () => {
       store.applyChanges([
         session('a', 5),

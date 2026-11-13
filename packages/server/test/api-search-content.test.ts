@@ -124,9 +124,18 @@ describe('GET /api/search/content', () => {
     const queries = ['parser bug', 'parseLine(', 'src/parse.ts', 'please', 'Bash', 'rg -n', 'late-output-marker', 'pa'];
     const before = await Promise.all(queries.map((q) => content(q)));
     pipeline.rebuild();
+    // The rebuild leaves the index to the background build (one bulk pass): searches say so meanwhile.
+    expect(store.searchIndexStatus()).toMatchObject({ indexing: true });
+    expect(await content('parser bug')).toMatchObject({ hits: [], indexing: true });
+    expect(store.searchIndexBatch(100, 1 << 20)).toMatchObject({ more: false, skipped: 0 }); // every node, once
     const after = await Promise.all(queries.map((q) => content(q)));
     expect(after).toEqual(before);
     expect(before[0]!.hits.length).toBeGreaterThan(0);
+    // after the rebuild, live writes maintain the index again
+    const file = path.join(config.projectsDir, 'proj', 's1.jsonl');
+    await fs.appendFile(file, linesOf([assistantBlock('a9', 'r1', { type: 'text', text: 'written after the rebuild' })]));
+    await pipeline.ingestFile(file);
+    expect((await content('after the rebuild')).hits.map((h) => h.nodeId)).toEqual(['a9']);
   });
 });
 
@@ -184,7 +193,7 @@ describe('start: the index at start-up', () => {
     expect(r).toMatchObject({ indexing: false, hits: [{ nodeId: 'a1' }, { nodeId: 'u1' }] });
   }, 30_000);
 
-  test('the first start after the upgrade rebuilds (normalizer version) and so needs no separate build', async () => {
+  test('the first start after the upgrade rebuilds (normalizer version); the index is then built once, in the background', async () => {
     await databaseWithoutIndex('1');
     const lines: string[] = [];
     const log: string[] = [];
@@ -194,9 +203,14 @@ describe('start: the index at start-up', () => {
     );
     apps.push(app);
     expect(log.join('\n')).toMatch(/rebuilding derived data/);
-    const d = (await (await fetch(`${app.url}/api/diagnostics`)).json()) as Diagnostics;
-    expect(d.search).toEqual({ indexing: false, indexed: 0, total: 0, skipped: 0, lastError: null });
-    expect(lines).toEqual([]);
+    let d: Diagnostics | null = null;
+    for (let i = 0; i < 400; i++) {
+      d = (await (await fetch(`${app.url}/api/diagnostics`)).json()) as Diagnostics;
+      if (d.search?.indexing === false) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    expect(d!.search).toEqual({ indexing: false, indexed: 0, total: 0, skipped: 0, lastError: null });
+    expect(lines).toEqual(['agent-canvas: building the search index (one-time, in the background)…', 'agent-canvas: search index built']);
     const r = (await (await fetch(`${app.url}/api/search/content?q=parser%20bug`)).json()) as ContentSearchResponse;
     expect(r.hits.map((h) => h.nodeId)).toEqual(['a1', 'u1']);
   }, 30_000);

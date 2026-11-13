@@ -101,7 +101,7 @@ export interface ContentHit {
 /**
  * GET /api/search/content?q=&origin=&projectId= (400 for an unknown origin). hits: sessions by last activity (newest
  * first), within a session by node time (newest first); at most CONTENT_MAX_HITS_PER_SESSION per session and
- * CONTENT_MAX_SESSIONS sessions. truncated: a limit (or the per-request work budget) left matches out. shortQuery: the
+ * CONTENT_MAX_SESSIONS sessions. truncated: a limit (or the per-request work budget) may have left matches out — approximate: it is set when more index candidates existed, some of which might not have been real matches. shortQuery: the
  * query has exactly 2 characters, so only the prompts and replies of sessions active in the last
  * CONTENT_SHORT_QUERY_DAYS days were scanned. indexing: the index is still being built, results may be incomplete.
  * A query under SEARCH_MIN_CHARS characters (after trimming) gives no hits.

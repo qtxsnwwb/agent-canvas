@@ -237,8 +237,14 @@ export interface Store {
   transcriptSessionIds(keyPrefix: string): string[];
   /** The store keys of transcript raw events that start with `keyPrefix` (non-empty), ascending; one seek per key. */
   transcriptKeys(keyPrefix: string): string[];
-  /** Clears derived tables, the change log and unknown_stat; keeps raw_event, file_offset and meta. */
-  clearDerived(): void;
+  /**
+   * Clears derived tables, the change log and unknown_stat; keeps raw_event, file_offset and meta. deferSearchIndex (a
+   * full rebuild): the search index is left incomplete and not written until resumeSearchIndex(); the background build
+   * fills it afterwards (searches say indexing meanwhile).
+   */
+  clearDerived(options?: { deferSearchIndex?: boolean }): void;
+  /** Ends clearDerived({ deferSearchIndex })'s suspension of index writes. */
+  resumeSearchIndex(): void;
   /**
    * Deletes one session's derived rows (session, nodes, details, edges, its change_log rows); for a per-session
    * re-derive inside the caller's transaction.
@@ -1038,9 +1044,10 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   const deleteDirty = db.prepare(`DELETE FROM dirty_session WHERE session_id = ?`);
   const selectDirty = db.prepare(`SELECT session_id FROM dirty_session ORDER BY session_id`).pluck();
 
-  const clearDerivedTx = db.transaction(() => {
+  const clearDerivedTx = db.transaction((deferSearch: boolean) => {
     for (const t of DERIVED_TABLES) db.exec(`DELETE FROM ${t}`);
-    search.clear(); // no nodes, no index rows: complete (a rebuild then indexes every node as it writes it)
+    // No nodes, no index rows: complete; or, before a full rebuild, incomplete and filled in bulk afterwards.
+    search.clear(deferSearch);
     // seq (AUTOINCREMENT) is deliberately NOT reset: it must stay monotonic so clients
     // holding an old sinceSeq still receive the rebuilt changes.
   });
@@ -1284,9 +1291,10 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
       return [...ids].sort();
     },
     transcriptKeys,
-    clearDerived() {
-      clearDerivedTx();
+    clearDerived(options) {
+      clearDerivedTx(options?.deferSearchIndex === true);
     },
+    resumeSearchIndex: () => search.resume(),
     deleteDerivedForSession(sessionId) {
       search.deleteForSession(sessionId); // while the node rows still name the index rows
       for (const stmt of deleteSessionDerived) stmt.run(sessionId);
