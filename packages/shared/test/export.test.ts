@@ -52,6 +52,14 @@ test.each<[string, unknown]>([
   expect(r.ok).toBe(false);
 });
 
+test('错误信息不回显请求里的字段名或值', () => {
+  const r = parseExportOptions({ ...valid, 'evil-field-name': 'evil-value' });
+  expect(r.ok).toBe(false);
+  if (!r.ok) expect(r.error).not.toContain('evil');
+  const s = parseExportSettings({ customTerms: [], 'evil-field-name': 1 });
+  if (!s.ok) expect(s.error).not.toContain('evil');
+});
+
 test('自定义词：去空白、去重（不分 ASCII 大小写）、去掉空的', () => {
   expect(validateCustomTerms(['  Acme  ', 'acme', '', '   ', 'Project X', '项目代号'])).toEqual({
     ok: true,
@@ -65,6 +73,8 @@ test.each<[string, unknown]>([
   ['太短', ['ab']],
   ['太长', ['x'.repeat(201)]],
   ['控制字符', ['ac\nme']],
+  ['双向控制字符', ['abc‮']],
+  ['零宽字符', ['ab​c']],
   ['太多', Array.from({ length: 101 }, (_, i) => `term${i}`)],
 ])('不合法的自定义词：%s', (_name, terms) => {
   expect(validateCustomTerms(terms).ok).toBe(false);

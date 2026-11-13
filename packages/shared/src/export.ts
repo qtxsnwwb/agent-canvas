@@ -108,7 +108,8 @@ const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'obj
 
 function exactKeys(o: Record<string, unknown>, keys: readonly string[]): string | null {
   for (const k of keys) if (!Object.prototype.hasOwnProperty.call(o, k)) return `缺少字段 ${k}`;
-  for (const k of Object.keys(o)) if (!keys.includes(k)) return `未知字段 ${k}`;
+  // The name of an unknown field is client input: never echoed.
+  for (const k of Object.keys(o)) if (!keys.includes(k)) return '有未知字段';
   return null;
 }
 
@@ -175,7 +176,8 @@ export interface ExportSettings {
 }
 
 const ascii = (s: string): string => s.replace(/[A-Z]+/g, (x) => x.toLowerCase());
-const CONTROL = /[\u0000-\u001f\u007f]/;
+/** Control and format characters (bidi controls and zero-width characters among them). */
+const CONTROL = /[\p{Cc}\p{Cf}]/u;
 
 /**
  * Validates a list of custom terms: strings only; each trimmed; empty ones dropped; duplicates (ASCII-case-insensitive)
@@ -193,7 +195,7 @@ export function validateCustomTerms(terms: unknown): { ok: true; terms: string[]
     const n = [...term].length;
     if (n < CUSTOM_TERM_MIN_CHARS) return { ok: false, error: `自定义词至少 ${CUSTOM_TERM_MIN_CHARS} 个字符` };
     if (n > CUSTOM_TERM_MAX_CHARS) return { ok: false, error: `自定义词最多 ${CUSTOM_TERM_MAX_CHARS} 个字符` };
-    if (CONTROL.test(term)) return { ok: false, error: '自定义词不能包含控制字符' };
+    if (CONTROL.test(term)) return { ok: false, error: '自定义词不能包含控制字符或不可见的格式字符' };
     const key = ascii(term);
     if (seen.has(key)) continue;
     seen.add(key);

@@ -161,7 +161,8 @@ test('赋值名字的规则', () => {
 test('赋值值的筛选（直接调用）', () => {
   expect(isMaskableAssignmentValue('Abc12345xyz')).toBe(true);
   expect(isMaskableAssignmentValue('abcdefgh1')).toBe(true);
-  expect(isMaskableAssignmentValue('AbcdEfgh')).toBe(true);
+  expect(isMaskableAssignmentValue('AbcdEfgh', { quoted: true })).toBe(true);
+  expect(isMaskableAssignmentValue('AbcdEfgh')).toBe(false); // an unquoted identifier
   expect(isMaskableAssignmentValue('abcdefgh')).toBe(false);
   expect(isMaskableAssignmentValue('ABCDEFGH')).toBe(false);
   expect(isMaskableAssignmentValue('true')).toBe(false);
@@ -293,7 +294,7 @@ test('maskValue：逐个字符串值处理；键名命中而值是字符串时�
   expect(masker.maskValue(value)).toEqual({
     command: `curl -H "Authorization: Bearer ${ph('bearer', 1)}"`,
     token: ph('assignment', 1),
-    nested: [{ password: 'short' }, { apiKey: 'response' }, { secret: 12345678 }, `x ${ph('github-token', 1)}`],
+    nested: [{ password: ph('assignment', 2) }, { apiKey: 'response' }, { secret: ph('assignment', 3) }, `x ${ph('github-token', 1)}`],
     count: 3,
     ok: true,
     none: null,
@@ -357,15 +358,45 @@ test.each([
   ['/home/', fill('/home/')],
   ['C:\\Users\\', fill('C:\\Users\\')],
   ['custom aaa', fill('a')],
+  // fix round 1: starts after escapes and glued starts, new rules
+  ['\\nsk-', fill('\\nsk-')],
+  ['x_sk-proj-Ab1', fill('x_sk-proj-Ab1')],
+  ['glpat-', fill('gl' + 'pat-')],
+  ['hf_', fill('h' + 'f_')],
+  ['hf_Ab', fill('h' + 'f_Ab')],
+  ['sk_live_', fill('s' + 'k_live_')],
+  ['AccountKey=', fill('AccountKey=')],
+  ['Authorization: Basic ', fill('Authorization: Basic ')],
+  ['-u a:', fill(' -u a:')],
+  ['mysql -p', fill('mysql -p')],
+  ['mysql ', fill('mysql ')],
+  ['Cookie: a=', fill('Cookie: a=')],
+  ['Cookie: a=b;', fill('Cookie: a=b;')],
+  ['Set-Cookie: ', fill('Set-Cookie: ')],
+  ['a://u:p@', fill('a://u:p@')],
+  ['https://x@', fill('https://x@')],
+  ['password="', fill('password="')],
+  ['$a', fill('password=$a')],
 ])('1 MB 的最坏输入：%s', (_name, text) => {
   const masker = createMasker({
     categories: ['credential', 'assignment', 'personal', 'custom'],
     customTerms: ['aaa', 'aaaa', 'aaaaa', 'sk-sk-', 'token', ...Array.from({ length: 95 }, (_, i) => `term${i}`)],
     homeUsers: ['alice', 'a'.repeat(50)],
   });
+  // Learned mode: a first pass over the same text, then masking with the learned values; and truncated mode.
   const t0 = performance.now();
+  masker.learn(text);
+  const t1 = performance.now();
   const out = masker.mask(text);
-  const ms = performance.now() - t0;
+  const t2 = performance.now();
+  const cut = masker.mask(text, { truncated: true });
+  const t3 = performance.now();
+  if (process.env.AGENT_CANVAS_MASK_TIMES === '1') {
+    console.log(`MASKTIME ${JSON.stringify(_name)} learn ${Math.round(t1 - t0)} mask ${Math.round(t2 - t1)} truncated ${Math.round(t3 - t2)}`);
+  }
   expect(typeof out).toBe('string');
-  expect(ms).toBeLessThan(3000);
+  expect(typeof cut).toBe('string');
+  expect(t1 - t0).toBeLessThan(3000);
+  expect(t2 - t1).toBeLessThan(3000);
+  expect(t3 - t2).toBeLessThan(3000);
 });
