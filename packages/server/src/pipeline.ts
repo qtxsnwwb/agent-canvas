@@ -1,4 +1,7 @@
+import { createHash } from 'node:crypto';
+import fs from 'node:fs';
 import fsp from 'node:fs/promises';
+import path from 'node:path';
 import { STALE_AFTER_MS, type Change, type Origin, type SeqChange } from '@agent-canvas/shared';
 import type { Config } from './config.js';
 import { NORMALIZER_FACTORIES, NormalizerRegistry, type NormalizerFactories } from './normalize/registry.js';
@@ -59,6 +62,14 @@ export function defaultSources(config: Config): FileSource[] {
 /** meta keys */
 export const REBUILD_FLAG = 'rebuild_in_progress';
 export const NORMALIZER_VERSION_KEY = 'normalizer_version';
+/**
+ * Hooks arriving while writes are held (the storage job's VACUUM) are appended to this file in the data directory, one
+ * JSON raw event per line, instead of being kept in memory only, so a process killed meanwhile loses none: the file is
+ * drained into the database when the writes are released, and by the next Pipeline (start) if it is still there.
+ */
+export const HELD_HOOKS_FILE = 'held-hooks.jsonl';
+/** meta key: sha1 of the held-hooks file content last drained (a file drained but not deleted is not drained twice). */
+export const HELD_HOOKS_DRAINED = 'held_hooks_drained';
 /** meta key prefix of a poll source's notes about its units (PollSink.saveUnitState): `poll:` + the store key. */
 export const POLL_STATE_PREFIX = 'poll:';
 
@@ -167,6 +178,12 @@ export class Pipeline {
     this.factories = options.normalizers ?? NORMALIZER_FACTORIES;
     this.normalizer = this.newNormalizer();
     this.dirty = new Set(store.dirtySessionIds());
+    // Hooks held during a VACUUM that the previous process did not live to store.
+    try {
+      this.drainHeldHooks();
+    } catch (err) {
+      this.reportFailure('hook', err);
+    }
   }
 
   /** The file sources this pipeline reads (the watcher watches each). */
@@ -229,8 +246,74 @@ export class Pipeline {
     return () => {
       if (this.writeHold !== hold) return;
       this.writeHold = null;
+      // Before anything that waited runs: the held hooks go first, in arrival order.
+      let drained: Set<string> = new Set();
+      try {
+        drained = this.drainHeldHooks();
+      } catch (err) {
+        this.reportFailure('hook', err);
+      }
       open();
+      for (const id of drained) void this.enqueue(id, () => {}).catch(() => undefined); // re-derive now
     };
+  }
+
+  private heldHooksPath(): string {
+    return path.join(this.config.dataDir, HELD_HOOKS_FILE);
+  }
+
+  /** Appends a hook raw event to the held-hooks file; false when it could not be written (then it waits in memory). */
+  private holdHook(event: RawEvent): boolean {
+    try {
+      fs.mkdirSync(this.config.dataDir, { recursive: true });
+      fs.appendFileSync(this.heldHooksPath(), `${JSON.stringify(event)}\n`);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Stores the hooks of the held-hooks file (lines that do not parse, e.g. one cut short by a kill, are skipped): in one
+   * transaction their raw events, a dirty mark for each session (re-derived on its next touch, as a hook whose
+   * processing failed) and the file's hash in `meta`; then deletes the file. A file whose hash is already recorded was
+   * stored before (killed before the delete): it is only deleted. Returns the sessions marked dirty.
+   */
+  private drainHeldHooks(): Set<string> {
+    const file = this.heldHooksPath();
+    let content: string;
+    try {
+      content = fs.readFileSync(file, 'utf8');
+    } catch {
+      return new Set();
+    }
+    const hash = createHash('sha1').update(content).digest('hex');
+    const sessions = new Set<string>();
+    if (this.store.getMeta(HELD_HOOKS_DRAINED) !== hash) {
+      const events: Extract<RawEvent, { source: 'hook' }>[] = [];
+      for (const line of content.split('\n')) {
+        if (line.trim() === '') continue;
+        try {
+          const e = JSON.parse(line) as Extract<RawEvent, { source: 'hook' }>;
+          if (e?.source === 'hook' && typeof e.eventName === 'string' && typeof e.receivedAt === 'string' && typeof e.payload === 'string') events.push(e);
+        } catch {
+          // a line cut short by a kill
+        }
+      }
+      this.store.transaction(() => {
+        for (const e of events) {
+          this.store.insertRaw(e);
+          if (e.sessionId !== null) {
+            this.store.markDirty(e.sessionId);
+            sessions.add(e.sessionId);
+          }
+        }
+        this.store.setMeta(HELD_HOOKS_DRAINED, hash);
+      });
+      for (const id of sessions) this.dirty.add(id);
+    }
+    fs.rmSync(file, { force: true });
+    return sessions;
   }
 
   /** True while holdWrites() holds the writes. */
@@ -367,6 +450,8 @@ export class Pipeline {
     for (const id of pokes) this.pokePoll(origin, id);
     this.seed();
     if (this.lastHook === null || receivedAt > this.lastHook) this.lastHook = receivedAt;
+    // Writes held (VACUUM): onto disk next to the database, stored when they are released (or at the next start).
+    if (this.writeHold !== null && this.holdHook(event)) return;
     const key = `hook:${sessionId}`;
     const keepRaw = (): void => {
       if (this.writeHold !== null) {
