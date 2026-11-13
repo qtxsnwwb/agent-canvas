@@ -94,8 +94,11 @@ test('compact：空间不够时只迁移、跳过 VACUUM；--force 不查空间�
   expect(encOf()).toEqual({ 1: 500 });
   const forced = await compact({ projectsDir, dataDir }, { force: true, freeBytes: () => 1 });
   expect(forced.vacuum.outcome).toBe('done');
+  // Done, and nothing compressed since: not run again unless forced.
   const again = await compact({ projectsDir, dataDir }, { freeBytes: () => 10 ** 12 });
-  expect(again).toMatchObject({ converted: 0, vacuum: { outcome: 'done' } });
+  expect(again).toMatchObject({ converted: 0, vacuum: { outcome: 'already' } });
+  const forcedAgain = await compact({ projectsDir, dataDir }, { force: true, freeBytes: () => 1 });
+  expect(forcedAgain.vacuum.outcome).toBe('done');
 });
 
 test('main compact：进度写到 stderr，前后大小写到 stdout；用法里有 compact', async () => {
@@ -109,6 +112,9 @@ test('main compact：进度写到 stderr，前后大小写到 stdout；用法里
   expect(await main(['compact', '--force'])).toBe(0);
   expect(err.join('')).toMatch(/compact: 300\/300/);
   expect(out.join('\n')).toMatch(/database file: .* -> /);
+  out.length = 0;
+  expect(await main(['compact'])).toBe(0);
+  expect(out.join('\n')).toMatch(/VACUUM not needed/);
   expect(await main(['compact', '--bogus'])).toBe(1);
   out.length = 0;
   expect(await main(['--help'])).toBe(0);

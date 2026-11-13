@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
@@ -16,8 +17,7 @@ import type { Store } from './store.js';
  * text; a row that cannot be converted is left as it is and counted (`storage:failed`). Running it when done is a
  * no-op; a database created by this version is marked done when it is created.
  *
- * VACUUM: once, after the migration; only when the database's volume has at least VACUUM_SPACE_FACTOR times the file
- * size free (it writes a full copy). In the service it runs on its own connection in a worker thread while the
+ * VACUUM: once, after the migration; only when there is room for it (vacuumSpace). In the service it runs on its own connection in a worker thread while the
  * pipeline's writes are held (they queue and are applied afterwards) and meta writes are kept in memory; reads go on.
  * A skipped VACUUM is retried on later starts and by `agent-canvas compact` (which can skip the space check).
  */
@@ -44,8 +44,62 @@ export const STORAGE_META = {
  */
 export const MIGRATION_BATCH_ROWS = 2000;
 export const MIGRATION_BATCH_BYTES = 1024 * 1024;
-/** VACUUM needs about the file's size again (the copy, then the WAL): this much free space is required. */
+/**
+ * Where SQLite's VACUUM writes, and so where free space is required (file = database file + WAL now):
+ * - the temporary copy of the database (a file in SQLite's temp directory, sqliteTempDir(): this build has
+ *   SQLITE_TEMP_STORE=1, i.e. temp files on disk) — up to `file`;
+ * - the rewrite of the database from that copy, which in WAL mode goes through the WAL next to the database (the WAL
+ *   grows to the new size, then the checkpoint copies it into the file and truncates both) — up to `file`.
+ * Each needs VACUUM_SPACE_FACTOR × file free on its volume; when the temp directory is on the database's volume, that
+ * volume needs both (2 × VACUUM_SPACE_FACTOR × file).
+ */
 export const VACUUM_SPACE_FACTOR = 1.2;
+
+/**
+ * The directory SQLite puts its temporary files in, as its OS layer picks it: Windows (GetTempPathW) TMP, TEMP,
+ * USERPROFILE; elsewhere SQLITE_TMPDIR, TMPDIR, then /var/tmp, /usr/tmp, /tmp.
+ */
+export function sqliteTempDir(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string {
+  const pick = (candidates: (string | undefined)[]): string | undefined => candidates.find((d) => d !== undefined && d !== '');
+  if (platform === 'win32') return pick([env.TMP, env.TEMP, env.USERPROFILE]) ?? os.tmpdir();
+  const fromEnv = pick([env.SQLITE_TMPDIR, env.TMPDIR]);
+  if (fromEnv !== undefined) return fromEnv;
+  for (const d of ['/var/tmp', '/usr/tmp', '/tmp']) {
+    try {
+      if (fs.statSync(d).isDirectory()) return d;
+    } catch {
+      // next
+    }
+  }
+  return '.';
+}
+
+/** An id of the volume holding `dir` (its device number). */
+export function volumeOf(dir: string): string {
+  return String(fs.statSync(dir).dev);
+}
+
+/**
+ * Null when VACUUM has room (see VACUUM_SPACE_FACTOR), else the reason it does not. Throws when a probe fails.
+ */
+export function vacuumSpaceProblem(
+  dbDir: string,
+  size: number,
+  probe: { freeBytes: (dir: string) => number; tempDir: string; volumeOf: (dir: string) => string },
+): string | null {
+  const need = Math.ceil(size * VACUUM_SPACE_FACTOR);
+  const dbFree = probe.freeBytes(dbDir);
+  if (probe.volumeOf(dbDir) === probe.volumeOf(probe.tempDir)) {
+    if (dbFree < 2 * need) {
+      return `low-space: temporary copy and database on the same volume (temp directory ${probe.tempDir}): needs ${MB(2 * need)} free, ${MB(dbFree)} available`;
+    }
+    return null;
+  }
+  const tempFree = probe.freeBytes(probe.tempDir);
+  if (tempFree < need) return `low-space: temporary copy (temp directory ${probe.tempDir}) needs ${MB(need)} free, ${MB(tempFree)} available`;
+  if (dbFree < need) return `low-space: database volume needs ${MB(need)} free, ${MB(dbFree)} available`;
+  return null;
+}
 /** How long the service waits for the pipeline to stop importing before postponing VACUUM to the next start. */
 export const VACUUM_QUIESCE_TIMEOUT_MS = 30_000;
 /** The background job checks `startupDone` / `importing` this often, and starts anyway after STORAGE_MAX_WAIT_MS. */
@@ -170,6 +224,9 @@ export interface VacuumOptions {
   evenIfDone?: boolean;
   /** Free bytes on the volume of a directory (default freeBytesOf). */
   freeBytes?: (dir: string) => number;
+  /** SQLite's temp directory (default sqliteTempDir()) and the volume id of a directory (default volumeOf); tests. */
+  tempDir?: string;
+  volumeOf?: (dir: string) => string;
   /** In the service: VACUUM runs in a worker thread while the host's writes are held. Absent: on the store's connection. */
   host?: StorageHost;
   quiesceTimeoutMs?: number;
@@ -205,14 +262,17 @@ export async function vacuumIfDue(store: Store, options: VacuumOptions = {}): Pr
   };
   const before = store.dbFileSizes();
   if (options.skipSpaceCheck !== true) {
-    let free: number;
+    let problem: string | null;
     try {
-      free = (options.freeBytes ?? freeBytesOf)(path.dirname(path.resolve(store.dbPath())));
+      problem = vacuumSpaceProblem(path.dirname(path.resolve(store.dbPath())), before.fileBytes + before.walBytes, {
+        freeBytes: options.freeBytes ?? freeBytesOf,
+        tempDir: options.tempDir ?? sqliteTempDir(),
+        volumeOf: options.volumeOf ?? volumeOf,
+      });
     } catch (err) {
       return skip(`free-space check failed: ${err instanceof Error ? err.message : String(err)}`);
     }
-    const need = Math.ceil((before.fileBytes + before.walBytes) * VACUUM_SPACE_FACTOR);
-    if (free < need) return skip(`low-space: needs ${MB(need)} free, ${MB(free)} available`);
+    if (problem !== null) return skip(problem);
   }
   const host = options.host;
   try {

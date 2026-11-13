@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import {
   migrateAll,
   migrateBatch,
+  sqliteTempDir,
   startStorageMaintenance,
   STORAGE_META,
   storageStatus,
@@ -283,21 +284,60 @@ describe('VACUUM', () => {
     migrateAll(store);
   }
 
+  // The database file and its WAL as they are when the check runs (the checkpointer moves pages between them).
+  const times = (f: number) => (): number => {
+    const { fileBytes, walBytes } = store!.dbFileSizes();
+    return Math.floor((fileBytes + walBytes) * f);
+  };
+  /** Temp directory on another volume than the database (volumeOf injected). */
+  const twoVolumes = { tempDir: path.join(os.tmpdir(), 'elsewhere'), volumeOf: (dir: string) => (dir.endsWith('elsewhere') ? 'T' : 'D') };
+
   test('可用空间不足 1.2 倍时跳过，记下原因；之后空间够了再试', async () => {
     await migratedOld();
-    // The database file and its WAL as they are when the check runs (the checkpointer moves pages between them).
-    const times = (f: number) => (): number => {
-      const { fileBytes, walBytes } = store!.dbFileSizes();
-      return Math.floor((fileBytes + walBytes) * f);
-    };
-    const out = await vacuumIfDue(store!, { freeBytes: times(1.15) });
+    const out = await vacuumIfDue(store!, { ...twoVolumes, freeBytes: times(1.15) });
     expect(out.outcome).toBe('skipped');
     expect(store!.getMeta(STORAGE_META.vacuum)).toMatch(/^skipped:low-space/);
     expect(storageStatus(store!)).toMatchObject({ vacuum: 'skipped', vacuumSkipReason: expect.stringMatching(/^low-space/) });
-    const done = await vacuumIfDue(store!, { freeBytes: times(1.25) });
+    const done = await vacuumIfDue(store!, { ...twoVolumes, freeBytes: times(1.25) });
     expect(done.reason).toBeUndefined();
     expect(done.outcome).toBe('done');
     expect(store!.getMeta(STORAGE_META.vacuum)).toBe('done');
+  });
+
+  test('临时目录在另一个卷上：临时卷不够时跳过（原因里写临时目录），数据库卷不够时也跳过', async () => {
+    await migratedOld();
+    const tempLow = await vacuumIfDue(store!, {
+      ...twoVolumes,
+      freeBytes: (dir) => (dir.endsWith('elsewhere') ? times(1.1)() : times(5)()),
+    });
+    expect(tempLow).toMatchObject({ outcome: 'skipped', reason: expect.stringMatching(/^low-space: temporary copy .*elsewhere/) });
+    const dbLow = await vacuumIfDue(store!, {
+      ...twoVolumes,
+      freeBytes: (dir) => (dir.endsWith('elsewhere') ? times(5)() : times(1.1)()),
+    });
+    expect(dbLow).toMatchObject({ outcome: 'skipped', reason: expect.stringMatching(/^low-space: database volume/) });
+    expect(store!.getMeta(STORAGE_META.vacuum)).toMatch(/^skipped:low-space: database volume/);
+  });
+
+  test('临时目录和数据库在同一个卷上：两份都要算（各自够、合起来不够就跳过）', async () => {
+    await migratedOld();
+    const same = { tempDir: path.join(os.tmpdir(), 'elsewhere'), volumeOf: () => 'C' };
+    const short = await vacuumIfDue(store!, { ...same, freeBytes: times(1.5) });
+    expect(short).toMatchObject({ outcome: 'skipped', reason: expect.stringMatching(/^low-space: temporary copy and database on the same volume/) });
+    const enough = await vacuumIfDue(store!, { ...same, freeBytes: times(2.5) });
+    expect(enough.outcome).toBe('done');
+  });
+
+  test('查临时目录所在卷的空间失败时也跳过', async () => {
+    await migratedOld();
+    const out = await vacuumIfDue(store!, {
+      ...twoVolumes,
+      freeBytes: (dir) => {
+        if (dir.endsWith('elsewhere')) throw new Error('EACCES temp');
+        return 10 ** 12;
+      },
+    });
+    expect(out).toMatchObject({ outcome: 'skipped', reason: expect.stringMatching(/^free-space check failed: .*EACCES temp/) });
   });
 
   test('查不到可用空间时跳过并说明', async () => {
@@ -379,4 +419,12 @@ describe('VACUUM', () => {
     release();
     expect(peek(`SELECT value FROM meta WHERE key = 'poll:cursor:x'`)).toEqual([{ value: 'v1' }]);
   });
+});
+
+test('sqliteTempDir：按 SQLite 的顺序找临时目录', () => {
+  expect(sqliteTempDir({ TMP: 'W1', TEMP: 'W2' }, 'win32')).toBe('W1');
+  expect(sqliteTempDir({ TEMP: 'W2', USERPROFILE: 'WU' }, 'win32')).toBe('W2');
+  expect(sqliteTempDir({ USERPROFILE: 'WU' }, 'win32')).toBe('WU');
+  expect(sqliteTempDir({ SQLITE_TMPDIR: '/s', TMPDIR: '/t' }, 'linux')).toBe('/s');
+  expect(sqliteTempDir({ TMPDIR: '/t' }, 'linux')).toBe('/t');
 });

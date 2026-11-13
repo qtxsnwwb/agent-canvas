@@ -63,7 +63,8 @@ const USAGE = `Usage:
   agent-canvas --version            Print the version
   agent-canvas rebuild              Re-derive the graph from the stored raw log
   agent-canvas compact [--force]    Compress the stored records still uncompressed and reclaim free space (VACUUM);
-                                     the service must not be running. --force: skip the free-disk-space check
+                                     the service must not be running. --force: VACUUM even when not needed, without
+                                     the free-disk-space check
   agent-canvas hooks install [--port <n>] [--yes] [--settings <file>]
                                      Add the agent-canvas hooks to Claude Code's settings.json
   agent-canvas hooks uninstall [--port <n>] [--yes] [--settings <file>]
@@ -344,8 +345,9 @@ export interface CompactResult {
 
 /**
  * `agent-canvas compact`: with the lock of start / rebuild (refused while the service runs), the remaining storage
- * migration synchronously, then VACUUM on this connection (even when one was done before; skipped when the volume has
- * less than 1.2 times the database's size free, unless `force`).
+ * migration synchronously, then VACUUM on this connection, unless one was done and nothing was migrated since (outcome
+ * 'already'); skipped when there is not enough free space (vacuumSpaceProblem). `force` runs VACUUM in any case,
+ * without the space check.
  */
 export async function compact(overrides: Partial<Config> = {}, options: CompactOptions = {}): Promise<CompactResult> {
   const config = resolveConfig(overrides);
@@ -354,9 +356,11 @@ export async function compact(overrides: Partial<Config> = {}, options: CompactO
     const store = openStore(config.dbPath);
     try {
       const before = store.dbFileSizes();
+      const migratedBefore = store.getMeta(STORAGE_META.migration) === 'done';
       const { converted, failed } = migrateAll(store, options.progress !== undefined ? { progress: options.progress } : {});
+      // A VACUUM done after the migration finished leaves nothing to reclaim: run it again only when forced.
       const vacuum = await vacuumIfDue(store, {
-        evenIfDone: true,
+        evenIfDone: options.force === true || !migratedBefore,
         ...(options.force === true ? { skipSpaceCheck: true } : {}),
         ...(options.freeBytes !== undefined ? { freeBytes: options.freeBytes } : {}),
       });
@@ -477,6 +481,9 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
       const size = (s: { fileBytes: number; walBytes: number }): string => megabytes(s.fileBytes + s.walBytes);
       if (r.failed > 0) console.log(`agent-canvas compact: ${r.failed} stored rows could not be compressed (kept as they were)`);
       if (r.vacuum.outcome === 'skipped') console.log(`agent-canvas compact: VACUUM skipped: ${r.vacuum.reason ?? ''}`);
+      if (r.vacuum.outcome === 'already') {
+        console.log('agent-canvas compact: VACUUM not needed (done before, nothing compressed since); --force runs it anyway');
+      }
       console.log(`agent-canvas compact: database file: ${size(r.before)} -> ${size(r.after)}`);
       return 0;
     }
