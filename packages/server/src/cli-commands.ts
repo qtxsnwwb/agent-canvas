@@ -283,8 +283,8 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
       const filesNow = files;
       const anomaliesNow = anomalies;
       const pipelineNow = pipeline;
-      // One after the other: the file summaries are built once the stats ones are, then the anomaly ones (mostly built by
-      // the stats reads already); each warm() never rejects.
+      // One after the other: the file summaries are built once the stats ones are, then the anomaly ones (their first
+      // summaries only seed the notifications' "seen" set); each warm() never rejects.
       warmup = startStatsWarmup({
         warm: async () => {
           await statsNow.warm();

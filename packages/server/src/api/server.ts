@@ -181,10 +181,10 @@ export function buildServer(deps: {
   const stats = deps.stats ?? new StatsService(storeStatsSource(store));
   const files = deps.files ?? new FilesService(storeStatsSource(store));
   const anomalies = deps.anomalies ?? new AnomaliesService(storeStatsSource(store), { importing: () => pipeline.importing() });
-  // One read of a session builds both its stats and its file summary; a stats read builds its anomaly summary too (and an
-  // anomaly read its stats: the warm-up reads each session once).
+  // One read of a session builds both its stats and its file summary. The anomaly service reads on its own: sharing would
+  // put three summaries of a large session in one synchronous stretch (measured: 450 ms instead of 250 ms for a
+  // 100,000-node session) and make every background recompute of a running session rebuild its stats too.
   files.shareReadsWith(stats);
-  anomalies.shareReadsWith(stats.summaryCache());
   const app = Fastify();
   const connections = new Set<Connection>();
 

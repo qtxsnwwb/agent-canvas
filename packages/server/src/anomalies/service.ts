@@ -31,8 +31,8 @@ import { FAILED_SUMMARY, isRunningStatus, summarizeAnomalies, type AnomalySummar
  *
  * - Per-session summaries (summary.ts: loop / failures / churn anomalies + turn costs) in a SessionSummaryCache, the
  *   stats service's design: cached by session, invalidated through noteChanges (a status change is a change too: it
- *   arrives as session_upserted), recomputed only when needed, paged reads that yield, LRU-bounded; reads are shared with
- *   the stats and file caches (shareReadsWith), so one read of a session builds all three summaries.
+ *   arrives as session_upserted), recomputed only when needed, paged reads that yield, LRU-bounded. Its reads are its
+ *   own, not shared with the stats and file caches (see buildServer for why; shareReadsWith exists but is not used).
  * - `cost` anomalies are judged at query time: the finished turn costs of every session (whatever the request's
  *   filters), grouped by (project, origin), one costBaseline per group, costAnomalies per session. The result is cached
  *   under a version bumped by every summary computed, so requests with nothing changed reuse it.
@@ -58,8 +58,11 @@ export const ANOMALIES_CACHE_MAX_WEIGHT = 1_000_000;
 export const ANOMALY_ANSWER_WAIT_MS = 1000;
 /** A running session's change is followed by a recompute this long after the first change of a burst. */
 export const ANOMALY_LIVE_DELAY_MS = 1000;
-/** ... and never sooner than this many times the previous recompute's duration after it ended. */
-export const ANOMALY_LIVE_COST_FACTOR = 4;
+/**
+ * ... and never sooner than this many times the previous recompute's duration after it ended: a 100,000-node session
+ * (≈550 ms measured) is recomputed at most every ≈3.3 s while it runs, about 15 % of one core.
+ */
+export const ANOMALY_LIVE_COST_FACTOR = 6;
 /** A session that left running this recently still counts as running (its last changes may complete an anomaly). */
 export const ANOMALY_RUNNING_GRACE_MS = 5000;
 
