@@ -233,3 +233,15 @@ test('截断的文字以学到的值的开头结尾：至少 6 个字符就遮�
   expect(masker.mask(`psql -W ${pw.slice(0, 5)}…`, { truncated: true })).toBe(`psql -W ${pw.slice(0, 5)}…`);
   expect(masker.mask(`psql -W ${pw.slice(0, 9)}`)).toBe(`psql -W ${pw.slice(0, 9)}`);
 });
+
+test('学到的值：4 万个共享前缀的值，查找仍然快而准确', () => {
+  const masker = m();
+  for (let i = 0; i < 40_000; i++) masker.learn(`token=${'y'.repeat(20)}${i}`);
+  expect(masker.learnedCount()).toBe(40_000);
+  const text = Array.from({ length: 4000 }, (_, i) => `grep ${'y'.repeat(20)}${i * 7} .`).join('\n');
+  const t0 = performance.now();
+  const out = masker.mask(text);
+  expect(performance.now() - t0).toBeLessThan(2000);
+  expect(out).not.toMatch(/y{20}\d/);
+  expect(masker.report().learnedSkipped).toBeUndefined();
+});

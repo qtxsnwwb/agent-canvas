@@ -1021,8 +1021,36 @@ function ruleLearnedTail(sc: Scan, learned: Learned): void {
 }
 
 /**
- * Literal occurrences of learned values (at each position the longest one; every candidate of a hash bucket is
- * compared in full, so no value is missed for sharing a prefix with many others). Work is bounded: once the characters
+ * The longest value of a sorted list that `text` holds at `at`: the greatest value ≤ the text from `at` is that prefix
+ * when it is one; otherwise every prefix in the list is a prefix of it too, so search again for the longest common
+ * prefix (each round shortens the target). cost: binary-search steps plus characters compared.
+ */
+function longestPrefixIn(list: string[], text: string, at: number): { value: string | null; cost: number } {
+  let target = text.slice(at, at + MASK_LEARN_MAX_CHARS);
+  let cost = 0;
+  while (target.length >= MASK_LEARN_MIN_CHARS) {
+    let lo = 0;
+    let hi = list.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      cost++;
+      if (list[mid]! <= target) lo = mid + 1;
+      else hi = mid;
+    }
+    if (lo === 0) return { value: null, cost };
+    const q = list[lo - 1]!;
+    let p = 0;
+    while (p < q.length && p < target.length && q.charCodeAt(p) === target.charCodeAt(p)) p++;
+    cost += p + 1;
+    if (p === q.length) return { value: q, cost };
+    target = target.slice(0, p);
+  }
+  return { value: null, cost };
+}
+
+/**
+ * Literal occurrences of learned values (at each position the longest one, found by a search in the hash bucket's
+ * sorted values — exact for any number of values sharing a prefix). Work is bounded: once the characters
  * compared pass 32 × the text length + 1,000,000 — only a text built against the learned set gets there — learned
  * matching stops for the rest of this text (the rules still apply) and false is returned (counted in the report as
  * MaskReport.learnedSkipped). Returns true when the whole text was searched.
@@ -1030,7 +1058,7 @@ function ruleLearnedTail(sc: Scan, learned: Learned): void {
 function ruleLearned(sc: Scan, learned: Learned): boolean {
   if (learned.types.size === 0) return true;
   if (!learned.sorted) {
-    for (const list of learned.byHash.values()) list.sort((a, b) => b.length - a.length);
+    for (const list of learned.byHash.values()) list.sort();
     learned.sorted = true;
   }
   const { text } = sc;
@@ -1045,18 +1073,13 @@ function ruleLearned(sc: Scan, learned: Learned): boolean {
     if ((filter[idx >>> 5]! >>> (idx & 31)) & 1) {
       const list = learned.byHash.get(h);
       if (list !== undefined) {
-        for (const v of list) {
-          if (i + v.length > text.length) continue;
-          let p = 0;
-          while (p < v.length && v.charCodeAt(p) === text.charCodeAt(i + p)) p++;
-          budget -= p + 1;
-          if (p === v.length) {
-            sc.out.push(cand(i, i + v.length, learned.types.get(v)!, 0));
-            matched = v.length;
-            break;
-          }
-          if (budget < 0) return false;
+        const v = longestPrefixIn(list, text, i);
+        budget -= v.cost;
+        if (v.value !== null) {
+          sc.out.push(cand(i, i + v.value.length, learned.types.get(v.value)!, 0));
+          matched = v.value.length;
         }
+        if (budget < 0) return false;
       }
     }
     if (matched > 0) {
