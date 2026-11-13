@@ -1,6 +1,8 @@
 import {
+  nodeAddressHash,
   projectDisplayName,
   validateNotificationSettings,
+  type Anomaly,
   type Diagnostics,
   type NotificationKind,
   type NotificationSettings,
@@ -99,6 +101,7 @@ export class NotificationService {
       suppressed: (origin) => this.suppressed(origin),
       projectName: (session) => this.projectName(session),
       sessionUrl: (id) => `${this.baseUrl}/#/s/${encodeURIComponent(id)}`,
+      nodeUrl: (id, nodeId) => `${this.baseUrl}/${nodeAddressHash(id, nodeId)}`,
       isAbortedCall: (sessionId, nodeId) => deps.store.getNodeDetail(sessionId, nodeId)?.text === ABORTED_NOTE,
       reportError: (message) => this.recordError(message),
       ...(deps.graceMs !== undefined ? { graceMs: deps.graceMs } : {}),
@@ -132,6 +135,20 @@ export class NotificationService {
   handleHook(origin: Origin, eventName: string, sessionId: string | null, agentId: string | null, payload: Record<string, unknown> | null = null): void {
     if (this.unsubscribe === null) return;
     this.guard(() => this.engine.handleHook(origin, eventName, sessionId, agentId, payload));
+  }
+
+  /**
+   * A session's anomaly summary was (re)computed (AnomaliesService.onSummary): new `loop` / `failures` anomalies may
+   * notify (NotificationEngine.handleAnomalies). Seen anomalies are remembered from construction on, also before start().
+   */
+  handleAnomalies(event: { session: Session; anomalies: readonly Anomaly[]; running: boolean }): void {
+    if (this.closing !== null) return;
+    this.guard(() => this.engine.handleAnomalies(event.session, event.anomalies, event.running));
+  }
+
+  /** Whether a `loop` / `failures` notification could be sent now (master switch and one of the two on). */
+  wantsAnomalies(): boolean {
+    return this.settings.enabled && (this.settings.loop || this.settings.failures);
   }
 
   getSettings(): NotificationSettingsResponse {

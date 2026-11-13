@@ -1,7 +1,10 @@
 import type { Project } from './model.js';
 
-/** The four occasions a desktop notification is sent for (spec 3); `test` is the settings panel's test notification. */
-export type NotificationKind = 'permission' | 'finished' | 'error' | 'stuck';
+/**
+ * The occasions a desktop notification is sent for (spec 3; `loop` and `failures`: anomaly spec 5); `test` is the
+ * settings panel's test notification.
+ */
+export type NotificationKind = 'permission' | 'finished' | 'error' | 'stuck' | 'loop' | 'failures';
 
 /** Stored in the `meta` table under `notifications` (JSON). Replaced as a whole by PUT /api/notifications/settings. */
 export interface NotificationSettings {
@@ -19,6 +22,10 @@ export interface NotificationSettings {
   stuck: boolean;
   /** Integer, 1..NOTIFICATION_LIMITS.stuckMinutes.max. */
   stuckMinutes: number;
+  /** A running session's turn starts going round in circles (anomaly `loop`). Off by default. */
+  loop: boolean;
+  /** A running session's turn has a streak of failed calls (anomaly `failures`). Off by default. */
+  failures: boolean;
 }
 
 export const DEFAULT_NOTIFICATION_SETTINGS: Readonly<NotificationSettings> = Object.freeze({
@@ -29,6 +36,8 @@ export const DEFAULT_NOTIFICATION_SETTINGS: Readonly<NotificationSettings> = Obj
   error: true,
   stuck: true,
   stuckMinutes: 15,
+  loop: false,
+  failures: false,
 });
 
 /** Inclusive integer ranges of the two thresholds. */
@@ -37,7 +46,7 @@ export const NOTIFICATION_LIMITS = Object.freeze({
   stuckMinutes: { min: 1, max: 1440 },
 });
 
-const BOOLEAN_FIELDS = ['enabled', 'permission', 'finished', 'error', 'stuck'] as const;
+const BOOLEAN_FIELDS = ['enabled', 'permission', 'finished', 'error', 'stuck', 'loop', 'failures'] as const;
 const NUMBER_FIELDS = ['finishedMinSeconds', 'stuckMinutes'] as const;
 const FIELDS: readonly string[] = [...BOOLEAN_FIELDS, ...NUMBER_FIELDS];
 
@@ -65,6 +74,8 @@ export function validateNotificationSettings(value: unknown): { ok: true; settin
     error: o.error as boolean,
     stuck: o.stuck as boolean,
     stuckMinutes: o.stuckMinutes as number,
+    loop: o.loop as boolean,
+    failures: o.failures as boolean,
   };
   return { ok: true, settings };
 }

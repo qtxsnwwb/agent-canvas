@@ -31,6 +31,7 @@ import { CursorSource } from './sources/cursor/source.js';
 import type { PollSource } from './sources/poll.js';
 import type { FileSource } from './sources/source.js';
 import { startWatcher } from './sources/transcript/watcher.js';
+import { AnomaliesService } from './anomalies/service.js';
 import { FilesService } from './files/service.js';
 import { StatsService, storeStatsSource } from './stats/service.js';
 import { startStatsWarmup, type StatsWarmup } from './stats/warmup.js';
@@ -218,6 +219,7 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
   let notifications: NotificationService | null = null;
   let stats: StatsService | null = null;
   let files: FilesService | null = null;
+  let anomalies: AnomaliesService | null = null;
   let warmup: StatsWarmup | null = null;
   let storage: StorageMaintenance | null = null;
   let searchBuild: SearchIndexBuild | null = null;
@@ -242,6 +244,14 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
     });
     stats = new StatsService(storeStatsSource(store));
     files = new FilesService(storeStatsSource(store));
+    const notificationsNow = notifications;
+    const pipelineForAnomalies = pipeline;
+    // Running sessions are recomputed in the background only while a loop / failures notification could be sent.
+    anomalies = new AnomaliesService(storeStatsSource(store), {
+      importing: () => pipelineForAnomalies.importing(),
+      live: () => notificationsNow.wantsAnomalies(),
+    });
+    anomalies.onSummary((event) => notificationsNow.handleAnomalies(event));
     // After the (automatic) rebuild above; the job itself waits for the initial scan and the first poll rounds.
     if (options.storage !== false && storageWorkDue(store)) {
       storage = startStorageMaintenance(store, pipeline, { log: (line) => process.stderr.write(`${line}\n`), ...options.storage });
@@ -259,6 +269,7 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
       notifications,
       stats,
       files,
+      anomalies,
       ...(storageJob !== null ? { storage: storageJob } : {}),
       ...(searchJobNow !== null ? { search: searchJobNow } : {}),
     });
@@ -270,12 +281,15 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
     if (options.statsWarmup ?? process.env.AGENT_CANVAS_STATS_WARMUP !== '0') {
       const statsNow = stats;
       const filesNow = files;
+      const anomaliesNow = anomalies;
       const pipelineNow = pipeline;
-      // One after the other: the file summaries are built once the stats ones are (each warm() never rejects).
+      // One after the other: the file summaries are built once the stats ones are, then the anomaly ones (mostly built by
+      // the stats reads already); each warm() never rejects.
       warmup = startStatsWarmup({
         warm: async () => {
           await statsNow.warm();
           await filesNow.warm();
+          await anomaliesNow.warm();
         },
         settled: () => pipelineNow.startupDone(),
       });
@@ -283,6 +297,7 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
   } catch (err) {
     stats?.close();
     files?.close();
+    anomalies?.close();
     await warmup?.stop();
     await storage?.stop();
     await searchBuild?.stop();
@@ -300,6 +315,7 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
   const service = notifications!;
   const statsService = stats!;
   const filesService = files!;
+  const anomaliesService = anomalies!;
   const statsWarmup = warmup;
   const storageJob = storage;
   const searchJob = searchBuild;
@@ -318,6 +334,7 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
           await searchJob?.stop();
           statsService.close();
           filesService.close();
+          anomaliesService.close();
           await statsWarmup?.done;
           // Unsubscribes and stops the timer at once; deliveries in flight end within their timeout meanwhile.
           const notificationsClosed = service.close();

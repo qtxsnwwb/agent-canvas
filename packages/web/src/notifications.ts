@@ -1,5 +1,5 @@
 import {
-  NOTIFICATION_LIMITS, validateNotificationSettings,
+  ANOMALY_LABELS, NOTIFICATION_LIMITS, validateNotificationSettings,
   type Diagnostics, type NotificationKind, type NotificationSettings, type NotificationStatus,
 } from '@agent-canvas/shared';
 import { formatAge } from './diagnostics';
@@ -11,6 +11,8 @@ export const KIND_LABELS: Record<SentKind, string> = {
   finished: '一轮跑完了',
   error: '出错中断',
   stuck: '卡住很久',
+  loop: ANOMALY_LABELS.loop.name,
+  failures: ANOMALY_LABELS.failures.name,
   test: '测试通知',
 };
 

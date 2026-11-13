@@ -8,7 +8,7 @@ import {
 
 const valid: NotificationSettings = { ...DEFAULT_NOTIFICATION_SETTINGS, enabled: true };
 
-test('默认值：总开关关，四种都开，60 秒，15 分钟', () => {
+test('默认值：总开关关，四种都开，60 秒，15 分钟；两种异常默认关', () => {
   expect(DEFAULT_NOTIFICATION_SETTINGS).toEqual({
     enabled: false,
     permission: true,
@@ -17,6 +17,8 @@ test('默认值：总开关关，四种都开，60 秒，15 分钟', () => {
     error: true,
     stuck: true,
     stuckMinutes: 15,
+    loop: false,
+    failures: false,
   });
 });
 
@@ -29,6 +31,8 @@ test.each([
   ['不是对象', null],
   ['数组', []],
   ['缺字段', { ...valid, stuck: undefined }],
+  ['缺异常开关', { ...valid, loop: undefined }],
+  ['异常开关不是布尔', { ...valid, failures: 1 }],
   ['多余字段', { ...valid, extra: 1 }],
   ['开关不是布尔', { ...valid, enabled: 'true' }],
   ['最短时长为负', { ...valid, finishedMinSeconds: -1 }],
@@ -42,6 +46,11 @@ test.each([
   const r = validateNotificationSettings(value);
   expect(r.ok).toBe(false);
   if (!r.ok) expect(r.error).toMatch(/\S/);
+});
+
+test('两种异常开关原样通过', () => {
+  const on = { ...valid, loop: true, failures: true };
+  expect(validateNotificationSettings(on)).toEqual({ ok: true, settings: on });
 });
 
 test('项目名：与页面相同的规则', () => {
