@@ -57,34 +57,52 @@ export function cutUtf8(s: string, maxBytes: number): { text: string; bytes: num
   return { text: s, bytes, cut: false };
 }
 
+/** One part of an index text: [start, end) in UTF-16 units; `cut`: its source went on past `end` (a byte cap). */
+export interface IndexPart { start: number; end: number; cut: boolean }
+
 /** Collects text parts (joined by '\n') up to a byte budget; stops taking anything once it is full. */
 class Parts {
-  readonly parts: string[] = [];
+  readonly parts: { text: string; cut: boolean }[] = [];
   bytes = 0;
   full = false;
   private readonly max: number;
   constructor(max: number) {
     this.max = max;
   }
-  add(s: string): void {
+  /** Adds `s` (cut to the room left); `cut`: `s` itself is already a cut of something longer. */
+  add(s: string, alreadyCut = false): void {
     if (this.full || s === '') return;
     const sep = this.parts.length > 0 ? 1 : 0;
     const room = this.max - this.bytes - sep;
     if (room <= 0) {
       this.full = true;
+      if (this.parts.length > 0) this.parts[this.parts.length - 1]!.cut = true; // something was left out after it
       return;
     }
     const { text, bytes, cut } = cutUtf8(s, room);
     if (text !== '') {
-      this.parts.push(text);
+      this.parts.push({ text, cut: cut || alreadyCut });
       this.bytes += bytes + sep;
-    }
+    } else if (cut && this.parts.length > 0) this.parts[this.parts.length - 1]!.cut = true;
     if (cut) this.full = true;
   }
-  text(): string {
-    return this.parts.join('\n');
+  /** Adds another collection's parts one by one (keeping their own cut flags). */
+  addAll(other: Parts): void {
+    other.parts.forEach((p, i) => this.add(p.text, p.cut || (other.full && i === other.parts.length - 1)));
+  }
+  result(): IndexText {
+    const spans: IndexPart[] = [];
+    let at = 0;
+    for (const p of this.parts) {
+      spans.push({ start: at, end: at + p.text.length, cut: p.cut });
+      at += p.text.length + 1;
+    }
+    return { text: this.parts.map((p) => p.text).join('\n'), parts: spans };
   }
 }
+
+/** A node's index text and where its parts are in it. */
+export interface IndexText { text: string; parts: IndexPart[] }
 
 /** Long base64 payloads (images) carry no searchable text. */
 const BASE64_RUN = /^[A-Za-z0-9+/=\r\n]+$/;
@@ -138,6 +156,11 @@ const nonEmptyString = (v: unknown): string | null => (typeof v === 'string' && 
  * - unknown: nothing. '' means the node gets no index row.
  */
 export function indexTextOf(node: IndexNode, detail: Partial<NodeDetail> | null | undefined): string {
+  return indexPartsOf(node, detail).text;
+}
+
+/** indexTextOf with the parts' places (a match must lie within one part; a cut part ends a snippet with an ellipsis). */
+export function indexPartsOf(node: IndexNode, detail: Partial<NodeDetail> | null | undefined): IndexText {
   const d = detail ?? {};
   const parts = new Parts(INDEX_TEXT_MAX_BYTES);
   switch (node.kind) {
@@ -159,14 +182,27 @@ export function indexTextOf(node: IndexNode, detail: Partial<NodeDetail> | null 
       if (d.output !== undefined && d.output !== null && !parts.full) {
         const out = new Parts(INDEX_OUTPUT_BYTES);
         addValues(d.output, out);
-        parts.add(out.text());
+        parts.addAll(out);
       }
       break;
     }
     default:
       break;
   }
-  return parts.text();
+  return parts.result();
+}
+
+/**
+ * The first occurrence of NEEDLE (already ASCII-lower-cased) in the index text, ASCII-case-insensitively, that lies
+ * within one part: the newline between two parts is not recorded text, so a match across it is no match. Null: none.
+ */
+export function findInIndexText(it: IndexText, needle: string): { at: number; part: IndexPart } | null {
+  const hay = asciiLower(it.text);
+  for (let at = hay.indexOf(needle); at >= 0; at = hay.indexOf(needle, at + 1)) {
+    const part = it.parts.find((p) => p.start <= at && at + needle.length <= p.end);
+    if (part !== undefined) return { at, part };
+  }
+  return null;
 }
 
 /**
@@ -222,8 +258,10 @@ export interface Snippet { before: string; match: string; after: string; clipped
  * The text around the match at [at, at + length) (UTF-16 offsets on a code-point boundary): about SNIPPET_SIDE_CHARS
  * code points on each side, whitespace runs collapsed to one space (none at the text's own start or end), cut on
  * code-point boundaries. clippedStart / clippedEnd: text was left out before / after (the page shows an ellipsis).
+ * PART: the index text part holding the match; when it was cut (the 8 KB output or 64 KB text cap), the snippet ends
+ * at its end with clippedEnd (what follows in the index text is another part, not what followed in the record).
  */
-export function cutSnippet(text: string, at: number, length: number): Snippet {
+export function cutSnippet(text: string, at: number, length: number, part?: IndexPart): Snippet {
   const from = Math.max(0, at - SNIPPET_WINDOW_UNITS);
   let head = text.slice(from, at);
   if (from > 0 && (head.charCodeAt(0) & 0xfc00) === 0xdc00) head = head.slice(1); // window cut a pair
@@ -238,11 +276,12 @@ export function cutSnippet(text: string, at: number, length: number): Snippet {
   const match = matchCps.slice(0, SNIPPET_MATCH_MAX_CHARS).join('');
 
   const end = at + length;
-  const to = Math.min(text.length, end + SNIPPET_WINDOW_UNITS);
+  const stop = part?.cut === true ? part.end : text.length;
+  const to = Math.min(stop, end + SNIPPET_WINDOW_UNITS);
   let tail = text.slice(end, to);
-  if (to < text.length && (tail.charCodeAt(tail.length - 1) & 0xfc00) === 0xd800) tail = tail.slice(0, -1);
+  if (to < stop && (tail.charCodeAt(tail.length - 1) & 0xfc00) === 0xd800) tail = tail.slice(0, -1);
   let afterAll = matchCut ? '' : collapse(tail);
-  const restHasText = to < text.length && /\S/.test(text.slice(to));
+  const restHasText = part?.cut === true || (to < stop && /\S/.test(text.slice(to, stop)));
   if (!restHasText) afterAll = afterAll.trimEnd();
   const afterCps = Array.from(afterAll);
   const after = afterCps.slice(0, SNIPPET_SIDE_CHARS).join('');
@@ -280,6 +319,8 @@ export interface SearchIndexBuild {
   done: Promise<void>;
   stop(): Promise<void>;
   lastError(): string | null;
+  /** Diagnostics.search: the index's status with this run's lastError. */
+  status(): SearchIndexStatus;
 }
 
 /**
@@ -291,7 +332,7 @@ export interface SearchIndexBuild {
  * build until the next start. Its timers never keep the process alive.
  */
 export function startSearchIndexBuild(
-  store: { searchIndexStatus(): SearchIndexStatus; searchIndexBatch(maxRows: number, maxBytes: number): { more: boolean } },
+  store: { searchIndexStatus(): SearchIndexStatus; searchIndexBatch(maxRows: number, maxBytes: number): { more: boolean; skipped?: number } },
   host: SearchIndexHost,
   options: SearchIndexBuildOptions = {},
 ): SearchIndexBuild {
@@ -331,7 +372,9 @@ export function startSearchIndexBuild(
       if (stopped) return;
       let more: boolean;
       try {
-        more = store.searchIndexBatch(options.batchRows ?? SEARCH_BUILD_BATCH_ROWS, options.batchBytes ?? SEARCH_BUILD_BATCH_BYTES).more;
+        const batch = store.searchIndexBatch(options.batchRows ?? SEARCH_BUILD_BATCH_ROWS, options.batchBytes ?? SEARCH_BUILD_BATCH_BYTES);
+        more = batch.more;
+        if ((batch.skipped ?? 0) > 0) log(`agent-canvas: search index: ${batch.skipped} node row(s) could not be read fully (see diagnostics)`);
       } catch (err) {
         lastError = err instanceof Error ? err.message : String(err);
         log(`agent-canvas: building the search index failed (retried at the next start): ${lastError}`);
@@ -353,6 +396,7 @@ export function startSearchIndexBuild(
       await done;
     },
     lastError: () => lastError,
+    status: () => ({ ...store.searchIndexStatus(), lastError }),
   };
 }
 
@@ -362,9 +406,20 @@ export function startSearchIndexBuild(
  * Version of the index (indexTextOf and the table layout). `meta.search_index` holds it once the index covers every node;
  * any other value (or none) makes start-up build the index again in the background.
  */
+// Bump it whenever indexTextOf (or the table) changes what a node's row holds: the consistency check at open only
+// catches orphan rows, so an older text format would otherwise stay in the index.
 export const SEARCH_INDEX_VERSION = '1';
-/** meta keys: the completeness marker, and the background build's position and range end (node rowids). */
-export const SEARCH_META = { complete: 'search_index', after: 'search_index:after', end: 'search_index:end' } as const;
+/**
+ * meta keys: the completeness marker, the background build's position and range end (node rowids), and the number of
+ * node rows the last build could not index as usual (`skipped`: an unparseable node body, or a detail that could not be
+ * decoded: then only the node's own row (its summary) is indexed).
+ */
+export const SEARCH_META = {
+  complete: 'search_index',
+  after: 'search_index:after',
+  end: 'search_index:end',
+  skipped: 'search_index:skipped',
+} as const;
 /** The detail level chosen by measurement (spec 3.2). */
 export const DEFAULT_SEARCH_DETAIL: SearchIndexDetail = 'none';
 
@@ -444,10 +499,17 @@ export class SearchIndex {
   readonly detail: SearchIndexDetail;
   /** False only for the benchmark's baseline (detail 'off'): no row is written. */
   private readonly maintained: boolean;
+  /** Told about every node detail found undecodable (Diagnostics.storage.unreadableDetails). */
+  private readonly onUnreadable: (sessionId: string, nodeId: string) => void;
 
   // No parameter properties: the store is also loaded by Node's type stripping (test/child), which does not support them.
-  constructor(db: Database.Database, detail: SearchIndexDetail | 'off' = DEFAULT_SEARCH_DETAIL) {
+  constructor(
+    db: Database.Database,
+    detail: SearchIndexDetail | 'off' = DEFAULT_SEARCH_DETAIL,
+    onUnreadable: (sessionId: string, nodeId: string) => void = () => {},
+  ) {
     this.db = db;
+    this.onUnreadable = onUnreadable;
     this.detail = detail === 'off' ? 'none' : detail;
     this.maintained = detail !== 'off';
     const existed = db.prepare(`SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'search_fts'`).get() !== undefined;
@@ -475,9 +537,11 @@ export class SearchIndex {
          AND (@cutoff IS NULL OR strftime('%Y-%m-%dT%H:%M:%fZ', last_activity_at) >= @cutoff)
        ORDER BY last_activity_at DESC, id`,
     );
-    this.shortNodes = db.prepare(`SELECT rowid, body FROM node WHERE session_id = ? AND json_extract(body, '$.kind') IN ('prompt', 'text')`);
+    // Every node of the session with its kind only, so the scan can check its time budget per node (a session may hold
+    // tens of thousands of tool nodes); the bodies of prompts and replies are then read by rowid.
+    this.shortNodes = db.prepare(`SELECT rowid, json_extract(body, '$.kind') AS kind FROM node WHERE session_id = ?`).raw();
     this.batchRows = db.prepare(
-      `SELECT n.rowid AS rowid, n.body AS body, d.data AS data, d.enc AS enc FROM node n
+      `SELECT n.rowid AS rowid, n.session_id AS sessionId, n.id AS nodeId, n.body AS body, d.data AS data, d.enc AS enc FROM node n
        LEFT JOIN node_detail d ON d.session_id = n.session_id AND d.node_id = n.id
        WHERE n.rowid > ? AND n.rowid <= ? ORDER BY n.rowid LIMIT ?`,
     );
@@ -509,23 +573,36 @@ export class SearchIndex {
     this.deleteMeta.run(SEARCH_META.end);
   }
 
+  private skippedCount(): number {
+    return Number(this.meta(SEARCH_META.skipped) ?? 0) || 0;
+  }
+
   /** True when every node is indexed (and the index is maintained with every write since). */
   complete(): boolean {
     return this.meta(SEARCH_META.complete) === SEARCH_INDEX_VERSION;
   }
 
-  /** Progress of the build in node row positions (zeros when complete). */
+  /**
+   * Progress of the build in node row positions (zeros when complete) and the rows the last build skipped. lastError is
+   * always null here: only the running build knows it (startSearchIndexBuild).
+   */
   status(): SearchIndexStatus {
-    if (this.complete()) return { indexing: false, indexed: 0, total: 0 };
+    const skipped = this.skippedCount();
+    if (this.complete()) return { indexing: false, indexed: 0, total: 0, skipped, lastError: null };
     const end = Number(this.meta(SEARCH_META.end) ?? NaN);
     const total = Number.isFinite(end) ? end : ((this.maxNodeRowid.get() as number | null) ?? 0);
-    return { indexing: true, indexed: Math.min(total, Number(this.meta(SEARCH_META.after) ?? 0) || 0), total };
+    return { indexing: true, indexed: Math.min(total, Number(this.meta(SEARCH_META.after) ?? 0) || 0), total, skipped, lastError: null };
   }
 
-  /** Replaces a node's row: removes the one under `stale` (the node's previous rowid, if it had one), adds `text`. */
+  /**
+   * Replaces a node's row: removes the one under `stale` (the node's previous rowid, if it had one), adds `text`. A new
+   * rowid (stale null or different) is cleared first as well: a contentless table accepts a second insert under a rowid
+   * and keeps both texts' tokens, which nothing would notice (verification filters the false matches).
+   */
   write(stale: number | null, rowid: number, text: string): void {
     if (!this.maintained) return;
     if (stale !== null) this.deleteRow.run(stale);
+    if (stale !== rowid) this.deleteRow.run(rowid);
     if (text !== '') this.insertRow.run(rowid, text);
   }
 
@@ -535,48 +612,69 @@ export class SearchIndex {
     for (const rowid of this.sessionRowids.all(sessionId) as number[]) this.deleteRow.run(rowid);
   }
 
+
   /** Empties the index along with every node (clearDerived): an empty index of no nodes is complete. */
   clear(): void {
     this.deleteAllRows.run();
     this.markComplete();
+    this.deleteMeta.run(SEARCH_META.skipped);
   }
 
   /**
    * One batch of the background build, in one transaction: starts the build on first use (empties the index and records
    * the node rowid range to cover; nodes written afterwards are indexed by their own writes), then (re)indexes the next
    * nodes of the range, at most `maxRows` and stopping once their stored bodies and details reach `maxBytes`. Marks the
-   * index complete after the last batch. Returns whether nodes are left; does nothing when the index is complete.
+   * index complete after the last batch. Returns whether nodes are left; does nothing when the index is complete. A node
+   * row that cannot be read (its body does not parse) is skipped, one whose detail cannot be decoded is indexed from its
+   * own row (the summary); both are counted (`skipped` in status()), neither fails the batch.
    */
-  buildBatch(maxRows: number, maxBytes: number): { more: boolean; indexed: number } {
+  buildBatch(maxRows: number, maxBytes: number): { more: boolean; indexed: number; skipped: number } {
     return this.db.transaction(() => {
-      if (this.complete()) return { more: false, indexed: 0 };
+      if (this.complete()) return { more: false, indexed: 0, skipped: 0 };
       if (this.meta(SEARCH_META.end) === null) {
         this.deleteAllRows.run();
         this.upsertMeta.run(SEARCH_META.end, String((this.maxNodeRowid.get() as number | null) ?? 0));
         this.upsertMeta.run(SEARCH_META.after, '0');
+        this.deleteMeta.run(SEARCH_META.skipped);
       }
       const end = Number(this.meta(SEARCH_META.end)) || 0;
       const after = Number(this.meta(SEARCH_META.after)) || 0;
-      const rows: { rowid: number; body: string; data: unknown; enc: number | null }[] = [];
+      const rows: { rowid: number; sessionId: string; nodeId: string; body: unknown; data: unknown; enc: number | null }[] = [];
       let bytes = 0;
       for (const row of this.batchRows.iterate(after, end, Math.max(1, maxRows)) as IterableIterator<(typeof rows)[number]>) {
         rows.push(row);
-        bytes += row.body.length + (typeof row.data === 'string' || row.data instanceof Uint8Array ? row.data.length : 0);
+        bytes += (typeof row.body === 'string' ? row.body.length : 0) + (typeof row.data === 'string' || row.data instanceof Uint8Array ? row.data.length : 0);
         if (bytes >= maxBytes) break; // ends the iteration (and the statement) before the writes below
       }
+      let skipped = 0;
       for (const row of rows) {
-        const node = JSON.parse(row.body) as GraphNode;
-        // A detail that cannot be decoded: the node is found by what its own row holds (the summary).
-        const detail = row.data === null ? {} : parseDetail(row.data, row.enc ?? 0);
+        let node: GraphNode;
+        try {
+          node = JSON.parse(String(row.body)) as GraphNode;
+          if (typeof node !== 'object' || node === null) throw new Error('not an object');
+        } catch {
+          skipped += 1;
+          this.deleteRow.run(row.rowid);
+          continue;
+        }
+        let detail: Partial<NodeDetail> | null = {};
+        if (row.data !== null) {
+          detail = parseDetail(row.data, row.enc ?? 0);
+          if (detail === null) {
+            skipped += 1;
+            this.onUnreadable(row.sessionId, row.nodeId);
+          }
+        }
         this.write(row.rowid, row.rowid, indexTextOf(node, detail));
       }
+      if (skipped > 0) this.upsertMeta.run(SEARCH_META.skipped, String(this.skippedCount() + skipped));
       const last = rows.length === 0 ? end : rows[rows.length - 1]!.rowid;
       if (last >= end) {
         this.markComplete();
-        return { more: false, indexed: rows.length };
+        return { more: false, indexed: rows.length - skipped, skipped };
       }
       this.upsertMeta.run(SEARCH_META.after, String(last));
-      return { more: true, indexed: rows.length };
+      return { more: true, indexed: rows.length - skipped, skipped };
     })();
   }
 
@@ -586,24 +684,36 @@ export class SearchIndex {
     return this.sessionsStmt.all({ projectId: options.projectId ?? null, origin: options.origin ?? null, cutoff }) as SessionRow[];
   }
 
+  /** A node row by rowid; null when missing or unreadable (a body that does not parse is never a hit). */
   private nodeRow(rowid: number): (NodeRow & { sessionId: string }) | null {
     const row = this.nodeByRowid.get(rowid) as { sessionId: string; body: string } | undefined;
-    return row === undefined ? null : { rowid, sessionId: row.sessionId, node: JSON.parse(row.body) as GraphNode };
+    if (row === undefined) return null;
+    try {
+      const node = JSON.parse(row.body) as GraphNode;
+      return typeof node === 'object' && node !== null ? { rowid, sessionId: row.sessionId, node } : null;
+    } catch {
+      return null;
+    }
   }
 
-  /** The node's index text from its stored detail; null when the detail cannot be decoded. */
-  private textOf(node: GraphNode): string | null {
+  /** The node's index text from its stored detail; null when the detail cannot be decoded (counted as unreadable). */
+  private textOf(node: GraphNode): IndexText | null {
     const row = this.detailOf.get(node.sessionId, node.id) as { data: unknown; enc: number } | undefined;
     const detail = row === undefined ? {} : parseDetail(row.data, row.enc);
-    return detail === null ? null : indexTextOf(node, detail);
+    if (detail === null) {
+      this.onUnreadable(node.sessionId, node.id);
+      return null;
+    }
+    return indexPartsOf(node, detail);
   }
 
   /**
-   * Content search (spec 3.3); see ContentSearchResponse. Literal, ASCII-case-insensitive. 3+ code points: index
-   * candidates, verified against the real text in rank order (sessions by last activity, nodes by time, newest first)
-   * until the limits are full, CONTENT_MAX_DECODES details were decoded or CONTENT_TIME_BUDGET_MS passed. Exactly 2: a
-   * scan of the prompt and reply nodes of sessions active in the last CONTENT_SHORT_QUERY_DAYS days, newest first, at
-   * most SHORT_QUERY_NODE_BUDGET nodes (and the same time budget).
+   * Content search (spec 3.3); see ContentSearchResponse. Literal, ASCII-case-insensitive, within one part of a node's
+   * index text. 3+ code points: index candidates, verified against the real text in rank order (sessions by last
+   * activity, nodes by time, newest first) until the limits are full, CONTENT_MAX_DECODES details were decoded or
+   * CONTENT_TIME_BUDGET_MS passed. Exactly 2: a scan of the prompt and reply nodes of sessions active in the last
+   * CONTENT_SHORT_QUERY_DAYS days, newest first, at most SHORT_QUERY_NODE_BUDGET of them (and the same time budget,
+   * checked per node row read).
    */
   search(rawQuery: string, options: ContentSearchOptions = {}): ContentSearchResult {
     const deadline = now() + (options.timeBudgetMs ?? CONTENT_TIME_BUDGET_MS);
@@ -618,18 +728,25 @@ export class SearchIndex {
       stopped = true;
       result.truncated = true;
     };
-    const hitOf = (session: SessionRow, node: GraphNode, indexText: string, at: number): ContentHit => ({
-      sessionId: session.id,
-      projectId: session.projectId,
-      origin: session.origin,
-      sessionTitle: session.title,
-      nodeId: node.id,
-      kind: node.kind,
-      toolName: node.toolName,
-      at: node.timestamp,
-      agentId: node.agentId,
-      snippet: cutSnippet(indexText, at, text.length),
-    });
+    /** The node's hit, or null when its text does not contain the query within one part. */
+    const verify = (session: SessionRow, node: GraphNode): ContentHit | null => {
+      const it = this.textOf(node);
+      if (it === null) return null;
+      const found = findInIndexText(it, needle);
+      if (found === null) return null;
+      return {
+        sessionId: session.id,
+        projectId: session.projectId,
+        origin: session.origin,
+        sessionTitle: session.title,
+        nodeId: node.id,
+        kind: node.kind,
+        toolName: node.toolName,
+        at: node.timestamp,
+        agentId: node.agentId,
+        snippet: cutSnippet(it.text, found.at, text.length, found.part),
+      };
+    };
 
     if (mode === 'index') {
       const expr = ftsMatchExpression(text, this.detail);
@@ -650,13 +767,11 @@ export class SearchIndex {
           }
           if (decodes >= CONTENT_MAX_DECODES || now() > deadline) return stop();
           decodes += 1;
-          const indexText = this.textOf(node);
-          if (indexText === null) continue;
-          const at = asciiLower(indexText).indexOf(needle);
-          if (at < 0) continue;
+          const hit = verify(session, node);
+          if (hit === null) continue;
           if (found === 0) sessionsWithHits += 1;
           found += 1;
-          result.hits.push(hitOf(session, node, indexText, at));
+          result.hits.push(hit);
         }
       };
 
@@ -698,10 +813,20 @@ export class SearchIndex {
     let scanned = 0;
     for (const session of this.sessions(options, cutoff)) {
       if (stopped) break;
-      const nodes = (this.shortNodes.all(session.id) as { rowid: number; body: string }[]).map((r) => ({
-        rowid: r.rowid,
-        node: JSON.parse(r.body) as GraphNode,
-      }));
+      const rowids: number[] = [];
+      for (const [rowid, kind] of this.shortNodes.iterate(session.id) as IterableIterator<[number, unknown]>) {
+        if (now() > deadline) {
+          stop();
+          break; // ends the statement
+        }
+        if (kind === 'prompt' || kind === 'text') rowids.push(rowid);
+      }
+      if (stopped) break;
+      const nodes: NodeRow[] = [];
+      for (const rowid of rowids) {
+        const row = this.nodeRow(rowid);
+        if (row !== null) nodes.push(row);
+      }
       nodes.sort(byTimeDesc);
       let found = 0;
       for (const { node } of nodes) {
@@ -712,13 +837,11 @@ export class SearchIndex {
         scanned += 1;
         // The summary is the text's beginning with whitespace runs collapsed; a 2-code-point query has no whitespace
         // inside (it is trimmed), so a match there is a match in the text: only a cut summary needs the full text.
-        const summary = node.summary ?? '';
+        const summary = typeof node.summary === 'string' ? node.summary : '';
         const cut = summary.endsWith('…') && summary.length >= SUMMARY_MAX; // summarize() counts UTF-16 units
         if (!cut && !asciiLower(summary).includes(needle)) continue;
-        const indexText = this.textOf(node);
-        if (indexText === null) continue;
-        const at = asciiLower(indexText).indexOf(needle);
-        if (at < 0) continue;
+        const hit = verify(session, node);
+        if (hit === null) continue;
         if (found === 0 && sessionsWithHits >= CONTENT_MAX_SESSIONS) {
           stop(); // a 51st session has a match
           break;
@@ -729,7 +852,7 @@ export class SearchIndex {
         }
         if (found === 0) sessionsWithHits += 1;
         found += 1;
-        result.hits.push(hitOf(session, node, indexText, at));
+        result.hits.push(hit);
       }
     }
     return result;

@@ -71,9 +71,13 @@ export interface Diagnostics {
 /**
  * The content search index (Diagnostics.search). indexing: the index is incomplete (a database from before it existed,
  * or one whose index was found inconsistent at start-up) and is being built in the background; content search then
- * answers from what is indexed. indexed / total: progress in node row positions (about nodes; equal once done).
+ * answers from what is indexed. indexed / total: progress in node row positions (about nodes; zeros once complete).
+ * lastError: why the build stopped in this run (it is retried at the next start); null while it runs or when none
+ * failed. indexing true with lastError null: being built; with lastError set: incomplete, not being built now.
+ * skipped: node rows the last build could not index as usual (an unreadable node row, not indexed; or an undecodable
+ * detail, indexed from the node's summary only).
  */
-export interface SearchIndexStatus { indexing: boolean; indexed: number; total: number }
+export interface SearchIndexStatus { indexing: boolean; indexed: number; total: number; skipped: number; lastError: string | null }
 
 /**
  * One place in a session's contents that contains the query: the node and a plain-text snippet around the first

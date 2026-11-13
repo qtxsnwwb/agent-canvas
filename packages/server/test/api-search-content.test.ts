@@ -106,7 +106,18 @@ describe('GET /api/search/content', () => {
 
   test('diagnostics carry the index status', async () => {
     const d = (await get('/api/diagnostics')).json() as Diagnostics;
-    expect(d.search).toEqual({ indexing: false, indexed: 0, total: 0 });
+    expect(d.search).toEqual({ indexing: false, indexed: 0, total: 0, skipped: 0, lastError: null });
+  });
+
+  test("diagnostics carry a failed build's error (from the running service's build)", async () => {
+    const failed = { indexing: true, indexed: 100, total: 900, skipped: 0, lastError: 'SQLITE_CORRUPT' };
+    const other = buildServer({ store, pipeline, config, search: { status: () => failed } });
+    try {
+      const d = (await other.inject({ method: 'GET', url: '/api/diagnostics' })).json() as Diagnostics;
+      expect(d.search).toEqual(failed);
+    } finally {
+      await other.close();
+    }
   });
 
   test('a full rebuild gives the same results as live ingest', async () => {
@@ -167,7 +178,7 @@ describe('start: the index at start-up', () => {
       if (d.search?.indexing === false) break;
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
-    expect(d!.search).toEqual({ indexing: false, indexed: 0, total: 0 });
+    expect(d!.search).toEqual({ indexing: false, indexed: 0, total: 0, skipped: 0, lastError: null });
     expect(lines).toContain('agent-canvas: search index built');
     const r = (await (await fetch(`${app.url}/api/search/content?q=parser%20bug`)).json()) as ContentSearchResponse;
     expect(r).toMatchObject({ indexing: false, hits: [{ nodeId: 'a1' }, { nodeId: 'u1' }] });
@@ -184,7 +195,7 @@ describe('start: the index at start-up', () => {
     apps.push(app);
     expect(log.join('\n')).toMatch(/rebuilding derived data/);
     const d = (await (await fetch(`${app.url}/api/diagnostics`)).json()) as Diagnostics;
-    expect(d.search).toEqual({ indexing: false, indexed: 0, total: 0 });
+    expect(d.search).toEqual({ indexing: false, indexed: 0, total: 0, skipped: 0, lastError: null });
     expect(lines).toEqual([]);
     const r = (await (await fetch(`${app.url}/api/search/content?q=parser%20bug`)).json()) as ContentSearchResponse;
     expect(r.hits.map((h) => h.nodeId)).toEqual(['a1', 'u1']);

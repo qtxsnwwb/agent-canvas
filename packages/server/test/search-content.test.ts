@@ -96,7 +96,7 @@ describe('content search', () => {
 
   describe('index maintenance', () => {
     test('a new database has a complete index; nodes are found by their full text', () => {
-      expect(store.searchIndexStatus()).toEqual({ indexing: false, indexed: 0, total: 0 });
+      expect(store.searchIndexStatus()).toEqual({ indexing: false, indexed: 0, total: 0, skipped: 0, lastError: null });
       const long = `${'intro '.repeat(100)}the needle-in-text is here`;
       store.applyChanges([session('s1', 5), text('s1', 'n1', 1, long, 'prompt')]);
       const r = find('needle-in-text');
@@ -208,7 +208,7 @@ describe('content search', () => {
       // a node written meanwhile is indexed at once
       store.applyChanges([text('s1', 'live', 100, 'old-row live')]);
       expect(ids('old-row')).toEqual(['live']);
-      expect(store.searchIndexBatch(10, 1 << 20)).toEqual({ more: true, indexed: 10 });
+      expect(store.searchIndexBatch(10, 1 << 20)).toEqual({ more: true, indexed: 10, skipped: 0 });
       // total: the node rowid range the build covers (the 30 old nodes and the one written before it started)
       expect(store.searchIndexStatus()).toMatchObject({ indexing: true, indexed: 10, total: 31 });
       // a node in the built part updated, one in the unbuilt part updated: both end up right
@@ -218,7 +218,7 @@ describe('content search', () => {
       ]);
       let more = true;
       while (more) more = store.searchIndexBatch(10, 1 << 20).more;
-      expect(store.searchIndexStatus()).toEqual({ indexing: false, indexed: 0, total: 0 });
+      expect(store.searchIndexStatus()).toEqual({ indexing: false, indexed: 0, total: 0, skipped: 0, lastError: null });
       for (const i of [1, 9, 10, 24, 29]) expect(ids(`old-row <${i}>`), String(i)).toEqual([`n${i}`]);
       expect(ids('old-row <0>')).toEqual([]);
       expect(ids('renamed-zero')).toEqual(['n0']);
@@ -228,7 +228,7 @@ describe('content search', () => {
       store.close();
       store = openStore(dbPath());
       expect(store.searchIndexStatus().indexing).toBe(false);
-      expect(store.searchIndexBatch(10, 1 << 20)).toEqual({ more: false, indexed: 0 });
+      expect(store.searchIndexBatch(10, 1 << 20)).toEqual({ more: false, indexed: 0, skipped: 0 });
     });
 
     test('the background build waits for start-up, pauses while writes are held or importing, then completes', async () => {
@@ -300,7 +300,7 @@ describe('content search', () => {
       store.close();
       store = openStore(dbPath());
       expect(store.searchIndexStatus()).toMatchObject({ indexing: true, indexed: 8 });
-      expect(store.searchIndexBatch(100, 1 << 20)).toEqual({ more: false, indexed: 12 });
+      expect(store.searchIndexBatch(100, 1 << 20)).toEqual({ more: false, indexed: 12, skipped: 0 });
       expect(find('resume-row').hits).toHaveLength(5);
       expect(indexRows()).toBe(20);
     });
@@ -473,6 +473,121 @@ describe('content search', () => {
       db.close();
       store = openStore(dbPath());
       expect(ids('damaged-term')).toEqual(['n2']);
+      expect(store.unreadableDetailCount()).toBe(1); // counted like any undecodable detail
+    });
+  });
+
+  describe('robustness and waste (review round 1)', () => {
+    /** Drops the index as a database from before it would have none. */
+    const dropIndex = (mutate?: (db: Database.Database) => void): void => {
+      store.close();
+      const db = new Database(dbPath());
+      db.exec(`DROP TABLE search_fts; DELETE FROM meta WHERE key LIKE 'search_index%'`);
+      mutate?.(db);
+      db.close();
+      store = openStore(dbPath());
+    };
+
+    test('a poison node row and an undecodable detail do not stop the build: the rest is indexed, both are counted', async () => {
+      store.applyChanges([session('s1', 5), ...Array.from({ length: 12 }, (_, i) => text('s1', `n${i}`, i, `poison-run <${i}>`))]);
+      dropIndex((db) => {
+        // (a body that is not JSON cannot even be written: the node_main_prompt index parses every body)
+        db.prepare(`UPDATE node SET body = '42' WHERE id = 'n3'`).run();
+        db.prepare(`UPDATE node_detail SET data = ?, enc = 1 WHERE node_id = 'n7'`).run(Buffer.from([9, 9, 9]));
+      });
+      const lines: string[] = [];
+      const job = startSearchIndexBuild(store, { startupDone: () => true, importing: () => false, writesHeld: () => false }, { pollMs: 1, batchRows: 5, log: (l) => lines.push(l) });
+      await job.done;
+      expect(job.status()).toEqual({ indexing: false, indexed: 0, total: 0, skipped: 2, lastError: null });
+      expect(ids('poison-run <11>')).toEqual(['n11']);
+      expect(ids('poison-run <4>')).toEqual(['n4']);
+      expect(indexRows()).toBe(11); // n3 has no row; n7 is indexed from its summary (its detail cannot be read)
+      expect(lines.some((l) => l.includes('could not be read fully'))).toBe(true);
+      expect(store.unreadableDetailCount()).toBeGreaterThanOrEqual(1);
+    });
+
+    test('a failing batch is reported (indexing stays true: incomplete) and the next start retries', async () => {
+      store.applyChanges([session('s1', 5), text('s1', 'n1', 1, 'retry-term')]);
+      dropIndex();
+      const failing = {
+        searchIndexStatus: () => store.searchIndexStatus(),
+        searchIndexBatch: (): { more: boolean } => {
+          throw new Error('SQLITE_CORRUPT: database disk image is malformed');
+        },
+      };
+      const host = { startupDone: () => true, importing: () => false, writesHeld: () => false };
+      const job = startSearchIndexBuild(failing, host, { pollMs: 1 });
+      await job.done;
+      expect(job.status()).toMatchObject({ indexing: true, lastError: 'SQLITE_CORRUPT: database disk image is malformed' });
+      // the next start: a new build on the same database completes
+      const again = startSearchIndexBuild(store, host, { pollMs: 1 });
+      await again.done;
+      expect(again.status()).toMatchObject({ indexing: false, lastError: null });
+      expect(ids('retry-term')).toEqual(['n1']);
+    });
+
+    test('an update that leaves the index text as it was does not touch the index', () => {
+      const statements: string[] = [];
+      store.close();
+      store = openStore(dbPath(), { verbose: (sql) => statements.push(String(sql)) });
+      store.applyChanges([
+        session('s1', 5),
+        text('s1', 'n1', 1, 'stable text'),
+        added(node('s1', 'sys', 'system', 2, { summary: 'system summary' }), {}),
+      ]);
+      const touches = (): number => statements.filter((s) => s.includes('search_fts')).length;
+      statements.length = 0;
+      store.applyChanges([
+        { type: 'node_updated', sessionId: 's1', id: 'n1', patch: { summary: 'stable text' }, detail: { text: 'stable text' } }, // same text again
+        { type: 'node_updated', sessionId: 's1', id: 'sys', patch: { summary: 'system summary' } }, // a field set to its value
+        { type: 'node_updated', sessionId: 's1', id: 'n1', patch: { durationMs: 3 } },
+      ]);
+      expect(touches()).toBe(0);
+      store.applyChanges([{ type: 'node_updated', sessionId: 's1', id: 'n1', patch: {}, detail: { text: 'changed text' } }]);
+      expect(touches()).toBeGreaterThan(0);
+      expect(ids('changed text')).toEqual(['n1']);
+      expect(ids('stable text')).toEqual([]);
+    });
+
+    test('a match at the 8 KB output cut: the snippet ends there with an ellipsis', () => {
+      const output = `${'o'.repeat(8180)}NEEDLE-AT-CUT${'p'.repeat(12_000)}`;
+      store.applyChanges([session('s1', 5), added(node('s1', 't1', 'tool', 1), { input: { command: 'cat' }, output })]);
+      const hit = find('o NEEDLE').hits[0];
+      expect(hit).toBeUndefined(); // no space there
+      const s = find('oooNEED').hits[0]!.snippet;
+      expect(s.clippedEnd).toBe(true);
+      expect(s.after).not.toContain('p');
+    });
+
+    test('a match across the join of two index parts is no match', () => {
+      store.applyChanges([session('s1', 5), added(node('s1', 't1', 'tool', 1, { title: 'Bash', toolName: 'Bash' }), { input: { command: 'cmd-start here' } })]);
+      expect(ids('Bash\ncmd-start')).toEqual([]);
+      expect(ids('cmd-start')).toEqual(['t1']);
+    });
+
+    test('a patch-only update of a node whose stored detail cannot be decoded leaves its index row alone', () => {
+      store.applyChanges([session('s1', 5), added(node('s1', 'sys', 'system', 1, { summary: 'old-summary' }), { text: 'full system text' })]);
+      store.close();
+      const db = new Database(dbPath());
+      db.prepare(`UPDATE node_detail SET data = ?, enc = 1 WHERE node_id = 'sys'`).run(Buffer.from([1, 2, 3]));
+      db.close();
+      store = openStore(dbPath());
+      store.applyChanges([{ type: 'node_updated', sessionId: 's1', id: 'sys', patch: { summary: 'new-summary' } }]);
+      expect(indexRows()).toBe(1);
+    });
+
+    test('node rowids, and with them the index, survive VACUUM', () => {
+      store.applyChanges([
+        session('a', 5),
+        ...Array.from({ length: 20 }, (_, i) => text('a', `a${i}`, i, `gone-${i}`)),
+        session('b', 6),
+        ...Array.from({ length: 20 }, (_, i) => text('b', `b${i}`, i, `kept-row <${i}>`)),
+      ]);
+      store.transaction(() => store.deleteDerivedForSession('a')); // a gap of rowids before b's
+      store.vacuum();
+      expect(ids('kept-row <7>')).toEqual(['b7']);
+      expect(ids('kept-row <19>')).toEqual(['b19']);
+      expect(indexRows()).toBe(20);
     });
   });
 });

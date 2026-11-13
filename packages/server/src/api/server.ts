@@ -14,6 +14,7 @@ import {
   type NotificationTestResponse,
   type Origin,
   type SearchHit,
+  type SearchIndexStatus,
   type SeqChange,
   type ServerMessage,
 } from '@agent-canvas/shared';
@@ -169,6 +170,8 @@ export function buildServer(deps: {
   files?: FilesService;
   /** The storage job (start()); without one, Diagnostics.storage is read from the database alone. */
   storage?: { status(): StorageDiagnostics };
+  /** The search index build (start(), when the index was incomplete): Diagnostics.search with its lastError. */
+  search?: { status(): SearchIndexStatus };
 }): FastifyInstance {
   const { store, pipeline, config, notifications } = deps;
   const stats = deps.stats ?? new StatsService(storeStatsSource(store));
@@ -359,7 +362,7 @@ export function buildServer(deps: {
         },
         ...(notifications !== undefined ? { notifications: notifications.diagnostics() } : {}),
         storage: deps.storage?.status() ?? storageStatus(store),
-        search: store.searchIndexStatus(),
+        search: deps.search?.status() ?? store.searchIndexStatus(),
       };
     },
   );

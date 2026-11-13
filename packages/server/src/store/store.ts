@@ -554,7 +554,10 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   db.pragma(`journal_size_limit = ${options.walSizeLimitBytes ?? WAL_SIZE_LIMIT_BYTES}`);
   db.exec(SCHEMA_SQL);
   migrateSchema(db);
-  const search = new SearchIndex(db, options.searchDetail ?? DEFAULT_SEARCH_DETAIL);
+  // Undecodable details met by the index (its build, a search's verification) count as unreadable too.
+  const search = new SearchIndex(db, options.searchDetail ?? DEFAULT_SEARCH_DETAIL, (sessionId, nodeId) =>
+    unreadableDetails.add(detailKey(sessionId, nodeId)),
+  );
   db.prepare(`INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE CAST(meta.value AS INTEGER) < ${STORAGE_FORMAT}`).run(
     STORAGE_FORMAT_KEY,
     String(STORAGE_FORMAT),
@@ -884,9 +887,14 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
    * Search index rows to rewrite when the applyChanges call in progress ends, by the same key as pendingDetails: the
    * node's current row (rowid, body) and the rowid its index row is stored under (`stale`, null: none yet; a node
    * re-added by INSERT OR REPLACE gets a new rowid). `storedDetail`: the index text needs the stored detail (a patch
-   * changed an indexed field and the call carries no detail for the node).
+   * changed an indexed field and the call carries no detail for the node). `before`: the node (and, when it was read, its
+   * detail) as they were before this call, for an update of a node whose row is not replaced: when the index text comes
+   * out the same, the index row is left alone (a streamed Cursor bubble, a patch that sets a field to its value).
    */
-  const pendingIndex = new Map<string, { rowid: number; node: GraphNode; stale: number | null; storedDetail: boolean }>();
+  const pendingIndex = new Map<
+    string,
+    { rowid: number; node: GraphNode; stale: number | null; storedDetail: boolean; before?: { node: GraphNode; detail?: Partial<NodeDetail> } }
+  >();
   function flushDetails(): void {
     for (const { sessionId, nodeId, detail } of pendingDetails.values()) upsertDetail(sessionId, nodeId, JSON.stringify(detail));
     // Index rows, from the final detail in memory (no detail is read back except for a patch without one).
@@ -897,7 +905,9 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
         detail = row === undefined ? {} : readDetail(row.data, row.enc);
         if (detail === null) continue; // an undecodable detail: its index row stays as it is (the session is re-derived)
       }
-      search.write(entry.stale, entry.rowid, indexTextOf(entry.node, detail ?? {}));
+      const text = indexTextOf(entry.node, detail ?? {});
+      if (entry.before !== undefined && entry.stale === entry.rowid && indexTextOf(entry.before.node, entry.before.detail ?? detail ?? {}) === text) continue;
+      search.write(entry.stale, entry.rowid, text);
     }
     pendingDetails.clear();
     pendingIndex.clear();
@@ -927,14 +937,17 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
       case 'node_updated': {
         const row = selectNodeRow.get(c.sessionId, c.id) as { rowid: number; body: string } | undefined;
         if (row === undefined) break; // updates to unknown nodes are ignored, as in shared applyChange
-        const merged = { ...(JSON.parse(row.body) as GraphNode), ...c.patch } as GraphNode;
+        const old = JSON.parse(row.body) as GraphNode;
+        const merged = { ...old, ...c.patch } as GraphNode;
         updateNode.run(JSON.stringify(merged), c.sessionId, c.id);
         const indexKey = detailKey(c.sessionId, c.id);
         const indexed = pendingIndex.get(indexKey);
+        const patch = c.patch as Record<string, unknown>;
+        const before = old as unknown as Record<string, unknown>;
         if (indexed !== undefined) indexed.node = merged;
-        else if (c.detail !== undefined || Object.keys(c.patch).some((k) => INDEXED_NODE_FIELDS.includes(k))) {
-          // storedDetail: refined below once the detail merge is known
-          pendingIndex.set(indexKey, { rowid: row.rowid, node: merged, stale: row.rowid, storedDetail: c.detail === undefined });
+        else if (c.detail !== undefined || INDEXED_NODE_FIELDS.some((k) => k in patch && patch[k] !== before[k])) {
+          // A patch that sets indexed fields to the values they have needs nothing; one without a detail needs the stored one.
+          pendingIndex.set(indexKey, { rowid: row.rowid, node: merged, stale: row.rowid, storedDetail: c.detail === undefined, before: { node: old } });
         }
         if (c.detail !== undefined) {
           // node_detail is touched only when the update carries detail.
@@ -954,6 +967,8 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
               break;
             }
             prev = stored;
+            const entry = pendingIndex.get(indexKey);
+            if (entry?.before !== undefined) entry.before.detail = stored;
           }
           pendingDetails.set(key, { sessionId: c.sessionId, nodeId: c.id, detail: { ...prev, ...c.detail } });
         }

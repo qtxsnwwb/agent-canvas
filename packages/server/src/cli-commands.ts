@@ -251,7 +251,17 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
       searchBuild = startSearchIndexBuild(store, pipeline, { log: (line) => process.stderr.write(`${line}\n`), ...options.searchIndex });
     }
     const storageJob = storage;
-    app = buildServer({ store, pipeline, config, notifications, stats, files, ...(storageJob !== null ? { storage: storageJob } : {}) });
+    const searchJobNow = searchBuild;
+    app = buildServer({
+      store,
+      pipeline,
+      config,
+      notifications,
+      stats,
+      files,
+      ...(storageJob !== null ? { storage: storageJob } : {}),
+      ...(searchJobNow !== null ? { search: searchJobNow } : {}),
+    });
     await app.listen({ port: config.port, host: config.host });
     // After the (automatic) rebuild above, before the initial scan: its changes arrive while importing() holds.
     notifications.start(`http://${config.host}:${(app.server.address() as AddressInfo).port}`);
