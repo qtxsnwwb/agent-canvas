@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import Fastify, { type FastifyInstance } from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import fastifyStatic from '@fastify/static';
 import fastifyWebsocket from '@fastify/websocket';
 import {
@@ -27,6 +27,7 @@ import { KEY_PREFIXES } from '../sources/source.js';
 import { storageStatus, type StorageDiagnostics } from '../store/migrate-storage.js';
 import type { Store } from '../store/store.js';
 import { AnomaliesService, parseAnomalyListQuery } from '../anomalies/service.js';
+import { ExportService, type ExportAnswer } from '../export/service.js';
 import { FilesService, parseFilesQuery } from '../files/service.js';
 import { parseStatsQuery, StatsService, storeStatsSource } from '../stats/service.js';
 
@@ -113,6 +114,29 @@ export function isAllowedRequest(headers: {
   return true;
 }
 
+/**
+ * The export routes (and the export settings' PUT) send a session's whole text, or change what masking does: on top of
+ * isAllowedRequest they require an `Origin` that is this very service (an http loopback origin whose host:port is the
+ * request's Host), so a request without Origin (another program, a link) or from another page is refused.
+ */
+export function isSameOriginRequest(headers: { host?: string | undefined; origin?: string | undefined }): boolean {
+  const { host, origin } = headers;
+  if (typeof host !== 'string' || typeof origin !== 'string') return false;
+  let u: URL;
+  try {
+    u = new URL(origin);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== 'http:' || !LOOPBACK_HOSTNAMES.has(u.hostname.toLowerCase())) return false;
+  return u.host.toLowerCase() === host.toLowerCase();
+}
+
+/** `Content-Type: application/json` (parameters such as charset allowed). */
+export function isJsonContentType(type: string | undefined): boolean {
+  return typeof type === 'string' && /^application\/json\s*(;|$)/i.test(type);
+}
+
 /** Whether the path names an existing file (only stat'ed, never opened). */
 function isFile(file: string | null): boolean {
   if (file === null || file === '') return false;
@@ -176,6 +200,8 @@ export function buildServer(deps: {
   storage?: { status(): StorageDiagnostics };
   /** The search index build (start(), when the index was incomplete): Diagnostics.search with its lastError. */
   search?: { status(): SearchIndexStatus };
+  /** Export and its settings (default: one reading `store`, settings in config.dataDir). */
+  exports?: ExportService;
 }): FastifyInstance {
   const { store, pipeline, config, notifications } = deps;
   const stats = deps.stats ?? new StatsService(storeStatsSource(store));
@@ -185,6 +211,7 @@ export function buildServer(deps: {
   // put three summaries of a large session in one synchronous stretch (measured: 450 ms instead of 250 ms for a
   // 100,000-node session) and make every background recompute of a running session rebuild its stats too.
   files.shareReadsWith(stats);
+  const exports = deps.exports ?? new ExportService({ store, dataDir: config.dataDir });
   const app = Fastify();
   const connections = new Set<Connection>();
 
@@ -391,6 +418,33 @@ export function buildServer(deps: {
       };
     },
   );
+
+  // ---- export (spec 2026-11-13-export-and-masking-design.md 4.2): POST with a JSON body from this service's own page.
+  const sameOriginJson = async (req: FastifyRequest, reply: FastifyReply): Promise<FastifyReply | undefined> => {
+    if (isSameOriginRequest(req.headers) && isJsonContentType(req.headers['content-type'])) return undefined;
+    return reply.code(403).header('cache-control', 'no-store').send({ error: '只接受来自本页面的 JSON 请求' });
+  };
+  const answer = (reply: FastifyReply, a: ExportAnswer): FastifyReply => {
+    reply.header('cache-control', 'no-store');
+    if ('file' in a) return reply.code(200).headers(a.headers).send(a.file);
+    return reply.code(a.status).send(a.json);
+  };
+  /** True once the client has gone away before the answer was sent. */
+  const goneFlag = (reply: FastifyReply): (() => boolean) => {
+    let gone = false;
+    reply.raw.once('close', () => {
+      if (!reply.raw.writableFinished) gone = true;
+    });
+    return () => gone || reply.raw.destroyed;
+  };
+  app.post<{ Params: { id: string } }>('/api/sessions/:id/export/preview', { onRequest: sameOriginJson }, async (req, reply) =>
+    answer(reply, await exports.preview(req.params.id, req.body, goneFlag(reply))),
+  );
+  app.post<{ Params: { id: string } }>('/api/sessions/:id/export', { onRequest: sameOriginJson }, async (req, reply) =>
+    answer(reply, await exports.export(req.params.id, req.body, goneFlag(reply))),
+  );
+  app.get('/api/export/settings', async (_req, reply) => reply.header('cache-control', 'no-store').send(exports.getSettings()));
+  app.put('/api/export/settings', { onRequest: sameOriginJson }, async (req, reply) => answer(reply, exports.putSettings(req.body)));
 
   if (notifications !== undefined) {
     app.get('/api/notifications/settings', async (): Promise<NotificationSettingsResponse> => notifications.getSettings());
