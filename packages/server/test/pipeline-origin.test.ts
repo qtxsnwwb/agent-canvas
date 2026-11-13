@@ -13,6 +13,7 @@ import { ClaudeFileSource } from '../src/sources/claude.js';
 import { KEY_PREFIXES, originOfKey, type FileClass, type FileSource } from '../src/sources/source.js';
 import { classifyRelPath, relPath } from '../src/sources/transcript/paths.js';
 import { startWatcher } from '../src/sources/transcript/watcher.js';
+import { decodeBody } from '../src/store/codec.js';
 import { openStore, type RawEvent, type Store } from '../src/store/store.js';
 import { assistantBlock, toolResult, userPrompt } from './fixtures.js';
 import { SCHEMA_SQL_V13 } from './schema-v13.js';
@@ -291,7 +292,9 @@ describe('pipeline 与来源', () => {
     old.exec(SCHEMA_SQL_V13);
     old.exec(`ATTACH DATABASE '${freshFile.replace(/'/g, "''")}' AS f`);
     const cols = `ingest_id, source, file, project_id, "offset", line_hash, record_type, session_id, agent_id, event_name, received_at, body`;
-    old.exec(`INSERT INTO raw_event (${cols}) SELECT ${cols} FROM f.raw_event ORDER BY ingest_id`);
+    // The previous version stored bodies as plain text: decode what this version stored (compressed rows, enc 1).
+    old.function('decode_body', (body: unknown, enc: unknown) => decodeBody(body, Number(enc)));
+    old.exec(`INSERT INTO raw_event (${cols}) SELECT ${cols.replace(/body$/, 'decode_body(body, enc)')} FROM f.raw_event ORDER BY ingest_id`);
     old.exec(`INSERT INTO file_offset SELECT * FROM f.file_offset`);
     old.exec(`INSERT INTO hook_stat (event_name, count, last_at) SELECT event_name, count, last_at FROM f.hook_stat`);
     old.exec(`INSERT INTO session (id, project_id, status, last_activity_at, body)

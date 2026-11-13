@@ -66,8 +66,13 @@ type Listener = (changes: SeqChange[]) => void;
 type ResyncListener = (sessionId: string) => void;
 /** Failure key of a session whose re-derive failed (shown as is in ingestFailures). */
 const sessionKey = (sessionId: string): string => `session:${sessionId}`;
+/**
+ * Failure key of stored raw records that cannot be decoded (damaged bytes): one per store key, `raw:<key>`, or per
+ * session for hook records, `raw:hook:<sessionId>`. Replay skips such a record.
+ */
+const corruptKey = (ev: StoredRawEvent): string => `raw:${ev.source === 'hook' ? `hook:${ev.sessionId}` : ev.file}`;
 /** Failure keys that are not file paths. */
-const isNonFileKey = (key: string): boolean => key.startsWith('hook') || key.startsWith('session:');
+const isNonFileKey = (key: string): boolean => key.startsWith('hook') || key.startsWith('session:') || key.startsWith('raw:');
 interface FileLock {
   running: Promise<void> | null;
   queued: Promise<void> | null;
@@ -1133,9 +1138,19 @@ export class Pipeline {
     }
   }
 
-  /** Every stored raw event of a session in ingest order, read page by page. */
+  /** Every stored raw event of a session in ingest order, read page by page (undecodable ones skipped, reported). */
   private *rawPages(sessionId: string): Generator<StoredRawEvent> {
-    for (const page of this.rawPageList(sessionId)) yield* page;
+    for (const page of this.rawPageList(sessionId)) yield* this.readable(page);
+  }
+
+  /** The events of a page whose stored body could be decoded; each one that could not is reported (corruptKey). */
+  private readable(events: readonly StoredRawEvent[]): readonly StoredRawEvent[] {
+    if (!events.some((ev) => ev.corrupt !== undefined)) return events;
+    return events.filter((ev) => {
+      if (ev.corrupt === undefined) return true;
+      this.reportFailure(corruptKey(ev), new Error(`stored record ${ev.ingestId} skipped: ${ev.corrupt}`));
+      return false;
+    });
   }
 
   /** The pages of rawPages. */
@@ -1161,10 +1176,15 @@ export class Pipeline {
 
   /**
    * Applies stored raw events in order as one batch (a normalizer with applyBatch derives once per page; the others
-   * apply them one by one, as before).
+   * apply them one by one, as before). Events whose stored body could not be decoded are skipped and reported (never
+   * thrown); `unknown` stays aligned with `events`.
    */
   private replay(events: readonly StoredRawEvent[]): { changes: Change[]; unknown: (string | undefined)[] } {
-    return this.normalizer.applyBatch(events.map((event) => ({ event, projectId: this.projectOf(event) })));
+    const good = this.readable(events);
+    const out = this.normalizer.applyBatch(good.map((event) => ({ event, projectId: this.projectOf(event) })));
+    if (good === events) return out;
+    let k = 0;
+    return { changes: out.changes, unknown: events.map((ev) => (ev.corrupt === undefined ? out.unknown[k++] : undefined)) };
   }
 
   private drop(sessionId: string): void {

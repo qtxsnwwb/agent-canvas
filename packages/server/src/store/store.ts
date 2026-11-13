@@ -25,6 +25,7 @@ import {
   type SeqChange,
   type Session,
 } from '@agent-canvas/shared';
+import { CorruptBodyError, decodeBody, encodeBody } from './codec.js';
 import { DERIVED_TABLES, MIGRATIONS, SCHEMA_SQL } from './schema.js';
 
 /**
@@ -72,13 +73,20 @@ export type RawEvent =
        */
       projectId?: string | null;
     };
-/** As read back: `origin` is always present (rows stored before origins existed are 'claude'). */
-export type StoredRawEvent = RawEvent & { ingestId: number; origin: Origin };
+/**
+ * As read back: `origin` is always present (rows stored before origins existed are 'claude'). `corrupt` is set (to the
+ * error) when the stored body could not be decoded: `line` / `payload` is then '' and the event must not be replayed
+ * (the pipeline skips and reports it); the other fields come from their own columns and are intact.
+ */
+export type StoredRawEvent = RawEvent & { ingestId: number; origin: Origin; corrupt?: string };
 /** One hook counter of one origin (Diagnostics.hookEvents without the origin). */
 export type HookEventStat = Omit<Diagnostics['hookEvents'][number], 'origin'>;
 
-/** The change log keeps at most this many rows; older ones are pruned down to 90% of it. */
-export const CHANGE_LOG_MAX_ROWS = 200_000;
+/**
+ * The change log keeps at most this many rows; older ones are pruned down to 90% of it. It only serves a web client's
+ * catch-up after a reconnect; one asking for a seq older than what is kept is told to resync (refetch the snapshot).
+ */
+export const CHANGE_LOG_MAX_ROWS = 50_000;
 /** Rows inserted into the change log between two size checks. */
 const PRUNE_CHECK_EVERY = 10_000;
 
@@ -254,6 +262,22 @@ export interface Store {
 }
 
 const SAMPLE_MAX = 500;
+
+/** The `body` / `enc` parameters of a raw_event insert: the event's text through encodeBody. */
+function withBody<T extends object>(event: T, text: string): T & { body: Buffer | string; enc: number } {
+  const { data, enc } = encodeBody(text);
+  return { ...event, body: data, enc };
+}
+
+/** A stored node detail as an object, or null when it cannot be decoded or parsed. */
+function readDetail(data: unknown, enc: number): Partial<NodeDetail> | null {
+  try {
+    const parsed: unknown = JSON.parse(decodeBody(data, enc));
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? (parsed as Partial<NodeDetail>) : null;
+  } catch {
+    return null;
+  }
+}
 /** meta key set once hook_stat holds every stored hook row (backfilled, or created empty with a new database). */
 const HOOK_STAT_READY = 'hook_stat_ready';
 /** The one-time hook_stat backfill query; served by the old raw_event_hook partial index when the database has it. */
@@ -275,10 +299,29 @@ interface RawRow {
   event_name: string | null;
   received_at: string | null;
   project_id: string | null;
-  body: string;
+  /** Through decodeBody only (text or BLOB, see enc). */
+  body: unknown;
+  enc: number;
+}
+
+/** The decoded body of a raw row, or the decode error (CorruptBodyError) as `corrupt`. */
+function rawText(r: RawRow): { text: string; corrupt?: string } {
+  try {
+    return { text: decodeBody(r.body, r.enc) };
+  } catch (err) {
+    if (err instanceof CorruptBodyError) return { text: '', corrupt: err.message };
+    throw err;
+  }
 }
 
 function toStoredRaw(r: RawRow): StoredRawEvent {
+  const { text, corrupt } = rawText(r);
+  const ev = toStoredRawText(r, text);
+  if (corrupt !== undefined) ev.corrupt = corrupt;
+  return ev;
+}
+
+function toStoredRawText(r: RawRow, body: string): StoredRawEvent {
   switch (r.source) {
     case 'transcript':
       return {
@@ -287,7 +330,7 @@ function toStoredRaw(r: RawRow): StoredRawEvent {
         origin: r.origin,
         file: r.file!,
         offset: r.offset!,
-        line: r.body,
+        line: body,
         recordType: r.record_type!,
         sessionId: r.session_id!,
         agentId: r.agent_id,
@@ -301,7 +344,7 @@ function toStoredRaw(r: RawRow): StoredRawEvent {
         receivedAt: r.received_at!,
         eventName: r.event_name!,
         sessionId: r.session_id,
-        payload: r.body,
+        payload: body,
         projectId: r.project_id,
       };
     default:
@@ -312,7 +355,7 @@ function toStoredRaw(r: RawRow): StoredRawEvent {
         file: r.file!,
         sessionId: r.session_id!,
         agentId: r.agent_id,
-        payload: r.body,
+        payload: body,
         ...(r.project_id !== null ? { projectId: r.project_id } : {}),
       };
   }
@@ -453,19 +496,19 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   // INSERT ... SELECT ... WHERE NOT EXISTS (rather than INSERT OR IGNORE): with AUTOINCREMENT, an
   // ignored insert would still consume an ingest_id and leave gaps.
   const insertRawTranscript = db.prepare(
-    `INSERT INTO raw_event (source, origin, file, "offset", line_hash, record_type, session_id, agent_id, project_id, body)
-     SELECT 'transcript', @origin, @file, @offset, @lineHash, @recordType, @sessionId, @agentId, @projectId, @line
+    `INSERT INTO raw_event (source, origin, file, "offset", line_hash, record_type, session_id, agent_id, project_id, body, enc)
+     SELECT 'transcript', @origin, @file, @offset, @lineHash, @recordType, @sessionId, @agentId, @projectId, @body, @enc
      WHERE NOT EXISTS (
        SELECT 1 FROM raw_event WHERE source = 'transcript' AND file = @file AND line_hash = @lineHash
      )`,
   );
   const insertRawHook = db.prepare(
-    `INSERT INTO raw_event (source, origin, event_name, received_at, session_id, project_id, body)
-     VALUES ('hook', @origin, @eventName, @receivedAt, @sessionId, @projectId, @payload)`,
+    `INSERT INTO raw_event (source, origin, event_name, received_at, session_id, project_id, body, enc)
+     VALUES ('hook', @origin, @eventName, @receivedAt, @sessionId, @projectId, @body, @enc)`,
   );
   const insertRawMeta = db.prepare(
-    `INSERT INTO raw_event (source, origin, file, session_id, agent_id, project_id, body)
-     VALUES ('meta', @origin, @file, @sessionId, @agentId, @projectId, @payload)`,
+    `INSERT INTO raw_event (source, origin, file, session_id, agent_id, project_id, body, enc)
+     VALUES ('meta', @origin, @file, @sessionId, @agentId, @projectId, @body, @enc)`,
   );
   const selectTranscriptLine = db
     .prepare(`SELECT 1 FROM raw_event WHERE source = 'transcript' AND file = ? AND line_hash = ?`)
@@ -501,10 +544,14 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   const insertNode = db.prepare(`INSERT OR REPLACE INTO node (session_id, id, body) VALUES (?, ?, ?)`);
   const selectNodeBody = db.prepare(`SELECT body FROM node WHERE session_id = ? AND id = ?`).pluck();
   const updateNode = db.prepare(`UPDATE node SET body = ? WHERE session_id = ? AND id = ?`);
-  const upsertDetail = db.prepare(`INSERT OR REPLACE INTO node_detail (session_id, node_id, detail) VALUES (?, ?, ?)`);
-  const selectDetail = db.prepare(`SELECT detail FROM node_detail WHERE session_id = ? AND node_id = ?`).pluck();
+  const insertDetail = db.prepare(`INSERT OR REPLACE INTO node_detail (session_id, node_id, detail, enc) VALUES (?, ?, ?, ?)`);
+  const upsertDetail = (sessionId: string, nodeId: string, detail: string): void => {
+    const { data, enc } = encodeBody(detail);
+    insertDetail.run(sessionId, nodeId, data, enc);
+  };
+  const selectDetail = db.prepare(`SELECT detail, enc FROM node_detail WHERE session_id = ? AND node_id = ?`);
   const selectNodeWithDetail = db.prepare(
-    `SELECT d.detail AS detail FROM node n
+    `SELECT d.detail AS detail, d.enc AS enc FROM node n
      LEFT JOIN node_detail d ON d.session_id = n.session_id AND d.node_id = n.id
      WHERE n.session_id = ? AND n.id = ?`,
   );
@@ -585,7 +632,7 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     `SELECT * FROM raw_event WHERE session_id = ? AND ingest_id > ? ORDER BY ingest_id LIMIT ?`,
   );
   const selectLatestMeta = db.prepare(
-    `SELECT body FROM raw_event WHERE source = 'meta' AND file = ? ORDER BY ingest_id DESC LIMIT 1`,
+    `SELECT body, enc FROM raw_event WHERE source = 'meta' AND file = ? ORDER BY ingest_id DESC LIMIT 1`,
   );
   const selectTranscriptOwner = db.prepare(
     `SELECT session_id AS sessionId, agent_id AS agentId, project_id AS projectId FROM raw_event
@@ -616,7 +663,7 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   );
   const insertHookTx = db.transaction((event: Extract<RawEvent, { source: 'hook' }>): number => {
     const origin = event.origin ?? 'claude';
-    const id = Number(insertRawHook.run({ ...event, origin, projectId: event.projectId ?? null }).lastInsertRowid);
+    const id = Number(insertRawHook.run({ ...withBody(event, event.payload), origin, projectId: event.projectId ?? null }).lastInsertRowid);
     upsertLaterMeta.run('last_hook_at', event.receivedAt);
     bumpHookStat.run(origin, event.eventName, event.receivedAt);
     return id;
@@ -649,7 +696,7 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
         break;
       case 'node_added':
         insertNode.run(c.node.sessionId, c.node.id, JSON.stringify(c.node));
-        upsertDetail.run(c.node.sessionId, c.node.id, JSON.stringify(c.detail ?? {}));
+        upsertDetail(c.node.sessionId, c.node.id, JSON.stringify(c.detail ?? {}));
         break;
       case 'node_updated': {
         const body = selectNodeBody.get(c.sessionId, c.id) as string | undefined;
@@ -657,9 +704,10 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
         updateNode.run(JSON.stringify({ ...(JSON.parse(body) as object), ...c.patch }), c.sessionId, c.id);
         if (c.detail !== undefined) {
           // node_detail is touched only when the update carries detail.
-          const prev = selectDetail.get(c.sessionId, c.id) as string | undefined;
-          const merged = { ...(prev === undefined ? {} : (JSON.parse(prev) as object)), ...c.detail };
-          upsertDetail.run(c.sessionId, c.id, JSON.stringify(merged));
+          // A stored detail that cannot be decoded is replaced by the update's (it is unreadable either way).
+          const prev = selectDetail.get(c.sessionId, c.id) as { detail: unknown; enc: number } | undefined;
+          const merged = { ...(prev === undefined ? {} : (readDetail(prev.detail, prev.enc) ?? {})), ...c.detail };
+          upsertDetail(c.sessionId, c.id, JSON.stringify(merged));
         }
         break;
       }
@@ -761,11 +809,13 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     insertRaw(event) {
       if (event.source === 'transcript') {
         const lineHash = createHash('sha1').update(event.line).digest('hex');
-        const res = insertRawTranscript.run({ ...event, origin: event.origin ?? 'claude', projectId: event.projectId ?? null, lineHash });
+        const res = insertRawTranscript.run({ ...withBody(event, event.line), origin: event.origin ?? 'claude', projectId: event.projectId ?? null, lineHash });
         return res.changes === 0 ? null : Number(res.lastInsertRowid);
       }
       if (event.source === 'hook') return insertHookTx(event);
-      return Number(insertRawMeta.run({ ...event, origin: event.origin ?? 'claude', projectId: event.projectId ?? null }).lastInsertRowid);
+      return Number(
+        insertRawMeta.run({ ...withBody(event, event.payload), origin: event.origin ?? 'claude', projectId: event.projectId ?? null }).lastInsertRowid,
+      );
     },
     hasTranscriptLine(file, line) {
       return selectTranscriptLine.get(file, createHash('sha1').update(line).digest('hex')) !== undefined;
@@ -880,10 +930,12 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     },
     lastSeq,
     getNodeDetail(sessionId, nodeId) {
-      const row = selectNodeWithDetail.get(sessionId, nodeId) as { detail: string | null } | undefined;
+      const row = selectNodeWithDetail.get(sessionId, nodeId) as { detail: unknown; enc: number | null } | undefined;
       if (!row) return null;
-      const d = row.detail === null ? {} : (JSON.parse(row.detail) as Partial<NodeDetail>);
-      return { input: null, output: null, text: null, raw: null, ...d, nodeId };
+      const empty: NodeDetail = { input: null, output: null, text: null, raw: null, nodeId };
+      if (row.detail === null) return empty;
+      const d = readDetail(row.detail, row.enc ?? 0);
+      return d === null ? { ...empty, unreadable: true } : { ...empty, ...d, nodeId };
     },
     changesSince(seq, sessionId, limit) {
       if (sessionId === undefined) return toChanges(selectChanges.all(seq));
@@ -904,15 +956,24 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
       const out: StoredRawEvent[] = [];
       let bytes = 0;
       for (const row of selectRawAfter.iterate(sessionId, afterIngestId, limit) as IterableIterator<RawRow>) {
-        out.push(toStoredRaw(row));
-        bytes += row.body.length;
+        const ev = toStoredRaw(row);
+        out.push(ev);
+        // The decoded text's length (what the page holds in memory), not the stored size.
+        bytes += ev.source === 'transcript' ? ev.line.length : ev.payload.length;
         if (bytes >= maxBytes) break; // ends the iteration (and the statement)
       }
       return out;
     },
     latestMeta(file) {
-      const row = selectLatestMeta.get(file) as { body: string } | undefined;
-      return row?.body ?? null;
+      // A latest row that cannot be decoded counts as none: the caller writes the current content again.
+      const row = selectLatestMeta.get(file) as { body: unknown; enc: number } | undefined;
+      if (row === undefined) return null;
+      try {
+        return decodeBody(row.body, row.enc);
+      } catch (err) {
+        if (err instanceof CorruptBodyError) return null;
+        throw err;
+      }
     },
     transcriptFileOwner(file) {
       const row = selectTranscriptOwner.get(file) as { sessionId: string; agentId: string | null; projectId: string | null } | undefined;

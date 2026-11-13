@@ -323,8 +323,21 @@ test('change_log 超过上限时裁剪到 90%，minSeq 随之前移', () => {
   }
 });
 
-test('CHANGE_LOG_MAX_ROWS 默认 20 万', () => {
-  expect(CHANGE_LOG_MAX_ROWS).toBe(200_000);
+test('CHANGE_LOG_MAX_ROWS 默认 5 万', () => {
+  expect(CHANGE_LOG_MAX_ROWS).toBe(50_000);
+});
+
+test('默认上限下变更流水不超过 5 万条，最早保留的 seq 随之前移', () => {
+  store.applyChanges([sessionUpsert('s1', 'p1')]);
+  for (let batch = 0; batch < 60; batch++) {
+    store.applyChanges(Array.from({ length: 1000 }, (_, i) => nodeUpdated('n', 's1', { summary: `${batch}:${i}` })));
+  }
+  const total = 60_001;
+  const kept = store.changesSince(0).length;
+  expect(kept).toBeLessThanOrEqual(CHANGE_LOG_MAX_ROWS);
+  expect(kept).toBeGreaterThanOrEqual(Math.floor(CHANGE_LOG_MAX_ROWS * 0.9));
+  expect(store.minSeq()).toBe(total - kept + 1);
+  expect(store.lastSeq()).toBe(total);
 });
 
 test('diagnostics 不扫描 raw_event，仍给出最近 hook 时间', () => {
