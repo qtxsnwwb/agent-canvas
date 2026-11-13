@@ -44,6 +44,24 @@ export interface Diagnostics {
     lastErrorAt: string | null;
     settingsError: string | null;
   };
+  /**
+   * The database file and the one-time storage migration (compressing records stored before compression existed, then
+   * VACUUM). fileBytes / walBytes: sizes of the database file and its WAL. migrating: the background migration is
+   * running now. migrated / total: progress in row-key positions (about rows; equal once done). vacuum: 'skipped' with
+   * vacuumSkipReason (e.g. `low-space: ...`, `busy`, `error: ...`) is retried at the next start and by `agent-canvas
+   * compact`. lastError: why the migration or VACUUM failed this run, or how many rows could not be compressed; null
+   * when none. Absent from servers before it existed.
+   */
+  storage?: {
+    fileBytes: number;
+    walBytes: number;
+    migrating: boolean;
+    migrated: number;
+    total: number;
+    vacuum: 'pending' | 'done' | 'skipped';
+    vacuumSkipReason: string | null;
+    lastError: string | null;
+  };
 }
 
 export type SearchField = 'title' | 'id' | 'branch' | 'cwd' | 'prompt';

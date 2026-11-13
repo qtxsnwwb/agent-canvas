@@ -153,6 +153,8 @@ export class Pipeline {
   private readonly classifyFailed = new Set<string>();
   /** Index file (absolute path) -> its source's indexVersion when it was last read. */
   private readonly indexVersions = new Map<string, number>();
+  /** Set while writes are held (holdWrites): resolves when they are released. */
+  private writeHold: Promise<void> | null = null;
 
   constructor(
     private readonly store: Store,
@@ -208,6 +210,40 @@ export class Pipeline {
       const status = this.pollStatus(p.origin);
       return status === null || status.lastPollAt !== null || status.lastError !== null;
     });
+  }
+
+  /**
+   * Holds every write of the pipeline until the returned function is called (once; later calls do nothing): work
+   * arriving meanwhile (file slices, hooks, poll batches, scan bookkeeping) waits, in its usual order, and is applied
+   * after the release; nothing is dropped. For the storage job's VACUUM, which runs on another connection and takes
+   * the database's write lock. Every write path checks the hold synchronously right before writing, so no write is in
+   * flight once this returns. Throws when writes are already held; rebuild() refuses while they are.
+   */
+  holdWrites(): () => void {
+    if (this.writeHold !== null) throw new Error('pipeline writes are already held');
+    let open!: () => void;
+    const hold = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    this.writeHold = hold;
+    return () => {
+      if (this.writeHold !== hold) return;
+      this.writeHold = null;
+      open();
+    };
+  }
+
+  /** True while holdWrites() holds the writes. */
+  writesHeld(): boolean {
+    return this.writeHold !== null;
+  }
+
+  /**
+   * Resolves once writes are not held. Callers write `if (this.writeHold !== null) await this.writable()` so the normal
+   * path takes no extra turn.
+   */
+  private async writable(): Promise<void> {
+    while (this.writeHold !== null) await this.writeHold;
   }
 
   /**
@@ -332,10 +368,11 @@ export class Pipeline {
     this.seed();
     if (this.lastHook === null || receivedAt > this.lastHook) this.lastHook = receivedAt;
     const key = `hook:${sessionId}`;
-    const onError = (err: unknown): void => {
-      this.reportFailure(key, err);
-      // The slice rolled back; keep the raw event alone (it must not be lost) and, in the same transaction, mark the
-      // session dirty: its derived rows now lag behind its raw events until the next touch re-derives it.
+    const keepRaw = (): void => {
+      if (this.writeHold !== null) {
+        void this.track(this.writable().then(keepRaw));
+        return;
+      }
       if (!this.persistedHooks.has(event)) {
         try {
           this.store.transaction(() => {
@@ -349,20 +386,32 @@ export class Pipeline {
         }
       }
     };
+    const onError = (err: unknown): void => {
+      this.reportFailure(key, err);
+      // The slice rolled back; keep the raw event alone (it must not be lost) and, in the same transaction, mark the
+      // session dirty: its derived rows now lag behind its raw events until the next touch re-derives it.
+      keepRaw();
+    };
     const needsQueue =
       sessionId !== null &&
-      (this.tails.has(sessionId) ||
+      (this.writeHold !== null ||
+        this.tails.has(sessionId) ||
         this.dirty.has(sessionId) ||
         (!this.normalizer.hasSession(sessionId) &&
           (this.store.getSession(sessionId) !== null ||
             (this.normalizer.needsPreSessionReplay(sessionId) && this.store.hasRawForSession(sessionId)))));
     if (!needsQueue || sessionId === null) {
-      try {
-        this.applyHook(event);
-        this.failures.delete(key);
-      } catch (err) {
-        onError(err);
-      }
+      const apply = (): void => {
+        try {
+          this.applyHook(event);
+          this.failures.delete(key);
+        } catch (err) {
+          onError(err);
+        }
+      };
+      // A hook without a session waits for held writes on its own (in arrival order); one with a session queues.
+      if (this.writeHold !== null) void this.track(this.writable().then(apply));
+      else apply();
       return;
     }
     this.enqueue(sessionId, () => this.applyHook(event)).then(() => {
@@ -461,6 +510,7 @@ export class Pipeline {
    */
   rebuild(progress?: (done: number, total: number) => void): void {
     if (this.active.size > 0 || this.tails.size > 0) throw new Error('rebuild refused: ingest work is pending (await idle() first)');
+    if (this.writeHold !== null) throw new Error('rebuild refused: writes are held');
     this.importDepth += 1;
     try {
       this.rebuildAll(progress);
@@ -644,6 +694,7 @@ export class Pipeline {
 
   /** PollSink.markSourceDeleted: the session is flagged, and stays flagged in every later change of it. */
   private async markSourceDeleted(sessionId: string): Promise<void> {
+    if (this.writeHold !== null) await this.writable();
     if (this.closed) return;
     this.deleted.add(sessionId);
     const session = this.store.getSession(sessionId);
@@ -652,6 +703,7 @@ export class Pipeline {
 
   /** PollSink.clearSourceDeleted: also clears a flag stored by an earlier run (no longer in `deleted`). */
   private async clearSourceDeleted(sessionId: string): Promise<void> {
+    if (this.writeHold !== null) await this.writable();
     if (this.closed) return;
     this.deleted.delete(sessionId);
     const session = this.store.getSession(sessionId);
@@ -868,8 +920,10 @@ export class Pipeline {
    */
   private enqueue(sessionId: string, task: () => void): Promise<void> {
     const run = async (): Promise<void> => {
+      if (this.writeHold !== null) await this.writable();
       if (this.dirty.has(sessionId)) this.tryRederive(sessionId);
       await this.hydrate(sessionId);
+      if (this.writeHold !== null) await this.writable();
       this.lastTouch.set(sessionId, Date.now());
       task();
     };
@@ -917,9 +971,11 @@ export class Pipeline {
       } catch {
         return; // file is gone: keep the stored offset, scanAll marks the session
       }
+      if (this.writeHold !== null) await this.writable();
       if (cls.kind === 'session') this.clearDeleted(cls.sessionId);
       const from = this.store.getOffset(file);
       const res = await readNewLines(absPath, from, READ_BUDGET_BYTES);
+      if (this.writeHold !== null) await this.writable();
       const progressed = res.newOffset !== from || res.truncated;
       // The size stored with an offset is the size this read accounts for: the whole file only when the read reached
       // its end. A slice cut short (read budget, kill, failure) leaves a stored size below the real one, so unchanged()
@@ -1031,6 +1087,7 @@ export class Pipeline {
         });
       });
     }
+    if (this.writeHold !== null) await this.writable();
     this.recordOffset(file, size, size);
     this.indexVersions.set(absPath, version);
   }
@@ -1257,7 +1314,8 @@ export class Pipeline {
    * flag is sticky) and clears it for sessions whose file is back, including flags left over from a previous run.
    */
   private async markDeletedSources(listed: ReadonlySet<string>): Promise<void> {
-    const changes: Change[] = [];
+    /** Session -> the flag it should carry; the changes are built from the stored sessions right before committing. */
+    const flags: [string, boolean][] = [];
     const firstPass = !this.flagsChecked;
     this.flagsChecked = true;
     for (const file of [...this.sizeMap().keys()]) {
@@ -1270,14 +1328,18 @@ export class Pipeline {
       if (listed.has(file)) {
         if (firstPass || this.deleted.has(sessionId)) {
           this.deleted.delete(sessionId);
-          const session = this.store.getSession(sessionId);
-          if (session?.sourceDeleted) changes.push({ type: 'session_upserted', session: { ...session, sourceDeleted: false } });
+          flags.push([sessionId, false]);
         }
         continue;
       }
       this.deleted.add(sessionId);
+      flags.push([sessionId, true]);
+    }
+    if (this.writeHold !== null) await this.writable();
+    const changes: Change[] = [];
+    for (const [sessionId, deleted] of flags) {
       const session = this.store.getSession(sessionId);
-      if (session && !session.sourceDeleted) changes.push({ type: 'session_upserted', session: { ...session, sourceDeleted: true } });
+      if (session !== null && session.sourceDeleted !== deleted) changes.push({ type: 'session_upserted', session: { ...session, sourceDeleted: deleted } });
     }
     this.commit(changes);
   }

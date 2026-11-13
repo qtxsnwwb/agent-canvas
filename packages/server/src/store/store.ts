@@ -26,6 +26,7 @@ import {
   type Session,
 } from '@agent-canvas/shared';
 import { CorruptBodyError, decodeBody, encodeBody } from './codec.js';
+import { STORAGE_META, type BodyTable, type ConvertResult } from './migrate-storage.js';
 import { DERIVED_TABLES, MIGRATIONS, SCHEMA_SQL } from './schema.js';
 
 /**
@@ -258,6 +259,28 @@ export interface Store {
   allHookEventStats(): Diagnostics['hookEvents'];
   /** The stored part of Diagnostics; the API adds the pipeline's live fields. */
   diagnostics(): StoreDiagnostics;
+  // ---- storage migration (migrate-storage.ts)
+  /** Highest raw_event ingest_id and node_detail rowid (0 for an empty table). */
+  bodyKeyRange(): { raw: number; detail: number };
+  /**
+   * Rewrites through encodeBody the enc-0 rows of `table` whose key (raw_event: ingest_id, node_detail: rowid) is in
+   * (after, end], in key order, at most `maxRows` and stopping once their text reaches `maxBytes` (at least one row).
+   * A row is rewritten only when its compressed form decodes back to exactly its text; one that is not text, or does
+   * not round-trip, is left as is and counted as failed. Runs in the caller's transaction, if any.
+   */
+  convertBodies(table: BodyTable, after: number, end: number, maxRows: number, maxBytes: number): ConvertResult;
+  /** Sizes of the database file and its WAL (0 when missing, or for an in-memory database). */
+  dbFileSizes(): { fileBytes: number; walBytes: number };
+  /** The path the store was opened with. */
+  dbPath(): string;
+  /** VACUUM on this connection, then a truncating checkpoint (so the file shrinks and the WAL is emptied). */
+  vacuum(): void;
+  /**
+   * Until the returned function is called (once), setMeta / deleteMeta are kept in memory (getMeta and metaWithPrefix
+   * see them) instead of written: for the time another connection holds the write lock (VACUUM). The release writes
+   * them in one transaction.
+   */
+  holdMetaWrites(): () => void;
   close(): void;
 }
 
@@ -680,6 +703,26 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     upsertMeta.run(HOOK_STAT_READY, '1');
   })();
   db.exec(`DROP INDEX IF EXISTS raw_event_hook`);
+  // A database created just now (its epoch was written above) holds nothing to compress or reclaim: the storage
+  // migration is done from the start.
+  if (created) {
+    db.transaction(() => {
+      upsertMeta.run(STORAGE_META.migration, 'done');
+      upsertMeta.run(STORAGE_META.vacuum, 'done');
+    })();
+  }
+  const selectMaxIngestId = db.prepare(`SELECT MAX(ingest_id) FROM raw_event`).pluck();
+  const selectMaxDetailRowid = db.prepare(`SELECT MAX(rowid) FROM node_detail`).pluck();
+  const convertSelect: Record<BodyTable, Database.Statement> = {
+    raw_event: db.prepare(`SELECT ingest_id AS id, body FROM raw_event WHERE ingest_id > ? AND ingest_id <= ? AND enc = 0 ORDER BY ingest_id LIMIT ?`),
+    node_detail: db.prepare(`SELECT rowid AS id, detail AS body FROM node_detail WHERE rowid > ? AND rowid <= ? AND enc = 0 ORDER BY rowid LIMIT ?`),
+  };
+  const convertUpdate: Record<BodyTable, Database.Statement> = {
+    raw_event: db.prepare(`UPDATE raw_event SET body = ?, enc = ? WHERE ingest_id = ?`),
+    node_detail: db.prepare(`UPDATE node_detail SET detail = ?, enc = ? WHERE rowid = ?`),
+  };
+  /** setMeta / deleteMeta kept in memory while held (holdMetaWrites); null when not held. */
+  let heldMeta: Map<string, string | null> | null = null;
   const selectUnknown = db.prepare(`SELECT record_type, count, sample FROM unknown_stat ORDER BY record_type`);
   const selectFiles = db.prepare(`SELECT file, "offset", size FROM file_offset ORDER BY file`);
 
@@ -1024,17 +1067,30 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
       }
     },
     epoch: () => epoch,
-    getMeta: (key) => (selectMeta.get(key) as string | undefined) ?? null,
+    getMeta(key) {
+      if (heldMeta?.has(key)) return heldMeta.get(key) ?? null;
+      return (selectMeta.get(key) as string | undefined) ?? null;
+    },
     metaWithPrefix(prefix) {
       if (prefix === '') throw new Error('metaWithPrefix: empty prefix');
       const end = prefix.slice(0, -1) + String.fromCharCode(prefix.charCodeAt(prefix.length - 1) + 1);
-      return selectMetaRange.all(prefix, end) as [string, string][];
+      const rows = selectMetaRange.all(prefix, end) as [string, string][];
+      if (heldMeta === null) return rows;
+      const merged = new Map(rows);
+      for (const [key, value] of heldMeta) {
+        if (key < prefix || key >= end) continue;
+        if (value === null) merged.delete(key);
+        else merged.set(key, value);
+      }
+      return [...merged].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
     },
     setMeta(key, value) {
-      upsertMeta.run(key, value);
+      if (heldMeta !== null) heldMeta.set(key, value);
+      else upsertMeta.run(key, value);
     },
     deleteMeta(key) {
-      deleteMeta.run(key);
+      if (heldMeta !== null) heldMeta.set(key, null);
+      else deleteMeta.run(key);
     },
     hookEventStats: (origin = 'claude') => selectHookStats.all(origin) as HookEventStat[],
     allHookEventStats: () => selectAllHookStats.all() as Diagnostics['hookEvents'],
@@ -1049,6 +1105,75 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
         })),
         lastHookAt: lastHookAt(),
         files: listOffsets(),
+      };
+    },
+    bodyKeyRange() {
+      return { raw: (selectMaxIngestId.get() as number | null) ?? 0, detail: (selectMaxDetailRowid.get() as number | null) ?? 0 };
+    },
+    convertBodies(table, after, end, maxRows, maxBytes) {
+      const rows: { id: number; body: unknown }[] = [];
+      let bytes = 0;
+      let cut = false;
+      for (const row of convertSelect[table].iterate(after, end, maxRows) as IterableIterator<{ id: number; body: unknown }>) {
+        rows.push(row);
+        bytes += typeof row.body === 'string' ? row.body.length : row.body instanceof Uint8Array ? row.body.length : 0;
+        if (bytes >= maxBytes) {
+          cut = true;
+          break; // ends the iteration (and the statement) before the updates below
+        }
+      }
+      let converted = 0;
+      let failed = 0;
+      for (const row of rows) {
+        if (typeof row.body !== 'string') {
+          failed += 1;
+          continue;
+        }
+        try {
+          const { data, enc } = encodeBody(row.body);
+          if (enc === 0) continue; // short or incompressible: stays as it is
+          if (decodeBody(data, enc) !== row.body) {
+            failed += 1; // not representable as UTF-8 byte for byte (e.g. a lone surrogate): keep the text
+            continue;
+          }
+          convertUpdate[table].run(data, enc, row.id);
+          converted += 1;
+        } catch {
+          failed += 1;
+        }
+      }
+      const done = !cut && rows.length < maxRows;
+      return { last: done || rows.length === 0 ? end : rows[rows.length - 1]!.id, examined: rows.length, converted, failed, done };
+    },
+    dbFileSizes() {
+      const size = (f: string): number => {
+        try {
+          return fs.statSync(f).size;
+        } catch {
+          return 0;
+        }
+      };
+      if (dbPath === ':memory:' || dbPath === '') return { fileBytes: 0, walBytes: 0 };
+      return { fileBytes: size(dbPath), walBytes: size(walPath) };
+    },
+    dbPath: () => dbPath,
+    vacuum() {
+      db.exec('VACUUM');
+      if (dbPath !== ':memory:' && dbPath !== '') db.pragma('wal_checkpoint(TRUNCATE)');
+    },
+    holdMetaWrites() {
+      if (heldMeta !== null) throw new Error('meta writes are already held');
+      const held = new Map<string, string | null>();
+      heldMeta = held;
+      return () => {
+        if (heldMeta !== held) return;
+        heldMeta = null;
+        db.transaction(() => {
+          for (const [key, value] of held) {
+            if (value === null) deleteMeta.run(key);
+            else upsertMeta.run(key, value);
+          }
+        })();
       };
     },
     close() {
