@@ -1,4 +1,15 @@
-import type { Change, NotificationKind, NotificationSettings, Origin, Session, SessionStatus } from '@agent-canvas/shared';
+import {
+  ANOMALY_LABELS,
+  ANOMALY_NOTIFY_MAX_AGE_MS,
+  anomalyBasisText,
+  type Anomaly,
+  type Change,
+  type NotificationKind,
+  type NotificationSettings,
+  type Origin,
+  type Session,
+  type SessionStatus,
+} from '@agent-canvas/shared';
 
 /** A notification the engine decided to send (spec 4). Delivery is the Notifier's job. */
 export interface EngineNotification {
@@ -24,10 +35,20 @@ export interface EngineDeps {
   /** The page of a session, e.g. `http://127.0.0.1:4317/#/s/<id>`. May throw: that one notification is skipped. */
   sessionUrl(sessionId: string): string;
   /**
+   * The page of a node, e.g. `http://127.0.0.1:4317/#/s/<id>/n/<node>` (anomaly notifications). May throw, or be absent:
+   * the session's page is used instead.
+   */
+  nodeUrl?(sessionId: string, nodeId: string): string;
+  /**
    * Cursor only: whether a call node patched to `failed` was failed by the conversation being aborted (its note; node
    * notes are not on the change stream). Called only for main-thread Cursor calls that turn `failed`. Default: never.
    */
   isAbortedCall?(sessionId: string, nodeId: string): boolean;
+  /**
+   * Whether anomaly notifications may be sent at all: the start-up work (initial scan, import, every poll source's
+   * first round) is over (pipeline.startupDone). Default: always.
+   */
+  anomaliesReady?(): boolean;
   /** A notification that could not be built (skipped); the message names the cause, never content. */
   reportError?(message: string): void;
   /** How long a "finished" is held for a late error marker (default GRACE_MS); 0 = not held. */
@@ -55,7 +76,16 @@ const KIND_LABEL: Record<NotificationKind, string> = {
   finished: '跑完了',
   error: '出错中断',
   stuck: '卡住了',
+  loop: ANOMALY_LABELS.loop.name,
+  failures: ANOMALY_LABELS.failures.name,
 };
+/** The anomaly kinds that notify (spec 5: churn and cost never do). */
+const ANOMALY_NOTIFY_KINDS: ReadonlySet<Anomaly['kind']> = new Set(['loop', 'failures']);
+export type AnomalyNotifyKind = 'loop' | 'failures';
+/** An anomaly dated more than this ahead of the clock is not fresh (clock skew; history parsed in another zone). */
+export const ANOMALY_FUTURE_SKEW_MS = 60_000;
+/** Sessions whose seen anomaly ids (and last anomaly notification) are kept, least recently summarised dropped. */
+export const ANOMALY_SEEN_MAX_SESSIONS = 10_000;
 
 /**
  * Hooks that by themselves say the current turn failed or was interrupted (main thread): Claude Code `StopFailure`,
@@ -136,9 +166,19 @@ const errorMessage = (err: unknown): string => (err instanceof Error ? err.messa
 export class NotificationEngine {
   private readonly sessions = new Map<string, SessionState>();
   private readonly graceMs: number;
+  /** When the engine (the service) started, engine clock: no anomaly from before ever notifies. */
+  private readonly startedAt: number;
+  /** Session id -> the `loop` / `failures` anomaly ids already seen (notified or not); LRU of ANOMALY_SEEN_MAX_SESSIONS. */
+  private readonly anomaliesSeen = new Map<string, Set<string>>();
+  /** Per kind: when its switch last became effective (anomalySwitchedOn). */
+  private readonly anomalyOnSince: Record<AnomalyNotifyKind, number>;
+  /** Session id -> kind -> engine clock of the last anomaly notification sent. */
+  private readonly anomalyLastSent = new Map<string, Partial<Record<AnomalyNotifyKind, number>>>();
 
   constructor(private readonly deps: EngineDeps) {
     this.graceMs = Math.max(0, deps.graceMs ?? GRACE_MS);
+    this.startedAt = deps.now();
+    this.anomalyOnSince = { loop: this.startedAt, failures: this.startedAt };
   }
 
   /** Number of sessions the engine keeps state for. */
@@ -257,6 +297,91 @@ export class NotificationEngine {
     const out: EngineNotification[] = [];
     if (!RUNNING.has(state.session.status)) this.lateError(state, now, out);
     return out;
+  }
+
+  /**
+   * The switch of an anomaly kind became effective (master and kind on) at `at` (engine clock): anomalies from before
+   * never notify (spec: nothing that existed before the user asked for it). At start the switches count as on since the
+   * engine started.
+   */
+  anomalySwitchedOn(kind: AnomalyNotifyKind, at: number = this.deps.now()): void {
+    this.anomalyOnSince[kind] = Math.max(this.anomalyOnSince[kind], at);
+  }
+
+  /**
+   * A session's anomaly summary was (re)computed (AnomaliesService.onSummary). `runningUntil`: the latest time the
+   * session was observed running (Infinity: running now; null: not running). A `loop` / `failures` anomaly is a
+   * candidate the first time its id is seen in the session (one per session, turn and kind; every id is remembered once
+   * seen, notified or not, so it never notifies later) when its `at` is
+   * - not before the engine started (history: import, restart, rebuild never notify), nor before its kind's switch was
+   *   turned on (anomalySwitchedOn);
+   * - at most ANOMALY_NOTIFY_MAX_AGE_MS old and at most ANOMALY_FUTURE_SKEW_MS in the future;
+   * - not after the session was last seen running;
+   * and the start-up work is over (anomaliesReady). Per kind, the candidates of one summary give at most one notification
+   * (the most recent one, "…，等 N 处" when there are several), and the per-session, per-kind RATE_LIMIT_MS applies as for
+   * every kind; the master switch, the kind's switch, the import suppression and a deleted source as for every kind.
+   */
+  handleAnomalies(session: Session, anomalies: readonly Anomaly[], runningUntil: number | null): EngineNotification[] {
+    const now = this.deps.now();
+    let seen = this.anomaliesSeen.get(session.id);
+    if (seen === undefined) {
+      seen = new Set();
+      while (this.anomaliesSeen.size >= ANOMALY_SEEN_MAX_SESSIONS) this.anomaliesSeen.delete(this.anomaliesSeen.keys().next().value as string);
+    } else this.anomaliesSeen.delete(session.id); // least recently used at the front
+    this.anomaliesSeen.set(session.id, seen);
+    const ready = this.anomaliesReady();
+    const candidates: Record<AnomalyNotifyKind, Anomaly[]> = { loop: [], failures: [] };
+    for (const a of anomalies) {
+      if (!ANOMALY_NOTIFY_KINDS.has(a.kind) || seen.has(a.id)) continue;
+      seen.add(a.id);
+      const kind = a.kind as AnomalyNotifyKind;
+      const at = ms(a.at);
+      if (!Number.isFinite(at) || at < this.startedAt || at < this.anomalyOnSince[kind]) continue;
+      if (now - at > ANOMALY_NOTIFY_MAX_AGE_MS || at - now > ANOMALY_FUTURE_SKEW_MS) continue;
+      if (runningUntil === null || runningUntil < at || !ready) continue;
+      candidates[kind].push(a);
+    }
+    const out: EngineNotification[] = [];
+    for (const kind of ['loop', 'failures'] as const) {
+      const list = candidates[kind];
+      if (list.length === 0) continue;
+      const settings = this.readSettings();
+      if (settings === null || settings.enabled !== true || settings[kind] !== true) continue;
+      if (this.deps.suppressed(session.origin) || session.sourceDeleted) continue;
+      let sent = this.anomalyLastSent.get(session.id);
+      const last = sent?.[kind];
+      if (last !== undefined && last <= now && now - last < RATE_LIMIT_MS) continue;
+      // The most recent one (then the greatest id) is the click target.
+      const a = list.reduce((best, x) => {
+        const d = ms(x.at) - ms(best.at);
+        return d > 0 || (d === 0 && x.id > best.id) ? x : best;
+      });
+      const text = list.length > 1 ? `${anomalyBasisText(a)}，等 ${list.length} 处` : anomalyBasisText(a);
+      try {
+        const n = this.build(kind, session, text);
+        out.push({ ...n, url: this.anomalyUrl(session.id, a.lastNodeId, n.url) });
+        if (sent === undefined) {
+          while (this.anomalyLastSent.size >= ANOMALY_SEEN_MAX_SESSIONS) this.anomalyLastSent.delete(this.anomalyLastSent.keys().next().value as string);
+          this.anomalyLastSent.set(session.id, (sent = {}));
+        }
+        sent[kind] = now;
+      } catch (err) {
+        try {
+          this.deps.reportError?.(`通知未能生成（${KIND_LABEL[kind]}）：${errorMessage(err)}`);
+        } catch {
+          // nothing more to do
+        }
+      }
+    }
+    return out;
+  }
+
+  private anomaliesReady(): boolean {
+    try {
+      return this.deps.anomaliesReady?.() ?? true;
+    } catch {
+      return false;
+    }
   }
 
   /** Earliest time a held "finished" is due (ms), or null when none is held. */
@@ -395,6 +520,15 @@ export class NotificationEngine {
     state.errorHandled = true;
     const n = this.emit(state, 'error', at, now, null);
     if (n !== null) out.push(n);
+  }
+
+  private anomalyUrl(sessionId: string, nodeId: string, fallback: string): string {
+    if (this.deps.nodeUrl === undefined) return fallback;
+    try {
+      return this.deps.nodeUrl(sessionId, nodeId);
+    } catch {
+      return fallback;
+    }
   }
 
   private release(state: SessionState, out: EngineNotification[]): void {

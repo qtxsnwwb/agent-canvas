@@ -7,6 +7,7 @@ import { THINKING_NOT_RECORDED } from './reasoning';
 import { replayOverlay, replayOverlayTitle } from './replay';
 import { isBackgroundStep } from './waterfall';
 import type { TurnSummary } from './view';
+import type { CardMarker } from '../anomalies';
 
 export { KIND_LABEL } from '../labels';
 
@@ -69,6 +70,8 @@ export type GraphNodeData = {
   /** Compact view: thinking time removed in front of this node (0: none). */
   thinkingMs: number;
   highlight: Highlight;
+  /** A subagent card: the anomalies inside that agent (null: none). */
+  anomaly: CardMarker | null;
 };
 /**
  * Causal view with a selection: 'chain' for nodes / edges on the selection's upstream chain, 'dim' for the rest; 'none'
@@ -77,7 +80,8 @@ export type GraphNodeData = {
 export type Highlight = 'chain' | 'dim' | 'none';
 export type GraphFlowNode = Node<GraphNodeData, 'graphNode'>;
 /** `outline`: the outline view's turn card (a click selects it; there is nothing to expand). */
-export type SummaryFlowNode = Node<{ summary: TurnSummary; highlight: Highlight; outline: boolean }, 'turnSummary'>;
+/** `anomaly`: the turn's anomalies, those inside the subagents it dispatched included (null: none). */
+export type SummaryFlowNode = Node<{ summary: TurnSummary; highlight: Highlight; outline: boolean; anomaly: CardMarker | null }, 'turnSummary'>;
 export type HeaderFlowNode = Node<{ turnKey: string; startedAt: string; nodeCount: number; highlight: Highlight }, 'turnHeader'>;
 /** `groupKey`: the turn key, or the agent group key for the fold inside a long expanded agent (see ViewNode). */
 export type EarlierFlowNode = Node<{
@@ -116,6 +120,19 @@ export const UNFINISHED_LABEL = '未结束';
 export const CanvasActions = createContext<CanvasActionsValue>({ toggleTurn() {}, showFullTurn() {}, toggleAgent() {} });
 
 const THINKING_CHIP_MIN_MS = 1_000;
+
+/**
+ * A card's anomalies: a small warning mark (an exclamation shape, plus the count when more than one); the tooltip lists
+ * the kinds. Hidden from screen readers: the card's accessible name carries the same text.
+ */
+function AnomalyBadge({ marker }: { marker: CardMarker | null }) {
+  if (marker === null) return null;
+  return (
+    <span className="cc-anomaly" title={marker.label} aria-hidden="true">
+      <span className="cc-anomaly-icon">!</span>{marker.count > 1 ? marker.count : null}
+    </span>
+  );
+}
 
 function boxStyle(width: number | undefined, height: number | undefined, color: string): CSSProperties {
   return { width, height, ['--cc-color' as string]: color };
@@ -254,7 +271,7 @@ function SubagentView({ data, className, style, rows, overlayRow }: {
     <div className={`${className}${container ? ' cc-container' : ''}`} style={style}>
       <Handles />
       <div className="cc-agent-head">
-        {rows(button)}
+        {rows(<><AnomalyBadge marker={data.anomaly} />{button}</>)}
         <div className="cc-row cc-inner">
           <span className="cc-ellipsis cc-grow">{innerCount > 0 ? `内部 ${innerCount} 个节点` : '暂无内部节点'}</span>
         </div>
@@ -288,6 +305,7 @@ function TurnSummaryView({ data, width, height, selected }: NodeProps<SummaryFlo
       <div className="cc-row">
         <span className="cc-kind">{data.outline ? '轮次' : '已折叠'}</span>
         <span className="cc-title cc-ellipsis cc-grow">{s.promptSummary || '（无提示）'}</span>
+        <AnomalyBadge marker={data.anomaly} />
         {s.running && (progressing
           ? <span className="cc-status cc-running-dot">运行中</span>
           : <span className="cc-status cc-stalled-label">{UNFINISHED_LABEL}</span>)}

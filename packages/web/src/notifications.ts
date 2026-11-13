@@ -1,5 +1,5 @@
 import {
-  NOTIFICATION_LIMITS, validateNotificationSettings,
+  ANOMALY_LABELS, NOTIFICATION_LIMITS, validateNotificationSettings,
   type Diagnostics, type NotificationKind, type NotificationSettings, type NotificationStatus,
 } from '@agent-canvas/shared';
 import { formatAge } from './diagnostics';
@@ -11,6 +11,8 @@ export const KIND_LABELS: Record<SentKind, string> = {
   finished: '一轮跑完了',
   error: '出错中断',
   stuck: '卡住很久',
+  loop: ANOMALY_LABELS.loop.name,
+  failures: ANOMALY_LABELS.failures.name,
   test: '测试通知',
 };
 
@@ -28,7 +30,14 @@ export const NOTIFICATION_KINDS: readonly KindInfo[] = [
   { key: 'finished', label: KIND_LABELS.finished, hint: '一轮对话跑完、轮到你时提醒，太短的轮次不打扰。', note: 'Claude Code、Codex、Cursor 都行（Cursor 不装 hooks 会晚几秒）' },
   { key: 'error', label: KIND_LABELS.error, hint: '一轮因为出错或被中断而结束时提醒。', note: 'Claude Code、Codex 可以；Cursor 只在会话被中止时能看出来' },
   { key: 'stuck', label: KIND_LABELS.stuck, hint: '会话显示运行中，却很久没有任何动静时提醒。', note: 'Claude Code、Codex、Cursor 都行' },
+  { key: 'loop', label: KIND_LABELS.loop, hint: anomalyHint('loop'), note: 'Claude Code、Codex、Cursor 都行；默认关着' },
+  { key: 'failures', label: KIND_LABELS.failures, hint: anomalyHint('failures'), note: 'Claude Code、Codex、Cursor 都行；默认关着' },
 ];
+
+/** The two anomaly kinds: the shared one-line description, then when they fire (anomaly spec 5). */
+function anomalyHint(kind: 'loop' | 'failures'): string {
+  return `${ANOMALY_LABELS[kind].description}只看运行中的会话，同一轮只提醒一次。`;
+}
 
 export function sentKindLabel(kind: SentKind): string {
   return KIND_LABELS[kind] ?? kind;

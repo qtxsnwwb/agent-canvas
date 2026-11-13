@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
-import { SEARCH_MIN_CHARS, type Project, type SearchField, type SearchHit, type Session } from '@agent-canvas/shared';
+import {
+  SEARCH_MIN_CHARS, type AnomalyCountsResponse, type AnomalySessionCount, type Project, type SearchField, type SearchHit, type Session,
+} from '@agent-canvas/shared';
+import { ANOMALY_POLL_MS, anomalyErrorText, homeMarker } from '../anomalies';
 import { api, openLiveSessions } from '../client';
 import { sessionStatusView } from '../labels';
 import {
@@ -24,6 +27,17 @@ const byActivityDesc = (a: Session, b: Session): number =>
 function formatTime(iso: string): string {
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+}
+
+/** A session's anomalies: a small warning mark with the total; the tooltip and accessible name list the kinds. */
+function AnomalyMark({ count }: { count: AnomalySessionCount | undefined }) {
+  const m = homeMarker(count);
+  if (m === null) return null;
+  return (
+    <span className="anomaly-mark" role="img" aria-label={m.label} title={m.label}>
+      <span className="anomaly-mark-icon" aria-hidden="true">!</span>{m.total}
+    </span>
+  );
 }
 
 function Highlighted({ text, q }: { text: string; q: string }) {
@@ -53,7 +67,9 @@ function OriginFilterSwitch({ value, onChange }: { value: OriginFilter; onChange
   );
 }
 
-function SessionResults({ result, q, now, filter }: { result: SearchResult | null; q: string; now: number; filter: OriginFilter }) {
+function SessionResults({ result, q, now, filter, counts }: {
+  result: SearchResult | null; q: string; now: number; filter: OriginFilter; counts: AnomalyCountsResponse['counts'] | undefined;
+}) {
   if (result === null || result.q !== q) return <p className="muted search-note">搜索中…</p>;
   if (result.error !== null) return <p className="error">搜索失败：{result.error}</p>;
   const all: SearchHit[] = result.hits ?? [];
@@ -78,6 +94,7 @@ function SessionResults({ result, q, now, filter }: { result: SearchResult | nul
                 <OriginBadge origin={s.origin} />
                 {s.cwd !== null && <span className="chip" title={s.cwd}>📁 {projectName(s.cwd)}</span>}
                 <span className="muted" title={formatTime(s.lastActivityAt)}>{relativeTime(s.lastActivityAt, now)}</span>
+                <AnomalyMark count={counts?.[s.id]} />
               </div>
               {matches.map((m, i) => (
                 <div key={i} className="search-match">
@@ -140,14 +157,15 @@ function ContentResults({ result, q, now, filter }: { result: ContentResult | nu
 }
 
 /** Search results in two groups: sessions (title, branch, directory, prompt starts) and content inside sessions. */
-function SearchResults({ result, content, q, now, filter }: {
+function SearchResults({ result, content, q, now, filter, counts }: {
   result: SearchResult | null; content: ContentResult | null; q: string; now: number; filter: OriginFilter;
+  counts: AnomalyCountsResponse['counts'] | undefined;
 }) {
   return (
     <div className="search-groups">
       <section className="search-group" aria-labelledby="search-group-sessions">
         <h2 id="search-group-sessions">会话</h2>
-        <SessionResults result={result} q={q} now={now} filter={filter} />
+        <SessionResults result={result} q={q} now={now} filter={filter} counts={counts} />
       </section>
       <section className="search-group" aria-labelledby="search-group-content">
         <h2 id="search-group-content">内容</h2>
@@ -161,6 +179,9 @@ export function Home({ projectId }: { projectId: string | null }) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [error, setError] = useState<string | null>(null);
+  // Anomaly counts of every session: null until the first answer; a failed refresh keeps the last one.
+  const [anomalyCounts, setAnomalyCounts] = useState<AnomalyCountsResponse | null>(null);
+  const [anomalyError, setAnomalyError] = useState<string | null>(null);
   const now = useNow();
   const [chosenFilter, setChosenFilter] = useState<OriginFilter>(readOriginFilter);
   const chooseFilter = (value: OriginFilter): void => {
@@ -193,9 +214,32 @@ export function Home({ projectId }: { projectId: string | null }) {
         (e: unknown) => { if (alive) setError(String(e)); },
       );
     };
-    loadProjects();
-    const refresh = createThrottle(loadProjects, PROJECTS_REFRESH_MS);
-    const poll = setInterval(loadProjects, PROJECTS_POLL_MS);
+    // Anomaly counts are refreshed with the projects; one request at a time, and every ANOMALY_POLL_MS while the
+    // server is still computing them.
+    let countsInFlight = false;
+    let countsAgain = false;
+    let countsTimer: ReturnType<typeof setTimeout> | null = null;
+    const loadCounts = (): void => {
+      if (countsInFlight) { countsAgain = true; return; }
+      countsInFlight = true;
+      if (countsTimer !== null) { clearTimeout(countsTimer); countsTimer = null; }
+      api.anomalyCounts().then(
+        (r) => {
+          if (!alive) return;
+          setAnomalyCounts(r);
+          setAnomalyError(null);
+          if (r.computing) countsTimer = setTimeout(loadCounts, ANOMALY_POLL_MS);
+        },
+        (e: unknown) => { if (alive) setAnomalyError(anomalyErrorText(e, 'counts')); },
+      ).finally(() => {
+        countsInFlight = false;
+        if (alive && countsAgain) { countsAgain = false; loadCounts(); }
+      });
+    };
+    const loadAll = (): void => { loadProjects(); loadCounts(); };
+    loadAll();
+    const refresh = createThrottle(loadAll, PROJECTS_REFRESH_MS);
+    const poll = setInterval(loadAll, PROJECTS_POLL_MS);
     const live = openLiveSessions(
       (s) => {
         if (s.projectId === selected.current) {
@@ -204,11 +248,12 @@ export function Home({ projectId }: { projectId: string | null }) {
         refresh.trigger();
       },
       // Upserts missed while disconnected are not replayed: refetch both lists.
-      { onReconnect: () => { loadProjects(); loadSessions(); } },
+      { onReconnect: () => { loadAll(); loadSessions(); } },
     );
     return () => {
       alive = false;
       clearInterval(poll);
+      if (countsTimer !== null) clearTimeout(countsTimer);
       refresh.cancel();
       live.close();
     };
@@ -276,7 +321,7 @@ export function Home({ projectId }: { projectId: string | null }) {
       </div>
     </div>
     {searching ? (
-      <SearchResults result={result} content={content} q={q} now={now} filter={filter} />
+      <SearchResults result={result} content={content} q={q} now={now} filter={filter} counts={anomalyCounts?.counts} />
     ) : (
     <div className="home">
       {error !== null && <p className="error">加载失败：{error}</p>}
@@ -313,6 +358,8 @@ export function Home({ projectId }: { projectId: string | null }) {
       <section className="sessions">
         <h2>{shown !== undefined ? `${projectTitle(shown)} 的会话` : '会话'}</h2>
         {shownId !== null && sessions.length === 0 && <p className="muted">这个项目还没有会话</p>}
+        {anomalyCounts === null && anomalyError !== null && <p className="muted anomaly-home-note">异常标记暂时加载不出来（{anomalyError}），稍后会自动重试。</p>}
+        {anomalyCounts?.computing === true && <p className="muted anomaly-home-note">异常还在计算，标记可能不全。</p>}
         {sessions.length > 0 && shownSessions.length === 0 && filter !== 'all' && (
           <p className="muted">这个项目没有 {originLook(filter).label} 会话</p>
         )}
@@ -329,6 +376,7 @@ export function Home({ projectId }: { projectId: string | null }) {
                   {s.gitBranch !== null && <span className="chip chip-branch" title={s.gitBranch}>🌿 {s.gitBranch}</span>}
                   <span className="muted" title={formatTime(s.lastActivityAt)}>{relativeTime(s.lastActivityAt, now)}</span>
                   {s.sourceDeleted && <span className="tag">源文件已删除</span>}
+                  <AnomalyMark count={anomalyCounts?.counts[s.id]} />
                 </div>
               </a>
             </li>

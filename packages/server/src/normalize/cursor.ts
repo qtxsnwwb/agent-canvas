@@ -10,11 +10,13 @@ import {
   maxOf,
   minOf,
   str,
+  cursorCallKey,
   type BubbleView,
   type ComposerFacts,
 } from './cursor-bubbles.js';
 import { parseCursorHook } from './cursor-hooks.js';
 import { filesFields, filesPatch, nodeFiles } from './files.js';
+import { inputKeyFields, inputKeyPatch } from './input-key.js';
 import type { AgentNormalizer, BatchItem, BatchResult, NormalizeResult } from './types.js';
 
 /*
@@ -352,6 +354,7 @@ function nodePatch(old: GraphNode, next: GraphNode): Partial<GraphNode> {
   const nu = next.usage;
   if ((ou === null) !== (nu === null) || (ou !== null && nu !== null && (ou.inputTokens !== nu.inputTokens || ou.outputTokens !== nu.outputTokens))) patch.usage = nu;
   Object.assign(patch, filesPatch(old, next));
+  Object.assign(patch, inputKeyPatch(old, next.inputKey));
   return patch;
 }
 
@@ -496,6 +499,19 @@ export class CursorNormalizer implements AgentNormalizer {
     } else {
       const old = thread.bubbles.get(bubble.view.bubbleId);
       let view = bubble.view;
+      // A call record without params keeps the bubble's last params, one whose result names no content ids keeps the
+      // last ids: carried in the record state, so the key is a function of the records read (whatever the batching, as
+      // a rebuild and a hydration replay them).
+      if ((view.kind === 'tool' || view.kind === 'subagent') && old !== undefined) {
+        const paramsKey = view.paramsKey ?? old.paramsKey;
+        const contentIds = view.contentIds ?? old.contentIds;
+        if (paramsKey !== view.paramsKey || contentIds !== view.contentIds) {
+          view = { ...view, paramsKey, contentIds, inputKey: cursorCallKey(view.toolName ?? 'unknown', paramsKey, contentIds) };
+          if (view.inputKey === undefined) delete view.inputKey;
+          if (view.paramsKey === undefined) delete view.paramsKey;
+          if (view.contentIds === undefined) delete view.contentIds;
+        }
+      }
       if (view.unknown !== null) {
         // Counted once per shape change of a bubble, not once per version.
         if (old?.unknown !== view.unknown) unknown = view.unknown;
@@ -984,6 +1000,7 @@ export class CursorNormalizer implements AgentNormalizer {
           usage: b.usage,
           systemSubtype: b.kind === 'notification' ? 'task_notification' : null,
           ...filesFields(nodeFiles(b.fileTouches, cwd)),
+          ...inputKeyFields(b.inputKey),
         },
       });
       prevNode = b.nodeId;

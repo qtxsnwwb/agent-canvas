@@ -1,4 +1,5 @@
 import { expect, test } from 'vitest';
+import { nodeAddressHash } from '@agent-canvas/shared';
 import { parseHash, sessionFileHash, sessionNodeHash } from '../src/route';
 import { nextNodeTarget, nodeJumpAction } from '../src/nodeJump';
 
@@ -63,4 +64,8 @@ test('nodeJumpAction：没有目标或已处理过不动；没准备好等；没
   expect(nodeJumpAction({ id: 'zz', seq: 1 }, 0, true, has)).toBe('missing');
   expect(nodeJumpAction({ id: 'n1', seq: 1 }, 0, true, has)).toBe('show');
   expect(nodeJumpAction({ id: 'n1', seq: 2 }, 1, true, has)).toBe('show');
+});
+
+test('通知用的节点地址（shared nodeAddressHash）与 sessionNodeHash 一致', () => {
+  for (const id of ids) expect(nodeAddressHash('s/1 #x', id)).toBe(sessionNodeHash('s/1 #x', id));
 });

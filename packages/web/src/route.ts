@@ -13,7 +13,9 @@ export type Route =
   | { page: 'diagnostics' }
   | { page: 'notifications' }
   | { page: 'stats' }
-  | { page: 'files' };
+  | { page: 'files' }
+  /** `query`: what follows `#/anomalies?` (the page's filter, see anomalies.ts parseAnomaliesQuery); '' when none. */
+  | { page: 'anomalies'; query: string };
 
 const FILE_SEGMENT = '/f/';
 const NODE_SEGMENT = '/n/';
@@ -31,6 +33,8 @@ export function parseHash(hash: string): Route {
   if (h === '/notifications') return { page: 'notifications' };
   if (h === '/stats') return { page: 'stats' };
   if (h === '/files') return { page: 'files' };
+  if (h === '/anomalies') return { page: 'anomalies', query: '' };
+  if (h.startsWith('/anomalies?')) return { page: 'anomalies', query: h.slice('/anomalies?'.length) };
   if (h.startsWith('/s/')) {
     const rest = h.slice(3);
     // The id is encoded (no literal '/'), so the first '/f/' or '/n/' starts the file or node part (whichever comes
