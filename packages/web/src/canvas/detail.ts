@@ -34,3 +34,14 @@ export function detailSections(detail: NodeDetail): DetailSection[] {
   }
   return out;
 }
+
+export const DETAIL_UNREADABLE_NOTE = '这一步的详情已损坏，无法读取';
+
+/**
+ * The line the drawer shows instead of sections: the detail is damaged (`unreadable`: its fields are empty), or there is
+ * nothing to show; null when sections are shown.
+ */
+export function detailNote(detail: NodeDetail, sectionCount: number): string | null {
+  if (detail.unreadable === true) return DETAIL_UNREADABLE_NOTE;
+  return sectionCount === 0 ? '无内容' : null;
+}

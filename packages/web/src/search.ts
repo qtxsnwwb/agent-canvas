@@ -31,7 +31,6 @@ export function highlightParts(snippet: string, q: string): { text: string; matc
 }
 
 export interface SearchResult { q: string; hits: SearchHit[] | null; error: string | null }
-/** The content group's answer for q: response null when q is too short or the request failed (error set). */
 /**
  * The content group's answer for q under an origin filter (null: all origins; the server filters, so its caps apply
  * after the filter): response null when q is too short or the request failed (error set).

@@ -7,6 +7,7 @@ import {
 } from '../diagnostics';
 import { diagnosticsNotificationLines } from '../notifications';
 import { OriginBadge } from '../OriginBadge';
+import { searchIndexLines, storageLines, type DiagLine } from '../storageDiagnostics';
 import { useNow } from '../useNow';
 
 const REFRESH_MS = 5000;
@@ -80,6 +81,27 @@ function NotificationsSection({ data }: { data: DiagnosticsData['notifications']
       <p>最近一次发出：{n.lastSent}</p>
       {n.lastError !== null && <p className="error" style={{ padding: 0 }}>最近一次错误：{n.lastError}</p>}
       {n.settingsError !== null && <p className="diag-warn">保存的通知设置读不出来，按默认（关闭）处理：{n.settingsError}</p>}
+    </section>
+  );
+}
+
+function DiagLineView({ line }: { line: DiagLine }) {
+  const cls = line.tone === 'warn' ? 'diag-warn' : line.tone === 'error' ? 'error' : line.tone === 'muted' ? 'muted' : undefined;
+  return (
+    <p className={cls} style={line.tone === 'error' ? { padding: 0 } : undefined}>
+      {line.text}{line.command !== undefined && <code>{line.command}</code>}{line.tail}
+    </p>
+  );
+}
+
+/** Database file, compression, VACUUM and the content search index; nothing for a block an older server does not send. */
+function DatabaseSection({ data }: { data: DiagnosticsData }) {
+  const lines = [...(storageLines(data.storage) ?? []), ...(searchIndexLines(data.search) ?? [])];
+  if (lines.length === 0) return null;
+  return (
+    <section>
+      <h2>数据库</h2>
+      {lines.map((l, i) => <DiagLineView key={i} line={l} />)}
     </section>
   );
 }
@@ -164,6 +186,8 @@ export function Diagnostics() {
         <p>推导规则版本：{data.normalizerVersion}</p>
         <p>数据库标识：<code>{data.dbEpoch}</code></p>
       </section>
+
+      <DatabaseSection data={data} />
 
       <section>
         <h2>Hooks</h2>
