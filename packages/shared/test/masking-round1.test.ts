@@ -83,7 +83,7 @@ test.each([
 // ---- new rules ----
 
 test.each<[string, string, string, MaskType]>([
-  ['Authorization: Basic', 'Authorization: Basic ' + 'dXNlcjpwYXNz', 'Authorization: Basic @', 'authorization'],
+  ['Authorization: Basic', 'Authorization: Basic ' + 'dXNlcjpwYXNzd29yZDEy', 'Authorization: Basic @', 'authorization'],
   ['Authorization: Token', '"authorization": "Token ' + 'abcd1234efgh"', '"authorization": "Token @"', 'authorization'],
   ['GitLab', 'x ' + K.gitlab, 'x @', 'gitlab-token'],
   ['Hugging Face', 'x ' + K.hf, 'x @', 'huggingface-token'],
@@ -143,7 +143,7 @@ test('键名命中时：数字换成占位符，数组和嵌套对象里的字�
 
 // ---- I2: key names ----
 
-test.each(['passWord', 'PassWord', 'userPASSWORD', 'db_password_hash', 'SECRETkey', 'clientSecret', 'X-Auth-Token', 'access_token', 'refreshToken', 'apiKey', 'API_KEY', 'aws_access_key_id', 'privateKey', 'passphrase', 'credentials', 'Authorization', 'Cookie', 'AccountKey', 'auth', 'pwd'])(
+test.each(['passWord', 'PassWord', 'userPASSWORD', 'db_password_hash', 'SECRETkey', 'clientSecret', 'X-Auth-Token', 'access_token', 'refreshToken', 'apiKey', 'API_KEY', 'aws_access_key_id', 'privateKey', 'passphrase', 'credentials', 'Authorization', 'Cookie', 'AccountKey', 'auth', 'db_pass', 'PASS'])(
   '是密钥的名字：%s',
   (name) => {
     expect(isAssignmentKeyName(name)).toBe(true);
@@ -186,15 +186,23 @@ test.each(TYPES)('截断的文字：%s 在前缀后的每个位置被截断都�
   const prefix = TYPES.find((t) => t[0] === k)![2];
   for (let n = prefix + 1; n <= key.length; n++) {
     const text = `cmd "x: ${key.slice(0, n)}…`;
-    const out = m(['credential']).mask(text, { truncated: true });
-    expect(out, `${k} cut at ${n}`).toMatch(/^cmd "x: ‹已遮蔽·[^›]+›…$/);
+    const masker = m(['credential']);
+    const out = masker.mask(text, { truncated: true });
+    // Fewer than 4 key characters after the prefix reveal nothing useful and stay; from 4 on the tail is masked.
+    if (n < prefix + 4) expect(out, `${k} cut at ${n}`).toBe(text);
+    else expect(out, `${k} cut at ${n}`).toMatch(/^cmd "x: ‹已遮蔽·[^›]+›…$/);
+    // Nothing accepted only because of the cut is learned.
+    if (n < prefix + 9) {
+      masker.learn(text, { truncated: true });
+      expect(masker.learnedCount(), `${k} learned at ${n}`).toBe(0);
+    }
   }
   void type;
 });
 
 test('截断的文字：值一直到末尾的赋值不管筛选都遮；不截断时照常筛选', () => {
   expect(m(['assignment']).mask('{"command":"x","password":"Ab…', { truncated: true })).toBe(`{"command":"x","password":"${ph('assignment', 1)}`);
-  expect(m(['assignment']).mask('export TOKEN=ab…', { truncated: true })).toBe(`export TOKEN=${ph('assignment', 1)}`);
+  expect(m(['assignment']).mask('export TOKEN=ab…', { truncated: true })).toBe('export TOKEN=ab…'); // not a password-class key
   expect(m(['assignment']).mask('export TOKEN=ab')).toBe('export TOKEN=ab');
   expect(m(['credential']).mask('psql postgres://u:Hun…', { truncated: true })).toBe(`psql postgres://u:${ph('url-password', 1)}`);
   expect(m(['credential']).mask('see https://example.com:8080…', { truncated: true })).toBe('see https://example.com:8080…');

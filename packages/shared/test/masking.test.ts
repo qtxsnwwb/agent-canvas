@@ -111,7 +111,7 @@ test.each<[string, string, string]>([
   ['camelCase 段', 'accessToken=Abc12345xyz', 'accessToken=@'],
   ['auth 作为整段', 'AUTH=Abc12345xyz', 'AUTH=@'],
   ['值在 ) 处结束', 'f(password=Abc12345xyz)', 'f(password=@)'],
-  ['值在 } 处结束', '{pwd=Abc12345xyz}', '{pwd=@}'],
+  ['值在 } 处结束', '{passwd=Abc12345xyz}', '{passwd=@}'],
   ['值在 , 处结束', 'passwd=Abc12345xyz,next', 'passwd=@,next'],
   ['转义引号的 JSON', '{\\"token\\": \\"Abc12345xyz\\"}', '{\\"token\\": \\"@\\"}'],
 ])('赋值形式：%s', (_name, text, expected) => {
@@ -150,7 +150,7 @@ test.each([
 });
 
 test('赋值名字的规则', () => {
-  for (const name of ['password', 'DB_PASSWD', 'pwd', 'clientSecret', 'X-Auth-Token', 'apikey', 'API_KEY', 'api-key', 'AWS_ACCESS_KEY_ID', 'private_key', 'client_secret', 'auth', 'my.auth.value', 'APIKey']) {
+  for (const name of ['password', 'DB_PASSWD', 'db_pass', 'clientSecret', 'X-Auth-Token', 'apikey', 'API_KEY', 'api-key', 'AWS_ACCESS_KEY_ID', 'private_key', 'client_secret', 'auth', 'my.auth.value', 'APIKey']) {
     expect(isAssignmentKeyName(name), name).toBe(true);
   }
   for (const name of ['author', 'oauth', 'keyboard', 'api', 'key', 'access', 'name', '']) {
@@ -377,6 +377,17 @@ test.each([
   ['https://x@', fill('https://x@')],
   ['password="', fill('password="')],
   ['$a', fill('password=$a')],
+  // fix round 2
+  ['--user=x:', fill('--user=x:')],
+  ['--user=ab:cd ', fill(' --user=ab:cdef ')],
+  ['ya29.', fill('ya29.')],
+  ['1//', fill('1//')],
+  ['password (netrc)', fill('machine a login b password ')],
+  ['password ', fill(' password ')],
+  ['risk_test_', fill('ri' + 'sk_test_')],
+  ['db_pass=', fill('db_pass=')],
+  ['max_tokens=', fill('max_tokens=')],
+  ['a a a (prose)', fill('password="a a a ')],
 ])('1 MB 的最坏输入：%s', (_name, text) => {
   const masker = createMasker({
     categories: ['credential', 'assignment', 'personal', 'custom'],
