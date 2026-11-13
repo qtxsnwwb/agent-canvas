@@ -501,3 +501,77 @@ header .header-link[aria-current="page"] { background: var(--sun); }
   .session-bar { flex-wrap: wrap; row-gap: 6px; padding: 6px 12px; }
   .session-bar-end { flex: 1 1 100%; margin-left: 0; flex-wrap: wrap; gap: 6px 8px; }
 }
+
+/* The header's masking switch (spec 5): at the end of the header; while on, filled and labelled 遮蔽中. */
+.mask-switch { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; flex: none; }
+.mask-toggle {
+  display: inline-flex; align-items: center; gap: 4px; margin: 0; padding: 2px 12px; border: 2px solid var(--edge); border-radius: 999px;
+  background: var(--card); color: var(--ink); font: 700 12px/18px var(--font); box-shadow: var(--shadow-sm); cursor: pointer; white-space: nowrap;
+}
+.mask-toggle:hover { background: var(--paper); }
+.mask-toggle:focus-visible { outline: 3px solid var(--grape); outline-offset: 2px; }
+.mask-toggle[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: var(--card); }
+.mask-warn { color: #c2410c; font-size: 12px; font-weight: 700; white-space: nowrap; cursor: help; }
+@media (max-width: 640px) {
+  .mask-toggle { padding: 2px 8px; }
+  .mask-warn-text { display: none; }
+}
+@media (max-width: 480px) {
+  .mask-switch { margin-left: 5px; }
+  .mask-toggle { padding: 2px 6px; }
+}
+
+/* The session bar's export button, then the canvas's own buttons. */
+.session-bar-tools { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+@media (max-width: 760px) { .session-bar-tools { gap: 6px 8px; } }
+
+/* The export dialog (spec 4.1): a native modal dialog that scrolls inside itself on a small screen. */
+.export-dialog {
+  box-sizing: border-box; width: min(640px, calc(100vw - 24px)); max-height: calc(100vh - 24px); max-height: calc(100dvh - 24px);
+  margin: auto; padding: 0; border: 2px solid var(--edge); border-radius: 18px; background: var(--card); color: var(--ink);
+  box-shadow: var(--shadow); display: flex; flex-direction: column; overflow: hidden;
+}
+.export-dialog:not([open]) { display: none; }
+.export-dialog::backdrop { background: rgba(63, 58, 90, 0.35); }
+.export-head, .export-foot { flex: none; display: flex; align-items: center; gap: 8px; padding: 10px 16px; }
+.export-head { border-bottom: 2px solid var(--line); }
+.export-head h2 { margin: 0; flex: 1; }
+.export-foot { border-top: 2px solid var(--line); flex-wrap: wrap; justify-content: flex-end; }
+.export-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 10px 16px 6px; overscroll-behavior: contain; }
+.export-body fieldset { margin: 0 0 10px; padding: 6px 10px 8px; border: 1.5px solid var(--line); border-radius: 12px; min-width: 0; }
+.export-body legend { padding: 0 4px; font-weight: 800; font-size: 13px; }
+.export-body label { display: block; margin: 2px 0; overflow-wrap: anywhere; }
+.export-body label.is-disabled { color: var(--ink-faint); }
+.export-body input[type="radio"], .export-body input[type="checkbox"] { margin: 0 6px 0 0; vertical-align: -2px; }
+.export-hint { margin: 0 0 4px 22px; overflow-wrap: anywhere; }
+.export-output { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 12px; margin-top: 4px; }
+.export-output label { display: inline-block; }
+.export-mask-row { margin-bottom: 2px; }
+.export-warn { color: #c0392b; font-weight: 700; margin: 4px 0; overflow-wrap: anywhere; }
+.export-warn ul, ul.export-warn { padding: 0; }
+.export-terms { margin-top: 6px; }
+.export-terms summary { cursor: pointer; font-weight: 700; font-size: 13px; }
+.export-terms-label { margin-top: 6px !important; font-size: 12px; color: var(--ink-soft); }
+.export-terms textarea {
+  box-sizing: border-box; width: 100%; margin: 4px 0; padding: 6px 8px; border: 2px solid var(--edge); border-radius: 10px;
+  font: 13px/1.5 var(--mono); color: var(--ink); background: var(--paper); resize: vertical;
+}
+.export-terms textarea[aria-invalid="true"] { border-color: #e7a19a; }
+.export-terms-msg { min-height: 18px; font-size: 12px; }
+.export-scan { margin: 4px 0 8px; padding: 8px 10px; border-radius: 12px; background: var(--paper-deep); }
+.export-scan h3 { margin: 0 0 4px; font-size: 13px; }
+.export-scan p { margin: 2px 0; }
+.export-rows { font-size: 13px; }
+.export-rows li::before { content: "· "; color: var(--ink-soft); }
+.export-caution { margin: 6px 0 4px; font-weight: 700; color: #9a4a12; }
+.export-status { flex: 1 1 auto; min-width: 0; font-size: 12px; overflow-wrap: anywhere; }
+.export-dialog button {
+  margin: 0; padding: 3px 14px; border: 2px solid var(--edge); border-radius: 999px; background: var(--card); color: var(--ink);
+  font: 700 12px/18px var(--font); cursor: pointer; box-shadow: var(--shadow-sm);
+}
+.export-dialog button:hover:not(:disabled) { background: var(--paper-deep); }
+.export-dialog button:disabled { opacity: 0.5; cursor: not-allowed; }
+.export-dialog button:focus-visible { outline: 3px solid var(--grape); outline-offset: 2px; }
+.export-dialog .export-go { background: var(--sun); }
+.export-dialog .export-close { padding: 0 9px; font-size: 16px; }
+.export-dialog .export-link { padding: 0 8px; }

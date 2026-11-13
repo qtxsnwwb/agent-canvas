@@ -1,7 +1,11 @@
 import { useEffect, useMemo, useReducer, useState } from 'react';
 import { openLiveSession, type LiveSession } from '../client';
+import { ExportDialog } from '../canvas/ExportDialog';
+import type { TurnChoice } from '../export';
 import { liveSource } from '../liveSource';
 import { sessionStatusView } from '../labels';
+import { useMask } from '../MaskContext';
+import { createMaskedSource } from '../masking';
 import { OriginBadge } from '../OriginBadge';
 import { sessionLoadState } from '../sessionLoad';
 import { useNow } from '../useNow';
@@ -15,8 +19,14 @@ export function SessionPage({ sessionId, filePath = null, nodeId = null }: { ses
   /** The info bar's right-hand slot; the canvas renders its view switch into it (it owns the mode). */
   const [toolbar, setToolbar] = useState<HTMLElement | null>(null);
   const now = useNow();
-  // One source per live session (its functions are stable: the panels refetch when they change).
-  const source = useMemo(() => (live === null ? null : liveSource(live)), [live]);
+  // The masking switch (spec 5): one numbered masker per session; with the switch on, everything the page shows comes
+  // through the masked source (the info bar included). Rebuilt when the switch or the custom terms change.
+  const mask = useMask();
+  const masker = mask.forSession(sessionId);
+  // One source per live session and masker (its functions are stable: the panels refetch when they change).
+  const source = useMemo(() => (live === null ? null : createMaskedSource(liveSource(live), masker)), [live, masker]);
+  const [turn, setTurn] = useState<TurnChoice | null>(null);
+  const [exportOpen, setExportOpen] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -50,8 +60,11 @@ export function SessionPage({ sessionId, filePath = null, nodeId = null }: { ses
   }
   if (state === 'error') return <p className="error">加载失败：{String(error)}</p>;
   if (live === null || source === null) return <p className="muted session-loading">加载中…</p>;
-  const session = live.getSession();
+  const session = source.getSession();
   const status = sessionStatusView(session, now);
+  // A file address from a page with the switch on carries the path masked (see masking.ts); a plain one is masked here
+  // like the file panel's paths, so both find the file.
+  const shownFilePath = filePath === null ? null : masker.text(filePath);
   return (
     <div className="session-page">
       <div className="session-bar">
@@ -61,9 +74,14 @@ export function SessionPage({ sessionId, filePath = null, nodeId = null }: { ses
         <OriginBadge origin={session.origin} />
         {session.gitBranch !== null && <span className="muted branch" title={session.gitBranch}>{session.gitBranch}</span>}
         {session.sourceDeleted && <span className="tag">源文件已删除</span>}
-        <div className="session-bar-end" ref={setToolbar} />
+        <div className="session-bar-end">
+          <button type="button" className="files-toggle export-toggle" aria-haspopup="dialog" onClick={() => setExportOpen(true)}
+            title="把这个会话导出成 HTML 或 Markdown 文件（可遮蔽密钥）">导出</button>
+          <div className="session-bar-tools" ref={setToolbar} />
+        </div>
       </div>
-      <SessionCanvas key={session.id} source={source} toolbar={toolbar} filePath={filePath} nodeId={nodeId} />
+      <SessionCanvas key={session.id} source={source} toolbar={toolbar} filePath={shownFilePath} nodeId={nodeId} onTurnChange={setTurn} />
+      {exportOpen && <ExportDialog sessionId={session.id} turn={turn} onClose={() => setExportOpen(false)} />}
     </div>
   );
 }

@@ -11,7 +11,7 @@ import { Canvas, type CanvasFocus } from '../canvas/Canvas';
 import { FilePanel } from '../canvas/FilePanel';
 import { AnomalyPanel, useSessionAnomalies } from '../canvas/AnomalyPanel';
 import {
-  NO_CARD_MARKS, anomaliesUntil, anomalyButton, cardMarks, graphResolver, graphTurns, panelRows, pickedRowKey, stableCardMarks,
+  NO_CARD_MARKS, anomaliesUntil, anomalyButton, cardMarks, graphResolver, graphTurns, panelRows, pickedRowKey, stableCardMarks, turnLabel,
   type CardMarks, type PanelRow,
 } from '../anomalies';
 import { revealPlan } from '../canvas/reveal';
@@ -77,8 +77,13 @@ function DensitySwitch({ compact, disabled, onChange }: { compact: boolean; disa
  * re-renders do not reach React Flow; it re-renders when the canvas snapshot or the selection changes. Every handler
  * passed to Canvas is stable.
  */
-export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, filePath, nodeId }: {
+export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, filePath, nodeId, onTurnChange }: {
   source: SessionSource; toolbar: HTMLElement | null;
+  /**
+   * Told the turn the selection belongs to (a turn card, or any node of the turn, in any view) with its label as the
+   * anomaly panel writes it (“第 N 轮 · <prompt>”); null when nothing is selected. The app's export dialog uses it.
+   */
+  onTurnChange?: (turn: { key: string; label: string } | null) => void;
   /** The deep link's file (`#/s/<id>/f/<path>`): opens the file panel at it, again whenever it changes. */
   filePath: string | null;
   /** The deep link's node (`#/s/<id>/n/<nodeId>`): selected and brought into view, again whenever it changes. */
@@ -154,6 +159,14 @@ export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, file
   // The selected node is never folded away by later updates (see CanvasModel.setKeepVisible).
   const { setKeepVisible } = canvas;
   useEffect(() => { setKeepVisible(selected); }, [selected, setKeepVisible]);
+  // The selection's turn, for the export dialog's "this turn" (main-thread turns only: every view node carries the turn
+  // it is drawn in, an agent's inner nodes their dispatching turn).
+  const selectedTurnKey = selected !== null ? canvas.view.nodes.get(selected)?.turnKey ?? null : null;
+  const selectedTurnIndex = selectedTurnKey === null ? -1 : canvas.view.turns.findIndex((t) => t.key === selectedTurnKey);
+  const selectedTurnLabel = selectedTurnIndex < 0 ? null : turnLabel(selectedTurnIndex, canvas.view.turns[selectedTurnIndex]!.summary.promptSummary);
+  useEffect(() => {
+    onTurnChange?.(selectedTurnKey === null || selectedTurnLabel === null ? null : { key: selectedTurnKey, label: selectedTurnLabel });
+  }, [selectedTurnKey, selectedTurnLabel, onTurnChange]);
   // Only graph nodes open the drawer; a vanished node (or a turn summary) leaves selectedNode null and closes it.
   const selectedView = selected !== null ? canvas.view.nodes.get(selected) : undefined;
   // The replay view draws nodes as they were at the replay time; the drawer shows the node's current content.

@@ -4,6 +4,7 @@ import {
 } from '@agent-canvas/shared';
 import { originLook, type OriginFilter } from './home';
 import { KIND_LABEL } from './labels';
+import { IDENTITY_MASKER, maskContentSnippet, type PageMasker } from './masking';
 import { sessionNodeHash } from './route';
 
 export const SEARCH_DEBOUNCE_MS = 250;
@@ -16,18 +17,27 @@ const asciiLower = (s: string): string => s.replace(/[A-Z]/g, (c) => c.toLowerCa
  * 只有 ASCII 字母不区分大小写，按字面查找（不用正则、不做 Unicode 大小写折叠）。q 为空或未出现时返回单段。
  */
 export function highlightParts(snippet: string, q: string): { text: string; match: boolean }[] {
-  const needle = asciiLower(Array.from(q.trim()).slice(0, SEARCH_MAX_CHARS).join('').trim());
-  if (needle === '') return [{ text: snippet, match: false }];
-  const hay = asciiLower(snippet);
+  const ranges = highlightRanges(snippet, q);
+  if (ranges.length === 0) return [{ text: snippet, match: false }];
   const parts: { text: string; match: boolean }[] = [];
   let last = 0;
-  for (let at = hay.indexOf(needle); at >= 0; at = hay.indexOf(needle, last)) {
+  for (const [at, end] of ranges) {
     if (at > last) parts.push({ text: snippet.slice(last, at), match: false });
-    parts.push({ text: snippet.slice(at, at + needle.length), match: true });
-    last = at + needle.length;
+    parts.push({ text: snippet.slice(at, end), match: true });
+    last = end;
   }
   if (last < snippet.length) parts.push({ text: snippet.slice(last), match: false });
-  return parts.length === 0 ? [{ text: snippet, match: false }] : parts;
+  return parts;
+}
+
+/** Where q occurs in the snippet (highlightParts' rule), as [start, end) ranges in order. */
+export function highlightRanges(snippet: string, q: string): [number, number][] {
+  const needle = asciiLower(Array.from(q.trim()).slice(0, SEARCH_MAX_CHARS).join('').trim());
+  if (needle === '') return [];
+  const hay = asciiLower(snippet);
+  const out: [number, number][] = [];
+  for (let at = hay.indexOf(needle); at >= 0; at = hay.indexOf(needle, at + needle.length)) out.push([at, at + needle.length]);
+  return out;
 }
 
 export interface SearchResult { q: string; hits: SearchHit[] | null; error: string | null }
@@ -145,23 +155,26 @@ export interface ContentRow {
 /** One session's hits under one heading (title and origin shown once). */
 export interface ContentSessionGroup { key: string; sessionId: string; origin: Origin; title: string; rows: ContentRow[] }
 
-/** Groups consecutive hits of the same session (the server sends them grouped), keeping the server's order. */
-export function groupContentHits(hits: readonly ContentHit[]): ContentSessionGroup[] {
+/**
+ * Groups consecutive hits of the same session (the server sends them grouped), keeping the server's order. With the
+ * masking switch on (`m`), the title, tool name and snippet are masked (the snippet with maskContentSnippet).
+ */
+export function groupContentHits(hits: readonly ContentHit[], m: PageMasker = IDENTITY_MASKER): ContentSessionGroup[] {
   const groups: ContentSessionGroup[] = [];
   for (const h of hits) {
     let g = groups.at(-1);
     if (g === undefined || g.sessionId !== h.sessionId) {
-      g = { key: `${groups.length}:${h.sessionId}`, sessionId: h.sessionId, origin: h.origin, title: h.sessionTitle ?? h.sessionId.slice(0, 8), rows: [] };
+      g = { key: `${groups.length}:${h.sessionId}`, sessionId: h.sessionId, origin: h.origin, title: h.sessionTitle !== null ? m.cut(h.sessionTitle) : h.sessionId.slice(0, 8), rows: [] };
       groups.push(g);
     }
     g.rows.push({
       key: `${g.key}:${g.rows.length}:${h.nodeId}`,
       href: sessionNodeHash(h.sessionId, h.nodeId),
       kindLabel: KIND_LABEL[h.kind] ?? h.kind,
-      toolName: h.toolName,
+      toolName: h.toolName === null ? null : m.text(h.toolName),
       at: h.at,
       inSubagent: h.agentId !== null,
-      parts: snippetParts(h.snippet),
+      parts: m.on ? maskContentSnippet(m, h.snippet) : snippetParts(h.snippet),
     });
   }
   return groups;
@@ -178,7 +191,7 @@ export type ContentView =
  * What the content group shows for the trimmed query q under the page's origin filter. The server applies the filter
  * (contentOrigin); an answer for another query or another filter counts as still loading.
  */
-export function contentView(result: ContentResult | null, q: string, filter: OriginFilter): ContentView {
+export function contentView(result: ContentResult | null, q: string, filter: OriginFilter, m: PageMasker = IDENTITY_MASKER): ContentView {
   if (Array.from(q).length < SEARCH_MIN_CHARS) return { state: 'short', message: `至少输入 ${SEARCH_MIN_CHARS} 个字才搜内容` };
   if (result === null || result.q !== q || result.origin !== contentOrigin(filter)) return { state: 'loading' };
   if (result.response === null) return result.error !== null ? { state: 'error', message: `内容搜索失败：${result.error}` } : { state: 'loading' };
@@ -190,7 +203,7 @@ export function contentView(result: ContentResult | null, q: string, filter: Ori
   if (r.hits.length === 0) {
     return { state: 'empty', message: filter === 'all' ? '没有匹配的内容' : `没有匹配的 ${originLook(filter).label} 内容`, notes };
   }
-  return { state: 'hits', groups: groupContentHits(r.hits), notes };
+  return { state: 'hits', groups: groupContentHits(r.hits, m), notes };
 }
 
 /** The origin the content request carries for the page's filter (null: no filter). */

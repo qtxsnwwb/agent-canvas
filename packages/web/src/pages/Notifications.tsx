@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { NotificationSettings, NotificationStatus } from '@agent-canvas/shared';
 import { api } from '../client';
 import { createPoller } from '../diagnostics';
+import { useMask } from '../MaskContext';
 import {
   NOTIFICATION_KINDS, deliveryLines, mergeSettings, parseNumberField,
   type NumberField,
@@ -21,8 +22,13 @@ function errorText(e: unknown): string {
 }
 
 /** Owns the 1-second tick for the relative times. */
-function DeliveryStatus({ status }: { status: NotificationStatus }) {
+function DeliveryStatus({ status: raw }: { status: NotificationStatus }) {
   const now = useNow(1000);
+  // A delivery error can quote the notification (a session title): masked with the switch on.
+  const { list: m } = useMask();
+  const status = m.on
+    ? { ...raw, lastError: raw.lastError === null ? null : m.text(raw.lastError), settingsError: raw.settingsError === null ? null : m.text(raw.settingsError) }
+    : raw;
   const lines = deliveryLines(status, now);
   return (
     <section aria-labelledby="notify-status-h">
@@ -36,6 +42,7 @@ function DeliveryStatus({ status }: { status: NotificationStatus }) {
 }
 
 export function Notifications({ onEnabledChange }: { onEnabledChange?: (enabled: boolean) => void }) {
+  const { list: mask } = useMask();
   const [settings, setSettings] = useState<NotificationSettings | null>(null);
   const [status, setStatus] = useState<NotificationStatus | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -231,7 +238,7 @@ export function Notifications({ onEnabledChange }: { onEnabledChange?: (enabled:
           {test.kind === 'sending' ? '发送中…' : '发一条测试通知'}
         </button>
         <p className={`notify-result${test.kind === 'sent' ? ' ok' : test.kind === 'failed' ? ' bad' : ''}`} role="status" aria-live="polite">
-          {test.kind === 'sent' ? '已发送，看看屏幕右下角' : test.kind === 'failed' ? `没发出去：${test.error}` : ''}
+          {test.kind === 'sent' ? '已发送，看看屏幕右下角' : test.kind === 'failed' ? `没发出去：${mask.text(test.error)}` : ''}
         </p>
       </section>
 

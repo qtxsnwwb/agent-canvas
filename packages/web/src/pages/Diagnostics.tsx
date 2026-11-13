@@ -1,10 +1,12 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { Diagnostics as DiagnosticsData, Origin } from '@agent-canvas/shared';
 import { api } from '../client';
 import {
   codexDirLine, createPoller, cursorBlockVisible, cursorDbLine, cursorHooks, cursorPollLine, cursorUnknownRecords, fileOrigin, formatAge, hookState, hooksByOrigin, summarizeDiagnostics, truncateSample, FILES_BEHIND_MAX,
   type OriginHooks,
 } from '../diagnostics';
+import { useMask } from '../MaskContext';
+import { maskDiagnostics } from '../masking';
 import { diagnosticsNotificationLines } from '../notifications';
 import { OriginBadge } from '../OriginBadge';
 import { searchIndexLines, storageLines, type DiagLine } from '../storageDiagnostics';
@@ -148,8 +150,12 @@ function CursorSection({ data }: { data: DiagnosticsData }) {
 }
 
 export function Diagnostics() {
-  const [data, setData] = useState<DiagnosticsData | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [rawData, setData] = useState<DiagnosticsData | null>(null);
+  const [rawError, setError] = useState<string | null>(null);
+  // With the masking switch on: unknown-record samples (conversation text), file keys, errors and paths masked.
+  const { list: m } = useMask();
+  const data = useMemo(() => (rawData === null ? null : maskDiagnostics(rawData, m)), [rawData, m]);
+  const error = rawError === null ? null : m.text(rawError);
 
   useEffect(() => {
     const poller = createPoller({

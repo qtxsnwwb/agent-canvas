@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { AnomalyListResponse, Origin, Project } from '@agent-canvas/shared';
 import {
   ANOMALY_COMPUTING_NOTE, ANOMALY_HEURISTIC_NOTE, anomaliesHash, anomalyErrorText, pollDelay, anomaliesQueryString, effectiveAnomaliesFilter,
@@ -6,7 +6,9 @@ import {
 } from '../anomalies';
 import { PathLabel } from '../canvas/FilePanel';
 import { api } from '../client';
-import { ORIGIN_LOOK, projectTitle, relativeTime, stripProjects } from '../home';
+import { ORIGIN_LOOK, relativeTime, stripProjects } from '../home';
+import { useMask } from '../MaskContext';
+import { maskAnomalyList, maskProject, type PageMasker } from '../masking';
 import { OriginBadge } from '../OriginBadge';
 import { STATS_RANGE_OPTIONS, availableOrigins } from '../stats';
 import { useNow } from '../useNow';
@@ -17,8 +19,8 @@ function fullTime(iso: string): string | undefined {
 }
 
 /** The stats page's controls (range, origin, project), plus the kinds as chips with their totals. */
-function FilterRow({ filter, projects, totals, onChange }: {
-  filter: AnomaliesFilter; projects: Project[] | null; totals: AnomalyListResponse['totals'] | null; onChange(f: AnomaliesFilter): void;
+function FilterRow({ filter, projects, totals, m, onChange }: {
+  filter: AnomaliesFilter; projects: Project[] | null; totals: AnomalyListResponse['totals'] | null; m: PageMasker; onChange(f: AnomaliesFilter): void;
 }) {
   const origins = projects === null ? [] : availableOrigins(projects);
   const originOptions: { value: AnomaliesOriginFilter; label: string }[] = [
@@ -50,7 +52,7 @@ function FilterRow({ filter, projects, totals, onChange }: {
             <span className="visually-hidden">项目</span>
             <select value={filter.projectId ?? ''} onChange={(e) => onChange({ ...filter, projectId: e.target.value === '' ? null : e.target.value })}>
               <option value="">全部项目</option>
-              {projectOptions.map((p) => <option key={p.id} value={p.id}>{projectTitle(p)}</option>)}
+              {projectOptions.map((p) => <option key={p.id} value={p.id}>{maskProject(p, m).title}</option>)}
             </select>
           </label>
         )}
@@ -152,9 +154,15 @@ export function Anomalies({ query }: { query: string }) {
     window.location.hash = anomaliesHash(f);
   };
 
-  const data = load.data;
-  const state = surfaceState(data, load.error, (d) => d.items.length === 0);
-  const rows = data === null ? [] : listRows(data.items, projects);
+  // With the masking switch on, titles, paths and tool names are masked once per answer (the projects' directories too,
+  // so a path is still shown relative to its masked directory).
+  const { list: m } = useMask();
+  const rawData = load.data;
+  const data = useMemo(() => (rawData === null ? null : maskAnomalyList(rawData, m)), [rawData, m]);
+  const shownProjects = useMemo(() => (projects === null ? null : projects.map((p) => maskProject(p, m))), [projects, m]);
+  const loadError = load.error === null ? null : m.text(load.error);
+  const state = surfaceState(data, loadError, (d) => d.items.length === 0);
+  const rows = data === null ? [] : listRows(data.items, shownProjects);
   const retry = <button type="button" className="notify-btn stats-retry" onClick={() => setAttempt((x) => x + 1)}>再试一次</button>;
 
   return (
@@ -164,12 +172,12 @@ export function Anomalies({ query }: { query: string }) {
         <p className="muted">在会话里原地打转、失败扎堆、反复改同一个文件、消耗异常高的地方。点一条打开会话，定位到那一步。</p>
       </div>
       <p className="stats-note stats-coverage anomaly-heuristic">{ANOMALY_HEURISTIC_NOTE}</p>
-      <FilterRow filter={filter} projects={projects} totals={data?.totals ?? null} onChange={change} />
+      <FilterRow filter={filter} projects={projects} totals={data?.totals ?? null} m={m} onChange={change} />
       {state === 'loading' && <p className="muted stats-state">加载中…</p>}
-      {state === 'error' && <p className="error stats-state">{load.error}。{retry}</p>}
+      {state === 'error' && <p className="error stats-state">{loadError}。{retry}</p>}
       {data !== null && (
         <>
-          {load.error !== null && <p className="error stats-state">刷新失败（{load.error}），下面是上一次的结果。{retry}</p>}
+          {loadError !== null && <p className="error stats-state">刷新失败（{loadError}），下面是上一次的结果。{retry}</p>}
           {data.computing && <p className="stats-note stats-coverage" role="status">{ANOMALY_COMPUTING_NOTE}</p>}
           {listNotes(data).map((line) => <p key={line} className="stats-note stats-coverage">{line}</p>)}
           <div className={`stats-body${load.loading ? ' is-loading' : ''}`} aria-busy={load.loading}>

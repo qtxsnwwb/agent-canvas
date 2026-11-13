@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from './client';
+import { MaskProvider, MaskSwitch, useMask } from './MaskContext';
 import { Anomalies } from './pages/Anomalies';
 import { Diagnostics } from './pages/Diagnostics';
 import { Files } from './pages/Files';
@@ -12,6 +13,15 @@ import { parseHash, type Route } from './route';
 export { parseHash, type Route } from './route';
 
 export function App() {
+  return (
+    <MaskProvider>
+      <AppBody />
+    </MaskProvider>
+  );
+}
+
+function AppBody() {
+  const mask = useMask();
   const [route, setRoute] = useState<Route>(() => parseHash(location.hash));
   useEffect(() => {
     const onHash = (): void => setRoute(parseHash(location.hash));
@@ -38,8 +48,11 @@ export function App() {
           通知{notifyOn && <span className="header-dot" role="img" aria-label="已开启" title="通知已开启" />}
         </a>
         <a className="header-link header-link-next" href="#/diagnostics">诊断</a>
+        <MaskSwitch />
       </header>
-      {route.page === 'session' ? (
+      {!mask.ready ? (
+        <p className="muted session-loading">加载中…</p>
+      ) : route.page === 'session' ? (
         <SessionPage key={route.sessionId} sessionId={route.sessionId} filePath={route.filePath ?? null} nodeId={route.nodeId ?? null} />
       ) : route.page === 'diagnostics' ? (
         <Diagnostics />

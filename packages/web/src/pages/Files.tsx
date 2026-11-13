@@ -1,12 +1,14 @@
-import { useCallback, useEffect, useState } from 'react';
-import type { Origin, Project, ProjectFile, ProjectFilesResponse } from '@agent-canvas/shared';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import type { Origin, Project, ProjectFilesResponse } from '@agent-canvas/shared';
 import { api } from '../client';
 import { ChangeMarks, FailedMark, PathLabel } from '../canvas/FilePanel';
 import {
   CODEX_NOTE, DEFAULT_FILES_FILTER, FILES_FILTER_KEY, FILES_RANGE_OPTIONS, FILES_SCOPE_NOTE, FILES_SORT_OPTIONS,
   effectiveFilesFilter, filesQueryString, parseFilesFilter, serializeFilesFilter, type FilesFilter, type FilesOriginFilter,
 } from '../files';
-import { ORIGIN_LOOK, projectTitle, relativeTime } from '../home';
+import { ORIGIN_LOOK, relativeTime } from '../home';
+import { useMask } from '../MaskContext';
+import { maskProject, maskProjectFiles, type PageMasker, type ShownProjectFiles } from '../masking';
 import { OriginBadge } from '../OriginBadge';
 import { sessionFileHash } from '../route';
 import { useNow } from '../useNow';
@@ -29,8 +31,8 @@ function fullTime(iso: string | null): string | undefined {
   return Number.isNaN(d.getTime()) ? undefined : d.toLocaleString('zh-CN', { hour12: false });
 }
 
-function FilterRow({ filter, qInput, projects, onChange, onQuery }: {
-  filter: FilesFilter; qInput: string; projects: Project[]; onChange(f: FilesFilter): void; onQuery(q: string): void;
+function FilterRow({ filter, qInput, projects, m, onChange, onQuery }: {
+  filter: FilesFilter; qInput: string; projects: Project[]; m: PageMasker; onChange(f: FilesFilter): void; onQuery(q: string): void;
 }) {
   const project = projects.find((p) => p.id === filter.projectId);
   const origins: Origin[] = project?.origins ?? [];
@@ -42,7 +44,10 @@ function FilterRow({ filter, qInput, projects, onChange, onQuery }: {
       <label className="stats-project">
         <span className="visually-hidden">项目</span>
         <select value={filter.projectId ?? ''} onChange={(e) => onChange({ ...filter, projectId: e.target.value, origin: 'all' })}>
-          {projects.map((p) => <option key={p.id} value={p.id} title={p.cwd ?? p.id}>{projectTitle(p)}</option>)}
+          {projects.map((p) => {
+            const shown = maskProject(p, m);
+            return <option key={p.id} value={p.id} title={shown.displayPath}>{shown.title}</option>;
+          })}
         </select>
       </label>
       {origins.length > 1 && (
@@ -80,12 +85,15 @@ function FilterRow({ filter, qInput, projects, onChange, onQuery }: {
   );
 }
 
-function FileItem({ file, expanded, now, onToggle }: { file: ProjectFile; expanded: boolean; now: number; onToggle(path: string): void }) {
-  const listId = `files-sessions-${encodeURIComponent(file.path)}`;
+type ShownFile = ShownProjectFiles['files'][number];
+
+/** `file` is masked when the switch is on (its original path is `rawPath`, the list's key); `index` names its list. */
+function FileItem({ file, index, expanded, now, onToggle }: { file: ShownFile; index: number; expanded: boolean; now: number; onToggle(path: string): void }) {
+  const listId = `files-sessions-${index}`;
   return (
     <li className={`file-item files-item${expanded ? ' is-open' : ''}`}>
       <button type="button" className="file-row files-row" aria-expanded={expanded} aria-controls={expanded ? listId : undefined}
-        onClick={() => onToggle(file.path)}>
+        onClick={() => onToggle(file.rawPath)}>
         <span className="file-caret" aria-hidden="true">{expanded ? '▾' : '▸'}</span>
         <PathLabel path={file.relativePath} full={file.path} />
         <span className="file-counts">
@@ -128,7 +136,7 @@ function FileItem({ file, expanded, now, onToggle }: { file: ProjectFile; expand
 }
 
 function FilesBody({ data, now, expanded, onToggle }: {
-  data: ProjectFilesResponse; now: number; expanded: ReadonlySet<string>; onToggle(path: string): void;
+  data: ShownProjectFiles; now: number; expanded: ReadonlySet<string>; onToggle(path: string): void;
 }) {
   if (data.files.length === 0) {
     return (
@@ -141,7 +149,7 @@ function FilesBody({ data, now, expanded, onToggle }: {
   return (
     <section className="files-card" aria-label="文件">
       <ul className="file-list">
-        {data.files.map((f) => <FileItem key={f.path} file={f} expanded={expanded.has(f.path)} now={now} onToggle={onToggle} />)}
+        {data.files.map((f, i) => <FileItem key={f.rawPath} file={f} index={i} expanded={expanded.has(f.rawPath)} now={now} onToggle={onToggle} />)}
       </ul>
       {data.truncated && (
         <p className="stats-note">只显示前 {data.files.length} 个，共 {data.totalFiles} 个，用上面的过滤框缩小范围。</p>
@@ -205,7 +213,11 @@ export function Files() {
   }, []);
 
   const retry = <button type="button" className="notify-btn stats-retry" onClick={() => setAttempt((x) => x + 1)}>再试一次</button>;
-  const data = load.data;
+  // With the masking switch on, paths and titles are masked here, once per answer (the links then carry masked paths).
+  const { list: m } = useMask();
+  const raw = load.data;
+  const data = useMemo(() => (raw === null ? null : maskProjectFiles(raw, m)), [raw, m]);
+  const loadError = load.error === null ? null : m.text(load.error);
 
   return (
     <div className="stats files-page">
@@ -215,7 +227,7 @@ export function Files() {
       </div>
       {projects === null ? (
         projectsError !== null
-          ? <p className="error stats-state">加载失败：{projectsError} {retry}</p>
+          ? <p className="error stats-state">加载失败：{m.text(projectsError)} {retry}</p>
           : <p className="muted stats-state">加载中…</p>
       ) : projects.length === 0 ? (
         <section className="stats-empty files-card">
@@ -224,15 +236,15 @@ export function Files() {
         </section>
       ) : (
         <>
-          <FilterRow filter={filter} qInput={qInput} projects={projects} onChange={change} onQuery={setQInput} />
+          <FilterRow filter={filter} qInput={qInput} projects={projects} m={m} onChange={change} onQuery={setQInput} />
           <p className="stats-caption files-caption">{FILES_SCOPE_NOTE}{CODEX_NOTE}搜索和列目录不算。</p>
           {data === null ? (
-            load.error !== null
-              ? <p className="error stats-state">加载失败：{load.error} {retry}</p>
+            loadError !== null
+              ? <p className="error stats-state">加载失败：{loadError} {retry}</p>
               : <p className="muted stats-state">加载中…</p>
           ) : (
             <>
-              {load.error !== null && <p className="error stats-state">刷新失败：{load.error}。下面是上一次的结果。{retry}</p>}
+              {loadError !== null && <p className="error stats-state">刷新失败：{loadError}。下面是上一次的结果。{retry}</p>}
               {data.importing && <p className="stats-note stats-coverage">数据还在导入，数字会继续变化。</p>}
               {data.failedSessions > 0 && <p className="stats-note stats-coverage">有 {data.failedSessions} 个会话算不出来，已跳过。</p>}
               {data.truncatedNodes > 0 && (
