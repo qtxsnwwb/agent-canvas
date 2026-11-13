@@ -44,7 +44,7 @@ function AnomalyMark({ count }: { count: AnomalySessionCount | undefined }) {
 
 /** A session-search snippet with q marked; with the switch on, masked first (a match inside a masked span marks its placeholder). */
 function Highlighted({ text, q, m }: { text: string; q: string; m: PageMasker }) {
-  const parts = m.on ? maskedHighlight(m, text, highlightRanges(text, q), true) : highlightParts(text, q);
+  const parts = m.on ? maskedHighlight(m, text, highlightRanges(text, q), false) : highlightParts(text, q);
   return (
     <>
       {parts.map((p, i) => (p.match ? <mark key={i}>{p.text}</mark> : <span key={i}>{p.text}</span>))}

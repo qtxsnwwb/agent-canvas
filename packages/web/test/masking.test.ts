@@ -2,7 +2,7 @@ import { expect, test } from 'vitest';
 import type { Graph, GraphNode, NodeDetail, SessionAnomaliesResponse, SessionFilesResponse } from '@agent-canvas/shared';
 import {
   IDENTITY_MASKER, MASK_SWITCH_KEY, PAGE_MASK_CATEGORIES, createMaskedSource, createPageMasker, maskContentSnippet, maskDiagnostics,
-  maskProject, maskProjectFiles, resolveMaskedId, maskCutTermTail, maskSessionFields, maskStats, maskAnomalyList, maskedHighlight, parseMaskSwitch, sameMaskedValue,
+  maskProject, maskProjectFiles, resolveMaskedId, isCutText, projectOptionValue, projectFromOptionValue, maskSessionFields, maskStats, maskAnomalyList, maskedHighlight, parseMaskSwitch, sameMaskedValue,
   serializeMaskSwitch, stripPlaceholderNumbers,
 } from '../src/masking';
 import type { SessionSource } from '../src/sessionSource';
@@ -93,23 +93,50 @@ test('遮蔽器建不出来时宁可全遮', () => {
   expect(m.text('')).toBe('');
 });
 
-test('截断的文字结尾是半个自定义词时也遮', () => {
-  expect(maskCutTermTail('项目是 FalconPr…', [TERM])).toBe('项目是 ‹已遮蔽·自定义词›…');
-  expect(maskCutTermTail('项目是 Fal', [TERM])).toBe('项目是 ‹已遮蔽·自定义词›');
-  expect(maskCutTermTail('项目是 Fa…', [TERM])).toBe('项目是 Fa…');
-  expect(maskCutTermTail('nothing here…', [TERM])).toBe('nothing here…');
-  expect(masker().cut(`see ${TERM.slice(0, 8)}…`)).toBe('see ‹已遮蔽·自定义词›…');
+test('截断的文字结尾是半个自定义词时也遮（共享遮蔽器的截断模式；会话页编号，列表不编号）', () => {
+  expect(masker().cut(`项目是 ${TERM.slice(0, 8)}…`)).toBe('项目是 ‹已遮蔽·自定义词#1›…');
+  expect(masker(false).cut(`项目是 ${TERM.slice(0, 8)}…`)).toBe('项目是 ‹已遮蔽·自定义词›…');
+  expect(masker().cut(`项目是 ${TERM.slice(0, 2)}…`)).toBe(`项目是 ${TERM.slice(0, 2)}…`);
+});
+
+test('截断模式只用于真的被截断的文字：到摘要上限或以省略号结尾', () => {
+  expect(isCutText('Fix risk-score')).toBe(false);
+  expect(isCutText('task-manager …')).toBe(true);
+  expect(isCutText('x'.repeat(200))).toBe(true);
+  expect(isCutText('x'.repeat(199))).toBe(false);
+  expect(isCutText('abc...')).toBe(true);
+  // The reviewer's over-masking examples stay as they are with the switch on.
+  const m = masker();
+  expect(m.cut('Fix risk-score')).toBe('Fix risk-score');
+  expect(m.cut('task-manager …')).toBe('task-manager …');
+  expect(m.text('Fix risk-score')).toBe('Fix risk-score');
+  // A known cut (a clipped snippet end) uses truncated mode whatever the text looks like.
+  expect(m.clipped(`see ${KEY.slice(0, 14)}`)).not.toContain(KEY.slice(0, 14));
 });
 
 test('两遍：一处认出来的值，在别处原样出现时也遮', () => {
   const m = masker();
-  m.learn(`password=${PASSWORD}`, false);
+  m.learn(`password=${PASSWORD}`);
   expect(m.text(`login ${PASSWORD}`)).not.toContain(PASSWORD);
   // A text masked before the value was learned is masked again afterwards (the cache is forgotten).
   const m2 = masker();
   expect(m2.text(`echo ${PASSWORD}`)).toContain(PASSWORD);
+  const before = m2.learnedCount();
   m2.learnValue({ password: PASSWORD });
+  expect(m2.learnedCount()).toBeGreaterThan(before);
   expect(m2.text(`echo ${PASSWORD}`)).not.toContain(PASSWORD);
+});
+
+test('项目选择框的 value：开关打开时是不透露 id 的序号，能换回 id', () => {
+  const ids = ['C--work-plain', `C--work-${TERM}`];
+  const m = masker(false);
+  expect(projectOptionValue(ids[1]!, ids, m)).toBe('p1');
+  expect(projectFromOptionValue('p1', ids, m)).toBe(ids[1]);
+  expect(projectFromOptionValue('', ids, m)).toBe(null);
+  expect(projectFromOptionValue('p9', ids, m)).toBe(null);
+  expect(projectOptionValue(null, ids, m)).toBe('');
+  expect(projectOptionValue(ids[1]!, ids, IDENTITY_MASKER)).toBe(ids[1]);
+  expect(projectFromOptionValue(ids[1]!, ids, IDENTITY_MASKER)).toBe(ids[1]);
 });
 
 // ---- search snippets ----
@@ -282,6 +309,22 @@ test('会话页的数据源：文件和异常的加载函数是固定的（面�
   const ms = createMaskedSource(src, masker());
   expect(ms.files).toBe(ms.files);
   expect(typeof ms.files).toBe('function');
+});
+
+test('会话页的数据源：打开的详情认出新值时，已显示的卡片重新遮蔽一次并通知', async () => {
+  const card = node('a', { summary: `psql -W ${PASSWORD}` });
+  const tool = node('b', { kind: 'tool', summary: 'connect' });
+  const src = fakeSource({ nodes: { a: card, b: tool }, edges: {} }, { nodeId: 'b', input: { password: PASSWORD }, output: null, text: null, raw: null });
+  const ms = createMaskedSource(src, masker());
+  let told = 0;
+  ms.subscribe(() => { told++; });
+  expect(ms.getGraph().nodes.a!.summary).toContain(PASSWORD);
+  await ms.nodeDetail('b');
+  expect(told).toBe(1);
+  expect(ms.getGraph().nodes.a!.summary).not.toContain(PASSWORD);
+  // Nothing new learned: no second notification.
+  await ms.nodeDetail('b');
+  expect(told).toBe(1);
 });
 
 // ---- cross-session lists ----

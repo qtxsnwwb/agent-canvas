@@ -3,7 +3,7 @@ import type { Origin, Project, StatsBucket, StatsDay, StatsResponse, StatsTokens
 import { api } from '../client';
 import { ORIGIN_LOOK, stripProjects } from '../home';
 import { useMask } from '../MaskContext';
-import { linkId, maskProject, maskStats, type PageMasker } from '../masking';
+import { linkId, maskProject, maskStats, projectFromOptionValue, projectOptionValue, type PageMasker } from '../masking';
 import { sessionNodeHash } from '../route';
 import {
   DEFAULT_STATS_FILTER, STATS_FILTER_KEY, STATS_RANGE_OPTIONS, availableOrigins, bucketLabel, bucketLong, columnLayout,
@@ -80,6 +80,7 @@ function FilterRow({ filter, projects, m, onChange }: {
     { value: 'all', label: '全部' }, ...origins.map((o) => ({ value: o, label: originName(o) })),
   ];
   const projectOptions = projects === null ? [] : stripProjects(projects, filter.origin, filter.projectId);
+  const projectIds = projectOptions.map((p) => p.id);
   return (
     <div className="stats-filters">
       <div className="view-switch" role="group" aria-label="时间范围">
@@ -102,9 +103,9 @@ function FilterRow({ filter, projects, m, onChange }: {
       {projects !== null && projects.length > 0 && (
         <label className="stats-project">
           <span className="visually-hidden">项目</span>
-          <select value={filter.projectId ?? ''} onChange={(e) => onChange({ ...filter, projectId: e.target.value === '' ? null : e.target.value })}>
+          <select value={projectOptionValue(filter.projectId, projectIds, m)} onChange={(e) => onChange({ ...filter, projectId: projectFromOptionValue(e.target.value, projectIds, m) })}>
             <option value="">全部项目</option>
-            {projectOptions.map((p) => <option key={p.id} value={p.id}>{maskProject(p, m).title}</option>)}
+            {projectOptions.map((p) => <option key={p.id} value={projectOptionValue(p.id, projectIds, m)}>{maskProject(p, m).title}</option>)}
           </select>
         </label>
       )}

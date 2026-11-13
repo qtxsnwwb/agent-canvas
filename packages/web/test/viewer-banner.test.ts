@@ -67,3 +67,10 @@ test('选项写成文字：范围和内容', () => {
   const noNumber = bannerModel(bundle({ options: options({ scope: { kind: 'turn', turnKey: 'k' }, output: 'none' }) }));
   expect(noNumber.optionsLine).toBe('范围：一轮 · 包含思考 · 包含子代理内部步骤 · 工具输出：不含');
 });
+
+test('遮蔽达到上限时，横幅上有提示；报告没有这些字段时没有', () => {
+  expect(bannerModel(bundle()).warnings).toEqual([]);
+  const m = bannerModel(bundle({ report: { total: 0, byType: {}, learnedCapped: true, numberingCapped: true } }));
+  expect(m.warnings).toHaveLength(2);
+  expect(m.warnings[0]).toContain('上限');
+});

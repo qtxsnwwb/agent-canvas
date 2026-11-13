@@ -8,7 +8,7 @@ import {
 } from '../files';
 import { ORIGIN_LOOK, relativeTime } from '../home';
 import { useMask } from '../MaskContext';
-import { maskProject, maskProjectFiles, type PageMasker, type ShownProjectFiles } from '../masking';
+import { maskProject, maskProjectFiles, projectFromOptionValue, projectOptionValue, type PageMasker, type ShownProjectFiles } from '../masking';
 import { OriginBadge } from '../OriginBadge';
 import { sessionFileHash } from '../route';
 import { useNow } from '../useNow';
@@ -35,6 +35,7 @@ function FilterRow({ filter, qInput, projects, m, onChange, onQuery }: {
   filter: FilesFilter; qInput: string; projects: Project[]; m: PageMasker; onChange(f: FilesFilter): void; onQuery(q: string): void;
 }) {
   const project = projects.find((p) => p.id === filter.projectId);
+  const ids = projects.map((p) => p.id);
   const origins: Origin[] = project?.origins ?? [];
   const originOptions: { value: FilesOriginFilter; label: string }[] = [
     { value: 'all', label: '全部' }, ...origins.map((o) => ({ value: o, label: ORIGIN_LOOK[o].label })),
@@ -43,10 +44,11 @@ function FilterRow({ filter, qInput, projects, m, onChange, onQuery }: {
     <div className="stats-filters files-filters">
       <label className="stats-project">
         <span className="visually-hidden">项目</span>
-        <select value={filter.projectId ?? ''} onChange={(e) => onChange({ ...filter, projectId: e.target.value, origin: 'all' })}>
+        <select value={projectOptionValue(filter.projectId, ids, m)}
+          onChange={(e) => onChange({ ...filter, projectId: projectFromOptionValue(e.target.value, ids, m), origin: 'all' })}>
           {projects.map((p) => {
             const shown = maskProject(p, m);
-            return <option key={p.id} value={p.id} title={shown.displayPath}>{shown.title}</option>;
+            return <option key={p.id} value={projectOptionValue(p.id, ids, m)} title={shown.displayPath}>{shown.title}</option>;
           })}
         </select>
       </label>

@@ -13,7 +13,7 @@
  * masked, and the page that receives it compares with sameMaskedValue.
  */
 import {
-  createMasker, maskPlaceholder, MASK_FAILED_TEXT, type AnomalyListResponse, type ContentHit, type Diagnostics, type Graph, type GraphNode, type Masker,
+  createMasker, MASK_FAILED_TEXT, SUMMARY_MAX, type AnomalyListResponse, type ContentHit, type Diagnostics, type Graph, type GraphNode, type Masker,
   type MaskCategory, type NodeDetail, type Project, type ProjectFilesResponse, type Session, type SessionAnomaliesResponse,
   type SessionFilesResponse, type StatsResponse,
 } from '@agent-canvas/shared';
@@ -31,7 +31,9 @@ export const PAGE_MASK_CATEGORIES: readonly MaskCategory[] = ['credential', 'ass
 /**
  * What the pages call. When the switch is off every function is the identity (same string, same object).
  * - text: a whole text (a path, a detail field, a branch name).
- * - cut: a text that was cut short (a summary, a title, a snippet's end): a secret cut at the end is masked too.
+ * - cut: a text that may have been cut short (a summary, a title): masked in the shared masker's truncated mode exactly
+ *   when it was cut (isCutText: at the summary cap or ending with an ellipsis), else like `text`.
+ * - clipped: a text known to be cut at its end (a search snippet whose end the server clipped): truncated mode.
  * - value: a structured value (a step's input / output / raw record), masked string by string with the masker's
  *   key-name rules — never stringified first.
  */
@@ -39,18 +41,22 @@ export interface PageMasker {
   readonly on: boolean;
   text(text: string): string;
   cut(text: string): string;
+  clipped(text: string): string;
   value(value: unknown): unknown;
   /**
-   * First pass (the shared masker's learn / learnValue): remember the secret values found in a text / value, so that
-   * later masking also masks their other literal occurrences. Masked texts remembered before are forgotten when
-   * something new was learned (they are masked again when next asked for).
+   * First pass (the shared masker's learn / learnValue; which values are learned is the masker's rule): remember the
+   * secret values found in a text / value, so that later masking also masks their other literal occurrences. Masked
+   * texts remembered before are forgotten when something new was learned (they are masked again when next asked for).
    */
-  learn(text: string, cut: boolean): void;
+  learn(text: string): void;
   learnValue(value: unknown): void;
+  /** How many values have been learned (changes when learning found something new). */
+  learnedCount(): number;
 }
 
 export const IDENTITY_MASKER: PageMasker = {
-  on: false, text: (t) => t, cut: (t) => t, value: (v) => v, learn: () => {}, learnValue: () => {},
+  on: false, text: (t) => t, cut: (t) => t, clipped: (t) => t, value: (v) => v, learn: () => {}, learnValue: () => {},
+  learnedCount: () => 0,
 };
 
 /** Texts up to this many characters are remembered per masker (summaries, titles, paths); longer ones are details, masked once when loaded. */
@@ -60,31 +66,13 @@ const CACHE_MAX_ENTRIES = 100_000;
 
 type MaskerLike = Pick<Masker, 'mask' | 'maskValue'> & Partial<Pick<Masker, 'learn' | 'learnValue' | 'learnedCount'>>;
 
-const asciiLower = (s: string): string => s.replace(/[A-Z]/g, (c) => c.toLowerCase());
-
 /**
- * A cut text whose content (before a trailing `…` / `...`) ends in the first characters of a custom term — the term was
- * cut: that tail is replaced by the custom-term placeholder (the shared masker's truncated mode covers credentials and
- * assignments only). At least 3 characters of the term must be left for this to apply.
+ * Whether a text was cut (the server's rule, `cutOptions` in packages/server/src/export/assemble.ts): a summary at its
+ * length cap (SUMMARY_MAX) or any text ending with an ellipsis. Only such texts are masked in truncated mode (it masks
+ * a secret, a custom term or a learned value cut at the end, and must not apply to whole text like `Fix risk-score`).
  */
-export function maskCutTermTail(masked: string, terms: readonly string[]): string {
-  if (terms.length === 0) return masked;
-  const tail = masked.endsWith('…') ? '…' : masked.endsWith('...') ? '...' : '';
-  const body = masked.slice(0, masked.length - tail.length);
-  const low = asciiLower(body);
-  let best = 0;
-  for (const t of terms) {
-    const term = asciiLower(t);
-    for (let n = Math.min(term.length - 1, low.length); n >= 3 && n > best; n--) {
-      if (low.endsWith(term.slice(0, n))) { best = n; break; }
-    }
-  }
-  return best === 0 ? masked : `${body.slice(0, body.length - best)}${maskPlaceholder('custom', null)}${tail}`;
-}
-
-/** The one place a cut text is masked: the shared masker's truncated mode, then a cut custom term at the end. */
-function maskTruncated(m: MaskerLike, text: string, terms: readonly string[]): string {
-  return maskCutTermTail(m.mask(text, { truncated: true }), terms);
+export function isCutText(text: string): boolean {
+  return text.length >= SUMMARY_MAX || text.endsWith('…') || text.endsWith('...');
 }
 
 /**
@@ -101,11 +89,10 @@ export function createPageMasker(o: {
   } catch {
     const failed = (t: string): string => (t === '' ? '' : MASK_FAILED_TEXT);
     return {
-      on: true, text: failed, cut: failed, value: (v) => (v === null || v === undefined ? v : MASK_FAILED_TEXT),
-      learn: () => {}, learnValue: () => {},
+      on: true, text: failed, cut: failed, clipped: failed, value: (v) => (v === null || v === undefined ? v : MASK_FAILED_TEXT),
+      learn: () => {}, learnValue: () => {}, learnedCount: () => 0,
     };
   }
-  const terms = o.customTerms.filter((t) => typeof t === 'string' && t.trim().length >= 3).map((t) => t.trim());
   const texts = new Map<string, string>();
   const cuts = new Map<string, string>();
   let values = new WeakMap<object, unknown>();
@@ -128,7 +115,9 @@ export function createPageMasker(o: {
     return out;
   };
   const text = (t: string): string => (typeof t === 'string' ? remembered(texts, t, (x) => m.mask(x)) : t);
-  const cut = (t: string): string => (typeof t === 'string' ? remembered(cuts, t, (x) => maskTruncated(m, x, terms)) : t);
+  // The one place truncated mode is chosen: `clipped` (known cut) and `cut` (when isCutText says so).
+  const clipped = (t: string): string => (typeof t === 'string' ? remembered(cuts, t, (x) => m.mask(x, { truncated: true })) : t);
+  const cut = (t: string): string => (typeof t === 'string' && isCutText(t) ? clipped(t) : text(t));
   const value = (v: unknown): unknown => {
     if (typeof v === 'string') return text(v);
     if (v === null || typeof v !== 'object') return v;
@@ -137,10 +126,10 @@ export function createPageMasker(o: {
     values.set(v, out);
     return out;
   };
-  const learn = (t: string, isCut: boolean): void => {
+  const learn = (t: string): void => {
     if (typeof t !== 'string' || t === '' || m.learn === undefined) return;
     const before = learnedNow();
-    try { m.learn(t, isCut ? { truncated: true } : undefined); } catch { /* masking still applies the rules */ }
+    try { m.learn(t, isCutText(t) ? { truncated: true } : undefined); } catch { /* masking still applies the rules */ }
     afterLearning(before);
   };
   const learnValue = (v: unknown): void => {
@@ -149,7 +138,7 @@ export function createPageMasker(o: {
     try { m.learnValue(v); } catch { /* masking still applies the rules */ }
     afterLearning(before);
   };
-  return { on: true, text, cut, value, learn, learnValue };
+  return { on: true, text, cut, clipped, value, learn, learnValue, learnedCount: learnedNow };
 }
 
 // ---- placeholders in addresses ----
@@ -173,6 +162,25 @@ export function sameMaskedValue(a: string, b: string): boolean {
 export function resolveMaskedId(value: string | null, ids: readonly string[], m: PageMasker): string | null {
   if (value === null || ids.includes(value) || !value.includes('‹已遮蔽·')) return value;
   return ids.find((id) => sameMaskedValue(m.text(id), value)) ?? value;
+}
+
+/**
+ * The `value` of a project's `<option>`: the id, or while the switch is on an opaque key (its position in the list,
+ * `p<n>`) — a value attribute is in the DOM, and a project id is the encoded working directory. '' stays ''.
+ */
+export function projectOptionValue(id: string | null, ids: readonly string[], m: PageMasker): string {
+  if (id === null || id === '') return '';
+  if (!m.on) return id;
+  const i = ids.indexOf(id);
+  return i < 0 ? 'p?' : `p${i}`;
+}
+
+/** The project id an option's value stands for (projectOptionValue's inverse); null for '' (all projects). */
+export function projectFromOptionValue(value: string, ids: readonly string[], m: PageMasker): string | null {
+  if (value === '') return null;
+  if (!m.on) return value;
+  const n = /^p(\d+)$/.exec(value);
+  return n === null ? null : ids[Number(n[1])] ?? null;
 }
 
 /** An id as a link carries it: masked while the switch is on. */
@@ -234,14 +242,50 @@ export function maskSessionAnomalies(r: SessionAnomaliesResponse, m: PageMasker)
  */
 export function createMaskedSource(source: SessionSource, m: PageMasker): SessionSource {
   if (!m.on) return source;
-  const nodes = new WeakMap<GraphNode, GraphNode>();
+  let nodes = new WeakMap<GraphNode, GraphNode>();
   let rawGraph: Graph | null = null;
   let maskedGraph: Graph | null = null;
   let rawSession: Session | null = null;
   let maskedSession: Session | null = null;
+  /** learnedCount() when the masked node texts were made; when it moved, they are masked again (once). */
+  let maskedWith = -1;
+  /** Nodes whose texts were learned (once per node object; re-masking does not learn again). */
+  const learnedNodes = new WeakSet<GraphNode>();
   const details = new WeakMap<NodeDetail, NodeDetail>();
+  const listeners = new Set<() => void>();
   const files = source.files;
   const anomalies = source.anomalies;
+  /** Something new was learned: the session and every node are masked again on the next read. */
+  const relearned = (): boolean => {
+    if (m.learnedCount() === maskedWith) return false;
+    nodes = new WeakMap();
+    maskedGraph = null;
+    maskedSession = null;
+    return true;
+  };
+  const getGraph = (): Graph => {
+    const g = source.getGraph();
+    if (g === rawGraph && maskedGraph !== null && m.learnedCount() === maskedWith) return maskedGraph;
+    // Two passes over the nodes not masked yet: learn the secret values in their texts, then mask, so a value found in
+    // one summary is masked in the others too.
+    for (const n of Object.values(g.nodes)) {
+      if (learnedNodes.has(n)) continue;
+      learnedNodes.add(n);
+      m.learn(n.summary);
+      m.learn(n.title);
+    }
+    relearned();
+    maskedWith = m.learnedCount();
+    const entries: [string, GraphNode][] = [];
+    for (const [id, n] of Object.entries(g.nodes)) {
+      let out = nodes.get(n);
+      if (out === undefined) nodes.set(n, (out = maskNode(n, m)));
+      entries.push([id, out]);
+    }
+    rawGraph = g;
+    maskedGraph = { nodes: Object.fromEntries(entries), edges: g.edges };
+    return maskedGraph;
+  };
   return {
     getSession() {
       const s = source.getSession();
@@ -252,39 +296,26 @@ export function createMaskedSource(source: SessionSource, m: PageMasker): Sessio
       }
       return maskedSession;
     },
-    getGraph() {
-      const g = source.getGraph();
-      if (g === rawGraph && maskedGraph !== null) return maskedGraph;
-      // Two passes over the nodes not masked yet: learn the secret values in their texts, then mask, so a value found
-      // in one summary is masked in the others too.
-      const fresh = Object.values(g.nodes).filter((n) => !nodes.has(n));
-      for (const n of fresh) {
-        m.learn(n.summary, true);
-        m.learn(n.title, true);
-      }
-      const entries: [string, GraphNode][] = [];
-      for (const [id, n] of Object.entries(g.nodes)) {
-        let out = nodes.get(n);
-        if (out === undefined) nodes.set(n, (out = maskNode(n, m)));
-        entries.push([id, out]);
-      }
-      rawGraph = g;
-      maskedGraph = { nodes: Object.fromEntries(entries), edges: g.edges };
-      return maskedGraph;
+    getGraph,
+    subscribe(fn) {
+      listeners.add(fn);
+      const off = source.subscribe(fn);
+      return () => { listeners.delete(fn); off(); };
     },
-    subscribe: source.subscribe,
     live: source.live,
     nodeDetail: (nodeId) => source.nodeDetail(nodeId).then((step): StepDetail => {
       const d = step.detail;
       if (d === null) return step;
       let out = details.get(d);
       if (out === undefined) {
-        // Learn the detail's values first, so a secret found in one field is masked in the others.
+        // Learn the detail's values first, so a secret found in one field is masked in the others; a value learned
+        // here that the cards already show is masked there too (the graph is masked again once, subscribers told).
         m.learnValue(d.input);
         m.learnValue(d.output);
-        if (d.text !== null) m.learn(d.text, false);
+        if (d.text !== null) m.learn(d.text);
         m.learnValue(d.raw);
         details.set(d, (out = maskDetail(d, m)));
+        if (maskedWith >= 0 && relearned()) for (const fn of [...listeners]) fn();
       }
       return { ...step, detail: out };
     }),
@@ -395,12 +426,12 @@ function push(out: SnippetPart[], text: string, match: boolean): void {
 /**
  * The text masked as one string, split into parts with the ranges (positions in the original `text`) marked: a range
  * that falls inside a masked span marks the placeholder. The parts always join to the masked text, never to the
- * original. `cut`: the text was cut at its end. When the masked text cannot be aligned with the original (e.g. the
+ * original. `clipped`: the text is known to be cut at its end (else `cut` decides from the text itself). When the masked text cannot be aligned with the original (e.g. the
  * original contains placeholder-like text) it is returned as one unmarked part.
  */
-export function maskedHighlight(m: PageMasker, text: string, ranges: readonly (readonly [number, number])[], cut: boolean): SnippetPart[] {
+export function maskedHighlight(m: PageMasker, text: string, ranges: readonly (readonly [number, number])[], clipped: boolean): SnippetPart[] {
   const sorted = [...ranges].filter(([s, e]) => e > s).sort((a, b) => a[0] - b[0]);
-  const masked = m.on ? (cut ? m.cut(text) : m.text(text)) : text;
+  const masked = m.on ? (clipped ? m.clipped(text) : m.cut(text)) : text;
   const out: SnippetPart[] = [];
   if (masked === text) {
     splitByRanges(text, 0, sorted, out);

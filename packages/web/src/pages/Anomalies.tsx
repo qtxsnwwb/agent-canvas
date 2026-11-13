@@ -8,7 +8,7 @@ import { PathLabel } from '../canvas/FilePanel';
 import { api } from '../client';
 import { ORIGIN_LOOK, relativeTime, stripProjects } from '../home';
 import { useMask } from '../MaskContext';
-import { maskAnomalyList, maskProject, type PageMasker } from '../masking';
+import { maskAnomalyList, maskProject, projectFromOptionValue, projectOptionValue, type PageMasker } from '../masking';
 import { OriginBadge } from '../OriginBadge';
 import { STATS_RANGE_OPTIONS, availableOrigins } from '../stats';
 import { useNow } from '../useNow';
@@ -27,6 +27,7 @@ function FilterRow({ filter, projects, totals, m, onChange }: {
     { value: 'all', label: '全部' }, ...origins.map((o: Origin) => ({ value: o, label: ORIGIN_LOOK[o].label })),
   ];
   const projectOptions = projects === null ? [] : stripProjects(projects, filter.origin, filter.projectId);
+  const projectIds = projectOptions.map((p) => p.id);
   return (
     <>
       <div className="stats-filters">
@@ -50,9 +51,9 @@ function FilterRow({ filter, projects, totals, m, onChange }: {
         {projects !== null && projects.length > 0 && (
           <label className="stats-project">
             <span className="visually-hidden">项目</span>
-            <select value={filter.projectId ?? ''} onChange={(e) => onChange({ ...filter, projectId: e.target.value === '' ? null : e.target.value })}>
+            <select value={projectOptionValue(filter.projectId, projectIds, m)} onChange={(e) => onChange({ ...filter, projectId: projectFromOptionValue(e.target.value, projectIds, m) })}>
               <option value="">全部项目</option>
-              {projectOptions.map((p) => <option key={p.id} value={p.id}>{maskProject(p, m).title}</option>)}
+              {projectOptions.map((p) => <option key={p.id} value={projectOptionValue(p.id, projectIds, m)}>{maskProject(p, m).title}</option>)}
             </select>
           </label>
         )}
@@ -94,7 +95,12 @@ type Load = { data: AnomalyListResponse | null; loading: boolean; error: string 
 /** `#/anomalies`: every session's anomalies, newest first, filtered by range, origin, project and kind (in the address). */
 export function Anomalies({ query }: { query: string }) {
   const now = useNow(30_000);
-  const chosen = parseAnomaliesQuery(query);
+  const { list: m } = useMask();
+  const parsed = parseAnomaliesQuery(query);
+  // With the masking switch on, a project chosen here is kept in this page's state, not in the address (a project id
+  // is the encoded working directory, and the address bar is on screen). An address opened before is used as it is.
+  const [hiddenProject, setHiddenProject] = useState<string | null>(null);
+  const chosen = parsed.projectId === null && hiddenProject !== null ? { ...parsed, projectId: hiddenProject } : parsed;
   const [projects, setProjects] = useState<Project[] | null>(null);
   const [projectsSettled, setProjectsSettled] = useState(false);
   const [load, setLoad] = useState<Load>({ data: null, loading: true, error: null });
@@ -151,12 +157,12 @@ export function Anomalies({ query }: { query: string }) {
   }, [apiQuery, attempt, projectsSettled]);
 
   const change = (f: AnomaliesFilter): void => {
-    window.location.hash = anomaliesHash(f);
+    setHiddenProject(m.on ? f.projectId : null);
+    window.location.hash = anomaliesHash(m.on ? { ...f, projectId: null } : f);
   };
 
   // With the masking switch on, titles, paths and tool names are masked once per answer (the projects' directories too,
   // so a path is still shown relative to its masked directory).
-  const { list: m } = useMask();
   const rawData = load.data;
   const data = useMemo(() => (rawData === null ? null : maskAnomalyList(rawData, m)), [rawData, m]);
   const shownProjects = useMemo(() => (projects === null ? null : projects.map((p) => maskProject(p, m))), [projects, m]);

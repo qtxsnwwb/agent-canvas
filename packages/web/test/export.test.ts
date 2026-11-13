@@ -2,7 +2,7 @@ import { expect, test } from 'vitest';
 import { CUSTOM_TERMS_MAX, EXPORT_MAX_BYTES } from '@agent-canvas/shared';
 import {
   DEFAULT_DIALOG_OPTIONS, EXPORT_CAUTION, EXPORT_OPTIONS_KEY, buildExportOptions, createLatest, exportErrorText, fallbackFileName,
-  fileNameFromDisposition, maskOffWarning, parseDialogOptions, previewView, serializeDialogOptions, settingsErrorText, settingsView,
+  fileNameFromDisposition, maskOffWarning, maskWarnings, parseDialogOptions, previewView, serializeDialogOptions, settingsErrorText, settingsView,
   termsToText, validateTermsText,
 } from '../src/export';
 
@@ -135,4 +135,13 @@ test('只认最后一次请求：更早的晚到也被丢弃', () => {
   const b = latest.next();
   expect(latest.isLatest(a)).toBe(false);
   expect(latest.isLatest(b)).toBe(true);
+});
+
+test('遮蔽达到上限时的提示：扫描结果里显示', () => {
+  expect(maskWarnings({})).toEqual([]);
+  const w = maskWarnings({ learnedCapped: true, learnedSkipped: 3, numberingCapped: true });
+  expect(w).toHaveLength(3);
+  expect(w[1]).toContain('3 段');
+  const v = previewView({ report: { total: 1, byType: { jwt: { occurrences: 1, distinct: 1 } }, learnedSkipped: 2 }, estimatedBytes: 1, nodeCount: 1, tooLarge: false }, { kind: 'session' });
+  expect(v.warnings).toEqual([maskWarnings({ learnedSkipped: 2 })[0]]);
 });

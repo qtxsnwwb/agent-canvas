@@ -1,4 +1,5 @@
 import { MASK_TYPE_LABELS, MASK_TYPES, type ExportBundle } from '@agent-canvas/shared';
+import { maskWarnings } from '../export';
 import { sessionName } from './data';
 
 /** The banner at the top of an exported file: what it is, the mask report, the options, the caution line. */
@@ -14,6 +15,8 @@ export interface BannerModel {
   maskLine: string;
   /** The scope and content options in words. */
   optionsLine: string;
+  /** Masking limits the export reached (learned values capped / skipped, numbering capped). */
+  warnings: string[];
   caution: string;
 }
 
@@ -57,6 +60,7 @@ export function bannerModel(bundle: ExportBundle): BannerModel {
     chips,
     maskLine,
     optionsLine,
+    warnings: maskWarnings(report),
     caution: EXPORT_CAUTION,
   };
 }

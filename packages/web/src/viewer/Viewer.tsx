@@ -19,6 +19,7 @@ function Banner({ bundle }: { bundle: ExportBundle }) {
         ))}
         <span className="viewer-options">{m.optionsLine}</span>
       </div>
+      {m.warnings.map((w) => <p key={w} className="viewer-caution" role="note">{w}</p>)}
       <p className="viewer-caution" role="note">{m.caution}</p>
     </section>
   );

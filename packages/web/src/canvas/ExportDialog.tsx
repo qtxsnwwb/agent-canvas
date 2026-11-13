@@ -277,6 +277,7 @@ export function ExportDialog({ sessionId, turn, onClose }: {
               {view.partial
                 ? <p>{view.nodes} · {view.size}（扫描在超过上限时停止了，没有完整的数量）</p>
                 : <p>{view.total} · {view.nodes} · {view.size}</p>}
+              {view.warnings.map((w) => <p key={w} className="export-warn">{w}</p>)}
               {view.tooLarge !== null && <p className="export-warn">{view.tooLarge}</p>}
             </>
           )}
