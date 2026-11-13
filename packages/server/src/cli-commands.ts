@@ -44,6 +44,7 @@ import {
   type VacuumOptions,
   type VacuumResult,
 } from './store/migrate-storage.js';
+import { startSearchIndexBuild, type SearchIndexBuild, type SearchIndexBuildOptions } from './store/search-index.js';
 import { openStore, type Store } from './store/store.js';
 
 export interface Running {
@@ -196,6 +197,11 @@ export interface StartOptions {
    * background once start-up is done when the database still needs it; options for tests, false: never.
    */
   storage?: StorageMaintenanceOptions | false;
+  /**
+   * The search index build (search-index.ts), run in the background once start-up is done when the database has no
+   * complete index; options for tests, false: never.
+   */
+  searchIndex?: SearchIndexBuildOptions | false;
 }
 
 /** True while the database still needs the storage job (its migration or its VACUUM is not done). */
@@ -214,6 +220,7 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
   let files: FilesService | null = null;
   let warmup: StatsWarmup | null = null;
   let storage: StorageMaintenance | null = null;
+  let searchBuild: SearchIndexBuild | null = null;
   let pipeline: Pipeline;
   try {
     store = openStore(config.dbPath, options.log ? { log: options.log } : {});
@@ -238,6 +245,10 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
     // After the (automatic) rebuild above; the job itself waits for the initial scan and the first poll rounds.
     if (options.storage !== false && storageWorkDue(store)) {
       storage = startStorageMaintenance(store, pipeline, { log: (line) => process.stderr.write(`${line}\n`), ...options.storage });
+    }
+    // After the (automatic) rebuild above, which indexes every node it writes: then there is nothing left to build.
+    if (options.searchIndex !== false && store.searchIndexStatus().indexing) {
+      searchBuild = startSearchIndexBuild(store, pipeline, { log: (line) => process.stderr.write(`${line}\n`), ...options.searchIndex });
     }
     const storageJob = storage;
     app = buildServer({ store, pipeline, config, notifications, stats, files, ...(storageJob !== null ? { storage: storageJob } : {}) });
@@ -264,6 +275,7 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
     files?.close();
     await warmup?.stop();
     await storage?.stop();
+    await searchBuild?.stop();
     await notifications?.close().catch(() => undefined);
     await app?.close().catch(() => undefined);
     store?.close();
@@ -280,6 +292,7 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
   const filesService = files!;
   const statsWarmup = warmup;
   const storageJob = storage;
+  const searchJob = searchBuild;
   return {
     url,
     address: { address: bound.address, port: bound.port },
@@ -291,6 +304,8 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
           await statsWarmup?.stop();
           // The storage job stops before its next batch (a VACUUM in progress ends first, releasing held writes).
           await storageJob?.stop();
+          // The search index build stops before its next batch.
+          await searchJob?.stop();
           statsService.close();
           filesService.close();
           await statsWarmup?.done;

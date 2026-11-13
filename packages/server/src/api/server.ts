@@ -8,6 +8,7 @@ import {
   SEARCH_MAX_LIMIT,
   type Change,
   type ClientMessage,
+  type ContentSearchResponse,
   type Diagnostics,
   type NotificationSettingsResponse,
   type NotificationTestResponse,
@@ -284,6 +285,25 @@ export function buildServer(deps: {
     const parsed = typeof limit === 'string' && /^\s*-?\d+\s*$/.test(limit) ? Number(limit) : SEARCH_DEFAULT_LIMIT;
     return store.searchSessions(q, Math.min(SEARCH_MAX_LIMIT, Math.max(1, parsed)));
   });
+  // Search inside sessions: conversation text by design (the snippets). `q` other than one string: no hits. 400 for an
+  // unknown origin. indexing: the index is still being built (results may be incomplete).
+  app.get<{ Querystring: { q?: unknown; origin?: unknown; projectId?: unknown } }>(
+    '/api/search/content',
+    async (req, reply): Promise<ContentSearchResponse | undefined> => {
+      const { q, origin, projectId } = req.query;
+      if (origin !== undefined && (typeof origin !== 'string' || !(ORIGINS as readonly string[]).includes(origin))) {
+        return reply.code(400).send({ error: 'unknown origin' });
+      }
+      if (projectId !== undefined && typeof projectId !== 'string') return reply.code(400).send({ error: 'bad projectId' });
+      const indexing = store.searchIndexStatus().indexing;
+      if (typeof q !== 'string') return { hits: [], truncated: false, shortQuery: false, indexing };
+      const result = store.searchContent(q, {
+        origin: (origin as Origin | undefined) ?? null,
+        projectId: projectId === undefined || projectId === '' ? null : projectId,
+      });
+      return { ...result, indexing };
+    },
+  );
   app.get<{ Params: { id: string } }>('/api/sessions/:id/graph', async (req, reply) => {
     // Built from the stored bodies and sent as-is: no parse/re-serialize of every node.
     const json = store.getGraphJson(req.params.id);
@@ -339,6 +359,7 @@ export function buildServer(deps: {
         },
         ...(notifications !== undefined ? { notifications: notifications.diagnostics() } : {}),
         storage: deps.storage?.status() ?? storageStatus(store),
+        search: store.searchIndexStatus(),
       };
     },
   );
