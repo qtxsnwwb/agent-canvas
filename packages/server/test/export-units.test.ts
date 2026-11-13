@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, expect, test } from 'vitest';
 import { EXPORT_TEMPLATE_PLACEHOLDER, type ExportBundle } from '@agent-canvas/shared';
 import { contentDisposition, exportFileName } from '../src/export/filename.js';
-import { embedJson, fillTemplate, findViewerTemplate, viewerTemplateCandidates } from '../src/export/html.js';
+import { embedJson, fillTemplate, findViewerTemplate, isUsableTemplate, viewerTemplateCandidates } from '../src/export/html.js';
 import { EXPORT_SETTINGS_FILE, loadExportSettings, saveExportSettings } from '../src/export/settings.js';
 import { homeUsersOf } from '../src/export/assemble.js';
 import { truncateUtf8 } from '../src/export/truncate.js';
@@ -49,7 +49,7 @@ test('embedJson：转义 < > & U+2028 U+2029，仍是合法的 JSON，解析回�
 });
 
 test('fillTemplate：只替换一次占位符，$ 模式不被解释，数据不能结束脚本块', () => {
-  const template = `<!doctype html><html><head><script id="agent-canvas-export" type="application/json">${EXPORT_TEMPLATE_PLACEHOLDER}</script></head><body>${EXPORT_TEMPLATE_PLACEHOLDER}</body></html>`;
+  const template = `<!doctype html><html><head><script id="agent-canvas-export" type="application/json">${EXPORT_TEMPLATE_PLACEHOLDER}</script></head><body><p>x</p></body></html>`;
   const bundle = { session: { title: hostile } } as unknown as ExportBundle;
   const html = fillTemplate(template, bundle);
   const start = html.indexOf('type="application/json">') + 'type="application/json">'.length;
@@ -57,13 +57,18 @@ test('fillTemplate：只替换一次占位符，$ 模式不被解释，数据不
   const embedded = html.slice(start, end);
   expect(JSON.parse(embedded)).toEqual(bundle);
   expect(embedded).not.toContain('<');
-  // The second placeholder (outside the script element) is untouched; nothing after the data was changed.
-  expect(html.slice(end)).toBe(`</script></head><body>${EXPORT_TEMPLATE_PLACEHOLDER}</body></html>`);
+  // Nothing after the data was changed; the data holds the placeholder text itself without harm.
+  expect(html.slice(end)).toBe(`</script></head><body><p>x</p></body></html>`);
   expect(html.match(/<\/script>/g)!.length).toBe(1);
 });
 
 test('fillTemplate：模板里没有占位符的脚本块时报错', () => {
   expect(() => fillTemplate('<html></html>', {} as ExportBundle)).toThrow();
+  // The placeholder must occur exactly once (e.g. not also in a comment before the slot).
+  const slot = `<script id="agent-canvas-export" type="application/json">${EXPORT_TEMPLATE_PLACEHOLDER}</script>`;
+  expect(() => fillTemplate(`<!-- ${EXPORT_TEMPLATE_PLACEHOLDER} -->${slot}`, {} as ExportBundle)).toThrow();
+  expect(() => fillTemplate(`${slot}${slot}`, {} as ExportBundle)).toThrow();
+  expect(isUsableTemplate(slot)).toBe(true);
 });
 
 test('findViewerTemplate：按候选顺序找第一个存在的文件', () => {

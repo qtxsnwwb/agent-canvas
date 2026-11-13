@@ -5,15 +5,15 @@ import { buildStructure, type DocStep } from './structure.js';
  * The Markdown export (spec 4.5): a header (title, origin, times, export info, mask report, caution line), a section per
  * main-thread turn, each step in reading order (structure.ts). Everything in the bundle is already masked.
  *
- * How session text is written, by kind:
- * - free text (prompts, replies, system notes, titles in headings, header fields): escaped Markdown — every character
- *   that could start emphasis, code, a link or image, raw HTML, an entity, a table or strikethrough is
- *   backslash-escaped, `://`, `www.` and `@` are broken up so renderers do not autolink them, and line starts that would
- *   make a heading, list, quote or rule are escaped; line breaks are kept as hard breaks;
- * - code-like content (thinking, tool input and output): fenced code blocks, the fence one backtick longer than the
- *   longest backtick run inside (at least three), so nothing inside can end the block or be rendered (a `</details>` in
- *   it stays text);
- * - bidirectional control characters (U+202A–U+202E, U+2066–U+2069) are replaced by U+FFFD everywhere.
+ * Every piece of session text is rendered as code, never as Markdown — the only form in which no renderer (CommonMark,
+ * GFM with its autolinks, math extensions) interprets anything:
+ * - multi-line text (prompts, replies, thinking, system notes, tool input and output): fenced code blocks, the fence one
+ *   backtick longer than the longest backtick run inside (at least three), so nothing inside can end the block or be
+ *   rendered (a `</details>` in it stays text); prompts in a block quote (each line prefixed);
+ * - single-line text (titles, tool names in headings, header fields, ids): code spans, the delimiter one backtick longer
+ *   than the longest run inside, line breaks turned into spaces;
+ * - bidirectional controls and marks (U+202A–U+202E, U+2066–U+2069, U+200E, U+200F, U+061C) are replaced by U+FFFD.
+ * Everything outside code is fixed text written here (labels, numbers, durations).
  * Nodes left out by the options leave no trace except the options line of the header.
  */
 
@@ -29,53 +29,35 @@ const STATUS_LABELS: Record<NodeStatus, string> = {
 const OUTPUT_LABELS = { head: '每步前 8 KB', full: '全部', none: '不含' } as const;
 const CATEGORY_LABELS = { credential: '固定格式的凭据', assignment: '赋值形式', personal: '个人信息', custom: '自定义词' } as const;
 
-const BIDI = /[\u202a-\u202e\u2066-\u2069]/g;
+const BIDI = /[\u202a-\u202e\u2066-\u2069\u200e\u200f\u061c]/g;
 const noBidi = (s: string): string => s.replace(BIDI, '\ufffd');
 
-/** One line of free text, escaped (see the module comment). */
-function escapeLine(line: string): string {
-  let s = noBidi(line)
-    .replace(/[\\`*_[\]<>&|~#!@]/g, (c) => `\\${c}`)
-    .replace(/:\/\//g, '\\://')
-    .replace(/(w)(ww)\./gi, '$1$2\\.');
-  // Line starts: list markers, setext underlines, ordered lists.
-  s = s.replace(/^(\s*)([-+=])/, '$1\\$2').replace(/^(\s*\d{1,9})([.)])/, '$1\\$2');
-  return s;
+function longestBacktickRun(text: string): number {
+  let longest = 0;
+  for (const m of text.matchAll(/`+/g)) if (m[0].length > longest) longest = m[0].length;
+  return longest;
 }
 
-/** Free text as Markdown paragraphs: blank lines separate paragraphs, other line breaks are hard breaks. */
-function paragraphs(text: string, prefix = ''): string {
-  const lines = text.replace(/\r\n?/g, '\n').split('\n');
-  const out: string[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!;
-    if (line.trim() === '') {
-      out.push(prefix.trimEnd());
-      continue;
-    }
-    const nextBlank = i + 1 >= lines.length || lines[i + 1]!.trim() === '';
-    out.push(prefix + escapeLine(line) + (nextBlank ? '' : '\\'));
-  }
-  // No leading/trailing empty lines; collapse runs of empty lines.
-  const joined: string[] = [];
-  for (const l of out) {
-    if (l === prefix.trimEnd() && (joined.length === 0 || joined[joined.length - 1] === prefix.trimEnd())) continue;
-    joined.push(l);
-  }
-  while (joined.length > 0 && joined[joined.length - 1] === prefix.trimEnd()) joined.pop();
-  return joined.join('\n');
+/** Single-line text as a code span (see the module comment); `（空）` for empty text. */
+export function codeSpan(text: string): string {
+  const s = noBidi(text).replace(/[\r\n]+/g, ' ');
+  if (s.trim() === '') return '（空）';
+  const d = '`'.repeat(longestBacktickRun(s) + 1);
+  const pad = s.startsWith('`') || s.endsWith('`') || s.startsWith(' ') || s.endsWith(' ') ? ' ' : '';
+  return `${d}${pad}${s}${pad}${d}`;
 }
 
-/** A single-line escaped text (for headings and list items). */
-function inline(text: string): string {
-  return escapeLine(text.replace(/[\r\n]+/g, ' '));
+/** Multi-line text as a fenced block inside a block quote. */
+function quoted(text: string): string {
+  return fence(text, 'text')
+    .split('\n')
+    .map((l) => (l === '' ? '>' : `> ${l}`))
+    .join('\n');
 }
 
 /** A fenced code block whose fence is longer than any backtick run in the content. */
 export function fence(content: string, info = ''): string {
-  let longest = 0;
-  for (const m of content.matchAll(/`+/g)) if (m[0].length > longest) longest = m[0].length;
-  const f = '`'.repeat(Math.max(3, longest + 1));
+  const f = '`'.repeat(Math.max(3, longestBacktickRun(content) + 1));
   const body = noBidi(content).replace(/\r\n?/g, '\n');
   return `${f}${info}\n${body}${body.endsWith('\n') || body === '' ? '' : '\n'}${f}`;
 }
@@ -107,9 +89,8 @@ interface Ctx {
 }
 
 function stepHeading(node: GraphNode, level: number): string {
-  const name = node.kind === 'subagent' ? `子代理：${node.title}` : node.toolName ?? node.title;
-  const parts = [inline(name)];
-  if (node.status !== null) parts.push(STATUS_LABELS[node.status] ?? inline(String(node.status)));
+  const parts = [node.kind === 'subagent' ? `子代理：${codeSpan(node.title)}` : codeSpan(node.toolName ?? node.title)];
+  if (node.status !== null) parts.push(STATUS_LABELS[node.status] ?? codeSpan(String(node.status)));
   const d = duration(node.durationMs);
   if (d !== null) parts.push(d);
   return `${'#'.repeat(Math.min(6, level))} ${parts.join(' · ')}`;
@@ -123,10 +104,10 @@ function renderSteps(steps: DocStep[], ctx: Ctx, level: number, out: string[]): 
     const text = detail?.text ?? null;
     switch (node.kind) {
       case 'prompt':
-        out.push(`**提示**`, paragraphs(text ?? node.summary, '> '));
+        out.push(`**提示**`, quoted(text ?? node.summary));
         break;
       case 'text':
-        out.push(paragraphs(text ?? node.summary));
+        out.push(fence(text ?? node.summary, 'text'));
         break;
       case 'thinking':
         out.push(`<details><summary>思考</summary>\n\n${fence(text ?? node.summary, 'text')}\n\n</details>`);
@@ -135,22 +116,22 @@ function renderSteps(steps: DocStep[], ctx: Ctx, level: number, out: string[]): 
       case 'subagent': {
         out.push(stepHeading(node, level));
         if (detail?.input !== null && detail?.input !== undefined) out.push('输入：', valueBlock(detail.input, 'json'));
-        else if (node.summary !== '' && !broken) out.push(paragraphs(node.summary));
+        else if (node.summary !== '' && !broken) out.push(fence(node.summary, 'text'));
         if (detail?.output !== null && detail?.output !== undefined) {
           out.push('输出：', valueBlock(detail.output, 'json'));
           const cut = ctx.truncations[node.id];
           if (cut !== undefined) out.push(`（已截断，原始 ${Math.max(1, Math.ceil(cut.originalBytes / 1024))} KB）`);
         }
-        if (text !== null && text !== '') out.push(paragraphs(text));
+        if (text !== null && text !== '') out.push(fence(text, 'text'));
         break;
       }
       case 'system':
-        out.push(`**系统：${inline(node.title)}**`);
-        if ((text ?? node.summary) !== '') out.push(paragraphs(text ?? node.summary));
+        out.push(`**系统：${codeSpan(node.title)}**`);
+        if ((text ?? node.summary) !== '') out.push(fence(text ?? node.summary, 'text'));
         break;
       default:
-        out.push(`**${inline(node.title)}**`);
-        if (node.summary !== '') out.push(paragraphs(node.summary));
+        out.push(`**${codeSpan(node.title)}**`);
+        if (node.summary !== '') out.push(fence(node.summary, 'text'));
     }
     if (broken) out.push('（详情已损坏）');
     if (step.agent !== null) {
@@ -164,13 +145,13 @@ function renderSteps(steps: DocStep[], ctx: Ctx, level: number, out: string[]): 
 export function renderMarkdown(bundle: ExportBundle): string {
   const { session, options, report } = bundle;
   const out: string[] = [];
-  out.push(`# ${session.title !== null && session.title.trim() !== '' ? inline(session.title) : '未命名会话'}`);
-  const info: string[] = [`来源：${ORIGIN_LABELS[session.origin] ?? inline(String(session.origin))}`];
-  info.push(`开始：${inline(session.startedAt)}`, `最后活动：${inline(session.lastActivityAt)}`);
-  if (session.cwd !== null) info.push(`工作目录：${inline(session.cwd)}`);
-  if (session.gitBranch !== null) info.push(`分支：${inline(session.gitBranch)}`);
-  info.push(`会话：${inline(session.id)}`);
-  info.push(`导出：${inline(`${bundle.tool.name} ${bundle.tool.version}`)}，${inline(bundle.exportedAt)}（导出的是开始导出时的内容）`);
+  out.push(`# ${session.title !== null && session.title.trim() !== '' ? codeSpan(session.title) : '未命名会话'}`);
+  const info: string[] = [`来源：${ORIGIN_LABELS[session.origin] ?? codeSpan(String(session.origin))}`];
+  info.push(`开始：${codeSpan(session.startedAt)}`, `最后活动：${codeSpan(session.lastActivityAt)}`);
+  if (session.cwd !== null) info.push(`工作目录：${codeSpan(session.cwd)}`);
+  if (session.gitBranch !== null) info.push(`分支：${codeSpan(session.gitBranch)}`);
+  info.push(`会话：${codeSpan(session.id)}`);
+  info.push(`导出：${codeSpan(`${bundle.tool.name} ${bundle.tool.version}`)}，${codeSpan(bundle.exportedAt)}（导出的是开始导出时的内容）`);
   info.push(`范围：${options.scope.kind === 'session' ? '整个会话' : `第 ${bundle.turnNumber ?? '?'} 轮及其子代理`}`);
   info.push(
     `内容：${options.thinking ? '含思考' : '不含思考'}；${options.subagents ? '含子代理内部的步骤' : '不含子代理内部的步骤'}；工具输出：${OUTPUT_LABELS[options.output]}`,
@@ -197,7 +178,7 @@ export function renderMarkdown(bundle: ExportBundle): string {
   if (structure.orphanAgents.length > 0) {
     out.push('## 其他子代理的步骤');
     for (const agent of structure.orphanAgents) {
-      out.push(`### 子代理 ${inline(agent.agentId)}`);
+      out.push(`### 子代理 ${codeSpan(agent.agentId)}`);
       renderSteps(agent.steps, ctx, 4, out);
     }
   }

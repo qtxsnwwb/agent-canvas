@@ -45,10 +45,19 @@ export function embedJson(value: unknown): string {
   return JSON.stringify(value).replace(/[<>&\u2028\u2029]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
 }
 
-/** The template with its slot's placeholder replaced by the bundle (once; no `$` pattern interpretation). */
+/** Whether a template can be filled: the placeholder occurs exactly once, inside the slot. */
+export function isUsableTemplate(template: string): boolean {
+  const first = template.indexOf(EXPORT_TEMPLATE_PLACEHOLDER);
+  return first >= 0 && template.indexOf(EXPORT_TEMPLATE_PLACEHOLDER, first + 1) < 0 && template.includes(TEMPLATE_SLOT);
+}
+
+/**
+ * The template with its slot's placeholder replaced by the bundle (no `$` pattern interpretation). Throws unless the
+ * placeholder occurs exactly once, inside the slot.
+ */
 export function fillTemplate(template: string, bundle: ExportBundle): string {
+  if (!isUsableTemplate(template)) throw new Error('viewer template must hold the export slot exactly once');
   const at = template.indexOf(TEMPLATE_SLOT);
-  if (at < 0) throw new Error('viewer template has no export slot');
   const open = TEMPLATE_SLOT.slice(0, TEMPLATE_SLOT.indexOf(EXPORT_TEMPLATE_PLACEHOLDER));
   const close = '</script>';
   return template.slice(0, at) + open + embedJson(bundle) + close + template.slice(at + TEMPLATE_SLOT.length);

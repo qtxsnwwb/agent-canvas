@@ -181,6 +181,12 @@ describe('导出数据：损坏的详情、遮蔽、大小上限、取消', () =
     expect(r.preview.estimatedBytes).toBeGreaterThan(6000);
     expect(r.preview.nodeCount).toBe(12);
     expect(r.bundle).toBeNull();
+    // The first pass reads every detail (12); the second stops early.
+    expect(reads - 12).toBeLessThan(12);
+    // Far over the limit: the first pass itself stops.
+    reads = 0;
+    const far = await assembleExport(source, 's1', opts(), ctx({ maxBytes: 2100, mode: 'preview' }));
+    expect(far.kind === 'done' && far.preview.tooLarge).toBe(true);
     expect(reads).toBeLessThan(12);
   });
 
@@ -216,24 +222,24 @@ describe('Markdown', () => {
       { type: 'node_updated', sessionId: 's1', id: 'b3', patch: {}, detail: { output: 'x'.repeat(EXPORT_OUTPUT_HEAD_BYTES + 3000) } },
     ]);
     const md = renderMarkdown(await bundleOf());
-    expect(md.startsWith('# Shop work\n')).toBe(true);
+    expect(md.startsWith('# `Shop work`\n')).toBe(true);
     expect(md).toContain('导出内容可能仍含敏感信息，分享前请自己再看一遍。');
     expect(md).toContain('- 来源：Claude Code');
     expect(md).toContain('## 第 1 轮');
     expect(md).toContain('## 第 3 轮');
-    expect(md).toContain('> first prompt, full text');
+    expect(md).toContain('> ```text\n> first prompt, full text\n> ```');
     expect(md).toContain('<details><summary>思考</summary>\n\n```text\nthinking one\n```\n\n</details>');
-    expect(md).toContain('### Bash · 成功 · 1\\.2 秒'.replace('\\.', '.'));
+    expect(md).toContain('### `Bash` · 成功 · 1.2 秒');
     expect(md).toContain('输入：\n\n```json\n{\n  "command": "ls"\n}\n```');
     expect(md).toContain('（已截断，原始 11 KB）');
     // Subagent internals nested under the dispatch step, nested agents deeper.
-    const d2 = md.indexOf('### 子代理：general-purpose');
+    const d2 = md.indexOf('### 子代理：`general-purpose`');
     const inner = md.indexOf('<details><summary>子代理内部的步骤（2 步）</summary>');
     const nested = md.indexOf('<details><summary>子代理内部的步骤（1 步）</summary>');
     expect(d2).toBeGreaterThan(0);
     expect(inner).toBeGreaterThan(d2);
     expect(nested).toBeGreaterThan(inner);
-    expect(md.indexOf('##### Grep')).toBeGreaterThan(nested);
+    expect(md.indexOf('##### `Grep`')).toBeGreaterThan(nested);
   });
 
   test('一轮的导出用原来的轮次编号', async () => {
@@ -284,13 +290,12 @@ describe('Markdown', () => {
       },
     ]);
     const md = renderMarkdown(await bundleOf());
+    // Outside fenced blocks and code spans only the renderer's own text remains: no session text at all.
     const lines = md.split('\n');
-    const body = lines.slice(lines.indexOf('## 第 1 轮'));
-    expect(lines[0]).toBe('# \\# Title \\<b\\>x\\</b\\> \\[a\\](b)');
-    // Outside fenced blocks: only the renderer's headings, no raw HTML other than its details/summary, no link, image,
-    // autolink or list syntax.
+    const outside: string[] = [];
     let inFence: string | null = null;
-    for (const l of body) {
+    for (const raw of lines) {
+      const l = raw.replace(/^> ?/, '');
       const m = /^(`{3,})/.exec(l);
       if (inFence === null && m) {
         inFence = m[1]!;
@@ -300,14 +305,13 @@ describe('Markdown', () => {
         if (l === inFence) inFence = null;
         continue;
       }
-      if (/^#{1,6} /.test(l)) expect(l).toMatch(/^(## 第 1 轮|### \\<b\\>Bash)/);
-      const html = l.replace(/<\/?details>|<summary>[^<]*<\/summary>/g, '');
-      expect(html).not.toMatch(/(^|[^\\])</);
-      expect(l).not.toMatch(/(^|[^\\])\[/);
-      expect(l).not.toMatch(/(^|[^\\])https?:\/\//);
-      expect(l).not.toMatch(/^\s*[-+]\s|^\s*\d+[.)]\s/);
+      outside.push(raw.replace(/(`+)[^`][\s\S]*?\1(?!`)/g, 'CODE'));
     }
     expect(inFence).toBeNull();
+    const rest = outside.join('\n');
+    for (const piece of ['not a heading', 'link', 'img', 'script', 'evil', 'Title', 'Bash', 'list', 'ordered', 'amp']) expect(rest).not.toContain(piece);
+    expect(lines[0]).toBe('# `# Title <b>x</b> [a](b)`');
+    expect(md).toContain('### `<b>Bash</b> # [x](y)` · ');
     expect(md).not.toContain('‮');
     // Each <details> is closed by the renderer only.
     expect(md.match(/<details>/g)!.length).toBe(md.split('\n').filter((l) => l === '</details>').length);

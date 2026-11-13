@@ -11,7 +11,7 @@ import {
 } from '@agent-canvas/shared';
 import { assembleExport, ExportAbortedError, homeUsersOf, type ExportSource } from './assemble.js';
 import { contentDisposition, exportFileName } from './filename.js';
-import { fillTemplate, findViewerTemplate, TEMPLATE_SLOT } from './html.js';
+import { fillTemplate, findViewerTemplate, isUsableTemplate } from './html.js';
 import { renderMarkdown } from './markdown.js';
 import { loadExportSettings, saveExportSettings } from './settings.js';
 
@@ -66,6 +66,10 @@ const TOO_LARGE = (max: number): ExportAnswer => ({
   json: { error: `导出内容超过 ${Math.round(max / 1024 / 1024)} MB，请缩小范围或减少输出` },
 });
 const FAILED: ExportAnswer = { status: 500, json: { error: '导出失败' } };
+const SETTINGS_DAMAGED: ExportAnswer = {
+  status: 409,
+  json: { error: '自定义词的设置文件已损坏，无法按自定义词遮蔽。请在导出设置里重新保存自定义词，或关闭“自定义词”后再导出。' },
+};
 const GONE: ExportAnswer = { status: 499, json: { error: '请求已取消' } };
 
 /**
@@ -107,10 +111,21 @@ export class ExportService {
     if (file === null) return null;
     try {
       const text = fs.readFileSync(file, 'utf8');
-      return text.includes(TEMPLATE_SLOT) ? text : null;
+      return isUsableTemplate(text) ? text : null;
     } catch {
       return null;
     }
+  }
+
+  /**
+   * The custom terms when `custom` masking is asked for. Fail closed: a settings file that cannot be read means the
+   * terms cannot be applied, so the request is refused (409) rather than answered with them unmasked.
+   */
+  private customTerms(wanted: boolean): { terms: string[] } | { refused: ExportAnswer } {
+    if (!wanted) return { terms: [] };
+    const settings = this.getSettings();
+    if (settings.settingsError !== null) return { refused: SETTINGS_DAMAGED };
+    return { terms: settings.customTerms };
   }
 
   private homeUsers(cwd: string | null): string[] {
@@ -139,10 +154,13 @@ export class ExportService {
     const options = parsed.options;
     const session = this.options.store.getSession(sessionId);
     if (session === null) return { status: 404, json: { error: 'session not found' } };
+    const settings = this.customTerms(options.mask.custom);
+    if ('refused' in settings) return settings.refused;
+    const terms = settings.terms;
     return this.run(async () => {
       const template = options.format === 'html' ? this.template() : null;
       const result = await assembleExport(this.options.store, sessionId, options, {
-        customTerms: this.getSettings().customTerms,
+        customTerms: terms,
         homeUsers: this.homeUsers(session.cwd),
         version: this.options.version ?? serverVersion(),
         now: (this.options.now ?? (() => new Date()))(),
@@ -165,6 +183,9 @@ export class ExportService {
     const options = parsed.options;
     const session = this.options.store.getSession(sessionId);
     if (session === null) return { status: 404, json: { error: 'session not found' } };
+    const settings = this.customTerms(options.mask.custom);
+    if ('refused' in settings) return settings.refused;
+    const terms = settings.terms;
     let template: string | null = null;
     if (options.format === 'html') {
       template = this.template();
@@ -175,7 +196,7 @@ export class ExportService {
     return this.run(async () => {
       const now = (this.options.now ?? (() => new Date()))();
       const result = await assembleExport(this.options.store, sessionId, options, {
-        customTerms: this.getSettings().customTerms,
+        customTerms: terms,
         homeUsers: this.homeUsers(session.cwd),
         version: this.options.version ?? serverVersion(),
         now,

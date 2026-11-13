@@ -20,7 +20,10 @@ import { EXPORT_SETTINGS_FILE } from '../src/export/settings.js';
 import { ExportService, type ExportServiceOptions } from '../src/export/service.js';
 import { Pipeline } from '../src/pipeline.js';
 import { openStore, type Store } from '../src/store/store.js';
+import { summarize } from '../src/normalize/summary.js';
 import { FAKE_KEY, makeNode, makeSession, threeTurns } from './export-fixtures.js';
+
+const LEARNED_PW = 'Hunter2' + 'Hunter2xyz';
 
 const HOST = '127.0.0.1:4999';
 const ORIGIN = `http://${HOST}`;
@@ -157,7 +160,7 @@ describe('导出接口', () => {
     );
     expect(res.headers['x-content-type-options']).toBe('nosniff');
     expect(res.headers['cache-control']).toBe('no-store');
-    expect(res.body.startsWith('# Shop work')).toBe(true);
+    expect(res.body.startsWith('# `Shop work`')).toBe(true);
   });
 
   test('导出 HTML：没有模板时 501', async () => {
@@ -205,6 +208,25 @@ describe('导出接口', () => {
     const broken = (await get()).json() as { customTerms: string[]; settingsError: string };
     expect(broken.customTerms).toEqual([]);
     expect(broken.settingsError).toEqual(expect.any(String));
+  });
+
+  test('设置文件损坏而要求按自定义词遮蔽：预览和导出都拒绝（409），不带原文', async () => {
+    fs.mkdirSync(config.dataDir, { recursive: true });
+    fs.writeFileSync(path.join(config.dataDir, EXPORT_SETTINGS_FILE), '{broken');
+    for (const url of ['/api/sessions/s1/export', '/api/sessions/s1/export/preview']) {
+      const res = await post(url, options({ format: 'md', mask: { ...ALL_ON } }));
+      expect(res.statusCode, url).toBe(409);
+      expect(res.json()).toEqual({ error: expect.stringContaining('自定义词') });
+      expect(res.body).not.toContain('Shop');
+    }
+    // Without custom masking the export still works.
+    expect((await post('/api/sessions/s1/export', options({ format: 'md' }))).statusCode).toBe(200);
+  });
+
+  test('模板里占位符不止一处时当作没有模板（501）', async () => {
+    templateFile = path.join(tmp, 'tpl.html');
+    fs.writeFileSync(templateFile, `<!-- ${EXPORT_TEMPLATE_PLACEHOLDER} -->${TEMPLATE}`);
+    expect((await post('/api/sessions/s1/export', options({ format: 'html' }))).statusCode).toBe(501);
   });
 
   test('自定义词用于导出（custom 开）', async () => {
@@ -261,6 +283,36 @@ describe('泄漏：同一个假密钥出现在各处，两种格式都看不到'
         node: makeNode(s, 'n2', 1, { turnId: 'T1', kind: 'text', status: null, toolName: null, summary: FAKE_KEY }),
         detail: { text: `${FAKE_KEY}\n# heading ${FAKE_KEY}` },
       },
+      // fix round 1: glued and escaped starts, tool names, ids, inputKey, numbers under secret keys, cut summaries,
+      // a value masked in one place appearing literally elsewhere.
+      {
+        type: 'node_added',
+        node: makeNode(s, `tool:${FAKE_KEY}`, 2, {
+          turnId: 'T1',
+          toolName: `mcp__${FAKE_KEY}`,
+          title: `mcp__${FAKE_KEY}`,
+          toolUseId: `x${FAKE_KEY}`,
+          inputKey: 'feedfacecafebeef',
+          summary: JSON.stringify({ content: `A=1\n${FAKE_KEY}` }),
+        }),
+        detail: {
+          input: { content: `A=1\n${FAKE_KEY}`, password: 98765432, api_key: [`Zq${FAKE_KEY}`], text: `x\\n${FAKE_KEY}` },
+          output: `log: a%0A${FAKE_KEY} and x-${FAKE_KEY}`,
+        },
+      },
+      {
+        type: 'node_added',
+        node: makeNode(s, 'n4', 3, { turnId: 'T1', summary: `${'y'.repeat(190)} ${FAKE_KEY.slice(0, 9)}…` }),
+        detail: {},
+      },
+      {
+        type: 'node_added',
+        node: makeNode(s, 'n5', 4, { turnId: 'T1', summary: summarize({ command: `${'y'.repeat(185)} ${FAKE_KEY}` }) }),
+        detail: { input: { command: `${'y'.repeat(185)} ${FAKE_KEY}` } },
+      },
+      { type: 'node_added', node: makeNode(s, 'n6', 5, { turnId: 'T1' }), detail: { input: { command: `export DB_PASSWORD=${LEARNED_PW}` } } },
+      { type: 'node_added', node: makeNode(s, 'n7', 6, { turnId: 'T1' }), detail: { output: `login with ${LEARNED_PW} ok` } },
+      { type: 'edge_added', edge: { id: `n1->tool:${FAKE_KEY}`, sessionId: s, from: 'n1', to: `tool:${FAKE_KEY}`, kind: 'sequence' } },
     ];
     store.applyChanges(changes);
     const service = new ExportService({
@@ -291,10 +343,14 @@ describe('泄漏：同一个假密钥出现在各处，两种格式都看不到'
     // Not even the part after the prefix (e.g. a half-masked or re-encoded copy).
     expect(everything).not.toContain(FAKE_KEY.slice(8));
     expect(everything).not.toContain('alice');
+    expect(everything).not.toContain(FAKE_KEY.slice(0, 9));
+    expect(everything).not.toContain('98765432');
+    expect(everything).not.toContain('feedfacecafebeef');
+    expect(everything).not.toContain(LEARNED_PW);
     if (format === 'html') {
       const b = embedded(res.body);
       expect(b.report.byType['openai-key']!.occurrences).toBeGreaterThanOrEqual(10);
-      expect(b.report.byType['openai-key']!.distinct).toBe(1);
+      expect(b.report.byType['openai-key']!.distinct).toBe(2); // the key and the cut prefix in a summary
       expect(b.details.n1!.raw).toBeNull();
     }
     const preview = await app.inject({
