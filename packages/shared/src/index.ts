@@ -6,3 +6,4 @@ export * from './notifications.js';
 export * from './stats.js';
 export * from './paths.js';
 export * from './files.js';
+export * from './anomalies.js';
