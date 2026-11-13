@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest';
 import type { GraphNode, NodeDetail } from '@agent-canvas/shared';
-import { createMaskedSource, createPageMasker } from '../src/masking';
+import { createDisplaySource, createPageMasker } from '../src/masking';
 import type { SessionSource } from '../src/sessionSource';
 import { baseSession, mkNode } from './helpers';
 
@@ -17,7 +17,7 @@ test('1 MB 的详情：打开时遮蔽一次，之后不再遮', async () => {
     nodeDetail: async () => ({ detail, outputOriginalBytes: null }), files: null, anomalies: null,
     createLayoutClient: () => { throw new Error('unused'); },
   };
-  const ms = createMaskedSource(source, createPageMasker({ customTerms: ['FalconProject'], numbered: true }));
+  const ms = createDisplaySource(source, createPageMasker({ customTerms: ['FalconProject'], numbered: true }));
   const t0 = performance.now();
   const first = await ms.nodeDetail('n');
   const firstMs = performance.now() - t0;
@@ -45,7 +45,7 @@ test('5000 个节点：详情认出新值后重新遮蔽一遍卡片的耗时', 
     nodeDetail: async () => ({ detail, outputOriginalBytes: null }), files: null, anomalies: null,
     createLayoutClient: () => { throw new Error('unused'); },
   };
-  const ms = createMaskedSource(source, createPageMasker({ customTerms: ['FalconProject'], numbered: true }));
+  const ms = createDisplaySource(source, createPageMasker({ customTerms: ['FalconProject'], numbered: true }));
   const t0 = performance.now();
   const first = ms.getGraph();
   const firstMs = performance.now() - t0;

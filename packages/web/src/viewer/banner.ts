@@ -1,5 +1,5 @@
-import { MASK_TYPE_LABELS, MASK_TYPES, type ExportBundle } from '@agent-canvas/shared';
-import { maskWarnings } from '../export';
+import { MASK_TYPE_LABELS, MASK_TYPES, maskWarnings, type ExportBundle } from '@agent-canvas/shared';
+import { neutralizeBidi } from '../bidi';
 import { sessionName } from './data';
 
 /** The banner at the top of an exported file: what it is, the mask report, the options, the caution line. */
@@ -31,6 +31,9 @@ function formatTime(iso: string): string {
 
 const OUTPUT_TEXT = { head: '每步前 8 KB', full: '全部', none: '不含' } as const;
 
+/** The report as read from a file: an object (its flags are then read by maskWarnings). */
+const isReportLike = (r: unknown): r is ExportBundle['report'] => typeof r === 'object' && r !== null;
+
 export function bannerModel(bundle: ExportBundle): BannerModel {
   const { options, report } = bundle;
   const chips: BannerModel['chips'] = [];
@@ -56,11 +59,11 @@ export function bannerModel(bundle: ExportBundle): BannerModel {
     `工具输出：${output}`,
   ].join(' · ');
   return {
-    headline: `Agent Canvas 导出的只读快照 · 导出于 ${formatTime(bundle.exportedAt)} · ${sessionName(bundle.session)}`,
+    headline: neutralizeBidi(`Agent Canvas 导出的只读快照 · 导出于 ${formatTime(bundle.exportedAt)} · ${sessionName(bundle.session)}`),
     chips,
     maskLine,
     optionsLine,
-    warnings: maskWarnings(report),
+    warnings: maskWarnings(isReportLike(report) ? report : { total: 0, byType: {} }),
     caution: EXPORT_CAUTION,
   };
 }

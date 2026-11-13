@@ -4,7 +4,7 @@
  */
 import {
   EXPORT_MAX_BYTES, MASK_TYPE_LABELS, MASK_TYPES, validateCustomTerms, CUSTOM_TERMS_MAX, type ExportOptions, type ExportPreview,
-  type ExportSettingsResponse, type MaskReport,
+  maskWarnings, type ExportSettingsResponse,
 } from '@agent-canvas/shared';
 
 export const EXPORT_CAUTION = '遮蔽不保证完整，分享前请自己再看一遍。';
@@ -89,22 +89,6 @@ export function maskOffWarning(mask: ExportOptions['mask']): string | null {
 }
 
 // ---- the scan result ----
-
-/**
- * Warning lines about masking limits a report says were reached — the same text as the Markdown header's
- * (`maskWarnings` in packages/server/src/export/markdown.ts; the server package cannot be imported here). Read
- * defensively: the viewer passes a report from the file.
- */
-export function maskWarnings(report: Pick<MaskReport, 'learnedCapped' | 'learnedSkipped' | 'numberingCapped'>): string[] {
-  const out: string[] = [];
-  if (report.learnedCapped === true) out.push('需要逐处查找的密钥值太多，超出上限的值只在原处遮蔽，别处原样出现时可能没有遮住。');
-  const skipped = report.learnedSkipped;
-  if (typeof skipped === 'number' && Number.isFinite(skipped) && skipped > 0) {
-    out.push(`有 ${skipped} 段文字太长或太特殊，没有逐处查找已认出的密钥值，只按规则遮蔽。`);
-  }
-  if (report.numberingCapped === true) out.push('同一类型的不同值太多，部分占位符没有编号。');
-  return out;
-}
 
 export interface PreviewView {
   /** “<类型>：N 处（M 个不同的值）” per type found, in the report's order. */

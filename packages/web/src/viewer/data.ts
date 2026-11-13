@@ -1,4 +1,5 @@
 import type { ExportBundle, Graph, GraphEdge, GraphNode, NodeDetail } from '@agent-canvas/shared';
+import { neutralizeBidi } from '../bidi';
 import type { LayoutClient } from '../canvas/layoutClient';
 import { parseHash } from '../route';
 import type { SessionSource, StepDetail } from '../sessionSource';
@@ -111,7 +112,7 @@ export function sessionName(session: { id: string; title: string | null }): stri
 }
 
 export function exportDocumentTitle(bundle: ExportBundle): string {
-  return `${sessionName(bundle.session)} · Agent Canvas 导出`;
+  return neutralizeBidi(`${sessionName(bundle.session)} · Agent Canvas 导出`);
 }
 
 /**

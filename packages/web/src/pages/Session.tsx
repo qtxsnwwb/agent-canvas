@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useReducer, useState } from 'react';
-import { openLiveSession, type LiveSession } from '../client';
+import { useEffect, useLayoutEffect, useMemo, useReducer, useState } from 'react';
+import { api, openLiveSession, type LiveSession } from '../client';
 import { ExportDialog } from '../canvas/ExportDialog';
 import type { TurnChoice } from '../export';
 import { liveSource } from '../liveSource';
 import { sessionStatusView } from '../labels';
 import { useMask } from '../MaskContext';
-import { createMaskedSource } from '../masking';
+import { createDisplaySource, PAGE_MASK_CATEGORIES } from '../masking';
 import { OriginBadge } from '../OriginBadge';
 import { sessionLoadState } from '../sessionLoad';
 import { useNow } from '../useNow';
@@ -19,12 +19,57 @@ export function SessionPage({ sessionId, filePath = null, nodeId = null }: { ses
   /** The info bar's right-hand slot; the canvas renders its view switch into it (it owns the mode). */
   const [toolbar, setToolbar] = useState<HTMLElement | null>(null);
   const now = useNow();
-  // The masking switch (spec 5): one numbered masker per session; with the switch on, everything the page shows comes
-  // through the masked source (the info bar included). Rebuilt when the switch or the custom terms change.
+  // The masking switch (spec 5): one numbered masker per session; everything the page shows comes through the display
+  // source (the info bar included). A new masker (switch, custom terms) is swapped into the same source before the
+  // next paint, so the canvas keeps its view, selection and open drawer.
   const mask = useMask();
   const masker = mask.forSession(sessionId);
-  // One source per live session and masker (its functions are stable: the panels refetch when they change).
-  const source = useMemo(() => (live === null ? null : createMaskedSource(liveSource(live), masker)), [live, masker]);
+  const { dropSession, setSessionLearning } = mask;
+  // One source per live session (its functions are stable: the panels refetch when they change).
+  const source = useMemo(() => (live === null ? null : createDisplaySource(liveSource(live), masker)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the masker is swapped in below, not a reason to rebuild
+    [live]);
+  useLayoutEffect(() => { source?.setMasker(masker); }, [source, masker]);
+  // The info bar re-renders when the source says its texts changed (a new masker, adopted values).
+  useEffect(() => source?.subscribe(rerender), [source]);
+  // The values learned for this session live only in its masker: forgotten when the page closes.
+  useEffect(() => () => dropSession(sessionId), [dropSession, sessionId]);
+
+  // With the switch on, the server's pass over the whole session (POST …/mask/learned) seeds the masker, so a value
+  // recognised in a step not opened yet is masked everywhere (I2). Asked once per open and switch-on (and per new
+  // masker), and again when the live graph grew by more than 500 nodes since. Until it answers the page is masked by the
+  // rules (a note says the values are being found); a failure or a capped answer leaves a warning.
+  const nodeCount = live === null ? 0 : Object.keys(live.getGraph().nodes).length;
+  const [learnedAt, setLearnedAt] = useState<number | null>(null);
+  const growth = learnedAt === null ? 0 : nodeCount - learnedAt;
+  const refetchKey = Math.floor(Math.max(0, growth) / 501);
+  useEffect(() => {
+    if (source === null || !masker.on) {
+      setSessionLearning('idle');
+      return;
+    }
+    const ctrl = new AbortController();
+    setSessionLearning('loading');
+    const count = nodeCount;
+    api.maskLearned(sessionId, PAGE_MASK_CATEGORIES, ctrl.signal).then(
+      (r) => {
+        if (ctrl.signal.aborted) return;
+        masker.adopt(Array.isArray(r.values) ? r.values : []);
+        source.refresh();
+        setLearnedAt(count);
+        setSessionLearning(r.capped === true ? 'partial' : 'done');
+      },
+      () => {
+        if (ctrl.signal.aborted) return;
+        setLearnedAt(count);
+        setSessionLearning('partial');
+      },
+    );
+    return () => ctrl.abort();
+    // nodeCount is read when asking; only refetchKey (500 more nodes) asks again.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [source, masker, sessionId, refetchKey, setSessionLearning]);
+  useEffect(() => () => setSessionLearning('idle'), [setSessionLearning]);
   const [turn, setTurn] = useState<TurnChoice | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
 

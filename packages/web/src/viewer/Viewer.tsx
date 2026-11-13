@@ -3,6 +3,7 @@ import type { ExportBundle } from '@agent-canvas/shared';
 import { OriginBadge } from '../OriginBadge';
 import { SessionCanvas } from '../pages/SessionCanvas';
 import { bannerModel } from './banner';
+import { createDisplaySource, IDENTITY_MASKER } from '../masking';
 import { embeddedSource, sessionName, viewerNodeId } from './data';
 import { createInThreadLayoutClient } from './inThreadLayout';
 
@@ -31,7 +32,8 @@ function Banner({ bundle }: { bundle: ExportBundle }) {
  * (`#n/<id>`), which selects that step.
  */
 export function Viewer({ bundle }: { bundle: ExportBundle }) {
-  const source = useMemo(() => embeddedSource(bundle, createInThreadLayoutClient), [bundle]);
+  // The bundle is masked already; the display source only makes bidi controls visible (identity masker).
+  const source = useMemo(() => createDisplaySource(embeddedSource(bundle, createInThreadLayoutClient), IDENTITY_MASKER), [bundle]);
   const [nodeId, setNodeId] = useState<string | null>(() => viewerNodeId(window.location.hash));
   useEffect(() => {
     const onHash = (): void => setNodeId(viewerNodeId(window.location.hash));
@@ -39,7 +41,7 @@ export function Viewer({ bundle }: { bundle: ExportBundle }) {
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
   const [toolbar, setToolbar] = useState<HTMLElement | null>(null);
-  const session = bundle.session;
+  const session = source.getSession();
   const name = sessionName(session);
   return (
     <div className="viewer">

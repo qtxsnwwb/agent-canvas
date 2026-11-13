@@ -1,12 +1,12 @@
 import { expect, test } from 'vitest';
-import type { Graph, GraphNode, NodeDetail, SessionAnomaliesResponse, SessionFilesResponse } from '@agent-canvas/shared';
+import type { ContentHit, Graph, GraphNode, NodeDetail, SessionAnomaliesResponse, SessionFilesResponse } from '@agent-canvas/shared';
 import {
-  IDENTITY_MASKER, MASK_SWITCH_KEY, PAGE_MASK_CATEGORIES, createMaskedSource, createPageMasker, maskContentSnippet, maskDiagnostics,
-  maskProject, maskProjectFiles, resolveMaskedId, isCutText, projectOptionValue, projectFromOptionValue, maskSessionFields, maskStats, maskAnomalyList, maskedHighlight, parseMaskSwitch, sameMaskedValue,
+  IDENTITY_MASKER, MASK_SWITCH_KEY, PAGE_MASK_CATEGORIES, createDisplaySource, createPageMasker, maskDiagnostics,
+  maskProject, maskProjectFiles, resolveMaskedId, projectOptionValue, projectFromOptionValue, maskSessionFields, maskStats, maskAnomalyList, parseMaskSwitch, sameMaskedValue,
   serializeMaskSwitch, stripPlaceholderNumbers,
 } from '../src/masking';
 import type { SessionSource } from '../src/sessionSource';
-import { groupContentHits } from '../src/search';
+import { SEARCH_UNMASKED_TEXT, contentView, createSearcher, groupContentHits, sessionResultState } from '../src/search';
 import { failureOf } from '../src/client';
 import { baseSession, mkNode } from './helpers';
 
@@ -33,7 +33,8 @@ test('关着时是恒等：同一个字符串、同一个对象', () => {
   const v = { a: KEY };
   expect(IDENTITY_MASKER.on).toBe(false);
   expect(IDENTITY_MASKER.text(KEY)).toBe(KEY);
-  expect(IDENTITY_MASKER.cut(KEY)).toBe(KEY);
+  expect(IDENTITY_MASKER.title(KEY)).toBe(KEY);
+  expect(IDENTITY_MASKER.summary(KEY)).toBe(KEY);
   expect(IDENTITY_MASKER.value(v)).toBe(v);
 });
 
@@ -58,7 +59,7 @@ test('编号：会话页的遮蔽器同一个值同一个号；跨会话列表�
 test('截断的文字（摘要、标题）：结尾被截断的密钥前缀也遮', () => {
   const m = masker();
   const cut = `curl -H "x: ${KEY.slice(0, 12)}…`;
-  const out = m.cut(cut);
+  const out = m.summary(cut);
   expect(out).not.toContain(KEY.slice(0, 12));
 });
 
@@ -94,24 +95,31 @@ test('遮蔽器建不出来时宁可全遮', () => {
 });
 
 test('截断的文字结尾是半个自定义词时也遮（共享遮蔽器的截断模式；会话页编号，列表不编号）', () => {
-  expect(masker().cut(`项目是 ${TERM.slice(0, 8)}…`)).toBe('项目是 ‹已遮蔽·自定义词#1›…');
-  expect(masker(false).cut(`项目是 ${TERM.slice(0, 8)}…`)).toBe('项目是 ‹已遮蔽·自定义词›…');
-  expect(masker().cut(`项目是 ${TERM.slice(0, 2)}…`)).toBe(`项目是 ${TERM.slice(0, 2)}…`);
+  expect(masker().summary(`项目是 ${TERM.slice(0, 8)}…`)).toBe('项目是 ‹已遮蔽·自定义词#1›…');
+  expect(masker(false).title(`项目是 ${TERM.slice(0, 8)}…`)).toBe('项目是 ‹已遮蔽·自定义词›…');
+  expect(masker().summary(`项目是 ${TERM.slice(0, 2)}…`)).toBe(`项目是 ${TERM.slice(0, 2)}…`);
 });
 
-test('截断模式只用于真的被截断的文字：到摘要上限或以省略号结尾', () => {
-  expect(isCutText('Fix risk-score')).toBe(false);
-  expect(isCutText('task-manager …')).toBe(true);
-  expect(isCutText('x'.repeat(200))).toBe(true);
-  expect(isCutText('x'.repeat(199))).toBe(false);
-  expect(isCutText('abc...')).toBe(true);
-  // The reviewer's over-masking examples stay as they are with the switch on.
+test('截断模式只用于真的被截断的文字：标题按 isCutTitle（60 个码位或省略号），摘要按 isCutSummary', () => {
   const m = masker();
-  expect(m.cut('Fix risk-score')).toBe('Fix risk-score');
-  expect(m.cut('task-manager …')).toBe('task-manager …');
+  // The reviewer's over-masking examples stay as they are with the switch on.
+  expect(m.title('Fix risk-score')).toBe('Fix risk-score');
+  expect(m.summary('task-manager …')).toBe('task-manager …');
   expect(m.text('Fix risk-score')).toBe('Fix risk-score');
-  // A known cut (a clipped snippet end) uses truncated mode whatever the text looks like.
-  expect(m.clipped(`see ${KEY.slice(0, 14)}`)).not.toContain(KEY.slice(0, 14));
+  // C1: a session title made of the first 60 code points of a prompt, cut inside a GitHub-style token.
+  const token = 'ghp_' + 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8';
+  const prompt = `Here is the GitHub token for CI ok: ${token} please use it`;
+  const title = Array.from(prompt).slice(0, 60).join('');
+  expect(Array.from(title)).toHaveLength(60);
+  const shown = m.title(title);
+  expect(shown).not.toContain(token.slice(0, 12));
+  expect(shown).toContain('‹已遮蔽·');
+  // The same title on a session, a list and a summary of 200 characters.
+  expect(maskSessionFields({ ...baseSession, title }, masker(false)).title).not.toContain(token.slice(4, 14));
+  const summary = `run ${'x'.repeat(170)} ${token}`.slice(0, 200);
+  expect(m.summary(summary)).not.toContain(token.slice(4, 14));
+  // A short title is whole text: a cut token in it is not relaxed (not a cut).
+  expect(m.title('ghp_short1')).toBe('ghp_short1');
 });
 
 test('两遍：一处认出来的值，在别处原样出现时也遮', () => {
@@ -137,70 +145,6 @@ test('项目选择框的 value：开关打开时是不透露 id 的序号，能�
   expect(projectOptionValue(null, ids, m)).toBe('');
   expect(projectOptionValue(ids[1]!, ids, IDENTITY_MASKER)).toBe(ids[1]);
   expect(projectFromOptionValue(ids[1]!, ids, IDENTITY_MASKER)).toBe(ids[1]);
-});
-
-// ---- search snippets ----
-
-const join = (parts: { text: string; match: boolean }[]): string => parts.map((p) => p.text).join('');
-const marked = (parts: { text: string; match: boolean }[]): string[] => parts.filter((p) => p.match).map((p) => p.text);
-
-test('检索高亮：命中落在被遮蔽的范围里时，高亮占位符，原文不出现', () => {
-  const m = masker(false);
-  const text = `run with ${KEY} now`;
-  const at = text.indexOf(KEY);
-  const parts = maskedHighlight(m, text, [[at, at + 12]], false);
-  expect(join(parts)).toBe('run with ‹已遮蔽·OpenAI key› now');
-  expect(marked(parts)).toEqual(['‹已遮蔽·OpenAI key›']);
-  expect(join(parts)).not.toContain(KEY.slice(0, 12));
-});
-
-test('检索高亮：命中在遮蔽范围外时照常高亮；跨在边界上时两边都高亮', () => {
-  const m = masker(false);
-  const text = `hello world ${KEY} bye`;
-  expect(marked(maskedHighlight(m, text, [[0, 5]], false))).toEqual(['hello']);
-  const at = text.indexOf(KEY);
-  const parts = maskedHighlight(m, text, [[at - 6, at + 3]], false);
-  expect(marked(parts)).toEqual(['world ‹已遮蔽·OpenAI key›']);
-});
-
-test('检索高亮：多个占位符、开关关着、对不上时退回不高亮但仍是遮蔽后的文字', () => {
-  const m = masker(false);
-  const text = `${KEY} and ${KEY2} end`;
-  const at = text.indexOf(' and ');
-  expect(marked(maskedHighlight(m, text, [[at + 1, at + 4]], false))).toEqual(['and']);
-  expect(marked(maskedHighlight(IDENTITY_MASKER, 'abc', [[1, 2]], false))).toEqual(['b']);
-  // A placeholder-looking text in the original cannot make the raw value appear.
-  const odd = `‹已遮蔽·x› ${KEY}`;
-  expect(join(maskedHighlight(m, odd, [[0, odd.length]], false))).not.toContain(KEY);
-});
-
-test('内容检索片段：前后文和命中合在一起遮，命中在密钥里时高亮占位符', () => {
-  const m = masker(false);
-  const snippet = { before: 'export OPENAI_API_KEY=', match: KEY.slice(0, 10), after: `${KEY.slice(10)} && run`, clippedStart: false, clippedEnd: false };
-  const parts = maskContentSnippet(m, snippet);
-  expect(join(parts)).not.toContain(KEY.slice(0, 10));
-  expect(join(parts)).not.toContain(KEY.slice(10));
-  expect(marked(parts).join('')).toContain('‹已遮蔽·');
-});
-
-test('内容检索片段：开头被截断时，开头那半个词（可能是密钥的后半段）不显示', () => {
-  const m = masker(false);
-  const tail = 'ZZ9988776655443322110011aabbcc';
-  const parts = maskContentSnippet(m, { before: `${tail} then `, match: 'deploy', after: ' ok', clippedStart: true, clippedEnd: true });
-  expect(join(parts)).not.toContain(tail);
-  expect(join(parts)).toBe('… then deploy ok…');
-  expect(marked(parts)).toEqual(['deploy']);
-  // The run reaches into the match: the match stays (the reader typed it), its continuation goes.
-  const inner = maskContentSnippet(m, { before: 'AAAA1111BBBB2222', match: 'CCCC', after: '3333DDDD tail', clippedStart: true, clippedEnd: false });
-  expect(join(inner)).toBe('…CCCC… tail');
-  // Without masking, unchanged.
-  expect(join(maskContentSnippet(IDENTITY_MASKER, { before: 'ab', match: 'c', after: 'd', clippedStart: true, clippedEnd: true }))).toBe('…abcd…');
-});
-
-test('内容检索片段：结尾被截断的密钥前缀也遮', () => {
-  const m = masker(false);
-  const parts = maskContentSnippet(m, { before: 'key is ', match: 'here', after: ` ${KEY.slice(0, 11)}`, clippedStart: false, clippedEnd: true });
-  expect(join(parts)).not.toContain(KEY.slice(0, 11));
 });
 
 // ---- placeholders in addresses ----
@@ -257,9 +201,54 @@ function fakeSource(graph: Graph, detail: NodeDetail): SessionSource & { setGrap
 
 const node = (id: string, o: Partial<GraphNode> = {}): GraphNode => ({ ...mkNode(id), ...o });
 
-test('会话页的数据源：关着时原样返回同一个数据源', () => {
-  const src = fakeSource({ nodes: {}, edges: {} }, { nodeId: 'n1', input: null, output: null, text: null, raw: null });
-  expect(createMaskedSource(src, IDENTITY_MASKER)).toBe(src);
+test('会话页的数据源：关着时节点、会话、详情原样（同一个对象）', async () => {
+  const a = node('a', { summary: KEY });
+  const detail: NodeDetail = { nodeId: 'a', input: { command: KEY }, output: null, text: null, raw: null };
+  const src = fakeSource({ nodes: { a }, edges: {} }, detail);
+  const ds = createDisplaySource(src, IDENTITY_MASKER);
+  expect(ds.getGraph().nodes.a).toBe(a);
+  expect((await ds.nodeDetail('a')).detail).toBe(detail);
+});
+
+test('会话页的数据源：换遮蔽器时就地重新遮蔽并通知，函数不变（画布不重建）', async () => {
+  const a = node('a', { summary: `echo ${KEY}` });
+  const src = fakeSource({ nodes: { a }, edges: {} }, { nodeId: 'a', input: { command: KEY }, output: null, text: null, raw: null });
+  const ds = createDisplaySource(src, IDENTITY_MASKER);
+  const { nodeDetail, files, anomalies } = ds;
+  let told = 0;
+  ds.subscribe(() => { told++; });
+  expect(ds.getGraph().nodes.a!.summary).toContain(KEY);
+  ds.setMasker(masker());
+  expect(told).toBe(1);
+  expect(ds.getGraph().nodes.a!.summary).not.toContain(KEY);
+  expect(JSON.stringify((await ds.nodeDetail('a')).detail)).not.toContain(KEY);
+  expect([ds.nodeDetail, ds.files, ds.anomalies]).toEqual([nodeDetail, files, anomalies]);
+  ds.setMasker(IDENTITY_MASKER);
+  expect(ds.getGraph().nodes.a!.summary).toContain(KEY);
+});
+
+test('会话页的数据源：采用服务端认出的值后重新遮蔽一次（还没打开的步骤里的密码）', () => {
+  const thinking = node('t', { kind: 'thinking', summary: `and the password ${PASSWORD} carefully` });
+  const src = fakeSource({ nodes: { t: thinking }, edges: {} }, { nodeId: 't', input: null, output: null, text: null, raw: null });
+  const m = masker();
+  const ds = createDisplaySource(src, m);
+  let told = 0;
+  ds.subscribe(() => { told++; });
+  expect(ds.getGraph().nodes.t!.summary).toContain(PASSWORD);
+  m.adopt([{ type: 'assignment', value: PASSWORD }]);
+  ds.refresh();
+  expect(told).toBe(1);
+  expect(ds.getGraph().nodes.t!.summary).not.toContain(PASSWORD);
+});
+
+test('会话页的数据源：双向控制字符显示成可见的标记（开关关着也一样）', async () => {
+  const rlo = String.fromCharCode(0x202e);
+  const a = node('a', { title: `x${rlo}gnp.exe`, summary: `a${rlo}b`, files: [{ path: `C:/${rlo}evil.txt`, action: 'read' }] });
+  const src = fakeSource({ nodes: { a }, edges: {} }, { nodeId: 'a', input: { [`k${rlo}`]: `v${rlo}` }, output: `o${rlo}`, text: null, raw: null });
+  const ds = createDisplaySource(src, IDENTITY_MASKER);
+  const all = JSON.stringify([ds.getGraph(), (await ds.nodeDetail('a')).detail]);
+  expect(all).not.toContain(rlo);
+  expect(ds.getGraph().nodes.a!.title).toBe('x⟦U+202E⟧gnp.exe');
 });
 
 test('会话页的数据源：会话、节点、详情（含原始记录）、文件、异常全部遮蔽', async () => {
@@ -267,7 +256,7 @@ test('会话页的数据源：会话、节点、详情（含原始记录）、�
   const detail: NodeDetail = { nodeId: 'n1', input: { command: `echo ${KEY} ${PASSWORD}` }, output: `out password=${PASSWORD}`, text: `in ${TERM}`, raw: { message: { content: KEY } } };
   const src = fakeSource({ nodes: { n1 }, edges: {} }, detail);
   const m = masker();
-  const ms = createMaskedSource(src, m);
+  const ms = createDisplaySource(src, m);
   const all = JSON.stringify([
     ms.getSession(), ms.getGraph(), await ms.nodeDetail('n1'), await ms.files!(), await ms.anomalies!(),
   ]);
@@ -285,7 +274,7 @@ test('会话页的数据源：图不变时返回同一个对象，没变的节�
   const a = node('a', { summary: KEY });
   const b = node('b', { summary: 'plain' });
   const src = fakeSource({ nodes: { a, b }, edges: {} }, { nodeId: 'a', input: null, output: null, text: null, raw: null });
-  const ms = createMaskedSource(src, masker());
+  const ms = createDisplaySource(src, masker());
   const g1 = ms.getGraph();
   expect(ms.getGraph()).toBe(g1);
   const b2 = { ...b, summary: 'changed' };
@@ -299,14 +288,14 @@ test('会话页的数据源：图不变时返回同一个对象，没变的节�
 test('会话页的数据源：节点 id 是 __proto__ 时仍是普通的一项', () => {
   const p = node('__proto__', { summary: KEY });
   const src = fakeSource({ nodes: Object.fromEntries([['__proto__', p]]), edges: {} }, { nodeId: 'x', input: null, output: null, text: null, raw: null });
-  const g = createMaskedSource(src, masker()).getGraph();
+  const g = createDisplaySource(src, masker()).getGraph();
   expect(Object.keys(g.nodes)).toEqual(['__proto__']);
   expect(JSON.stringify(g.nodes)).not.toContain(KEY);
 });
 
 test('会话页的数据源：文件和异常的加载函数是固定的（面板按函数变化重新加载）', () => {
   const src = fakeSource({ nodes: {}, edges: {} }, { nodeId: 'x', input: null, output: null, text: null, raw: null });
-  const ms = createMaskedSource(src, masker());
+  const ms = createDisplaySource(src, masker());
   expect(ms.files).toBe(ms.files);
   expect(typeof ms.files).toBe('function');
 });
@@ -315,7 +304,7 @@ test('会话页的数据源：打开的详情认出新值时，已显示的卡�
   const card = node('a', { summary: `psql -W ${PASSWORD}` });
   const tool = node('b', { kind: 'tool', summary: 'connect' });
   const src = fakeSource({ nodes: { a: card, b: tool }, edges: {} }, { nodeId: 'b', input: { password: PASSWORD }, output: null, text: null, raw: null });
-  const ms = createMaskedSource(src, masker());
+  const ms = createDisplaySource(src, masker());
   let told = 0;
   ms.subscribe(() => { told++; });
   expect(ms.getGraph().nodes.a!.summary).toContain(PASSWORD);
@@ -381,16 +370,60 @@ test('诊断页：未知记录的样本、文件路径、错误都遮蔽', () =>
   expect(JSON.stringify(d)).not.toContain(TERM);
 });
 
-test('内容检索的分组：标题、工具名、片段都遮蔽，原文的命中不出现', () => {
+const hit = (o: Partial<ContentHit> = {}): ContentHit => ({
+  sessionId: 's', projectId: 'p', origin: 'claude', sessionTitle: `t ${KEY}`, nodeId: 'n', kind: 'tool', toolName: `mcp__${TERM}`, at: '', agentId: null,
+  snippet: { before: '"password": "', match: '‹已遮蔽·密钥/密码›', after: '", "host"', clippedStart: true, clippedEnd: true }, masked: true, ...o,
+});
+
+test('内容检索：开关打开时片段由服务端遮蔽、原样显示（命中可以是占位符）；标题和工具名在页面上遮', () => {
   const m = masker(false);
-  const groups = groupContentHits([{
-    sessionId: 's', projectId: 'p', origin: 'claude', sessionTitle: `t ${KEY}`, nodeId: 'n', kind: 'tool', toolName: `mcp__${TERM}`, at: '', agentId: null,
-    snippet: { before: 'key ', match: KEY.slice(0, 8), after: KEY.slice(8), clippedStart: false, clippedEnd: false },
-  }], m);
+  const groups = groupContentHits([hit()], m);
   const all = JSON.stringify(groups);
-  expect(all).not.toContain(KEY.slice(0, 8));
+  expect(all).not.toContain(KEY.slice(0, 10));
   expect(all).not.toContain(TERM);
-  expect(groups[0]!.rows[0]!.parts.find((p) => p.match)?.text).toBe('‹已遮蔽·OpenAI key›');
+  expect(groups[0]!.rows[0]!.parts.find((p) => p.match)?.text).toBe('‹已遮蔽·密钥/密码›');
+});
+
+test('内容检索：开关打开时没有带 masked 的回答不显示（失败即关闭），另一档开关的回答当作还在加载', () => {
+  const m = masker(false);
+  const response = { hits: [hit()], truncated: false, shortQuery: false, indexing: false };
+  const result = { q: 'host', origin: null, response, error: null, mask: true as const };
+  expect(contentView(result, 'host', 'all', m).state).toBe('hits');
+  const unmasked = { ...result, response: { ...response, hits: [hit({ masked: undefined })] } };
+  expect(contentView(unmasked, 'host', 'all', m)).toEqual({ state: 'error', message: SEARCH_UNMASKED_TEXT });
+  const { mask: _, ...plain } = result;
+  expect(contentView(plain, 'host', 'all', m).state).toBe('loading');
+  expect(contentView(result, 'host', 'all', IDENTITY_MASKER).state).toBe('loading');
+  expect(contentView(plain, 'host', 'all', IDENTITY_MASKER).state).toBe('hits');
+});
+
+test('会话检索：开关打开时每条命中都要带 masked，否则不显示；另一档开关的回答当作还在加载', () => {
+  const match = { field: 'prompt' as const, nodeId: 'u1', snippet: '…‹已遮蔽·OpenAI key› to call the staging API…', masked: true as const };
+  const hits = [{ session: baseSession, matches: [match] }];
+  expect(sessionResultState({ q: 'x', hits, error: null, mask: true }, true)).toBe('ok');
+  expect(sessionResultState({ q: 'x', hits: [{ session: baseSession, matches: [{ ...match, masked: undefined }] }], error: null, mask: true }, true)).toBe('unmasked');
+  expect(sessionResultState({ q: 'x', hits, error: null }, true)).toBe('loading');
+  expect(sessionResultState({ q: 'x', hits, error: null, mask: true }, false)).toBe('loading');
+  expect(sessionResultState({ q: 'x', hits, error: null }, false)).toBe('ok');
+});
+
+test('检索器：开关变化时两组重新请求（带 mask），旧回答晚到被丢弃', async () => {
+  const calls: unknown[][] = [];
+  const results: { mask?: true }[] = [];
+  const s = createSearcher({
+    search: async (...a: unknown[]) => { calls.push(['s', ...a]); return []; },
+    onResult: (r) => results.push(r),
+    searchContent: async (...a: unknown[]) => { calls.push(['c', ...a]); return { hits: [], truncated: false, shortQuery: false, indexing: false }; },
+    onContent: () => {},
+    delayMs: 1,
+  });
+  s.query('host');
+  await new Promise((r) => setTimeout(r, 20));
+  s.setMask(true);
+  await new Promise((r) => setTimeout(r, 20));
+  expect(calls).toEqual([['s', 'host'], ['c', 'host', null], ['s', 'host', true], ['c', 'host', null, true]]);
+  expect(results.at(-1)!.mask).toBe(true);
+  s.dispose();
 });
 
 test('请求失败的分类：状态码、取消、连不上', () => {

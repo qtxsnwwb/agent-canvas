@@ -11,9 +11,11 @@ import {
   type OriginFilter,
 } from '../home';
 import { useMask } from '../MaskContext';
-import { linkId, maskProject, maskSessionFields, maskedHighlight, resolveMaskedId, type PageMasker } from '../masking';
+import { linkId, maskProject, maskSessionFields, resolveMaskedId, type PageMasker } from '../masking';
 import { OriginBadge } from '../OriginBadge';
-import { contentOrigin, contentView, createSearcher, highlightParts, highlightRanges, type ContentResult, type SearchResult, type SnippetPart } from '../search';
+import {
+  SEARCH_UNMASKED_TEXT, contentOrigin, contentView, createSearcher, highlightParts, sessionResultState, type ContentResult, type SearchResult, type SnippetPart,
+} from '../search';
 import { createThrottle } from '../throttle';
 import { useNow } from '../useNow';
 
@@ -42,9 +44,9 @@ function AnomalyMark({ count }: { count: AnomalySessionCount | undefined }) {
   );
 }
 
-/** A session-search snippet with q marked; with the switch on, masked first (a match inside a masked span marks its placeholder). */
-function Highlighted({ text, q, m }: { text: string; q: string; m: PageMasker }) {
-  const parts = m.on ? maskedHighlight(m, text, highlightRanges(text, q), false) : highlightParts(text, q);
+/** A session-search snippet with q marked. With the switch on the snippet came masked by the server (`mask=1`) and is shown as it is. */
+function Highlighted({ text, q }: { text: string; q: string }) {
+  const parts = highlightParts(text, q);
   return (
     <>
       {parts.map((p, i) => (p.match ? <mark key={i}>{p.text}</mark> : <span key={i}>{p.text}</span>))}
@@ -75,7 +77,11 @@ function SessionResults({ result, q, now, filter, counts, m }: {
   result: SearchResult | null; q: string; now: number; filter: OriginFilter; counts: AnomalyCountsResponse['counts'] | undefined; m: PageMasker;
 }) {
   if (result === null || result.q !== q) return <p className="muted search-note">搜索中…</p>;
+  // With the switch on: an answer for the other position is stale; one whose snippets did not come masked is not shown.
+  const state = sessionResultState(result, m.on);
+  if (state === 'loading') return <p className="muted search-note">搜索中…</p>;
   if (result.error !== null) return <p className="error">搜索失败：{m.text(result.error)}</p>;
+  if (state === 'unmasked') return <p className="error">{SEARCH_UNMASKED_TEXT}</p>;
   const all: SearchHit[] = result.hits ?? [];
   const hits = all.filter((h) => matchesOrigin(filter, h.session.origin));
   if (hits.length === 0) {
@@ -104,7 +110,7 @@ function SessionResults({ result, q, now, filter, counts, m }: {
               {matches.map((match, i) => (
                 <div key={i} className="search-match">
                   <span className="search-field">{FIELD_LABEL[match.field]}</span>
-                  <Highlighted text={match.snippet} q={q} m={m} />
+                  <Highlighted text={match.snippet} q={q} />
                 </div>
               ))}
             </a>
@@ -290,6 +296,8 @@ export function Home({ projectId: addressed }: { projectId: string | null }) {
   // The content group is filtered by the server (its caps apply after the filter): a filter change re-requests it.
   const searchOrigin = contentOrigin(filter);
   useEffect(() => { searcher.current?.setContentOrigin(searchOrigin); }, [searchOrigin]);
+  // The switch: both groups are asked again (with `mask=1` while on); answers for the other position are ignored.
+  useEffect(() => { searcher.current?.setMask(m.on); }, [m.on]);
   const onQuery = (value: string): void => {
     setQuery(value);
     searcher.current?.query(value);

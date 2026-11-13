@@ -575,3 +575,5 @@ header .header-link[aria-current="page"] { background: var(--sun); }
 .export-dialog .export-go { background: var(--sun); }
 .export-dialog .export-close { padding: 0 9px; font-size: 16px; }
 .export-dialog .export-link { padding: 0 8px; }
+.mask-note { color: var(--ink-soft); font-size: 12px; font-weight: 600; white-space: nowrap; }
+@media (max-width: 640px) { .mask-note { display: none; } }
