@@ -5,7 +5,6 @@ import {
   surfaceState,
   type PanelRow,
 } from '../anomalies';
-import { api } from '../client';
 import { relativeTime } from '../home';
 import { createThrottle } from '../throttle';
 import { useNow } from '../useNow';
@@ -22,10 +21,15 @@ export interface AnomalyLoad {
  * The session's anomalies, for the toolbar button, the card markers and the panel: fetched now, again (throttled) while
  * the session changes, and every ANOMALY_POLL_MS while the answer says `computing`. One request at a time.
  */
-export function useSessionAnomalies(sessionId: string, subscribe: (fn: () => void) => () => void): AnomalyLoad {
+export function useSessionAnomalies(
+  /** Fetches the anomalies (SessionSource.anomalies; stable); null: not available, nothing is fetched and data stays null. */
+  fetchAnomalies: (() => Promise<SessionAnomaliesResponse>) | null,
+  subscribe: (fn: () => void) => () => void,
+): AnomalyLoad {
   const [load, setLoad] = useState<{ data: SessionAnomaliesResponse | null; error: string | null }>({ data: null, error: null });
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
+    if (fetchAnomalies === null) return undefined;
     let alive = true;
     let inFlight = false;
     let again = false;
@@ -40,7 +44,7 @@ export function useSessionAnomalies(sessionId: string, subscribe: (fn: () => voi
       if (inFlight) { again = true; return; }
       inFlight = true;
       if (poll !== null) { clearTimeout(poll); poll = null; }
-      api.sessionAnomalies(sessionId).then(
+      fetchAnomalies().then(
         (data) => {
           if (!alive) return;
           setLoad({ data, error: null });
@@ -71,7 +75,7 @@ export function useSessionAnomalies(sessionId: string, subscribe: (fn: () => voi
       refresh.cancel();
       if (poll !== null) clearTimeout(poll);
     };
-  }, [sessionId, subscribe, attempt]);
+  }, [fetchAnomalies, subscribe, attempt]);
   const reload = useCallback(() => setAttempt((x) => x + 1), []);
   return useMemo(() => ({ data: load.data, error: load.error, reload }), [load, reload]);
 }

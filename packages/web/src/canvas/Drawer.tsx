@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import type { GraphNode, NodeDetail } from '@agent-canvas/shared';
-import { api } from '../client';
+import type { GraphNode } from '@agent-canvas/shared';
+import type { StepDetail } from '../sessionSource';
 import { NODE_STATUS_LABEL } from '../labels';
 import type { UpstreamChain } from './chain';
 import { formatDuration } from './format';
 import { usageLabel } from './replay';
-import { DETAIL_MAX_CHARS, detailNote, detailSections } from './detail';
+import { DETAIL_MAX_CHARS, detailSections, exportCutNote, stepDetailNote } from './detail';
 import { KIND_LABEL, nodeColor, UNFINISHED_LABEL } from './nodes';
 import { CHAIN_FOLDED, NO_REASONING, reasoningRows, type ReasoningRow } from './reasoning';
 import type { CanvasView } from './view';
@@ -97,21 +97,23 @@ function ReasoningList({ rows, truncated, onSelect, onExpand, pendingFocus }: {
   );
 }
 
-function DrawerBody({ sessionId, node, prefix }: { sessionId: string; node: GraphNode; prefix: ReactNode }) {
-  const [detail, setDetail] = useState<NodeDetail | null>(null);
+function DrawerBody({ loadDetail, node, prefix }: {
+  loadDetail(nodeId: string): Promise<StepDetail>; node: GraphNode; prefix: ReactNode;
+}) {
+  const [step, setStep] = useState<StepDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // `node` is a new object whenever the node receives an update, so this refetches the detail then.
   useEffect(() => {
     let alive = true;
-    api.nodeDetail(sessionId, node.id).then(
-      (d) => { if (alive) { setDetail(d); setError(null); } },
+    loadDetail(node.id).then(
+      (d) => { if (alive) { setStep(d); setError(null); } },
       (e: unknown) => { if (alive) setError(String(e)); },
     );
     return () => { alive = false; };
-  }, [sessionId, node]);
+  }, [loadDetail, node]);
 
-  if (detail === null) {
+  if (step === null) {
     return (
       <div className="cc-drawer-body">
         {prefix}
@@ -121,19 +123,23 @@ function DrawerBody({ sessionId, node, prefix }: { sessionId: string; node: Grap
       </div>
     );
   }
-  // A damaged detail comes with empty fields: say so instead of showing nothing.
-  const sections = detail.unreadable === true ? [] : detailSections(detail);
-  const note = detailNote(detail, sections.length);
+  const { detail } = step;
+  // A damaged detail comes with empty fields: say so instead of showing nothing. No detail at all (an exported step that
+  // had none stored) is said too.
+  const sections = detail === null || detail.unreadable === true ? [] : detailSections(detail);
+  const note = stepDetailNote(detail, sections.length);
+  const cutNote = exportCutNote(step.outputOriginalBytes);
   return (
     <div className="cc-drawer-body">
       {prefix}
       {error !== null && <div className="cc-drawer-error">详情刷新失败：{error}</div>}
-      {note !== null && <div className={detail.unreadable === true ? 'cc-drawer-error' : 'cc-muted'}>{note}</div>}
+      {note !== null && <div className={detail?.unreadable === true ? 'cc-drawer-error' : 'cc-muted'}>{note}</div>}
       {sections.map((s) => {
         const content = () => (
           <>
             <pre>{s.body}</pre>
             {s.truncated && <div className="cc-muted">（已截断，仅显示前 {DETAIL_MAX_CHARS} 个字符）</div>}
+            {s.label === '输出' && cutNote !== null && <div className="cc-muted">{cutNote}</div>}
           </>
         );
         return s.label === '原始记录'
@@ -145,7 +151,8 @@ function DrawerBody({ sessionId, node, prefix }: { sessionId: string; node: Grap
 }
 
 export interface DrawerProps {
-  sessionId: string;
+  /** The step's detail (SessionSource.nodeDetail); a stable function, or the detail is fetched again on each render. */
+  loadDetail(nodeId: string): Promise<StepDetail>;
   node: GraphNode;
   /** upstreamChain(view, node.id) in the causal view (EMPTY_CHAIN otherwise). */
   chain: UpstreamChain;
@@ -163,7 +170,7 @@ export interface DrawerProps {
   onClose(): void;
 }
 
-export function Drawer({ sessionId, node, chain, view, replay = false, stalled = false, reasoning, onSelect, onExpandCut, onClose }: DrawerProps) {
+export function Drawer({ loadDetail, node, chain, view, replay = false, stalled = false, reasoning, onSelect, onExpandCut, onClose }: DrawerProps) {
   const closeRef = useRef<HTMLButtonElement>(null);
   // Focus the close button on open; give focus back to whatever had it when the drawer closes.
   useEffect(() => {
@@ -210,7 +217,7 @@ export function Drawer({ sessionId, node, chain, view, replay = false, stalled =
       </div>
       <DrawerBody
         key={node.id}
-        sessionId={sessionId}
+        loadDetail={loadDetail}
         node={node}
         prefix={causal
           ? <ReasoningList rows={rows} truncated={chain.truncated} onSelect={onSelect} onExpand={onExpandCut} pendingFocus={reasonFocus} />

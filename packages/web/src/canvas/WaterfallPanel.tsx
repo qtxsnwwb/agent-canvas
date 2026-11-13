@@ -1,18 +1,21 @@
 import { memo, useEffect, useMemo, useRef, useSyncExternalStore, type CSSProperties, type MouseEvent } from 'react';
 import type { Graph } from '@agent-canvas/shared';
-import type { LiveSession } from '../client';
+import type { SessionSource } from '../sessionSource';
 import { NODE_STATUS_LABEL } from '../labels';
 import { useNow } from '../useNow';
 import { formatDuration } from './format';
 import { KIND_LABEL, nodeColor, UNFINISHED_LABEL } from './nodes';
 import {
-  barOf, buildWaterfall, durationPlacement, scopeKey, stepTicking, waterfallClock, withNow, type WaterfallRow, type WaterfallScope,
+  barOf, buildWaterfall, durationPlacement, scopeKey, snapshotClock, stepTicking, waterfallClock, withNow, type WaterfallRow, type WaterfallScope,
 } from './waterfall';
 
 export interface WaterfallProps {
   graph: Graph;
-  /** The session is read from here as it changes (its status decides whether open steps keep growing, see waterfallClock). */
-  live: Pick<LiveSession, 'subscribe' | 'getSession'>;
+  /**
+   * The session is read from here as it changes (its status decides whether open steps keep growing, see waterfallClock);
+   * a snapshot (`live` false) uses snapshotClock: nothing grows.
+   */
+  live: Pick<SessionSource, 'subscribe' | 'getSession' | 'live'>;
   scope: WaterfallScope;
   /** The turn's prompt, or the agent's type and task. */
   title: string;
@@ -113,7 +116,7 @@ export const Waterfall = memo(function Waterfall({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const base = useMemo(() => buildWaterfall(graph, scope, { compact, nowMs: 0 }), [graph, key, compact]);
   const open = base.rows.some((r) => r.open);
-  const clock = waterfallClock(session, now);
+  const clock = liveSession.live ? waterfallClock(session, now) : snapshotClock(session);
   // Main-thread steps and background ones (a subagent's steps, a dispatch) have their own "now" (see waterfallClock).
   const live = base.rows.some((r) => r.open && stepTicking(clock, r.node));
   const { nowMs, backgroundNowMs } = clock;

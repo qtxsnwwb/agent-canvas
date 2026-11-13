@@ -1,6 +1,5 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import type { Origin, SessionFile, SessionFilesResponse } from '@agent-canvas/shared';
-import { api } from '../client';
 import {
   ACTION_LABEL, CODEX_NOTE, FILES_SCOPE_NOTE, SESSION_FILE_SORTS, SESSION_FILE_VIEW_KEY, failedLabel, findSessionFile, groupTouches,
   readOnlyNote,
@@ -111,7 +110,8 @@ function FileRow({ file, expanded, now, pickedNode, onToggle, onPick, rowRef }: 
 }
 
 export interface FilePanelProps {
-  sessionId: string;
+  /** Fetches the session's files (SessionSource.files); stable, or the list is fetched again on each render. */
+  load(): Promise<SessionFilesResponse>;
   origin: Origin;
   /** Notified on every session change: the list is fetched again (debounced). */
   subscribe(fn: () => void): () => void;
@@ -131,7 +131,7 @@ type Load = { data: SessionFilesResponse | null; error: string | null };
  * The session's files (spec 4): one row per file, expandable to its steps; a step selects its node on the canvas.
  * Fetched when opened and again after the session changes; expanded files and the scroll position are kept.
  */
-export const FilePanel = memo(function FilePanel({ sessionId, origin, subscribe, target, pickedNode, note, onPick, onClose }: FilePanelProps) {
+export const FilePanel = memo(function FilePanel({ load: loadFiles, origin, subscribe, target, pickedNode, note, onPick, onClose }: FilePanelProps) {
   const now = useNow(30_000);
   const [load, setLoad] = useState<Load>({ data: null, error: null });
   const [attempt, setAttempt] = useState(0);
@@ -149,7 +149,7 @@ export const FilePanel = memo(function FilePanel({ sessionId, origin, subscribe,
     const fetchNow = (): void => {
       if (inFlight) { again = true; return; }
       inFlight = true;
-      api.sessionFiles(sessionId).then(
+      loadFiles().then(
         (data) => { if (alive) setLoad({ data, error: null }); },
         (e: unknown) => { if (alive) setLoad((l) => ({ data: l.data, error: e instanceof Error ? e.message : String(e) })); },
       ).finally(() => {
@@ -167,7 +167,7 @@ export const FilePanel = memo(function FilePanel({ sessionId, origin, subscribe,
       unsubscribe();
       if (timer !== null) clearTimeout(timer);
     };
-  }, [sessionId, subscribe, attempt]);
+  }, [loadFiles, subscribe, attempt]);
 
   const files = load.data?.files ?? null;
   const shown = useMemo(() => (files === null ? [] : viewSessionFiles(files, view)), [files, view]);
