@@ -1,7 +1,8 @@
 import { expect, test } from 'vitest';
 import type { Anomaly, AnomalyListItem, AnomalyListResponse, Graph, GraphNode, Project } from '@agent-canvas/shared';
 import {
-  ANOMALY_EMPTY_SESSION, ANOMALY_HEURISTIC_NOTE, DEFAULT_ANOMALIES_FILTER, anomaliesHash, anomaliesQueryString, anomalyButton,
+  ANOMALY_EMPTY_SESSION, ANOMALY_HEURISTIC_NOTE, DEFAULT_ANOMALIES_FILTER, NO_CARD_MARKS, anomaliesUntil, anomalyErrorText,
+  graphTurns, pickedRowKey, pollDelay, stableCardMarks, anomaliesHash, anomaliesQueryString, anomalyButton,
   cardMarks, effectiveAnomaliesFilter, graphResolver, homeMarker, kindChips, kindCountsText, listNotes, listRows, panelRows,
   parseAnomaliesQuery, shouldPoll, surfaceState, turnLabel, type AnomalyResolver,
 } from '../src/anomalies';
@@ -260,4 +261,80 @@ test('shouldPoll：仍在计算时继续取', () => {
   expect(shouldPoll(null)).toBe(false);
   expect(shouldPoll({ computing: false })).toBe(false);
   expect(shouldPoll({ computing: true })).toBe(true);
+});
+
+// ---- final review fixes ----
+
+test('anomalyErrorText：会话算不出来、筛选不对、其他 HTTP 错误、连不上', () => {
+  const http = (status: number) => Object.assign(new Error(`/x: HTTP ${status}`), { status });
+  expect(anomalyErrorText(http(500), 'session')).toBe('这个会话的异常没能算出来');
+  expect(anomalyErrorText(http(404), 'session')).toBe('这个会话已经不在了');
+  expect(anomalyErrorText(http(400), 'list')).toBe('筛选条件不对，换一个试试');
+  expect(anomalyErrorText(http(500), 'list')).toBe('服务出错了（HTTP 500）');
+  expect(anomalyErrorText(http(503), 'counts')).toBe('服务出错了（HTTP 503）');
+  expect(anomalyErrorText(new TypeError('Failed to fetch'), 'list')).toBe('连不上 Agent Canvas 服务，请确认它还在运行');
+  expect(anomalyErrorText('boom', 'session')).toBe('连不上 Agent Canvas 服务，请确认它还在运行');
+});
+
+test('stableCardMarks：内容没变时沿用上一次的对象，变了的才换', () => {
+  const list = [anomaly({ kind: 'loop', turnKey: 't1' }), anomaly({ kind: 'churn', turnKey: 't2' })];
+  const a = cardMarks(list, noResolve);
+  const b = cardMarks(list.map((x) => ({ ...x })), noResolve);
+  expect(stableCardMarks(a, b)).toBe(a);
+  const grown = cardMarks([anomaly({ kind: 'loop', turnKey: 't1', count: 4 }), anomaly({ kind: 'churn', turnKey: 't2' }), anomaly({ kind: 'failures', turnKey: 't2' })], noResolve);
+  const c = stableCardMarks(a, grown);
+  expect(c).not.toBe(a);
+  expect(c.turns.get('t1')).toBe(a.turns.get('t1')); // same count, kinds and label
+  expect(c.turns.get('t2')).not.toBe(a.turns.get('t2'));
+  expect(c.turns.get('t2')!.count).toBe(2);
+  expect(stableCardMarks(a, NO_CARD_MARKS)).toBe(NO_CARD_MARKS);
+});
+
+test('anomaliesUntil：复盘时只留回放时间之前（含）的；时间读不出的算 0；null 原样返回', () => {
+  const list = [
+    anomaly({ kind: 'loop', turnKey: 't1', at: '2026-11-13T10:00:00.000Z' }),
+    anomaly({ kind: 'churn', turnKey: 't2', at: '2026-11-13T11:00:00.000Z' }),
+    anomaly({ kind: 'failures', turnKey: 't3', at: 'bad' }),
+  ];
+  expect(anomaliesUntil(list, null)).toBe(list);
+  expect(anomaliesUntil(list, Date.parse('2026-11-13T10:00:00.000Z')).map((a) => a.id)).toEqual(['loop:t1', 'failures:t3']);
+  expect(anomaliesUntil(list, Date.parse('2026-11-13T09:00:00.000Z')).map((a) => a.id)).toEqual(['failures:t3']);
+});
+
+test('pickedRowKey：两条异常落在同一个节点上时只标点过的那一条；从别处跳来时标第一条', () => {
+  const rows = [{ key: 'loop:t1', nodeId: 'n6' }, { key: 'failures:t1', nodeId: 'n6' }, { key: 'churn:t2', nodeId: 'n9' }];
+  expect(pickedRowKey(rows, 'failures:t1', 'n6')).toBe('failures:t1');
+  expect(pickedRowKey(rows, null, 'n6')).toBe('loop:t1');
+  expect(pickedRowKey(rows, 'failures:t1', 'n9')).toBe('churn:t2'); // the address moved on
+  expect(pickedRowKey(rows, 'gone', 'n6')).toBe('loop:t1');
+  expect(pickedRowKey(rows, 'loop:t1', null)).toBeNull();
+  expect(pickedRowKey(rows, null, 'nx')).toBeNull();
+});
+
+test('卡片不存在的异常：标记被丢掉，面板照样列出（轮次写不出）', () => {
+  const list = [anomaly({ kind: 'loop', turnKey: '__prelude__' }), anomaly({ kind: 'churn', turnKey: 't1' }), anomaly({ kind: 'failures', turnKey: 'x:p', agentId: 'x' })];
+  const marks = cardMarks(list, noResolve, { turns: new Set(['t1']), agents: new Set() });
+  expect([...marks.turns.keys()]).toEqual(['t1']);
+  expect(marks.agents.size).toBe(0);
+  const rows = panelRows('s1', list, { turns: [{ key: 't1', promptSummary: 'p' }], resolver: noResolve, cwd: null });
+  expect(rows.map((r) => [r.key, r.turnText])).toEqual([['loop:__prelude__', null], ['churn:t1', '第 1 轮 · p'], ['failures:x:p', null]]);
+});
+
+test('pollDelay：仍在计算时继续取，失败时按次数退避（有上限）；算完了就停', () => {
+  expect(pollDelay(false, 0)).toBeNull();
+  expect(pollDelay(false, 3)).toBeNull();
+  expect(pollDelay(true, 0)).toBe(3_000);
+  expect(pollDelay(true, 1)).toBe(6_000);
+  expect(pollDelay(true, 2)).toBe(12_000);
+  expect(pollDelay(true, 10)).toBe(30_000);
+});
+
+test('graphTurns：主线程的轮次（和概览同样的分法），带上第一个提示的摘要；不受复盘时间影响', () => {
+  const g = graphOf([
+    node('p1', { kind: 'prompt', turnId: 't1', summary: '第一个', timestamp: '2026-11-13T10:00:00Z' }),
+    node('x1', { kind: 'tool', timestamp: '2026-11-13T10:00:01Z' }),
+    node('i1', { kind: 'prompt', agentId: 'a1', summary: '子代理的', timestamp: '2026-11-13T10:00:02Z' }),
+    node('p2', { kind: 'text', turnId: 't2', timestamp: '2026-11-13T10:05:00Z' }),
+  ]);
+  expect(graphTurns(g)).toEqual([{ key: 't1', promptSummary: '第一个' }, { key: 't2', promptSummary: '' }]);
 });

@@ -4,7 +4,10 @@ import { openLiveSession, type LiveSession } from '../client';
 import { Canvas, type CanvasFocus } from '../canvas/Canvas';
 import { FilePanel } from '../canvas/FilePanel';
 import { AnomalyPanel, useSessionAnomalies } from '../canvas/AnomalyPanel';
-import { NO_CARD_MARKS, anomalyButton, cardMarks, graphResolver, panelRows } from '../anomalies';
+import {
+  NO_CARD_MARKS, anomaliesUntil, anomalyButton, cardMarks, graphResolver, graphTurns, panelRows, pickedRowKey, stableCardMarks,
+  type CardMarks, type PanelRow,
+} from '../anomalies';
 import { revealPlan } from '../canvas/reveal';
 import { EMPTY_CHAIN, expandCut, upstreamChain } from '../canvas/chain';
 import { isRunId } from '../canvas/compact';
@@ -99,10 +102,20 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar, filePath, nod
   const anomalyData = anomalies.data;
   // The graph as it was when the answer came (the answer is refetched as the graph changes).
   const anomalyResolver = useMemo(() => (anomalyData === null ? null : graphResolver(live.getGraph())), [anomalyData, live]);
-  const anomalyMarks = useMemo(
-    () => (anomalyData === null || anomalyResolver === null ? NO_CARD_MARKS : cardMarks(anomalyData.anomalies, anomalyResolver)),
-    [anomalyData, anomalyResolver],
-  );
+  // Markers only for cards the view has, and in the replay view only for anomalies reached by the replay time (the
+  // canvas shows that moment; the panel lists them all and says so). Kept referentially stable while unchanged, so a
+  // refetch that finds the same anomalies does not rebuild the cards.
+  const replayMs = canvas.replay !== null ? canvas.replay.timeMs : null;
+  const markView = canvas.view;
+  const lastMarks = useRef<CardMarks>(NO_CARD_MARKS);
+  const anomalyMarks = useMemo(() => {
+    if (anomalyData === null || anomalyResolver === null) return (lastMarks.current = NO_CARD_MARKS);
+    const turns = new Set(markView.turns.map((t) => t.key));
+    const agents = new Set<string>();
+    for (const vn of markView.nodes.values()) if (vn.type === 'node' && vn.node.childAgentId !== null) agents.add(vn.node.childAgentId);
+    const next = cardMarks(anomaliesUntil(anomalyData.anomalies, replayMs), anomalyResolver, { turns, agents });
+    return (lastMarks.current = stableCardMarks(lastMarks.current, next));
+  }, [anomalyData, anomalyResolver, markView, replayMs]);
   const sideOpen = filesOpen || anomaliesOpen;
   const [focus, setFocus] = useState<CanvasFocus | null>(null);
   const focusSeq = useRef(0);
@@ -386,18 +399,20 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar, filePath, nod
   const closeAnomalies = useCallback(() => setAnomaliesOpen(false), []);
   // A row is a link to `#/s/<id>/n/<node>`: following it shows the node (the node address above). When the address is
   // already that one, the browser sends no hashchange, so the node is shown again here.
-  const pickAnomaly = useCallback((nodeId: string, href: string) => {
+  const [clickedAnomaly, setClickedAnomaly] = useState<string | null>(null);
+  const pickAnomaly = useCallback(({ key, nodeId, href }: PanelRow) => {
+    setClickedAnomaly(key);
     if (window.location.hash !== href) return;
     setPickedStep(nodeId);
     setPickNote(null);
     setNodeNote(live.getGraph().nodes[nodeId] === undefined ? NODE_MISSING_NOTE : showStep(nodeId));
   }, [live, showStep]);
-  const turnsNow = canvas.view.turns;
+  // The turns of the whole graph as the answer came (the replay view's turns stop at the replay time).
   const anomalyRows = useMemo(() => {
     if (!anomaliesOpen || anomalyData === null || anomalyResolver === null) return null;
-    const turns = turnsNow.map((t) => ({ key: t.key, promptSummary: t.summary.promptSummary }));
+    const turns = graphTurns(live.getGraph());
     return panelRows(live.getSession().id, anomalyData.anomalies, { turns, resolver: anomalyResolver, cwd: live.getSession().cwd });
-  }, [anomaliesOpen, anomalyData, anomalyResolver, turnsNow, live]);
+  }, [anomaliesOpen, anomalyData, anomalyResolver, live]);
   const anomalyButtonText = anomalyButton(anomalyData === null ? null : anomalyData.anomalies);
   // "暂无节点" only when the live graph really has no nodes; "布局中…" while the model is starting or the view has
   // nodes none of which is placed yet.
@@ -466,7 +481,8 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar, filePath, nod
           <AnomalyPanel
             load={anomalies}
             rows={anomalyRows}
-            pickedNode={nodeTarget?.id ?? null}
+            pickedKey={anomalyRows === null ? null : pickedRowKey(anomalyRows, clickedAnomaly, nodeTarget?.id ?? null)}
+            replaying={replaying}
             onPick={pickAnomaly}
             onClose={closeAnomalies}
           />

@@ -1,7 +1,8 @@
 import { memo, useCallback, useEffect, useMemo, useState, type KeyboardEvent, type MouseEvent } from 'react';
 import type { SessionAnomaliesResponse } from '@agent-canvas/shared';
 import {
-  ANOMALY_COMPUTING_NOTE, ANOMALY_EMPTY_SESSION, ANOMALY_HEURISTIC_NOTE, ANOMALY_POLL_MS, ANOMALY_REFRESH_MS, surfaceState,
+  ANOMALY_COMPUTING_NOTE, ANOMALY_EMPTY_SESSION, ANOMALY_HEURISTIC_NOTE, ANOMALY_REFRESH_MS, anomalyErrorText, pollDelay,
+  surfaceState,
   type PanelRow,
 } from '../anomalies';
 import { api } from '../client';
@@ -29,6 +30,12 @@ export function useSessionAnomalies(sessionId: string, subscribe: (fn: () => voi
     let inFlight = false;
     let again = false;
     let poll: ReturnType<typeof setTimeout> | null = null;
+    let computing = false;
+    let failures = 0;
+    const arm = (): void => {
+      const delay = pollDelay(computing, failures);
+      if (delay !== null) poll = setTimeout(fetchNow, delay);
+    };
     const fetchNow = (): void => {
       if (inFlight) { again = true; return; }
       inFlight = true;
@@ -37,9 +44,19 @@ export function useSessionAnomalies(sessionId: string, subscribe: (fn: () => voi
         (data) => {
           if (!alive) return;
           setLoad({ data, error: null });
-          if (data.computing) poll = setTimeout(fetchNow, ANOMALY_POLL_MS);
+          computing = data.computing;
+          failures = 0;
+          arm();
         },
-        (e: unknown) => { if (alive) setLoad((l) => ({ data: l.data, error: e instanceof Error ? e.message : String(e) })); },
+        (e: unknown) => {
+          if (!alive) return;
+          // A 500 (detection failed for this session) or 404 has no answer to keep: the button shows no count then.
+          const status = typeof e === 'object' && e !== null ? (e as { status?: unknown }).status : undefined;
+          const drop = status === 500 || status === 404;
+          setLoad((l) => ({ data: drop ? null : l.data, error: anomalyErrorText(e, 'session') }));
+          failures += 1;
+          arm(); // still computing: keep trying, backing off
+        },
       ).finally(() => {
         inFlight = false;
         if (alive && again) { again = false; fetchNow(); }
@@ -64,11 +81,11 @@ function fullTime(iso: string): string | undefined {
   return Number.isNaN(d.getTime()) ? undefined : d.toLocaleString('zh-CN', { hour12: false });
 }
 
-function Row({ row, now, picked, onPick }: { row: PanelRow; now: number; picked: boolean; onPick(nodeId: string, href: string): void }) {
+function Row({ row, now, picked, onPick }: { row: PanelRow; now: number; picked: boolean; onPick(row: PanelRow): void }) {
   // A real link (it can be opened in a new tab or copied); a plain click also works when the address is already this one.
   const onClick = (e: MouseEvent<HTMLAnchorElement>): void => {
     if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-    onPick(row.nodeId, row.href);
+    onPick(row);
   };
   return (
     <li>
@@ -95,14 +112,16 @@ export interface AnomalyPanelProps {
   load: AnomalyLoad;
   /** null until the first answer (see panelRows). */
   rows: PanelRow[] | null;
-  /** The node last asked for (the address's node): its row is marked. */
-  pickedNode: string | null;
-  onPick(nodeId: string, href: string): void;
+  /** The row to mark (see anomalies.ts pickedRowKey). */
+  pickedKey: string | null;
+  /** Replay view: the canvas marks only the anomalies reached by the replay time; the list keeps them all. */
+  replaying: boolean;
+  onPick(row: PanelRow): void;
   onClose(): void;
 }
 
 /** The session's anomalies (spec 6): one row per anomaly; a row is a link to its last node, which it selects and locates. */
-export const AnomalyPanel = memo(function AnomalyPanel({ load, rows, pickedNode, onPick, onClose }: AnomalyPanelProps) {
+export const AnomalyPanel = memo(function AnomalyPanel({ load, rows, pickedKey, replaying, onPick, onClose }: AnomalyPanelProps) {
   const now = useNow(30_000);
   const onKeyDown = (e: KeyboardEvent<HTMLElement>): void => {
     if (e.key === 'Escape') { e.stopPropagation(); onClose(); }
@@ -120,9 +139,12 @@ export const AnomalyPanel = memo(function AnomalyPanel({ load, rows, pickedNode,
       <div className="file-panel-body">
         {load.error !== null && (
           <p className="file-error">
-            {state === 'error' ? '加载失败' : '刷新失败，下面是上一次的结果'}：{load.error}
+            {state === 'error' ? `${load.error}。` : `刷新失败（${load.error}），下面是上一次的结果。`}
             <button type="button" className="file-link-btn" onClick={load.reload}>再试一次</button>
           </p>
+        )}
+        {replaying && rows !== null && rows.length > 0 && (
+          <p className="file-note file-note-pick" role="status">复盘中：画布上只标出回放时间之前的异常，这里列出全部。</p>
         )}
         {load.data?.computing === true && <p className="file-note file-note-pick" role="status">{ANOMALY_COMPUTING_NOTE}</p>}
         {state === 'loading' && <p className="muted file-state">加载中…</p>}
@@ -133,7 +155,7 @@ export const AnomalyPanel = memo(function AnomalyPanel({ load, rows, pickedNode,
         )}
         {rows !== null && rows.length > 0 && (
           <ul className="anomaly-list">
-            {rows.map((r) => <Row key={r.key} row={r} now={now} picked={r.nodeId === pickedNode} onPick={onPick} />)}
+            {rows.map((r) => <Row key={r.key} row={r} now={now} picked={r.key === pickedKey} onPick={onPick} />)}
           </ul>
         )}
       </div>

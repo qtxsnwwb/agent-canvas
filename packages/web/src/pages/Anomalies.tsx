@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { AnomalyListResponse, Origin, Project } from '@agent-canvas/shared';
 import {
-  ANOMALY_COMPUTING_NOTE, ANOMALY_HEURISTIC_NOTE, ANOMALY_POLL_MS, anomaliesHash, anomaliesQueryString, effectiveAnomaliesFilter,
+  ANOMALY_COMPUTING_NOTE, ANOMALY_HEURISTIC_NOTE, anomaliesHash, anomalyErrorText, pollDelay, anomaliesQueryString, effectiveAnomaliesFilter,
   kindChips, listNotes, listRows, parseAnomaliesQuery, surfaceState, type AnomaliesFilter, type AnomaliesOriginFilter, type ListRow,
 } from '../anomalies';
 import { PathLabel } from '../canvas/FilePanel';
@@ -11,9 +11,6 @@ import { OriginBadge } from '../OriginBadge';
 import { STATS_RANGE_OPTIONS, availableOrigins } from '../stats';
 import { useNow } from '../useNow';
 
-function errorText(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
 function fullTime(iso: string): string | undefined {
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? undefined : d.toLocaleString('zh-CN', { hour12: false });
@@ -113,11 +110,18 @@ export function Anomalies({ query }: { query: string }) {
   const filter = effectiveAnomaliesFilter(chosen, projects);
   const apiQuery = anomaliesQueryString(filter);
 
-  // Fetched on open and on every filter change; again every ANOMALY_POLL_MS while the answer says `computing`.
+  // Fetched on open and on every filter change; again (pollDelay) while the last answer said `computing` — a failed
+  // attempt does not stop that, it only backs off. Stopped on unmount and on a filter change.
+  const lastComputing = useRef(false);
   useEffect(() => {
     if (!projectsSettled) return;
     let live = true;
     let poll: ReturnType<typeof setTimeout> | null = null;
+    let failures = 0;
+    const arm = (): void => {
+      const delay = pollDelay(lastComputing.current, failures);
+      if (delay !== null) poll = setTimeout(() => fetchNow(false), delay);
+    };
     const fetchNow = (dim: boolean): void => {
       // The previous result stays on screen (dimmed on a filter change) until the new one arrives.
       if (dim) setLoad((l) => ({ ...l, loading: true }));
@@ -125,9 +129,16 @@ export function Anomalies({ query }: { query: string }) {
         (data) => {
           if (!live) return;
           setLoad({ data, loading: false, error: null });
-          if (data.computing) poll = setTimeout(() => fetchNow(false), ANOMALY_POLL_MS);
+          lastComputing.current = data.computing;
+          failures = 0;
+          arm();
         },
-        (e: unknown) => { if (live) setLoad((l) => ({ data: l.data, loading: false, error: errorText(e) })); },
+        (e: unknown) => {
+          if (!live) return;
+          setLoad((l) => ({ data: l.data, loading: false, error: anomalyErrorText(e, 'list') }));
+          failures += 1;
+          arm();
+        },
       );
     };
     fetchNow(true);
@@ -155,10 +166,10 @@ export function Anomalies({ query }: { query: string }) {
       <p className="stats-note stats-coverage anomaly-heuristic">{ANOMALY_HEURISTIC_NOTE}</p>
       <FilterRow filter={filter} projects={projects} totals={data?.totals ?? null} onChange={change} />
       {state === 'loading' && <p className="muted stats-state">加载中…</p>}
-      {state === 'error' && <p className="error stats-state">加载失败：{load.error} {retry}</p>}
+      {state === 'error' && <p className="error stats-state">{load.error}。{retry}</p>}
       {data !== null && (
         <>
-          {load.error !== null && <p className="error stats-state">刷新失败：{load.error}。下面是上一次的结果。{retry}</p>}
+          {load.error !== null && <p className="error stats-state">刷新失败（{load.error}），下面是上一次的结果。{retry}</p>}
           {data.computing && <p className="stats-note stats-coverage" role="status">{ANOMALY_COMPUTING_NOTE}</p>}
           {listNotes(data).map((line) => <p key={line} className="stats-note stats-coverage">{line}</p>)}
           <div className={`stats-body${load.loading ? ' is-loading' : ''}`} aria-busy={load.loading}>

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import {
   SEARCH_MIN_CHARS, type AnomalyCountsResponse, type AnomalySessionCount, type Project, type SearchField, type SearchHit, type Session,
 } from '@agent-canvas/shared';
-import { ANOMALY_POLL_MS, homeMarker } from '../anomalies';
+import { ANOMALY_POLL_MS, anomalyErrorText, homeMarker } from '../anomalies';
 import { api, openLiveSessions } from '../client';
 import { sessionStatusView } from '../labels';
 import {
@@ -230,7 +230,7 @@ export function Home({ projectId }: { projectId: string | null }) {
           setAnomalyError(null);
           if (r.computing) countsTimer = setTimeout(loadCounts, ANOMALY_POLL_MS);
         },
-        (e: unknown) => { if (alive) setAnomalyError(e instanceof Error ? e.message : String(e)); },
+        (e: unknown) => { if (alive) setAnomalyError(anomalyErrorText(e, 'counts')); },
       ).finally(() => {
         countsInFlight = false;
         if (alive && countsAgain) { countsAgain = false; loadCounts(); }
@@ -358,7 +358,7 @@ export function Home({ projectId }: { projectId: string | null }) {
       <section className="sessions">
         <h2>{shown !== undefined ? `${projectTitle(shown)} 的会话` : '会话'}</h2>
         {shownId !== null && sessions.length === 0 && <p className="muted">这个项目还没有会话</p>}
-        {anomalyCounts === null && anomalyError !== null && <p className="muted anomaly-home-note">异常标记暂时加载不出来：{anomalyError}</p>}
+        {anomalyCounts === null && anomalyError !== null && <p className="muted anomaly-home-note">异常标记暂时加载不出来（{anomalyError}），稍后会自动重试。</p>}
         {anomalyCounts?.computing === true && <p className="muted anomaly-home-note">异常还在计算，标记可能不全。</p>}
         {sessions.length > 0 && shownSessions.length === 0 && filter !== 'all' && (
           <p className="muted">这个项目没有 {originLook(filter).label} 会话</p>

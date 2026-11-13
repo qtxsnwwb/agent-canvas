@@ -100,7 +100,11 @@ function markerOf(list: readonly Anomaly[]): CardMarker {
  * Which cards get a marker: a main-thread anomaly marks its turn; one inside a subagent marks that subagent's card and
  * the main turn that (through any nesting) dispatched it.
  */
-export function cardMarks(anomalies: readonly Anomaly[], r: AnomalyResolver): CardMarks {
+export function cardMarks(
+  anomalies: readonly Anomaly[], r: AnomalyResolver,
+  /** The cards that exist (when given): a marker for any other key is dropped (the panel still lists the anomaly). */
+  cards?: { turns: ReadonlySet<string>; agents: ReadonlySet<string> },
+): CardMarks {
   const turns = new Map<string, Anomaly[]>();
   const agents = new Map<string, Anomaly[]>();
   const add = (m: Map<string, Anomaly[]>, key: string, a: Anomaly): void => {
@@ -116,8 +120,75 @@ export function cardMarks(anomalies: readonly Anomaly[], r: AnomalyResolver): Ca
     const turn = dispatchingTurn(a.agentId, r);
     if (turn !== null) add(turns, turn, a);
   }
-  const done = (m: Map<string, Anomaly[]>): Map<string, CardMarker> => new Map([...m].map(([k, v]) => [k, markerOf(v)]));
-  return { turns: done(turns), agents: done(agents) };
+  const done = (m: Map<string, Anomaly[]>, keep: ReadonlySet<string> | undefined): Map<string, CardMarker> =>
+    new Map([...m].filter(([k]) => keep === undefined || keep.has(k)).map(([k, v]) => [k, markerOf(v)]));
+  return { turns: done(turns, cards?.turns), agents: done(agents, cards?.agents) };
+}
+
+const sameMarker = (a: CardMarker, b: CardMarker): boolean =>
+  a.count === b.count && a.label === b.label && a.kinds.length === b.kinds.length && a.kinds.every((k, i) => b.kinds[i] === k);
+
+/**
+ * `next` with every marker equal to the one `prev` had for the same card replaced by `prev`'s object; `prev` itself
+ * when nothing changed (so the canvas does not rebuild its cards on a refetch that found the same anomalies).
+ */
+export function stableCardMarks(prev: CardMarks, next: CardMarks): CardMarks {
+  let changed = prev.turns.size !== next.turns.size || prev.agents.size !== next.agents.size;
+  const keep = (p: ReadonlyMap<string, CardMarker>, n: ReadonlyMap<string, CardMarker>): Map<string, CardMarker> => {
+    const out = new Map<string, CardMarker>();
+    for (const [k, m] of n) {
+      const old = p.get(k);
+      if (old !== undefined && sameMarker(old, m)) out.set(k, old);
+      else { out.set(k, m); changed = true; }
+    }
+    return out;
+  };
+  const turns = keep(prev.turns, next.turns);
+  const agents = keep(prev.agents, next.agents);
+  if (!changed) return prev;
+  return next.turns.size === 0 && next.agents.size === 0 ? next : { turns, agents };
+}
+
+/** Replay view: the anomalies reached by the replay time (`at` ≤ timeMs; an unreadable `at` counts as 0). null: all. */
+export function anomaliesUntil(anomalies: readonly Anomaly[], timeMs: number | null): readonly Anomaly[] {
+  if (timeMs === null) return anomalies;
+  return anomalies.filter((a) => {
+    const t = Date.parse(a.at);
+    return (Number.isNaN(t) ? 0 : t) <= timeMs;
+  });
+}
+
+/**
+ * The panel row to mark: the one clicked while the address still names its node; else (a link from elsewhere, or two
+ * anomalies ending on the same node with none clicked) the first row ending on the address's node.
+ */
+export function pickedRowKey(rows: readonly { key: string; nodeId: string }[], clickedKey: string | null, nodeId: string | null): string | null {
+  if (nodeId === null) return null;
+  const clicked = rows.find((r) => r.key === clickedKey);
+  if (clicked !== undefined && clicked.nodeId === nodeId) return clicked.key;
+  return rows.find((r) => r.nodeId === nodeId)?.key ?? null;
+}
+
+/** An error of an anomaly request as one plain line. `surface`: which request it was. */
+export function anomalyErrorText(e: unknown, surface: 'session' | 'list' | 'counts'): string {
+  const status = typeof e === 'object' && e !== null ? (e as { status?: unknown }).status : undefined;
+  if (typeof status !== 'number') return '连不上 Agent Canvas 服务，请确认它还在运行';
+  if (surface === 'session' && status === 500) return '这个会话的异常没能算出来';
+  if (surface === 'session' && status === 404) return '这个会话已经不在了';
+  if (surface === 'list' && status === 400) return '筛选条件不对，换一个试试';
+  return `服务出错了（HTTP ${status}）`;
+}
+
+/** The longest wait between polls after failures. */
+const POLL_MAX_MS = 30_000;
+
+/**
+ * When to fetch again while the last answer said `computing` (null: stop): ANOMALY_POLL_MS, doubled after each failed
+ * attempt in a row, at most POLL_MAX_MS.
+ */
+export function pollDelay(computing: boolean, failures: number): number | null {
+  if (!computing) return null;
+  return Math.min(ANOMALY_POLL_MS * 2 ** Math.max(0, failures), POLL_MAX_MS);
 }
 
 /** A resolver over the session's graph. The main turns are computed once, on first use. */
@@ -149,6 +220,16 @@ export function graphResolver(graph: Graph): AnomalyResolver {
       return turnOf.get(nodeId) ?? null;
     },
   };
+}
+
+/**
+ * The session's main turns in order, as the overview groups them (groupTurns), each with the summary of its first
+ * prompt (what its card shows). From the whole graph, so the panel's numbering does not move with the replay time.
+ */
+export function graphTurns(graph: Graph): { key: string; promptSummary: string }[] {
+  return groupTurns(Object.values(graph.nodes)).map((t) => ({
+    key: t.key, promptSummary: t.nodes.find((n) => n.kind === 'prompt')?.summary ?? '',
+  }));
 }
 
 /** A turn as the panel names it: its place in the session and the prompt summary its overview card shows. */
