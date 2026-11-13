@@ -2,7 +2,7 @@ import {
   CONTENT_SHORT_QUERY_DAYS, SEARCH_MAX_CHARS, SEARCH_MIN_CHARS, type ContentHit, type ContentSearchResponse, type Origin,
   type SearchHit,
 } from '@agent-canvas/shared';
-import { matchesOrigin, originLook, type OriginFilter } from './home';
+import { originLook, type OriginFilter } from './home';
 import { KIND_LABEL } from './labels';
 import { sessionNodeHash } from './route';
 
@@ -32,53 +32,79 @@ export function highlightParts(snippet: string, q: string): { text: string; matc
 
 export interface SearchResult { q: string; hits: SearchHit[] | null; error: string | null }
 /** The content group's answer for q: response null when q is too short or the request failed (error set). */
-export interface ContentResult { q: string; response: ContentSearchResponse | null; error: string | null }
+/**
+ * The content group's answer for q under an origin filter (null: all origins; the server filters, so its caps apply
+ * after the filter): response null when q is too short or the request failed (error set).
+ */
+export interface ContentResult { q: string; origin: Origin | null; response: ContentSearchResponse | null; error: string | null }
 
 const errorText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 /**
  * 只把最后一次查询的结果交给回调；更早的请求即使晚到也被丢弃。delayMs 内的连续输入只发最后一次。
  * 给了 searchContent 时，会话与内容两个请求在同一时刻发出，各自到达就各自回报（onResult / onContent），互不等待。
+ * 内容请求带着来源筛选（setContentOrigin）；筛选变了只重发内容请求，旧筛选的结果晚到同样被丢弃。
  */
 export function createSearcher(deps: {
   search(q: string): Promise<SearchHit[]>;
   onResult(r: SearchResult): void;
-  searchContent?(q: string): Promise<ContentSearchResponse>;
+  searchContent?(q: string, origin: Origin | null): Promise<ContentSearchResponse>;
   onContent?(r: ContentResult): void;
   delayMs?: number;
-}): { query(q: string): void; dispose(): void } {
+}): { query(q: string): void; setContentOrigin(origin: Origin | null): void; dispose(): void } {
   const delayMs = deps.delayMs ?? SEARCH_DEBOUNCE_MS;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let latest = 0;
+  let latestContent = 0;
   let disposed = false;
+  let origin: Origin | null = null;
+  /** The query whose requests were sent (null: too short, or nothing sent yet). */
+  let sentQ: string | null = null;
+
+  const runContent = (q: string): void => {
+    const { searchContent, onContent } = deps;
+    if (searchContent === undefined || onContent === undefined) return;
+    latestContent += 1;
+    const mine = latestContent;
+    const o = origin;
+    const current = (): boolean => !disposed && mine === latestContent;
+    searchContent(q, o).then(
+      (response) => { if (current()) onContent({ q, origin: o, response, error: null }); },
+      (e: unknown) => { if (current()) onContent({ q, origin: o, response: null, error: errorText(e) }); },
+    );
+  };
 
   return {
     query(raw) {
       if (disposed) return;
       const q = raw.trim();
       latest += 1;
+      latestContent += 1;
+      sentQ = null;
       const mine = latest;
       const current = (): boolean => !disposed && mine === latest;
       if (timer !== null) clearTimeout(timer);
       timer = null;
       if (Array.from(q).length < SEARCH_MIN_CHARS) {
         deps.onResult({ q, hits: null, error: null });
-        deps.onContent?.({ q, response: null, error: null });
+        deps.onContent?.({ q, origin, response: null, error: null });
         return;
       }
       timer = setTimeout(() => {
         timer = null;
+        sentQ = q;
         deps.search(q).then(
           (hits) => { if (current()) deps.onResult({ q, hits, error: null }); },
           (e: unknown) => { if (current()) deps.onResult({ q, hits: null, error: errorText(e) }); },
         );
-        const { searchContent, onContent } = deps;
-        if (searchContent === undefined || onContent === undefined) return;
-        searchContent(q).then(
-          (response) => { if (current()) onContent({ q, response, error: null }); },
-          (e: unknown) => { if (current()) onContent({ q, response: null, error: errorText(e) }); },
-        );
+        runContent(q);
       }, delayMs);
+    },
+    setContentOrigin(next) {
+      if (disposed || next === origin) return;
+      origin = next;
+      // A pending (debounced) query picks the new filter up when it fires.
+      if (sentQ !== null) runContent(sentQ);
     },
     dispose() {
       disposed = true;
@@ -150,24 +176,25 @@ export type ContentView =
   | { state: 'hits'; groups: ContentSessionGroup[]; notes: string[] };
 
 /**
- * What the content group shows for the trimmed query q. The origin filter is applied here, as the session group does
- * (the page filters; the request carries no filter).
+ * What the content group shows for the trimmed query q under the page's origin filter. The server applies the filter
+ * (contentOrigin); an answer for another query or another filter counts as still loading.
  */
 export function contentView(result: ContentResult | null, q: string, filter: OriginFilter): ContentView {
   if (Array.from(q).length < SEARCH_MIN_CHARS) return { state: 'short', message: `至少输入 ${SEARCH_MIN_CHARS} 个字才搜内容` };
-  if (result === null || result.q !== q) return { state: 'loading' };
+  if (result === null || result.q !== q || result.origin !== contentOrigin(filter)) return { state: 'loading' };
   if (result.response === null) return result.error !== null ? { state: 'error', message: `内容搜索失败：${result.error}` } : { state: 'loading' };
   const r = result.response;
   const notes: string[] = [];
   if (r.indexing) notes.push(CONTENT_NOTE_INDEXING);
   if (r.shortQuery) notes.push(CONTENT_NOTE_SHORT_QUERY);
   if (r.truncated) notes.push(CONTENT_NOTE_TRUNCATED);
-  const hits = r.hits.filter((h) => matchesOrigin(filter, h.origin));
-  if (hits.length === 0) {
-    const message = r.hits.length === 0 || filter === 'all'
-      ? '没有匹配的内容'
-      : `没有匹配的 ${originLook(filter).label} 内容（其他来源有 ${r.hits.length} 处）`;
-    return { state: 'empty', message, notes };
+  if (r.hits.length === 0) {
+    return { state: 'empty', message: filter === 'all' ? '没有匹配的内容' : `没有匹配的 ${originLook(filter).label} 内容`, notes };
   }
-  return { state: 'hits', groups: groupContentHits(hits), notes };
+  return { state: 'hits', groups: groupContentHits(r.hits), notes };
+}
+
+/** The origin the content request carries for the page's filter (null: no filter). */
+export function contentOrigin(filter: OriginFilter): Origin | null {
+  return filter === 'all' ? null : filter;
 }

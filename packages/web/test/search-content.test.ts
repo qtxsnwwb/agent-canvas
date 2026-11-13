@@ -1,5 +1,5 @@
 import { afterEach, expect, test, vi } from 'vitest';
-import type { ContentHit, ContentSearchResponse, SearchHit } from '@agent-canvas/shared';
+import type { ContentHit, ContentSearchResponse, Origin, SearchHit } from '@agent-canvas/shared';
 import {
   CONTENT_NOTE_INDEXING, CONTENT_NOTE_SHORT_QUERY, CONTENT_NOTE_TRUNCATED, contentView, createSearcher, groupContentHits,
   snippetParts, type ContentResult,
@@ -16,7 +16,7 @@ const chit = (over: Partial<ContentHit> = {}): ContentHit => ({
 });
 const resp = (hits: ContentHit[], over: Partial<ContentSearchResponse> = {}): ContentSearchResponse =>
   ({ hits, truncated: false, shortQuery: false, indexing: false, ...over });
-const ok = (q: string, r: ContentSearchResponse): ContentResult => ({ q, response: r, error: null });
+const ok = (q: string, r: ContentSearchResponse, origin: Origin | null = null): ContentResult => ({ q, origin, response: r, error: null });
 
 test('snippetParts：三段按原样成文本段，命中段标记；空段省略；被截处加省略号', () => {
   expect(snippetParts({ before: 'a ', match: 'Fix', after: ' b', clippedStart: false, clippedEnd: false })).toEqual([
@@ -70,7 +70,7 @@ test('contentView：查询太短、加载中（无结果或结果属于旧查询
   expect(contentView(null, '😀', 'all').state).toBe('short');
   expect(contentView(null, '登录', 'all')).toEqual({ state: 'loading' });
   expect(contentView(ok('登', resp([chit()])), '登录', 'all')).toEqual({ state: 'loading' });
-  expect(contentView({ q: '登录', response: null, error: 'HTTP 500' }, '登录', 'all'))
+  expect(contentView({ q: '登录', origin: null, response: null, error: 'HTTP 500' }, '登录', 'all'))
     .toEqual({ state: 'error', message: '内容搜索失败：HTTP 500' });
 });
 
@@ -89,11 +89,56 @@ test('contentView：没有结果；标志位各自给出说明', () => {
     .toEqual({ state: 'empty', message: '没有匹配的内容', notes: [CONTENT_NOTE_INDEXING] });
 });
 
-test('contentView：来源筛选与会话组相同（在页面上筛），被筛掉时说明其他来源有几处', () => {
-  const r = ok('登录', resp([chit({ sessionId: 'a' }), chit({ sessionId: 'b', origin: 'codex' }), chit({ sessionId: 'b', origin: 'codex', nodeId: 'n2' })]));
+test('contentView：来源筛选由服务端做；结果属于另一个筛选时仍算加载中；筛选下没有结果', () => {
+  const r = ok('登录', resp([chit({ sessionId: 'b', origin: 'codex' }), chit({ sessionId: 'b', origin: 'codex', nodeId: 'n2' })]), 'codex');
   const v = contentView(r, '登录', 'codex');
   expect(v.state === 'hits' && v.groups.map((g) => [g.sessionId, g.rows.length])).toEqual([['b', 2]]);
-  expect(contentView(r, '登录', 'cursor')).toEqual({ state: 'empty', message: '没有匹配的 Cursor 内容（其他来源有 3 处）', notes: [] });
+  // The answer was for another filter: wait for the one under the current filter.
+  expect(contentView(r, '登录', 'all')).toEqual({ state: 'loading' });
+  expect(contentView(ok('登录', resp([chit()])), '登录', 'codex')).toEqual({ state: 'loading' });
+  // Hits are shown as the server sent them (no filtering on the page).
+  const mixed = contentView(ok('登录', resp([chit({ sessionId: 'a' }), chit({ sessionId: 'b', origin: 'codex' })])), '登录', 'all');
+  expect(mixed.state === 'hits' && mixed.groups.length).toBe(2);
+  expect(contentView(ok('登录', resp([]), 'cursor'), '登录', 'cursor'))
+    .toEqual({ state: 'empty', message: '没有匹配的 Cursor 内容', notes: [] });
+});
+
+test('createSearcher：换来源筛选只重发内容请求；旧筛选的结果晚到被丢弃；防抖中的请求用新筛选', async () => {
+  vi.useFakeTimers();
+  const resolvers: Record<string, (v: ContentSearchResponse) => void> = {};
+  const search = vi.fn(async () => [] as SearchHit[]);
+  const searchContent = vi.fn((q: string, origin: Origin | null) =>
+    new Promise<ContentSearchResponse>((r) => { resolvers[`${q}|${origin ?? 'all'}`] = r; }));
+  const onResult = vi.fn();
+  const onContent = vi.fn();
+  const s = createSearcher({ search, onResult, searchContent, onContent, delayMs: 10 });
+  s.query('登录');
+  await vi.advanceTimersByTimeAsync(10);
+  expect(searchContent).toHaveBeenLastCalledWith('登录', null);
+  s.setContentOrigin('codex');
+  expect(searchContent).toHaveBeenLastCalledWith('登录', 'codex');
+  expect(search).toHaveBeenCalledTimes(1);
+  resolvers['登录|codex']!(resp([]));
+  await vi.advanceTimersByTimeAsync(0);
+  resolvers['登录|all']!(resp([chit()]));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(onContent).toHaveBeenCalledTimes(1);
+  expect(onContent.mock.calls[0]![0]).toMatchObject({ q: '登录', origin: 'codex', error: null });
+  // Same filter again: no request.
+  s.setContentOrigin('codex');
+  expect(searchContent).toHaveBeenCalledTimes(2);
+  // A filter change while the next query is still debounced: one request, with the new filter.
+  s.query('验证码');
+  s.setContentOrigin(null);
+  await vi.advanceTimersByTimeAsync(10);
+  expect(searchContent).toHaveBeenCalledTimes(3);
+  expect(searchContent).toHaveBeenLastCalledWith('验证码', null);
+  // Too short: a filter change sends nothing.
+  s.query('a');
+  s.setContentOrigin('cursor');
+  await vi.advanceTimersByTimeAsync(10);
+  expect(searchContent).toHaveBeenCalledTimes(3);
+  expect(onContent).toHaveBeenLastCalledWith({ q: 'a', origin: null, response: null, error: null });
 });
 
 test('createSearcher：会话与内容两个请求同时发出，各自先到先报', async () => {
@@ -107,7 +152,7 @@ test('createSearcher：会话与内容两个请求同时发出，各自先到先
   s.query('登录');
   await vi.advanceTimersByTimeAsync(10);
   expect(search).toHaveBeenCalledWith('登录');
-  expect(searchContent).toHaveBeenCalledWith('登录');
+  expect(searchContent).toHaveBeenCalledWith('登录', null);
   resolvers['c:登录']!(resp([chit()]));
   await vi.advanceTimersByTimeAsync(0);
   expect(onContent).toHaveBeenCalledTimes(1);
@@ -147,7 +192,7 @@ test('createSearcher：旧查询的内容结果晚到被丢弃；内容失败不
   expect(onResult).toHaveBeenLastCalledWith({ q: 'bad', hits: [], error: null });
 
   s.query('a');
-  expect(onContent).toHaveBeenLastCalledWith({ q: 'a', response: null, error: null });
+  expect(onContent).toHaveBeenLastCalledWith({ q: 'a', origin: null, response: null, error: null });
   expect(onResult).toHaveBeenLastCalledWith({ q: 'a', hits: null, error: null });
 });
 
@@ -158,6 +203,10 @@ test('api.searchContent 对查询做 URL 编码', async () => {
     const { api } = await import('../src/client');
     await api.searchContent('a&b=c 登录#');
     expect(fetchMock).toHaveBeenCalledWith('/api/search/content?q=a%26b%3Dc%20%E7%99%BB%E5%BD%95%23');
+    await api.searchContent('ab', 'codex');
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/search/content?q=ab&origin=codex');
+    await api.searchContent('ab', null);
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/search/content?q=ab');
   } finally {
     vi.unstubAllGlobals();
   }

@@ -8,7 +8,7 @@ import {
   type OriginFilter,
 } from '../home';
 import { OriginBadge } from '../OriginBadge';
-import { contentView, createSearcher, highlightParts, type ContentResult, type SearchResult, type SnippetPart } from '../search';
+import { contentOrigin, contentView, createSearcher, highlightParts, type ContentResult, type SearchResult, type SnippetPart } from '../search';
 import { createThrottle } from '../throttle';
 import { useNow } from '../useNow';
 
@@ -234,6 +234,9 @@ export function Home({ projectId }: { projectId: string | null }) {
     searcher.current = s;
     return () => { s.dispose(); searcher.current = null; };
   }, []);
+  // The content group is filtered by the server (its caps apply after the filter): a filter change re-requests it.
+  const searchOrigin = contentOrigin(filter);
+  useEffect(() => { searcher.current?.setContentOrigin(searchOrigin); }, [searchOrigin]);
   const onQuery = (value: string): void => {
     setQuery(value);
     searcher.current?.query(value);
