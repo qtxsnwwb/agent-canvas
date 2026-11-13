@@ -31,6 +31,7 @@ const S = {
   openai: 'sk-' + 'proj-' + 'R4t5Y6u7'.repeat(6),
   github: 'gh' + 'p_' + 'Z9y8X7w6'.repeat(4) + 'V5u4',
   jwtSecret: 'q7W' + 'e8R9t0Y1u2I3o4P5a6S7d8F9',
+  awsSecret: 'wJalrXUtnFEMI/K7MDENG' + '/bPxRfiCYzQ1w2e3r45',
   i18nPassword: 'Password',
 };
 
@@ -115,6 +116,7 @@ parts.push(
     `      OPENAI_API_KEY: ${S.openai}`,
     `      GITHUB_TOKEN: ${S.github}`,
     `      JWT_SECRET: "${S.jwtSecret}"`,
+    `      AWS_SECRET_ACCESS_KEY: ${S.awsSecret}`,
     '      MAX_TOKENS: 4096',
   ].join('\n'),
 );
@@ -136,7 +138,8 @@ test('真实感检查：只遮预期的地方，其余逐字节不变', () => {
     .join(ph('assignment', 3))
     .replace(S.openai, ph('openai-key', 1))
     .replace(S.github, ph('github-token', 1))
-    .replace(S.jwtSecret, ph('assignment', 4));
+    .replace(S.jwtSecret, ph('assignment', 4))
+    .replace(S.awsSecret, ph('aws-secret-key', 1));
   if (out !== expected) {
     // Show where they first differ.
     let i = 0;
@@ -144,5 +147,5 @@ test('真实感检查：只遮预期的地方，其余逐字节不变', () => {
     expect(out.slice(Math.max(0, i - 80), i + 120)).toBe(expected.slice(Math.max(0, i - 80), i + 120));
   }
   expect(out).toBe(expected);
-  expect(masker.report().total).toBe(7);
+  expect(masker.report().total).toBe(8);
 });

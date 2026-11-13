@@ -20,6 +20,8 @@
  * - mask() never throws: when anything inside fails, the whole text becomes MASK_FAILED_TEXT (counted as `failed`).
  */
 
+import { SUMMARY_MAX } from './model.js';
+
 export type MaskCategory = 'credential' | 'assignment' | 'personal' | 'custom';
 export const MASK_CATEGORIES: readonly MaskCategory[] = ['credential', 'assignment', 'personal', 'custom'];
 
@@ -31,6 +33,7 @@ export type MaskType =
   | 'huggingface-token'
   | 'stripe-key'
   | 'aws-key'
+  | 'aws-secret-key'
   | 'azure-key'
   | 'google-key'
   | 'google-oauth'
@@ -42,6 +45,7 @@ export type MaskType =
   | 'private-key'
   | 'url-password'
   | 'cli-password'
+  | 'sql-password'
   | 'netrc-password'
   | 'cookie'
   | 'assignment'
@@ -59,6 +63,7 @@ export const MASK_TYPES: readonly MaskType[] = [
   'huggingface-token',
   'stripe-key',
   'aws-key',
+  'aws-secret-key',
   'azure-key',
   'google-key',
   'google-oauth',
@@ -70,6 +75,7 @@ export const MASK_TYPES: readonly MaskType[] = [
   'private-key',
   'url-password',
   'cli-password',
+  'sql-password',
   'netrc-password',
   'cookie',
   'assignment',
@@ -87,6 +93,7 @@ export const MASK_TYPE_LABELS: Record<MaskType, string> = {
   'huggingface-token': 'Hugging Face token',
   'stripe-key': 'Stripe key',
   'aws-key': 'AWS key',
+  'aws-secret-key': 'AWS secret key',
   'azure-key': 'Azure 存储密钥',
   'google-key': 'Google API key',
   'google-oauth': 'Google OAuth 令牌',
@@ -98,6 +105,7 @@ export const MASK_TYPE_LABELS: Record<MaskType, string> = {
   'private-key': '私钥',
   'url-password': '网址里的密码',
   'cli-password': '命令行密码',
+  'sql-password': 'SQL 密码',
   'netrc-password': '.netrc 密码',
   cookie: 'Cookie',
   assignment: '密钥/密码',
@@ -116,6 +124,7 @@ export const MASK_TYPE_CATEGORY: Record<MaskType, MaskCategory | null> = {
   'huggingface-token': 'credential',
   'stripe-key': 'credential',
   'aws-key': 'credential',
+  'aws-secret-key': 'credential',
   'azure-key': 'credential',
   'google-key': 'credential',
   'google-oauth': 'credential',
@@ -127,6 +136,7 @@ export const MASK_TYPE_CATEGORY: Record<MaskType, MaskCategory | null> = {
   'private-key': 'credential',
   'url-password': 'credential',
   'cli-password': 'credential',
+  'sql-password': 'credential',
   'netrc-password': 'credential',
   cookie: 'credential',
   assignment: 'assignment',
@@ -158,6 +168,32 @@ export interface MaskOptions {
  */
 export interface MaskTextOptions {
   truncated?: boolean;
+}
+
+/** maskWithSpans options: MaskTextOptions plus the object key the text sat under. */
+export interface MaskSpanOptions extends MaskTextOptions {
+  key?: string;
+  nested?: boolean;
+}
+
+/** One replaced span: [start, end) in the original text, [maskedStart, maskedEnd) in the masked text. */
+export interface MaskedSpan {
+  start: number;
+  end: number;
+  maskedStart: number;
+  maskedEnd: number;
+  type: MaskType;
+}
+
+export interface MaskedText {
+  text: string;
+  spans: MaskedSpan[];
+}
+
+/** A learned value and the type it was first found as. */
+export interface LearnedValue {
+  type: MaskType;
+  value: string;
 }
 
 export interface MaskTypeCount {
@@ -201,6 +237,19 @@ export interface Masker {
   learnedCount(): number;
   /** Whether mask() would change the text — without counting, numbering or learning anything. */
   wouldMask(text: string, options?: MaskTextOptions): boolean;
+  /**
+   * mask() that also says where: the masked text and every replaced span with its offsets in the original text
+   * ([start, end)) and in the masked text ([maskedStart, maskedEnd)), in order. `key` / `nested`: the text is a value
+   * that sat under that object key (nested inside an array or object there), with maskValue's key-name rules.
+   */
+  maskWithSpans(text: string, options?: MaskSpanOptions): MaskedText;
+  /**
+   * Seeds the learned values (from Masker.learnedValues of another masker, e.g. the server's pass over a whole
+   * session): entries with an unknown type or a value outside 8–512 characters are ignored; nothing is counted.
+   */
+  adopt(values: readonly LearnedValue[]): void;
+  /** Every learned value with its type (secret values: keep them local). */
+  learnedValues(): LearnedValue[];
   report(): MaskReport;
 }
 
@@ -223,6 +272,64 @@ const MAX_VALUE_DEPTH = 100;
 
 export function maskPlaceholder(type: MaskType, n: number | null): string {
   return `‹已遮蔽·${MASK_TYPE_LABELS[type]}${n === null ? '' : `#${n}`}›`;
+}
+
+/**
+ * A session title made from a prompt is its first SESSION_TITLE_CHARS code points (the normalizers of all three
+ * origins), with no ellipsis.
+ */
+export const SESSION_TITLE_CHARS = 60;
+
+function codePointsAtLeast(text: string, n: number): boolean {
+  if (text.length < n) return false;
+  let count = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (!(c >= 0xdc00 && c <= 0xdfff && i > 0 && (text.charCodeAt(i - 1) & 0xfc00) === 0xd800)) count++;
+    if (count >= n) return true;
+  }
+  return false;
+}
+const endsWithEllipsis = (text: string): boolean => text.endsWith('…') || text.endsWith('...');
+
+/**
+ * Whether a session title may have been cut: SESSION_TITLE_CHARS code points or more (a prompt-derived title is cut
+ * there without a mark), or ending with an ellipsis. Mask such a title with `{ truncated: true }`.
+ */
+export function isCutTitle(text: unknown): boolean {
+  return typeof text === 'string' && (codePointsAtLeast(text, SESSION_TITLE_CHARS) || endsWithEllipsis(text));
+}
+
+/** Whether a node summary may have been cut: SUMMARY_MAX characters or more, or ending with an ellipsis. */
+export function isCutSummary(text: unknown): boolean {
+  return typeof text === 'string' && (text.length >= SUMMARY_MAX || endsWithEllipsis(text));
+}
+
+/**
+ * Already-masked text cut to at most `maxCodePoints` code points, never inside a masking placeholder (`‹已遮蔽·…›`: a
+ * cut that would fall inside one is moved before it) nor inside a surrogate pair. ("Mask first, cut second.")
+ */
+export function cutMaskedText(text: string, maxCodePoints: number): string {
+  let i = 0;
+  let count = 0;
+  while (i < text.length && count < maxCodePoints) {
+    const c = text.charCodeAt(i);
+    i += c >= 0xd800 && c <= 0xdbff && i + 1 < text.length && (text.charCodeAt(i + 1) & 0xfc00) === 0xdc00 ? 2 : 1;
+    count++;
+  }
+  if (i >= text.length) return text;
+  const open = text.lastIndexOf('‹已遮蔽·', i - 1);
+  if (open >= 0 && text.indexOf('›', open) >= i) i = open;
+  return text.slice(0, i);
+}
+
+/** Warning lines about masking limits a report shows (export header, viewer banner, export dialog). */
+export function maskWarnings(report: MaskReport): string[] {
+  const out: string[] = [];
+  if (report.learnedCapped) out.push('需要逐处查找的密钥值太多，超出上限的值只在原处遮蔽，别处原样出现时可能没有遮住。');
+  if (report.learnedSkipped) out.push(`有 ${report.learnedSkipped} 段文字太长或太特殊，没有逐处查找已认出的密钥值，只按规则遮蔽。`);
+  if (report.numberingCapped) out.push('同一类型的不同值太多，部分占位符没有编号。');
+  return out;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -324,6 +431,7 @@ const LEARN_ALWAYS = new Set<MaskType>([
   'huggingface-token',
   'stripe-key',
   'aws-key',
+  'aws-secret-key',
   'google-key',
   'google-oauth',
   'slack-token',
@@ -331,7 +439,7 @@ const LEARN_ALWAYS = new Set<MaskType>([
   'jwt',
   'private-key',
 ]);
-const LEARN_GATED = new Set<MaskType>(['azure-key', 'bearer', 'authorization', 'url-password', 'cli-password', 'cookie', 'netrc-password', 'assignment']);
+const LEARN_GATED = new Set<MaskType>(['azure-key', 'bearer', 'authorization', 'url-password', 'cli-password', 'sql-password', 'cookie', 'netrc-password', 'assignment']);
 const cand = (s: number, e: number, type: MaskType, learn?: 0 | 1 | 2): Cand => ({
   s,
   e,
@@ -480,14 +588,50 @@ function ruleGoogleOauth(sc: Scan): void {
 }
 
 const AWS_START = /AKIA|ASIA/g;
+/** [A-Za-z0-9+/] */
+const isB64Char = (c: number): boolean => isAlnum(c) || c === 43 || c === 47;
+/**
+ * AWS access key ids; and a secret access key on the same line after an id (within 300 characters): a run of exactly 40
+ * base64 characters with upper- and lower-case letters and a digit.
+ */
 function ruleAws(sc: Scan): void {
   const { text } = sc;
   AWS_START.lastIndex = 0;
+  let scanned = 0;
   for (let m = AWS_START.exec(text); m !== null; m = AWS_START.exec(text)) {
     const at = m.index;
     AWS_START.lastIndex = at + 1;
+    const before = sc.out.length;
     fixedToken(sc, at, at + 4, 'aws-key', isUpperDigit, 16, isAlnum, (f, t) => hasDigit(text, f, t));
+    if (sc.out.length === before || sc.out[sc.out.length - 1]!.l === 0) continue;
+    let i = Math.max(at + 20, scanned);
+    const limit = Math.min(text.length, at + 20 + 300);
+    while (i < limit) {
+      const c = text.charCodeAt(i);
+      if (c === 10 || c === 13) break;
+      if (!isB64Char(c)) {
+        i++;
+        continue;
+      }
+      const end = runEnd(text, i, isB64Char);
+      if (end - i === 40 && !isB64Char(before2(text, i)) && looksRandom(text, i, end)) sc.out.push(cand(i, end, 'aws-secret-key'));
+      i = end;
+    }
+    scanned = i;
   }
+}
+const before2 = (text: string, at: number): number => (at > 0 ? text.charCodeAt(at - 1) : -1);
+
+const AWS_SECRET_NAME = /(?:aws_?)?secret_?access_?key["']?[ \t]{0,4}[:=][ \t]{0,16}["']?/gi;
+/** A value of 40 base64 characters after an AWS secret key name (`aws_secret_access_key`, `secretAccessKey`, …). */
+function ruleAwsSecretName(sc: Scan): void {
+  const { text } = sc;
+  eachStart(AWS_SECRET_NAME, text, (start, m) => {
+    const at = start + m[0].length;
+    const end = runEnd(text, at, isB64Char, Math.min(text.length, at + 41));
+    if (end - at === 40 && !isB64Char(charAt(text, end))) sc.out.push(cand(at, end, 'aws-secret-key'));
+    return end;
+  });
 }
 
 const GOOGLE_START = /AIza/g;
@@ -531,9 +675,38 @@ function ruleJwt(sc: Scan): void {
       return p;
     }
     const s = runEnd(text, p + 1, isB64Url);
-    sc.out.push(cand(at, s, 'jwt'));
+    if (isJsonSegment(text, at, h) && isJsonSegment(text, h + 1, p)) sc.out.push(cand(at, s, 'jwt'));
     return s;
   });
+}
+
+const B64URL = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+/**
+ * Whether a base64url segment decodes to a JSON object (a JWT's header and payload do). Segments over 16 KB are not
+ * decoded and count as valid (fail closed: masked).
+ */
+function isJsonSegment(text: string, from: number, to: number): boolean {
+  if (to - from > 16 * 1024) return true;
+  let bits = 0;
+  let acc = 0;
+  let out = '';
+  for (let i = from; i < to; i++) {
+    const v = B64URL.indexOf(text[i]!);
+    if (v < 0) return false;
+    acc = (acc << 6) | v;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out += String.fromCharCode((acc >> bits) & 0xff);
+    }
+  }
+  if (!out.startsWith('{')) return false;
+  try {
+    const v: unknown = JSON.parse(out);
+    return typeof v === 'object' && v !== null;
+  } catch {
+    return false;
+  }
 }
 
 const BEARER_START = /bearer[ \t]{1,8}/gi;
@@ -673,9 +846,19 @@ function maskUserinfoToEnd(sc: Scan, from: number, end: number): void {
 
 const CURL_USER = /(?:^|[^A-Za-z0-9_-])(?:-u|--user)(?:[ \t]{1,8}|=)/g;
 const MYSQL_WORD = /(?:mysql|mariadb|mysqldump|mysqladmin)(?![A-Za-z0-9_-])/g;
-/** A path-like value: starts with `/`, `~`, `.`, a drive (`C:`), or holds `/` or `\` separated segments. */
+/**
+ * A value that is really a path: it starts with `/`, `./`, `../`, `~`, `\\` or a drive (`C:\`, `D:/`), or it is made of
+ * name segments (letters, digits, `.`, `_`, `-`, `@`) joined by `/` or `\` with an extension on the last one or at least
+ * three segments. A run of base64 characters of 20 or more with upper- and lower-case letters and a digit is never a
+ * path (it is a secret candidate: `wJalrXUtnFEMI/K7MDENG/…`).
+ */
 export function isPathLike(value: string): boolean {
-  return /^(?:[/~.\\]|[A-Za-z]:[\\/])/.test(value) || /[^/\\\s][/\\][^/\\\s]/.test(value);
+  if (typeof value !== 'string' || value === '') return false;
+  if (/^(?:\/|\.\.?[\\/]|~|\\\\|[A-Za-z]:[\\/])/.test(value)) return true;
+  if (value.length >= 20 && /^[A-Za-z0-9+/=_-]+$/.test(value) && looksRandom(value, 0, value.length)) return false;
+  const segs = value.split(/[\\/]/);
+  if (segs.length < 2 || segs.some((seg) => !/^[A-Za-z0-9._@-]+$/.test(seg))) return false;
+  return /\.[A-Za-z0-9]{1,8}$/.test(segs[segs.length - 1]!) || segs.length >= 3;
 }
 
 /**
@@ -726,6 +909,55 @@ function ruleCliPassword(sc: Scan): void {
     }
     scanned = i;
   }
+}
+
+const DOCKER_LOGIN = /docker[ \t]+login(?![A-Za-z0-9_-])/g;
+const SSHPASS = /sshpass[ \t]+-p[ \t]*/g;
+const SQL_PASSWORD = /(?:identified[ \t]+by|(?<![A-Za-z0-9_])password)[ \t]+(['"])/gi;
+/**
+ * `docker login … -p <pass>` / `--password <pass>` / `--password=<pass>`, `sshpass -p <pass>`, SQL `IDENTIFIED BY '…'`
+ * and `[WITH] PASSWORD '…'`.
+ */
+function ruleMoreCliPasswords(sc: Scan): void {
+  const { text } = sc;
+  const isValueChar = (d: number): boolean => !isWhitespace(d) && d !== 59 && d !== 124 && d !== 38 && d >= 0;
+  DOCKER_LOGIN.lastIndex = 0;
+  let scanned = 0;
+  for (let m = DOCKER_LOGIN.exec(text); m !== null; m = DOCKER_LOGIN.exec(text)) {
+    let i = Math.max(m.index + m[0].length, scanned);
+    const limit = Math.min(text.length, i + 400);
+    while (i < limit) {
+      const c = text.charCodeAt(i);
+      if (c === 10 || c === 13 || c === 59 || c === 124 || c === 38) break;
+      const flag = isSpaceOrTab(c) ? (text.startsWith('-p', i + 1) && isSpaceOrTab(charAt(text, i + 3)) ? 3 : text.startsWith('--password', i + 1) ? 11 : 0) : 0;
+      if (flag > 0 && !text.startsWith('--password-stdin', i + 1)) {
+        let v = i + flag;
+        if (charAt(text, v) === 61) v++;
+        v = runEnd(text, v, isSpaceOrTab, Math.min(text.length, v + 8));
+        const end = runEnd(text, v, isValueChar);
+        if (end > v && !isTemplateStart(text, v)) sc.out.push(cand(v, end, 'cli-password'));
+        i = Math.max(end, i + 1);
+        continue;
+      }
+      i++;
+    }
+    scanned = i;
+  }
+  eachStart(SSHPASS, text, (start, m) => {
+    const v = start + m[0].length;
+    const end = runEnd(text, v, isValueChar);
+    if (end > v && !isTemplateStart(text, v)) sc.out.push(cand(v, end, 'cli-password'));
+    return end;
+  });
+  eachStart(SQL_PASSWORD, text, (start, m) => {
+    const q = m[1]!.charCodeAt(0);
+    const v = start + m[0].length;
+    let e = v;
+    const max = Math.min(text.length, v + MASK_ASSIGNMENT_VALUE_MAX);
+    while (e < max && text.charCodeAt(e) !== q && text.charCodeAt(e) !== 10) e++;
+    if (e < max && text.charCodeAt(e) === q && e > v && !isTemplateStart(text, v) && !text.slice(v, e).includes('${')) sc.out.push(cand(v, e, 'sql-password'));
+    return e;
+  });
 }
 
 const NETRC_PASSWORD = /(?:^|[^A-Za-z0-9_-])password[ \t]+/g;
@@ -1298,21 +1530,40 @@ export interface AssignmentValueContext {
  */
 export function isMaskableAssignmentValue(value: string, context: AssignmentValueContext = {}): boolean {
   if (typeof value !== 'string' || value === '') return false;
-  if (isNeverAValue(value)) return false;
+  if (isNotAValue(value)) return false;
   if (context.quoted && context.passwordKey) return true;
+  if (isPathLike(value)) return false;
   if (!atLeastCodePoints(value, 8)) return false;
-  if (IDENTIFIER_CHAIN.test(value) || CALL.test(value)) return false;
+  if (isIdentifierChain(value) || CALL.test(value)) return false;
   if (!context.quoted && PLAIN_IDENTIFIER.test(value)) return false;
   const c = counts(value, 0, value.length);
   return c.digit || (c.upper && c.lower);
 }
 
-/** References, templates, placeholders, dates, colours, paths: never a secret value. */
-function isNeverAValue(value: string): boolean {
-  if (isTemplateStart(value, 0)) return true;
+/** References, templates, placeholders, dates, colours, sentences: never a secret value, whatever the key. */
+function isNotAValue(value: string): boolean {
+  if (isTemplateStart(value, 0) || /\$\{[^}\n]{0,200}\}/.test(value)) return true;
   if (isOneCharRepeated(value, 0, value.length) || PLACEHOLDER_ONLY.test(value)) return true;
   if (/^your[-_]/i.test(value) || PLACEHOLDER_WORDS.test(value) || PLACEHOLDER_EXACT.test(value)) return true;
-  return DATE.test(value) || COLOR.test(value) || isPathLike(value) || isProse(value);
+  return DATE.test(value) || COLOR.test(value) || isProse(value);
+}
+
+/** isNotAValue, or a path: never masked by the cut-text relaxation either. */
+function isNeverAValue(value: string): boolean {
+  return isNotAValue(value) || isPathLike(value);
+}
+
+/**
+ * An identifier chain (process.env.X, os.environ["X"], config.api.key) whose segments are names, not random parts: a
+ * dotted token with a segment longer than 24 characters, or of 16 or more mixing upper- and lower-case letters and
+ * digits, is not exempt (`MTIz….GhIjKl.AbCd…`).
+ */
+function isIdentifierChain(value: string): boolean {
+  if (!IDENTIFIER_CHAIN.test(value)) return false;
+  for (const seg of value.split(/[.[\]()'" ]+/)) {
+    if (seg.length > 24 || (seg.length >= 16 && looksRandom(seg, 0, seg.length))) return false;
+  }
+  return true;
 }
 
 /**
@@ -1624,6 +1875,7 @@ export function createMasker(options: MaskOptions): Masker {
       ruleHuggingFace(sc);
       ruleGoogleOauth(sc);
       ruleAws(sc);
+      ruleAwsSecretName(sc);
       ruleAzure(sc);
       ruleGoogle(sc);
       ruleSlack(sc);
@@ -1635,6 +1887,7 @@ export function createMasker(options: MaskOptions): Masker {
       ruleUrlPassword(sc, urlAt);
       ruleCliPassword(sc);
       ruleNetrc(sc);
+      ruleMoreCliPasswords(sc);
       ruleCookie(sc);
     }
     if (assignment) ruleAssignment(sc);
@@ -1658,19 +1911,22 @@ export function createMasker(options: MaskOptions): Masker {
     return sc.out;
   };
 
-  const apply = (text: string, opts: MaskTextOptions | undefined, extra: Cand | null): string => {
+  const applySpans = (text: string, opts: MaskTextOptions | undefined, extra: Cand | null): MaskedText => {
     const cands = candidatesOf(text, opts, extra, true);
-    if (cands.length === 0) return text;
-    const spans = selectSpans(cands);
+    if (cands.length === 0) return { text, spans: [] };
     let out = '';
     let at = 0;
-    for (const c of spans) {
+    const spans: MaskedSpan[] = [];
+    for (const c of selectSpans(cands)) {
       out += text.slice(at, c.s);
-      out += replacement(c.type, text.slice(c.s, c.e));
+      const r = replacement(c.type, text.slice(c.s, c.e));
+      spans.push({ start: c.s, end: c.e, maskedStart: out.length, maskedEnd: out.length + r.length, type: c.type });
+      out += r;
       at = c.e;
     }
-    return out + text.slice(at);
+    return { text: out + text.slice(at), spans };
   };
+  const apply = (text: string, opts: MaskTextOptions | undefined, extra: Cand | null): string => applySpans(text, opts, extra).text;
 
   const failed = (): string => replacement('failed', '');
 
@@ -1796,6 +2052,30 @@ export function createMasker(options: MaskOptions): Masker {
         return failed();
       }
     },
+    maskWithSpans(text: string, opts?: MaskSpanOptions): MaskedText {
+      if (typeof text !== 'string' || text === '') return { text: '', spans: [] };
+      try {
+        let extra: Cand | null = null;
+        if (typeof opts?.key === 'string') {
+          const kind = keyNameKind(opts.key);
+          if (kind === 'secret') extra = keyedExtra(text, isPasswordKeyName(opts.key), opts.nested === true);
+          else if (kind === 'counter') extra = counterExtra(text);
+        }
+        return applySpans(text, opts, extra);
+      } catch {
+        const r = failed();
+        return { text: r, spans: [{ start: 0, end: text.length, maskedStart: 0, maskedEnd: r.length, type: 'failed' }] };
+      }
+    },
+    adopt(values: readonly LearnedValue[]): void {
+      if (!Array.isArray(values)) return;
+      for (const v of values) {
+        if (typeof v !== 'object' || v === null || typeof v.value !== 'string') continue;
+        if (!Object.prototype.hasOwnProperty.call(MASK_TYPE_LABELS, v.type) || v.type === 'failed') continue;
+        remember(v.value, v.type);
+      }
+    },
+    learnedValues: (): LearnedValue[] => [...learned.types].map(([value, type]) => ({ type, value })),
     wouldMask(text: string, opts?: MaskTextOptions): boolean {
       if (typeof text !== 'string' || text === '') return false;
       try {

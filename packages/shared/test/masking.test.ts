@@ -388,6 +388,14 @@ test.each([
   ['db_pass=', fill('db_pass=')],
   ['max_tokens=', fill('max_tokens=')],
   ['a a a (prose)', fill('password="a a a ')],
+  // final review
+  ['docker login -p ', fill('docker login -p ')],
+  ['sshpass -p', fill('sshpass -p')],
+  ["IDENTIFIED BY '", fill("IDENTIFIED BY '")],
+  ["PASSWORD '", fill(" PASSWORD '")],
+  ['secretAccessKey=', fill('secretAccessKey=')],
+  ['AKIA + b64', fill('AK' + 'IAEXAMPLE0FAKE1234 ' + 'Ab1/'.repeat(20) + '\n')],
+  ['a/b/c (paths)', fill('password=a/b/')],
 ])('1 MB 的最坏输入：%s', (_name, text) => {
   const masker = createMasker({
     categories: ['credential', 'assignment', 'personal', 'custom'],
