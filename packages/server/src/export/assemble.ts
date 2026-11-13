@@ -6,6 +6,7 @@ import {
   exportMaskCategories,
   groupTurns,
   ORIGINS,
+  SUMMARY_MAX,
   type EdgeKind,
   type ExportBundle,
   type ExportOptions,
@@ -14,6 +15,7 @@ import {
   type GraphEdge,
   type GraphNode,
   type Masker,
+  type MaskTextOptions,
   type NodeDetail,
   type NodeKind,
   type NodeStatus,
@@ -43,7 +45,7 @@ export class ExportAbortedError extends Error {
  * - id: an identifier made by the agent or the normalizer (uuid, `toolu_…`, `prompt:<item>`, `agent-<hash>`, a turn
  *   id); exported as is unless the masker would change it, then replaced by an opaque alias (`masked-id-<n>`), the same
  *   alias everywhere in the bundle.
- * - masked: text through the masker (titles and summaries in truncated mode).
+ * - masked: text through the masker (titles and summaries in truncated mode when they were cut, see cutOptions).
  * - enum / boolean / number / time / usage / files: re-built from a closed set or validated shape (no free text).
  * - drop: never exported.
  */
@@ -128,14 +130,26 @@ function usageOf(v: unknown): Usage | null {
   return cached === null ? { inputTokens: input, outputTokens: output } : { inputTokens: input, outputTokens: output, cachedInputTokens: cached };
 }
 
-/** Ids as exported: unchanged unless the masker finds something in them, then an opaque alias (the same each time). */
+/**
+ * Ids as exported: unchanged unless the masker finds something in them (checked with wouldMask: nothing counted or
+ * numbered), then an opaque alias `masked-id-<n>` (the same each time). `taken`: every real id in scope, so an alias
+ * never equals a real id (n is skipped past such ids).
+ */
 class IdAliases {
   private readonly map = new Map<string, string>();
-  constructor(private readonly masker: Masker) {}
+  private next = 1;
+  constructor(
+    private readonly masker: Masker,
+    private readonly taken: Set<string>,
+  ) {}
   of(id: string): string {
     let out = this.map.get(id);
     if (out === undefined) {
-      out = typeof id === 'string' && this.masker.mask(id) === id ? id : `masked-id-${this.map.size + 1}`;
+      if (typeof id === 'string' && !this.masker.wouldMask(id)) out = id;
+      else {
+        while (this.taken.has(`masked-id-${this.next}`)) this.next++;
+        out = `masked-id-${this.next++}`;
+      }
       this.map.set(id, out);
     }
     return out;
@@ -143,6 +157,15 @@ class IdAliases {
   ofNullable(id: string | null): string | null {
     return id === null || id === undefined ? null : this.of(id);
   }
+}
+
+/**
+ * Truncated-mode masking only for text that was actually cut: a summary at its length cap (SUMMARY_MAX) or any text
+ * ending with an ellipsis (`…`, `...`).
+ */
+export function cutOptions(text: unknown): MaskTextOptions | undefined {
+  if (typeof text !== 'string') return undefined;
+  return text.length >= SUMMARY_MAX || text.endsWith('…') || text.endsWith('...') ? { truncated: true } : undefined;
 }
 
 /** A project id as derived from a working directory (every non-alphanumeric character becomes `-`). */
@@ -156,7 +179,7 @@ function exportSession(session: Session, masker: Masker, ids: IdAliases): Sessio
     projectId: cwd !== null ? encodeProjectId(cwd) : 'unknown',
     origin: oneOf(ORIGINS, session.origin, 'claude'),
     cwd,
-    title: session.title === null ? null : masker.mask(session.title, { truncated: true }),
+    title: session.title === null ? null : masker.mask(session.title, cutOptions(session.title)),
     gitBranch: session.gitBranch === null ? null : masker.mask(session.gitBranch),
     status: oneOf(SESSION_STATUSES, session.status, 'ended'),
     sourceDeleted: session.sourceDeleted === true,
@@ -177,9 +200,9 @@ function exportNode(node: GraphNode, summary: string, masker: Masker, ids: IdAli
     status: NODE_STATUSES.includes(node.status as NodeStatus) ? node.status : null,
     timestamp: timeOf(node.timestamp),
     confirmed: node.confirmed === true,
-    title: masker.mask(typeof node.title === 'string' ? node.title : '', { truncated: true }),
+    title: masker.mask(typeof node.title === 'string' ? node.title : '', cutOptions(node.title)),
     summary,
-    toolName: typeof node.toolName === 'string' ? masker.mask(node.toolName, { truncated: true }) : null,
+    toolName: typeof node.toolName === 'string' ? masker.mask(node.toolName) : null,
     toolUseId: ids.ofNullable(node.toolUseId),
     messageId: ids.ofNullable(node.messageId),
     durationMs: numberOf(node.durationMs),
@@ -274,7 +297,7 @@ function readDetail(source: ExportSource, sessionId: string, nodeId: string): No
  * - second pass: everything is masked in reading order (structure.ts) and exported through the field whitelists: the
  *   session's fields, then each node's detail (read one at a time, masked at once, the output cut after masking) and the
  *   node; a summary derived from the input or text is re-derived from the masked one, any other summary and every title
- *   is masked as truncated text; edges between kept nodes last;
+ *   is masked as text (in truncated mode when it was cut); edges between kept nodes last;
  * - a running estimate (UTF-8 bytes of the JSON added, plus extraBytes) stops the second pass as soon as it passes the
  *   limit (preview.tooLarge, no bundle);
  * - the event loop gets a turn every yieldAfterMs; `stopped()` is checked at the same points.
@@ -365,13 +388,12 @@ export async function assembleExport(
 
   // ---- pass 1: learn the secret values of the whole scope
   if (options.mask.credential || options.mask.assignment) {
-    const truncated = { truncated: true };
     let raw = ctx.extraBytes + BUNDLE_OVERHEAD_BYTES;
-    for (const s of [session.title, session.cwd, session.gitBranch]) if (typeof s === 'string') masker.learn(s, truncated);
+    for (const s of [session.title, session.cwd, session.gitBranch]) if (typeof s === 'string') masker.learn(s, cutOptions(s));
     for (const node of order) {
-      masker.learn(node.title, truncated);
-      masker.learn(node.summary, truncated);
-      if (node.toolName !== null) masker.learn(node.toolName, truncated);
+      masker.learn(node.title, cutOptions(node.title));
+      masker.learn(node.summary, cutOptions(node.summary));
+      if (node.toolName !== null) masker.learn(node.toolName);
       for (const f of node.files ?? []) masker.learn(f.path);
       raw += jsonBytes(node);
       const d = readDetail(source, sessionId, node.id);
@@ -391,7 +413,11 @@ export async function assembleExport(
   }
 
   // ---- pass 2: mask and export through the whitelists, in reading order
-  const ids = new IdAliases(masker);
+  const taken = new Set<string>([session.id]);
+  for (const n of inScope) {
+    for (const v of [n.id, n.sessionId, n.turnId, n.agentId, n.childAgentId, n.parentId, n.toolUseId, n.messageId]) if (typeof v === 'string') taken.add(v);
+  }
+  const ids = new IdAliases(masker, taken);
   const maskedSession = exportSession(session, masker, ids);
   const exportedOptions: ExportOptions =
     options.scope.kind === 'turn' ? { ...options, scope: { kind: 'turn', turnKey: ids.of(options.scope.turnKey) } } : options;
@@ -428,7 +454,7 @@ export async function assembleExport(
       if (input !== null && summarize(d.input) === node.summary) summary = summarize(input);
       else if (text !== null && summarize(d.text) === node.summary) summary = summarize(text);
     }
-    const exported = exportNode(node, summary ?? masker.mask(typeof node.summary === 'string' ? node.summary : '', { truncated: true }), masker, ids);
+    const exported = exportNode(node, summary ?? masker.mask(typeof node.summary === 'string' ? node.summary : '', cutOptions(node.summary)), masker, ids);
     bytes += jsonBytes(exported) + 1;
     if (keep) maskedNodes.set(node.id, exported);
     if (detail !== null) {

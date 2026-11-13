@@ -56,7 +56,7 @@
 | `personal` 个人信息 | 邮箱地址；主目录路径里的用户名（`C:\Users\<名>`、`/Users/<名>`、`/home/<名>` → 名字换成 `~`；Windows 形式不分大小写，两种斜杠和 JSON 转义的双反斜杠都认），用户名取自会话的工作目录和服务所在机器的用户名 | 关 | 不遮 |
 | `custom` 自定义词 | 用户列出的词，原样匹配（不分 ASCII 大小写），每个 3–200 个字符，最多 100 个，不含控制字符和不可见的格式字符；互相重叠的命中合并成一处 | 有词就开 | 遮 |
 
-固定格式的凭据（类型名 `MaskType` 和中文名）：
+固定格式的凭据和其他密钥规则（类型名 `MaskType` 和中文名）：
 
 | 类型 | 中文名 | 形式 |
 |---|---|---|
@@ -65,35 +65,50 @@
 | `github-token` | GitHub token | `ghp_` / `gho_` / `ghu_` / `ghs_` / `ghr_` 后 ≥ 30 个字母数字；`github_pat_` 后 ≥ 22 个 |
 | `gitlab-token` | GitLab token | `glpat-` 后 ≥ 20 个 |
 | `huggingface-token` | Hugging Face token | `hf_` 后 ≥ 30 个字母数字 |
+| `google-oauth` | Google OAuth 令牌 | 访问令牌 `ya29.` 后 ≥ 20 个；刷新令牌 `1//` 后 ≥ 20 个（前面是 `/` 或 `:` 的不算，那是网址） |
 | `aws-key` | AWS key | `AKIA` / `ASIA` 后正好 16 个 `[A-Z0-9]` |
-| `azure-key` | Azure 存储密钥 | 连接串里 `AccountKey=` / `SharedAccessKey=` 的值 |
+| `azure-key` | Azure 存储密钥 | 连接串里 `AccountKey=` / `SharedAccessKey=` 的值（≥ 8 个 base64 字符） |
 | `google-key` | Google API key | `AIza` 后正好 35 个 |
 | `slack-token` | Slack token | `xox[abprse]-` 后 ≥ 10 个 |
 | `npm-token` | npm token | `npm_` 后正好 36 个字母数字 |
 | `jwt` | JWT | `eyJ…` 三段 base64url，前两段各 ≥ 10 |
 | `bearer` | Bearer 令牌 | `Bearer ` 后的令牌（≥ 8 个，含数字或大小写混合） |
-| `authorization` | Authorization 凭据 | `Authorization: Basic|Token|Bot ` 后的凭据 |
+| `authorization` | Authorization 凭据 | `Authorization: Basic <base64 ≥ 16 个，含数字或大小写混合>`；`Authorization: Token|Bot <≥ 8 个，含数字或大小写混合>` |
 | `private-key` | 私钥 | PEM 私钥块整块，从 BEGIN 到对应的 END；没有 END 就到文字末尾 |
 | `url-password` | 网址里的密码 | `scheme://user:password@host` 里的密码（到 authority 里最后一个 `@` 为止，密码里可有 `@`、`#`、`:`、百分号转义）；没有冒号时像令牌的 userinfo（`https://<令牌>@host`，≥ 8 个且含数字或大小写混合）整段 |
-| `cli-password` | 命令行密码 | `curl -u|--user user:pass` 的密码；`mysql|mariadb|mysqldump|mysqladmin … -p<pass>` / `--password=<pass>` |
+| `cli-password` | 命令行密码 | `-u|--user user:pass` 的密码部分——用户不是纯数字（`docker run -u 1000:1000` 是 uid:gid），密码 ≥ 4 个且不像路径（`rsync -u host:/path`）；`mysql|mariadb|mysqldump|mysqladmin … -p<pass>` / `--password=<pass>` |
+| `netrc-password` | .netrc 密码 | `password <值>`，前面 300 个字符内有 `machine` 或 `login` |
 | `cookie` | Cookie | `Cookie:` 头里每个 cookie 的值；`Set-Cookie:` 头里第一对的值（名字和属性保留） |
 
 另有 `assignment` 密钥/密码、`email` 邮箱、`home-user` 用户名、`custom` 自定义词、`failed` 处理失败。
 
-凭据在任何位置开始都认：前面是 JSON 转义（`\n`、`\t`、`\"`、`\uXXXX`）、百分号转义（`%0A`）、`_`、`-` 或别的字符都一样。前面紧贴一个字母或数字时，正文要像随机串才算（`sk-`：≥ 32 个且同时含数字、大写、小写；GitHub、GitLab、Slack、AWS：含数字；Hugging Face：大小写都有），这样 `task-…`、`risk-assessment-…` 这类词不会被当成密钥。
+**开头位置（紧贴规则）**：凭据在任何位置开始都认——前面是 JSON 转义（`\n`、`\t`、`\"`、`\uXXXX`）、百分号转义（`%0A`）、`_`、`-`、空白或其他符号都算“干净的开头”。前面**紧贴一个字母或数字**时，正文必须像随机串才算：
+
+| 规则 | 紧贴字母或数字时的要求 |
+|---|---|
+| `sk-` | 正文 ≥ 32 个，同时含数字、大写、小写 |
+| Stripe | 正文 ≥ 24 个，至少两个数字，大写、小写都有 |
+| GitHub `gh?_`、GitLab、Slack、AWS | 正文含数字 |
+| Hugging Face | 正文大写、小写都有 |
+| Google OAuth | 正文同时含数字、大写、小写 |
+| GitHub `github_pat_`、Google API key、npm、JWT | 无额外要求（前缀独特，长度固定或有结构） |
+
+所以 `task-…`、`risk-assessment-…`、`desk-top`、`risk_test_CalculatesValueAtRisk1.py` 这类词不会被当成密钥；这条规则在截断模式下同样适用。
 
 ### 3.2 赋值形式
 
-**密钥名**：名字（不分大小写，去掉非字母数字后）含 `password`、`passwd`、`passphrase`、`pwd`、`secret`、`token`、`apikey`、`accesskey`、`privatekey`、`accountkey`、`credential`、`authorization`、`cookie`，或某一段（按 `_`、`-`、`.` 和驼峰切开）正好是 `auth`。例外：表示模型 token 数量的 `token` 不算——`tokens`、`token…s`、`tokenizer` / `tokenize…`、`token_count` / `tokenCount`（所以 `max_tokens`、`inputTokens`、`outputTokens`、`cachedInputTokens` 不是密钥名）。其中 `password`、`passwd`、`passphrase`、`pwd`、`secret`、`privatekey` 是**密码类**。
+**密钥名**：名字（不分大小写，去掉非字母数字后）含 `password`、`passwd`、`passphrase`、`secret`、`token`、`apikey`、`accesskey`、`privatekey`、`accountkey`、`credential`、`authorization`、`cookie`，或某一段（按 `_`、`-`、`.` 和驼峰切开）**正好**是 `auth` 或 `pass`（`db_pass`、`PASS`；不含 `passport`、`compass`）。`pwd` 不是密钥名（环境变量 `PWD` / `OLDPWD` 是目录）。其中含 `password`、`passwd`、`passphrase`、`secret`、`privatekey` 或段 `pass` 的是**密码类**。
+
+**计数类名字**（与模型 token 数量有关，不是密钥名）是一个封闭清单，按去掉大小写和分隔符后整名比较：`tokens`、`token_count`、`token_counts`、`num_tokens`、`n_tokens`、`max_tokens`、`max_output_tokens`、`max_input_tokens`、`max_completion_tokens`、`min_tokens`、`total_tokens`、`input_tokens`、`output_tokens`、`prompt_tokens`、`completion_tokens`、`reasoning_tokens`、`cached_tokens`、`cached_input_tokens`、`cache_read_input_tokens`、`cache_creation_input_tokens`、`tokens_used`、`tokens_per_second`、`token_limit`、`token_usage`、`token_type`、`tokenizer`、`tokenize`、`tokenized`、`tokenization`、`tokenizer_name`。这些名字下数字、布尔值、模型名、编码名不遮；只有长而随机的字符串（≥ 16 个，同时含数字、大写、小写）照遮。其他含 `token` 的名字都是密钥名（`refresh_tokens`、`access_tokens`、`apiTokens`、`token_store`、`id_token`、`csrf_token`……）。`Cookie:` 头由 cookie 规则处理，不按赋值形式。
 
 值满足下面任一条就**不遮**：
 
 - 空；
 - 是变量引用或模板：`$VAR`、`${…}`、`$(…)`、`{{…`、`<…`、`%VAR%`（`$` 后面跟数字或后面还有 `$` 的不算引用，所以 `$2b$…`、`$argon2id$…` 这类哈希要遮）；
 - 是明显的占位符：全是同一个字符、只有 `x` / `*` 和分隔符、`your-…`、含 `changeme` / `example` / `placeholder`、或正好是 `null`、`undefined`、`true`、`false`、`none`、`nil`、`empty`、`redacted`、`hidden`；
-- 是日期，或是 CSS 颜色（`#ff00aa12`）。
+- 是日期、CSS 颜色（`#ff00aa12`）、路径（以 `/`、`~`、`.`、盘符开头，或含 `/`、`\` 分隔的段）、或一句话（至少三个由字母组成的词、最多一个数字，如 `At least 8 characters`）。
 
-除此之外，**带引号**的值（或结构化数据里的字符串）跟在**密码类**名字后面的，不论大小写和数字一律遮。其余的值满足下面任一条就不遮：
+除此之外，**带引号**的值（或结构化数据里的字符串）跟在**密码类**名字后面的，不论大小写和数字一律遮（所以 i18n 文件里 `"login.password": "Password"` 在原处会被遮；它不会被学，别处的 “Password” 不受影响）。其余的值满足下面任一条就不遮：
 
 - 短于 8 个字符；
 - 形如 `process.env.X`、`os.environ[…]`、`config.x`（标识符加点或括号），或是函数调用（`getToken(`）；
@@ -102,26 +117,45 @@
 
 结构化数据（对象）里，键名是密钥名时：字符串值按带引号的值处理；数字换成占位符；数组和嵌套对象里的每个字符串和数字都遮；`true` / `false` / `null` 保留。
 
-已知漏遮：不带引号、全是小写字母、不含数字的密码（`PASSWORD=correcthorse`）。这一类一定会有误遮和漏遮；数量在实现后用本机数据测量并写进本文。
-
 ### 3.3 替换形式
 
 - 命中的值替换成 `‹已遮蔽·<类型的中文名>#<n>›`，例如 `‹已遮蔽·OpenAI key#1›`、`‹已遮蔽·邮箱#3›`。
-- 编号在**一次导出**（或页面上的一个会话）里按“类型 + 值”分配：同一个值编号相同，读的人能看出两处是同一个值。编号按首次出现的顺序（导出：按阅读顺序）。同一类型的不同值超过 10 万个后，新值不再编号。
+- 编号在**一次导出**（或页面上的一个会话）里按“类型 + 值”分配：同一个值编号相同，读的人能看出两处是同一个值。编号按首次出现的顺序（导出：按阅读顺序）。同一类型的不同值超过 10 万个后，新值不再编号（报告 `numberingCapped`）。
 - 主目录用户名直接换成 `~`，不编号。
 - 多条规则命中重叠的范围时取最先开始、其次最长、再次按类别（凭据 > 赋值 > 自定义词 > 个人信息）的那一条；被盖住一部分、但伸出去的那一条，伸出去的部分也遮（任何规则命中的字符都会被遮）。替换后的文字不再参与匹配；原文里的 `‹›` 不处理。
-- **截断的文字**（200 字的摘要、标题）：末尾（`…` 之前）一个凭据前缀后面跟着的字符一直到末尾的，虽然短到无法确认也遮；值一直到末尾的赋值不管筛选也遮。
-- **两遍遮蔽**（导出用；页面可选）：第一遍扫描范围内的全部文字，记下凭据和赋值规则找到的值（8–512 个字符，只留在内存里的遮蔽器中）；第二遍除规则外，这些值原样出现的每一处也遮，类型和编号与第一次认出时相同。
+- **截断的文字**：只用于真正被截断的文字——长度到了摘要上限（200 个字符）或以 `…` / `...` 结尾的摘要和标题；没有截断的标题照常处理。只放宽**末尾**：
+  - 一个干净开头（紧贴规则照常适用）的凭据前缀，后面至少 4 个字符一直到末尾（`…` 之前），虽然短到无法确认也遮（`sk-proj-ab12…`、`ghp_ab12…`）；文字中间的任何东西不放宽；
+  - 密码类名字后面一直到末尾的值，不论形状都遮；其他名字照常筛选（`{"token":"abc…` 不遮）；
+  - 末尾至少 3 个字符是某个自定义词的开头（不分 ASCII 大小写）时遮；代价：一个恰好是自定义词开头的普通词出现在被截断文字的最末尾时也会被遮；
+  - 末尾至少 6 个字符是某个学到的值的开头时遮，类型同那个值；
+  - 截断模式下认出的东西**一律不学**。
+- **两遍遮蔽**（导出用；页面可选）：第一遍扫描范围内的全部文字，记下密钥规则找到的值（只留在内存里的遮蔽器中）；第二遍除规则外，这些值原样出现的每一处也遮，类型和编号与第一次认出时相同。学什么：
+  - 固定格式的凭据（上表 `openai-key` 到 `jwt`、`private-key`、`google-oauth`）一律学；
+  - 其他规则（赋值、`bearer`、`authorization`、`azure-key`、`url-password`、`cli-password`、`netrc-password`、`cookie`）找到的值，只有通过强度门槛才学：≥ 12 个字符、不含空白、含数字、小写 / 大写 / 数字 / 符号中至少两类、不像路径、不是网址（只由字母和符号组成的值——单词拼起来的——一律不学）；没通过的仍在原处遮蔽；
+  - 截断模式下认出的、重叠后剩下的片段不学；值长 8–512 个字符；最多学 20 万个（超出时报告 `learnedCapped`，导出开头有提示）。
+  - 查找学到的值：按前 8 个字符的哈希分桶，桶里每个值都完整比较（不会因为共享前缀的值太多而漏）；一段文字里比较的字符总数超过文字长度的 32 倍加 100 万时（只有专门针对学到的值构造的文字才会到），这段文字停止查找学到的值，只按规则遮蔽，计入报告 `learnedSkipped`，导出开头有提示。不整段遮住，是为了不让一段特殊文字毁掉整段内容；规则本身仍然全部生效。
 - 遮蔽函数出错时这段文字整体换成 `‹已遮蔽·处理失败›`（计入报告）。
-- 函数：`createMasker(options) → { mask(text, { truncated? }), maskValue(value), learn(text, { truncated? }), learnValue(value), learnedCount(), report() }`，`MaskReport` 是每个类型的处数和不同值的个数，**不含值本身**。
+- 函数：`createMasker(options) → { mask(text, { truncated? }), maskValue(value), learn(text, { truncated? }), learnValue(value), learnedCount(), wouldMask(text, { truncated? }), report() }`。`wouldMask` 只判断会不会遮，不计数、不占编号、不学。`MaskReport` 是每个类型的处数和不同值的个数，**不含值本身**，另有 `numberingCapped`、`learnedCapped`、`learnedSkipped`。
+
+**已知漏遮**（遮蔽是尽力而为，分享前请自己再看一遍）：
+
+- 不带引号、全是小写字母、不含数字的密码（`PASSWORD=correcthorse`）；
+- 由几个普通单词组成的口令（`"correct horse battery staple"`，被当成一句话）；
+- 被截断在前几个字符内的密钥（`sk-a…`、`ghp_ab…`，前缀后不足 4 个字符；露出的部分没有用处）；
+- 紧贴在字母或数字后面、正文不够随机的密钥（如紧贴单词的 `sk-` + 全小写十六进制）；
+- 没有固定前缀、也不在密钥名后面的令牌（Discord 等各种无前缀令牌、随机 id 形式的密钥）；
+- 经过 base64、百分号编码或其他编码的密钥（编码后的形式没有可识别的前缀）；
+- 图片、PDF 等二进制内容里的文字；
+- 学到的值超过 20 万个、或查找被工作量上限中止的文字里，别处原样出现的值（导出开头会提示）；
+- `-u` 后的纯数字用户名、路径形式的密码，`.netrc` 以外格式的配置文件里不在密钥名后面的密码。
 
 ### 3.4 作用的文字
 
-节点的标题、工具名、摘要、详情里的输入、输出、文本；会话标题、工作目录、分支；文件路径；检索片段。结构化的输入输出（对象）逐个值处理，键名也当文字遮蔽（键名同时用于判断赋值形式，见 3.2）；`__proto__` 之类的键作为普通数据保留。导出里由输入或文本得出的摘要，按遮蔽后的输入或文本重新得出；其他摘要和所有标题按截断的文字遮蔽。
+节点的标题、工具名、摘要、详情里的输入、输出、文本；会话标题、工作目录、分支；文件路径；检索片段。结构化的输入输出（对象）逐个值处理，键名也当文字遮蔽（键名同时用于判断赋值形式，见 3.2）；`__proto__` 之类的键作为普通数据保留。导出里由输入或文本得出的摘要，按遮蔽后的输入或文本重新得出；其他摘要和标题照常遮蔽，被截断的（3.3）按截断模式。
 
 ### 3.5 性能
 
-单条文字上限按现有详情的大小（几 MB）考虑：所有规则在线性时间内完成，不使用会灾难性回溯的写法；自定义词用 Aho–Corasick，与词的个数和长度无关；学到的值按前 8 个字符分桶查找，比较的总量超过文字长度的 32 倍时整段按“处理失败”遮住。实现时用 1 MB 的最坏输入测量并给出上限。
+单条文字上限按现有详情的大小（几 MB）考虑：所有规则在线性时间内完成，不使用会灾难性回溯的写法；自定义词用 Aho–Corasick，与词的个数和长度无关；学到的值的查找有工作量上限（3.3）。实现时用 1 MB 的最坏输入测量并给出上限。
 
 ## 4. 导出
 
@@ -155,7 +189,7 @@
 - 每个节点的详情遮蔽后再按选项裁剪（输出按 UTF-8 字节截断在字符边界上，不截在占位符中间，截断处标明原始大小）。
 - 会话信息：标题、来源、开始和最后活动时间、工作目录、分支（遮蔽后）；项目 id 由遮蔽后的工作目录重新编码得出。
 - 导出信息：工具名和版本、导出时间、范围和内容选项、遮蔽报告（类型和数量）。
-- 字段按**白名单**导出（`packages/server/src/export/assemble.ts` 的 `*_FIELD_POLICY`，类型上穷举：新加字段不表态就编译不过）：文字字段遮蔽；枚举、布尔、数字、时间、用量按固定集合或格式重建；各种 id 原样保留，但遮蔽器在其中找到任何东西的 id 换成一致的别名 `masked-id-<n>`（边、详情、轮次跟着换）。
+- 字段按**白名单**导出（`packages/server/src/export/assemble.ts` 的 `*_FIELD_POLICY`，类型上穷举：新加字段不表态就编译不过）：文字字段遮蔽；枚举、布尔、数字、时间、用量按固定集合或格式重建；各种 id 原样保留，但遮蔽器在其中找到任何东西的 id（用 `wouldMask` 检查，不计数、不占编号）换成一致的别名 `masked-id-<n>`（边、详情、轮次跟着换；编号跳过范围内已有的真实 id，别名不会与真实 id 相同）。
 - 不导出：原始记录（详情的 `raw` 一律为 `null`）、节点的 `inputKey`（未加盐的完整输入哈希，可用来验证被遮的值）、hook 载荷、其他会话的任何数据、统计、异常列表、本机路径以外的环境信息。
 - 要求按自定义词遮蔽而自定义词的设置文件读不了时，预览和导出都拒绝（409），不在没有自定义词的情况下导出。
 

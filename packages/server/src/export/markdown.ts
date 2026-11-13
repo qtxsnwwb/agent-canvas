@@ -62,6 +62,15 @@ export function fence(content: string, info = ''): string {
   return `${f}${info}\n${body}${body.endsWith('\n') || body === '' ? '' : '\n'}${f}`;
 }
 
+/** Warning lines about masking limits reached in this export (for the header; the viewer's banner shows the same). */
+export function maskWarnings(report: ExportBundle['report']): string[] {
+  const out: string[] = [];
+  if (report.learnedCapped) out.push('需要逐处查找的密钥值太多，超出上限的值只在原处遮蔽，别处原样出现时可能没有遮住。');
+  if (report.learnedSkipped) out.push(`有 ${report.learnedSkipped} 段文字太长或太特殊，没有逐处查找已认出的密钥值，只按规则遮蔽。`);
+  if (report.numberingCapped) out.push('同一类型的不同值太多，部分占位符没有编号。');
+  return out;
+}
+
 function duration(ms: number | null): string | null {
   if (ms === null || !Number.isFinite(ms) || ms < 0) return null;
   if (ms < 1000) return `${Math.round(ms)} 毫秒`;
@@ -165,6 +174,7 @@ export function renderMarkdown(bundle: ExportBundle): string {
       ? '遮蔽：未遮蔽'
       : `遮蔽：${categories.map((k) => CATEGORY_LABELS[k]).join('、')}；${found.length === 0 ? '没有找到需要遮蔽的内容' : `找到 ${found.join('，')}`}`,
   );
+  for (const w of maskWarnings(report)) info.push(`注意：${w}`);
   out.push(info.map((l) => `- ${l}`).join('\n'));
   out.push(`> ${CAUTION}`);
 
