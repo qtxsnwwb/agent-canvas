@@ -3,6 +3,8 @@ import { createPortal } from 'react-dom';
 import { openLiveSession, type LiveSession } from '../client';
 import { Canvas, type CanvasFocus } from '../canvas/Canvas';
 import { FilePanel } from '../canvas/FilePanel';
+import { AnomalyPanel, useSessionAnomalies } from '../canvas/AnomalyPanel';
+import { NO_CARD_MARKS, anomalyButton, cardMarks, graphResolver, panelRows } from '../anomalies';
 import { revealPlan } from '../canvas/reveal';
 import { EMPTY_CHAIN, expandCut, upstreamChain } from '../canvas/chain';
 import { isRunId } from '../canvas/compact';
@@ -88,6 +90,20 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar, filePath, nod
     setFilesOpen(true);
     setFileTarget((t) => ({ path: filePath, seq: (t?.seq ?? 0) + 1 }));
   }, [filePath]);
+  // ---- anomalies (anomaly spec 6) ----
+  // The panel shares the right-hand side with the file panel and the drawer: at most one of the two panels is open, and
+  // while one is, the drawer is not shown. The data feeds the toolbar button and the card markers too, so it is
+  // fetched whether or not the panel is open.
+  const [anomaliesOpen, setAnomaliesOpen] = useState(false);
+  const anomalies = useSessionAnomalies(live.getSession().id, live.subscribe);
+  const anomalyData = anomalies.data;
+  // The graph as it was when the answer came (the answer is refetched as the graph changes).
+  const anomalyResolver = useMemo(() => (anomalyData === null ? null : graphResolver(live.getGraph())), [anomalyData, live]);
+  const anomalyMarks = useMemo(
+    () => (anomalyData === null || anomalyResolver === null ? NO_CARD_MARKS : cardMarks(anomalyData.anomalies, anomalyResolver)),
+    [anomalyData, anomalyResolver],
+  );
+  const sideOpen = filesOpen || anomaliesOpen;
   const [focus, setFocus] = useState<CanvasFocus | null>(null);
   const focusSeq = useRef(0);
   const [pickedStep, setPickedStep] = useState<string | null>(null);
@@ -182,7 +198,8 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar, filePath, nod
   const openStep = useCallback((id: string) => {
     const cur = now.current;
     if (cur.currentScope === null) return;
-    setFilesOpen(false); // the drawer and the file panel share the right-hand side
+    setFilesOpen(false); // the drawer and the panels share the right-hand side
+    setAnomaliesOpen(false);
     if (cur.selected === null && cur.scopeNodeId !== null) {
       pinned.current = cur.scopeNodeId;
       setSelectedId(cur.scopeNodeId);
@@ -238,7 +255,10 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar, filePath, nod
     } else {
       if (id !== null) setPanelClosed(false);
       // A step picked on the canvas opens the drawer, which takes the file panel's place.
-      if (id !== null && !now.current.outline && now.current.view.nodes.get(id)?.type === 'node') setFilesOpen(false);
+      if (id !== null && !now.current.outline && now.current.view.nodes.get(id)?.type === 'node') {
+        setFilesOpen(false);
+        setAnomaliesOpen(false);
+      }
       setPickNote(null);
       pinned.current = null; // the reader's own choice
       setSelectedId(id);
@@ -336,7 +356,9 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar, filePath, nod
     const act = nodeJumpAction(nodeTarget, handledNode.current, ready, (id) => live.getGraph().nodes[id] !== undefined);
     if (act === 'idle' || act === 'wait' || nodeTarget === null) return;
     handledNode.current = nodeTarget.seq;
-    setFilesOpen(false); // the drawer and the file panel share the right-hand side
+    // The drawer and the file panel share the right-hand side. The anomaly panel stays: its rows are links to nodes, and
+    // like a step picked in the file panel the node is then shown on the canvas with the list kept open.
+    setFilesOpen(false);
     if (act === 'missing') {
       setNodeNote(NODE_MISSING_NOTE);
       return;
@@ -351,8 +373,32 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar, filePath, nod
   }, []);
   const toggleFiles = useCallback(() => {
     setFilesOpen((o) => !o);
+    setAnomaliesOpen(false);
     setPickNote(null);
   }, []);
+  const { reload: reloadAnomalies } = anomalies;
+  const toggleAnomalies = useCallback(() => {
+    if (!anomaliesOpen) reloadAnomalies(); // fetched again on open
+    setAnomaliesOpen(!anomaliesOpen);
+    setFilesOpen(false);
+    setPickNote(null);
+  }, [anomaliesOpen, reloadAnomalies]);
+  const closeAnomalies = useCallback(() => setAnomaliesOpen(false), []);
+  // A row is a link to `#/s/<id>/n/<node>`: following it shows the node (the node address above). When the address is
+  // already that one, the browser sends no hashchange, so the node is shown again here.
+  const pickAnomaly = useCallback((nodeId: string, href: string) => {
+    if (window.location.hash !== href) return;
+    setPickedStep(nodeId);
+    setPickNote(null);
+    setNodeNote(live.getGraph().nodes[nodeId] === undefined ? NODE_MISSING_NOTE : showStep(nodeId));
+  }, [live, showStep]);
+  const turnsNow = canvas.view.turns;
+  const anomalyRows = useMemo(() => {
+    if (!anomaliesOpen || anomalyData === null || anomalyResolver === null) return null;
+    const turns = turnsNow.map((t) => ({ key: t.key, promptSummary: t.summary.promptSummary }));
+    return panelRows(live.getSession().id, anomalyData.anomalies, { turns, resolver: anomalyResolver, cwd: live.getSession().cwd });
+  }, [anomaliesOpen, anomalyData, anomalyResolver, turnsNow, live]);
+  const anomalyButtonText = anomalyButton(anomalyData === null ? null : anomalyData.anomalies);
   // "暂无节点" only when the live graph really has no nodes; "布局中…" while the model is starting or the view has
   // nodes none of which is placed yet.
   const empty = !hasKeys(live.getGraph().nodes);
@@ -364,13 +410,15 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar, filePath, nod
         <>
           <button type="button" className="files-toggle" aria-pressed={filesOpen}
             onClick={toggleFiles} title="这个会话读过、改过哪些文件">文件</button>
+          <button type="button" className="files-toggle anomaly-toggle" aria-pressed={anomaliesOpen} onClick={toggleAnomalies}
+            aria-label={anomalyButtonText.label} title="这个会话里按固定规则找出来的异常">{anomalyButtonText.text}</button>
           <DensitySwitch compact={canvas.compact} disabled={!canvas.ready} onChange={canvas.setCompact} />
           <ViewSwitch mode={canvas.view.mode} disabled={!canvas.ready} onChange={canvas.setMode} />
         </>,
         toolbar,
       )}
       {canvas.layoutError !== null && <div className="canvas-error">布局失败，正在自动重试：{canvas.layoutError}</div>}
-      <div className={`canvas-area${selectedNode !== null || filesOpen ? ' cc-drawer-open' : ''}${canvas.replay !== null ? ' cc-replay' : ''}${scope !== null ? ' cc-waterfall-open' : ''}`}>
+      <div className={`canvas-area${selectedNode !== null || sideOpen ? ' cc-drawer-open' : ''}${canvas.replay !== null ? ' cc-replay' : ''}${scope !== null ? ' cc-waterfall-open' : ''}`}>
         <Canvas
           snapshot={canvas}
           selectedId={outline ? scopeNodeId : selected}
@@ -382,11 +430,12 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar, filePath, nod
           onFollowingChange={canvas.setAutoFold}
           stopFollowingSignal={stopFollowingSignal}
           focus={focus}
-          rightCovered={filesOpen}
+          rightCovered={sideOpen}
+          anomalyMarks={anomalyMarks}
           // The replay view shows history: "running" there is what was running at the replay time.
           progressing={replaying ? ALL_PROGRESSING : progressing}
         />
-        {selectedNode !== null && !filesOpen && (
+        {selectedNode !== null && !sideOpen && (
           <Drawer
             sessionId={live.getSession().id}
             node={selectedNode}
@@ -411,6 +460,15 @@ const SessionCanvas = memo(function SessionCanvas({ live, toolbar, filePath, nod
             note={pickNote}
             onPick={pickStep}
             onClose={closeFiles}
+          />
+        )}
+        {anomaliesOpen && (
+          <AnomalyPanel
+            load={anomalies}
+            rows={anomalyRows}
+            pickedNode={nodeTarget?.id ?? null}
+            onPick={pickAnomaly}
+            onClose={closeAnomalies}
           />
         )}
         {canvas.replay !== null && <Timeline replay={canvas.replay} onSeek={canvas.setReplayTime} />}

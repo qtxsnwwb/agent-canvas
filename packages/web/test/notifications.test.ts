@@ -9,11 +9,18 @@ const status = (over: Partial<NotificationStatus> = {}): NotificationStatus => (
   available: true, lastError: null, lastErrorAt: null, lastSentAt: null, lastSentKind: null, settingsError: null, ...over,
 });
 
-test('四种通知都有名字、说明和各来源的提示', () => {
-  expect(NOTIFICATION_KINDS.map((k) => k.key)).toEqual(['permission', 'finished', 'error', 'stuck']);
-  expect(NOTIFICATION_KINDS.map((k) => k.label)).toEqual(['等你确认权限', '一轮跑完了', '出错中断', '卡住很久']);
+test('六种通知都有名字、说明和各来源的提示', () => {
+  expect(NOTIFICATION_KINDS.map((k) => k.key)).toEqual(['permission', 'finished', 'error', 'stuck', 'loop', 'failures']);
+  expect(NOTIFICATION_KINDS.map((k) => k.label)).toEqual(['等你确认权限', '一轮跑完了', '出错中断', '卡住很久', '原地打转', '失败扎堆']);
   for (const k of NOTIFICATION_KINDS) { expect(k.hint).not.toBe(''); expect(k.note).not.toBe(''); }
   expect(NOTIFICATION_KINDS[0]!.note).toBe('需要装 hooks；Cursor 没有这个状态');
+});
+
+test('原地打转、失败扎堆：用共享的说明，注明只看运行中的会话、同一轮只提醒一次', () => {
+  const loop = NOTIFICATION_KINDS.find((k) => k.key === 'loop')!;
+  const failures = NOTIFICATION_KINDS.find((k) => k.key === 'failures')!;
+  expect(loop.hint).toBe('同一个调用在一轮里反复失败，或者连着执行了很多次。只看运行中的会话，同一轮只提醒一次。');
+  expect(failures.hint).toBe('一轮里接连好几次工具调用都以失败结束。只看运行中的会话，同一轮只提醒一次。');
 });
 
 test('sentKindLabel 覆盖四种和测试', () => {

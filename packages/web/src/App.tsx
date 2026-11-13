@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from './client';
+import { Anomalies } from './pages/Anomalies';
 import { Diagnostics } from './pages/Diagnostics';
 import { Files } from './pages/Files';
 import { Notifications } from './pages/Notifications';
@@ -32,6 +33,7 @@ export function App() {
         <a href="#/">Agent Canvas</a>
         <a className="header-link" href="#/stats" aria-current={route.page === 'stats' ? 'page' : undefined}>统计</a>
         <a className="header-link header-link-next" href="#/files" aria-current={route.page === 'files' ? 'page' : undefined}>文件</a>
+        <a className="header-link header-link-next" href="#/anomalies" aria-current={route.page === 'anomalies' ? 'page' : undefined}>异常</a>
         <a className="header-link header-link-next" href="#/notifications" aria-current={route.page === 'notifications' ? 'page' : undefined}>
           通知{notifyOn && <span className="header-dot" role="img" aria-label="已开启" title="通知已开启" />}
         </a>
@@ -45,6 +47,8 @@ export function App() {
         <Stats />
       ) : route.page === 'files' ? (
         <Files />
+      ) : route.page === 'anomalies' ? (
+        <Anomalies query={route.query} />
       ) : route.page === 'notifications' ? (
         <Notifications onEnabledChange={setNotifyOn} />
       ) : (

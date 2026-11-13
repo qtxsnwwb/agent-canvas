@@ -1,5 +1,7 @@
 import {
   applyChanges,
+  type AnomalyCountsResponse,
+  type AnomalyListResponse,
   type ClientMessage,
   type ContentSearchResponse,
   type Diagnostics,
@@ -16,6 +18,7 @@ import {
   type SearchHit,
   type ServerMessage,
   type Session,
+  type SessionAnomaliesResponse,
   type SessionFilesResponse,
   type StatsResponse,
 } from '@agent-canvas/shared';
@@ -73,6 +76,10 @@ export const api = {
   sessionFiles: (sessionId: string) => getJson<SessionFilesResponse>(`/api/sessions/${enc(sessionId)}/files`),
   /** `query` is built by files.ts `filesQueryString`. */
   files: (query: string) => getJson<ProjectFilesResponse>(`/api/files?${query}`),
+  sessionAnomalies: (sessionId: string) => getJson<SessionAnomaliesResponse>(`/api/sessions/${enc(sessionId)}/anomalies`),
+  /** `query` is built by anomalies.ts `anomaliesQueryString`. */
+  anomalies: (query: string) => getJson<AnomalyListResponse>(`/api/anomalies?${query}`),
+  anomalyCounts: () => getJson<AnomalyCountsResponse>('/api/anomalies/counts'),
 };
 
 export interface WebSocketLike {
