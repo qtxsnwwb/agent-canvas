@@ -1002,8 +1002,13 @@ export class CursorNormalizer implements AgentNormalizer {
    */
   private emit(state: SessionState, derived: Derived, changes: Change[]): void {
     const sid = state.session.id;
-    for (const { node, note, isCall } of derived.nodes) {
-      const old = state.nodes.get(node.id);
+    for (const derivedNode of derived.nodes) {
+      const { note, isCall } = derivedNode;
+      const old = state.nodes.get(derivedNode.node.id);
+      // A bubble whose newer record has no params keeps the key of its last params (as a bubble keeps the node of its
+      // last recognised shape): a patch cannot clear a key through JSON, and the state must stay what was emitted.
+      const node =
+        old?.inputKey !== undefined && derivedNode.node.inputKey === undefined ? { ...derivedNode.node, inputKey: old.inputKey } : derivedNode.node;
       const pending = state.pending.get(node.id);
       state.pending.delete(node.id);
       const withNote = (d: Partial<NodeDetail>): Partial<NodeDetail> => (isCall ? { ...d, text: note } : d);

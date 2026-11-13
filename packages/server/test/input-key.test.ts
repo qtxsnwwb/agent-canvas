@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import { canonicalInput, inputKeyOf, INPUT_KEY_CAP } from '../src/normalize/input-key.js';
+import { canonicalInput, inputKeyOf } from '../src/normalize/input-key.js';
 
 test('inputKeyOf: 16 hex chars; insensitive to key order, nested included', () => {
   const a = inputKeyOf('Edit', { file_path: '/a.ts', opts: { x: 1, y: [1, { b: 2, a: 1 }] } });
@@ -45,13 +45,23 @@ test('inputKeyOf: never throws (cycles, BigInt, deep nesting): no key', () => {
   expect(inputKeyOf('x', { a: shared, b: shared })).toBe(inputKeyOf('x', { a: { v: 1 }, b: { v: 1 } }));
 });
 
-test('inputKeyOf: a huge input is hashed over its capped text plus its full length; cost per node measured', () => {
+test('inputKeyOf: the whole input is hashed: large inputs differing only near the end (same length) differ', () => {
   const big = 'x'.repeat(1024 * 1024);
-  const k1 = inputKeyOf('Write', { file_path: '/a', content: big });
-  const k2 = inputKeyOf('Write', { file_path: '/a', content: `${big}y` });
-  // Differs past the cap only by length: still a different key.
+  const k1 = inputKeyOf('Write', { file_path: '/a', content: `${big}A` });
+  const k2 = inputKeyOf('Write', { file_path: '/a', content: `${big}B` });
   expect(k1).not.toBe(k2);
-  expect(INPUT_KEY_CAP).toBe(256 * 1024);
+  expect(inputKeyOf('Write', { file_path: '/a', content: `${big}y` })).not.toBe(inputKeyOf('Write', { file_path: '/a', content: big }));
+});
+
+test('inputKeyOf: a string input never collides with an object whose canonical JSON is that string', () => {
+  expect(inputKeyOf('T', '{"a":1}')).not.toBe(inputKeyOf('T', { a: 1 }));
+  expect(inputKeyOf('T', '1')).not.toBe(inputKeyOf('T', 1));
+  // The tool name and the input cannot run into each other.
+  expect(inputKeyOf('ab', 'c')).not.toBe(inputKeyOf('a', 'bc'));
+});
+
+test('inputKeyOf: cost per node measured (1 MB and typical inputs)', () => {
+  const big = 'x'.repeat(1024 * 1024);
   const rounds = 20;
   const t0 = performance.now();
   for (let i = 0; i < rounds; i++) inputKeyOf('Write', { file_path: '/a', content: big, i });

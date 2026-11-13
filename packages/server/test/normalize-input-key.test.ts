@@ -149,3 +149,63 @@ test('Cursor: the key follows the latest version of a bubble; rebuild equals liv
   const ref = runCodex(new CursorNormalizer({ checkpointEvery: Number.POSITIVE_INFINITY }), [...events, later]);
   expect(ref.graph.nodes).toEqual(rebuilt.graph.nodes);
 });
+
+// ---- fix round 1: a key that changes or whose input goes away ----
+
+test('Claude Code: transcript record first, then a PreToolUse hook with another input: the key stays the transcript one', () => {
+  const events = [
+    userPrompt('u1', null, 'x'),
+    use('a1', 'u1', 't1', 'Bash', { command: 'ls' }),
+    hook('PreToolUse', { tool_name: 'Bash', tool_input: { command: 'ls', description: 'hook form' }, tool_use_id: 't1' }),
+  ];
+  const r = run(new Normalizer(), events);
+  expect(r.graph.nodes['tool:t1']!.inputKey).toBe(inputKeyOf('Bash', { command: 'ls' }));
+  for (const c of r.changes) if (c.type === 'node_updated') expect(c.patch).not.toHaveProperty('inputKey');
+});
+
+test('Claude Code: a subagent (sidechain) tool node carries its key; an input cannot go away (a missing one is {})', () => {
+  const { graph } = run(new Normalizer(), [
+    userPrompt('u1', null, 'x'),
+    use('a1', 'u1', 'tA', 'Agent', { description: 'd', prompt: 'p' }),
+    userPrompt('s1', null, 'sub', { agentId: 'ag1', isSidechain: true }),
+    use('s2', 's1', 'tS', 'Bash', { command: 'ls' }, { agentId: 'ag1' }),
+  ]);
+  expect(graph.nodes['tool:tS']).toMatchObject({ agentId: 'ag1', inputKey: inputKeyOf('Bash', { command: 'ls' }) });
+  // The same tool_use rewritten without an input: the parser's {} — a new key, never none.
+  const n = new Normalizer();
+  run(n, [userPrompt('u1', null, 'x'), use('a1', 'u1', 't1', 'Bash', { command: 'ls' })]);
+  const again = run(n, [use('a1', 'u1', 't1', 'Bash', undefined)]);
+  expect(again.changes.find((c) => c.type === 'node_updated' && c.id === 'tool:t1')).toMatchObject({ patch: { inputKey: inputKeyOf('Bash', {}) } });
+});
+
+test('Codex: a call record repeated with another input changes nothing (the node and its detail keep the first)', () => {
+  const root = new CodexThread({ id: 'cx9', cwd: '/w' });
+  const events = [root.meta(), root.started('t1'), root.user('u1', 'x'), root.call('c1', 'shell', { command: ['ls'] })];
+  const n = new CodexNormalizer();
+  const first = runCodex(n, events);
+  const again = runCodex(n, [root.call('c1', 'shell', { command: ['ls', '-a'] })]);
+  expect(again.changes.filter((c) => c.type !== 'session_upserted')).toEqual([]);
+  expect(nodeOf(first, 'tool:c1').inputKey).toBe(inputKeyOf('shell', { command: ['ls'] }));
+});
+
+test('Cursor: params that go away keep the last key, in the normalizer state too; rebuild equals live', () => {
+  const c = new CursorConv({ id: 'c-root' });
+  const events = [c.composer(), c.user('u1', 'go', 0), c.tool('t1', 'run_terminal_command_v2', 'loading', 1, { params: { command: 'ls' } })];
+  const gone = c.update('t1', { toolFormerData: { status: 'completed', params: null } });
+  const back = c.update('t1', { toolFormerData: { params: JSON.stringify({ command: 'ls' }) } });
+  const key = inputKeyOf('run_terminal_command_v2', { command: 'ls' });
+  const live = new CursorNormalizer();
+  const first = runCodex(live, events);
+  const second = runCodex(live, [gone]);
+  for (const ch of second.changes) if (ch.type === 'node_updated') expect(ch.patch).not.toHaveProperty('inputKey');
+  let graph = first.graph;
+  for (const ch of second.changes) graph = applyTo(graph, ch);
+  expect(graph.nodes[c.node('t1')]!.inputKey).toBe(key);
+  const rebuilt = runCodex(new CursorNormalizer(), [...events, gone]);
+  expect(rebuilt.graph.nodes).toEqual(graph.nodes);
+  const ref = runCodex(new CursorNormalizer({ checkpointEvery: Number.POSITIVE_INFINITY }), [...events, gone]);
+  expect(ref.graph.nodes).toEqual(graph.nodes);
+  // The params come back unchanged: no patch (the state kept the key, as the graph did).
+  const third = runCodex(live, [back]);
+  for (const ch of third.changes) if (ch.type === 'node_updated') expect(ch.patch).not.toHaveProperty('inputKey');
+});
