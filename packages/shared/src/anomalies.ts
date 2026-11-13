@@ -1,4 +1,4 @@
-import type { GraphNode, NodeStatus } from './model.js';
+import type { GraphNode, NodeStatus, Origin } from './model.js';
 import { pathKey } from './paths.js';
 import { countedUsageNodes, groupTurns, PRELUDE_TURN_KEY } from './stats.js';
 
@@ -535,4 +535,62 @@ export function anomalyBasisText(a: Anomaly): string {
       return base > 0 ? `${head}，是平时高位的 ${oneDecimal(value / base)} 倍` : `${head}，远高于平时`;
     }
   }
+}
+
+// ---- routes (server spec section 4) ----
+
+/** Most items GET /api/anomalies returns (newest first); more matched: `truncated`. */
+export const ANOMALY_LIST_MAX = 200;
+/** A `loop` / `failures` anomaly notifies only when it happened at most this long ago (spec 5). */
+export const ANOMALY_NOTIFY_MAX_AGE_MS = 120_000;
+
+/** The time range of GET /api/anomalies (as the stats page: local days, today included). */
+export type AnomalyRange = '7d' | '30d' | 'all';
+export const ANOMALY_RANGES: readonly AnomalyRange[] = ['7d', '30d', 'all'];
+export const ANOMALY_DEFAULT_RANGE: AnomalyRange = '30d';
+
+/**
+ * GET /api/sessions/:id/anomalies: every anomaly of the session (all four kinds), by `at` then id. computing: the
+ * cost baselines are not yet built from every session (warm-up or import in progress), so `cost` ones may be missing.
+ */
+export interface SessionAnomaliesResponse {
+  anomalies: Anomaly[];
+  computing: boolean;
+}
+
+/** One row of GET /api/anomalies: the anomaly plus what the row shows of its session. */
+export type AnomalyListItem = Anomaly & { projectId: string; origin: Origin; sessionTitle: string | null };
+
+/**
+ * GET /api/anomalies?range=&origin=&projectId=&kind=: anomalies whose `at` is in range, newest first, at most
+ * ANOMALY_LIST_MAX. totals: per kind, over everything matching range / origin / projectId (the kind filter left out).
+ * truncated: more matched than returned. computing: not every session's anomalies are computed yet (the list may
+ * grow). failedSessions: sessions whose anomalies could not be computed (left out).
+ */
+export interface AnomalyListResponse {
+  items: AnomalyListItem[];
+  totals: Record<AnomalyKind, number>;
+  truncated: boolean;
+  computing: boolean;
+  failedSessions: number;
+}
+
+/** One session's anomaly counts (home page marker). */
+export interface AnomalySessionCount {
+  total: number;
+  byKind: Partial<Record<AnomalyKind, number>>;
+}
+
+/** GET /api/anomalies/counts: all time, only sessions with at least one anomaly, keyed by session id. */
+export interface AnomalyCountsResponse {
+  counts: Record<string, AnomalySessionCount>;
+  computing: boolean;
+}
+
+/**
+ * The page address of a node: the session page with the node selected (the web's sessionNodeHash, `#/s/<id>/n/<node>`,
+ * both parts URI-encoded). For notification click targets.
+ */
+export function nodeAddressHash(sessionId: string, nodeId: string): string {
+  return `#/s/${encodeURIComponent(sessionId)}/n/${encodeURIComponent(nodeId)}`;
 }

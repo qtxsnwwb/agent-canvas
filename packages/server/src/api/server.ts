@@ -26,6 +26,7 @@ import type { Pipeline } from '../pipeline.js';
 import { KEY_PREFIXES } from '../sources/source.js';
 import { storageStatus, type StorageDiagnostics } from '../store/migrate-storage.js';
 import type { Store } from '../store/store.js';
+import { AnomaliesService, parseAnomalyListQuery } from '../anomalies/service.js';
 import { FilesService, parseFilesQuery } from '../files/service.js';
 import { parseStatsQuery, StatsService, storeStatsSource } from '../stats/service.js';
 
@@ -160,6 +161,8 @@ function parseClientMessage(raw: string): ClientMessage | null {
  * `stats`: the service behind /api/stats (default: one reading `store`); it is told about every change the pipeline
  * reports.
  * `files`: the service behind /api/files and /api/sessions/:id/files (default: one reading `store`); told the same.
+ * `anomalies`: the service behind /api/anomalies, /api/anomalies/counts and /api/sessions/:id/anomalies (default: one
+ * reading `store`, its answers saying `computing` while the pipeline imports); told the same.
  */
 export function buildServer(deps: {
   store: Store;
@@ -168,6 +171,7 @@ export function buildServer(deps: {
   notifications?: NotificationService;
   stats?: StatsService;
   files?: FilesService;
+  anomalies?: AnomaliesService;
   /** The storage job (start()); without one, Diagnostics.storage is read from the database alone. */
   storage?: { status(): StorageDiagnostics };
   /** The search index build (start(), when the index was incomplete): Diagnostics.search with its lastError. */
@@ -176,8 +180,11 @@ export function buildServer(deps: {
   const { store, pipeline, config, notifications } = deps;
   const stats = deps.stats ?? new StatsService(storeStatsSource(store));
   const files = deps.files ?? new FilesService(storeStatsSource(store));
-  // One read of a session builds both its stats and its file summary.
+  const anomalies = deps.anomalies ?? new AnomaliesService(storeStatsSource(store), { importing: () => pipeline.importing() });
+  // One read of a session builds both its stats and its file summary; a stats read builds its anomaly summary too (and an
+  // anomaly read its stats: the warm-up reads each session once).
   files.shareReadsWith(stats);
+  anomalies.shareReadsWith(stats.summaryCache());
   const app = Fastify();
   const connections = new Set<Connection>();
 
@@ -224,12 +231,16 @@ export function buildServer(deps: {
   const unsubscribeStats = pipeline.onChanges((changes) => stats.noteChanges(changes));
   // Likewise the file summaries.
   const unsubscribeFiles = pipeline.onChanges((changes) => files.noteChanges(changes));
+  // Likewise the anomaly summaries (running sessions may be recomputed at once for the notifications, see the service).
+  const unsubscribeAnomalies = pipeline.onChanges((changes) => anomalies.noteChanges(changes));
   app.addHook('onClose', async () => {
     unsubscribe();
     unsubscribeResync();
     unsubscribeStats();
     unsubscribeFiles();
+    unsubscribeAnomalies();
     if (deps.files === undefined) files.close(); // the default one is ours
+    if (deps.anomalies === undefined) anomalies.close();
     connections.clear();
   });
 
@@ -340,6 +351,19 @@ export function buildServer(deps: {
     if ('error' in query) return reply.code(400).send({ error: query.error });
     return files.project(query, pipeline.importing());
   });
+  // Kinds, counts, numbers, times, ids, paths and the session title only (no conversation content or tool input).
+  app.get<{ Params: { id: string } }>('/api/sessions/:id/anomalies', async (req, reply) => {
+    const result = await anomalies.session(req.params.id);
+    if (result === null) return reply.code(404).send({ error: 'session not found' });
+    return result;
+  });
+  // 400 for an unknown range / origin / kind or a repeated parameter; an unknown project is an empty result.
+  app.get<{ Querystring: Record<string, unknown> }>('/api/anomalies', async (req, reply) => {
+    const query = parseAnomalyListQuery(req.query);
+    if ('error' in query) return reply.code(400).send({ error: query.error });
+    return anomalies.list(query);
+  });
+  app.get('/api/anomalies/counts', async () => anomalies.counts());
   app.get(
     '/api/diagnostics',
     async (): Promise<Diagnostics> => {
