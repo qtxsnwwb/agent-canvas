@@ -248,7 +248,7 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
     const pipelineForAnomalies = pipeline;
     // Running sessions are recomputed in the background only while a loop / failures notification could be sent.
     anomalies = new AnomaliesService(storeStatsSource(store), {
-      importing: () => pipelineForAnomalies.importing(),
+      startupDone: () => pipelineForAnomalies.startupDone(),
       live: () => notificationsNow.wantsAnomalies(),
     });
     anomalies.onSummary((event) => notificationsNow.handleAnomalies(event));

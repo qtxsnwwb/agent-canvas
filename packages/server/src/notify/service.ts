@@ -52,7 +52,8 @@ const realTimers: Timers = {
 
 export interface NotificationServiceDeps {
   store: Pick<Store, 'getMeta' | 'setMeta' | 'listProjects' | 'getNodeDetail' | 'liveSessions' | 'latestMainPromptAt'>;
-  pipeline: Pick<Pipeline, 'onChanges' | 'importing' | 'pollSources' | 'pollStatus'>;
+  /** startupDone (optional for fakes; absent = done): anomaly notifications wait for it. */
+  pipeline: Pick<Pipeline, 'onChanges' | 'importing' | 'pollSources' | 'pollStatus'> & { startupDone?(): boolean };
   notifier: ServiceNotifier;
   now?: () => number;
   timers?: Timers;
@@ -102,6 +103,7 @@ export class NotificationService {
       projectName: (session) => this.projectName(session),
       sessionUrl: (id) => `${this.baseUrl}/#/s/${encodeURIComponent(id)}`,
       nodeUrl: (id, nodeId) => `${this.baseUrl}/${nodeAddressHash(id, nodeId)}`,
+      anomaliesReady: () => deps.pipeline.startupDone?.() ?? true,
       isAbortedCall: (sessionId, nodeId) => deps.store.getNodeDetail(sessionId, nodeId)?.text === ABORTED_NOTE,
       reportError: (message) => this.recordError(message),
       ...(deps.graceMs !== undefined ? { graceMs: deps.graceMs } : {}),
@@ -141,9 +143,9 @@ export class NotificationService {
    * A session's anomaly summary was (re)computed (AnomaliesService.onSummary): new `loop` / `failures` anomalies may
    * notify (NotificationEngine.handleAnomalies). Seen anomalies are remembered from construction on, also before start().
    */
-  handleAnomalies(event: { session: Session; anomalies: readonly Anomaly[]; running: boolean }): void {
+  handleAnomalies(event: { session: Session; anomalies: readonly Anomaly[]; runningUntil: number | null }): void {
     if (this.closing !== null) return;
-    this.guard(() => this.engine.handleAnomalies(event.session, event.anomalies, event.running));
+    this.guard(() => this.engine.handleAnomalies(event.session, event.anomalies, event.runningUntil));
   }
 
   /** Whether a `loop` / `failures` notification could be sent now (master switch and one of the two on). */
@@ -160,7 +162,13 @@ export class NotificationService {
     const checked = validateNotificationSettings(value);
     if (!checked.ok) return checked;
     saveNotificationSettings(this.deps.store, checked.settings);
+    const before = this.settings;
     this.settings = checked.settings;
+    // A switch turned on (master and kind) never sends an anomaly from before it.
+    const on = (s: NotificationSettings, kind: 'loop' | 'failures'): boolean => s.enabled && s[kind];
+    for (const kind of ['loop', 'failures'] as const) {
+      if (!on(before, kind) && on(checked.settings, kind)) this.engine.anomalySwitchedOn(kind, this.now());
+    }
     this.settingsError = null;
     return { ok: true, response: this.getSettings() };
   }

@@ -14,6 +14,7 @@ import {
   type AnomalyListResponse,
   type AnomalyRange,
   type AnomalySessionCount,
+  type CostBaseline,
   type GraphNode,
   type Origin,
   type SeqChange,
@@ -32,19 +33,24 @@ import { FAILED_SUMMARY, isRunningStatus, summarizeAnomalies, type AnomalySummar
  * - Per-session summaries (summary.ts: loop / failures / churn anomalies + turn costs) in a SessionSummaryCache, the
  *   stats service's design: cached by session, invalidated through noteChanges (a status change is a change too: it
  *   arrives as session_upserted), recomputed only when needed, paged reads that yield, LRU-bounded. Its reads are its
- *   own, not shared with the stats and file caches (see buildServer for why; shareReadsWith exists but is not used).
+ *   own, not shared with the stats and file caches (see buildServer for why). Concurrent reads of one session (a
+ *   request's refresh and a background recompute) share one read and one summary.
  * - `cost` anomalies are judged at query time: the finished turn costs of every session (whatever the request's
- *   filters), grouped by (project, origin), one costBaseline per group, costAnomalies per session. The result is cached
- *   under a version bumped by every summary computed, so requests with nothing changed reuse it.
+ *   filters), grouped by (project, origin), one costBaseline per group (with its origin: Cursor is judged on time only),
+ *   costAnomalies per session. The result is cached under a version bumped by every summary computed, so requests with
+ *   nothing changed reuse it.
  * - Requests do not wait for a cold build for long: when the summaries are not all ready within `answerWaitMs`, the
  *   answer is built from the summaries computed so far and says `computing` (the build goes on in the background).
+ *   `computing` is also true until the start-up work is over (pipeline.startupDone).
  * - A session whose summary throws is counted in failedSessions and skipped; its failed summary stays cached until the
- *   session changes, so it is retried then (a failed read is retried by every request, as the stats service does).
- * - Every summary computed is shown to the onSummary listeners (the notification service), with whether the session is
- *   running. While `live()` holds (a notification switch for loop / failures is on), a change to a running session
- *   schedules a background recompute of that session alone: at most one in flight per session, armed `liveDelayMs` after
- *   the first change of a burst (later changes do not push it back), and never sooner than `liveCostFactor` times the
- *   previous recompute's duration after it ended (a 100,000-node session is not recomputed back to back).
+ *   session changes, so it is retried then. A failed read is counted too, and retried by every request (as the stats
+ *   service does).
+ * - Every summary computed is shown to the onSummary listeners (the notification service), with the latest time the
+ *   session was seen running. While `live()` holds (a notification switch for loop / failures is on) and the start-up
+ *   work is over, a change to a running session schedules a background recompute of that session alone: at most one in
+ *   flight per session, armed `liveDelayMs` after the first change of a burst (later changes do not push it back), and
+ *   never sooner than `liveCostFactor` times the previous recompute's duration after it ended; a change newer than the
+ *   read it used arms another one.
  */
 
 /** What the anomaly service reads: the same as the stats service (storeStatsSource: paged node reads). */
@@ -74,16 +80,16 @@ export interface AnomalyListQuery {
 }
 
 /**
- * The query string of GET /api/anomalies. range defaults to ANOMALY_DEFAULT_RANGE; an empty origin / projectId / kind
- * means no filter. An unknown range, origin or kind, or a repeated parameter, is an error (400); an unknown projectId is
- * not (empty result, as GET /api/stats).
+ * The query string of GET /api/anomalies. An empty or absent range means ANOMALY_DEFAULT_RANGE; an empty or absent
+ * origin / projectId / kind means no filter. An unknown range, origin or kind, or a repeated parameter, is an error
+ * (400); an unknown projectId is not (empty result, as GET /api/stats).
  */
 export function parseAnomalyListQuery(query: Record<string, unknown>): AnomalyListQuery | { error: string } {
   const { range, origin, projectId, kind } = query;
   for (const [name, v] of Object.entries({ range, origin, projectId, kind })) {
     if (v !== undefined && typeof v !== 'string') return { error: `${name} must be given once` };
   }
-  if (range !== undefined && !(ANOMALY_RANGES as readonly unknown[]).includes(range)) {
+  if (range !== undefined && range !== '' && !(ANOMALY_RANGES as readonly unknown[]).includes(range)) {
     return { error: `unknown range (expected ${ANOMALY_RANGES.join(', ')})` };
   }
   if (origin !== undefined && origin !== '' && !(ORIGINS as readonly unknown[]).includes(origin)) {
@@ -93,18 +99,22 @@ export function parseAnomalyListQuery(query: Record<string, unknown>): AnomalyLi
     return { error: `unknown kind (expected ${ANOMALY_KINDS.join(', ')})` };
   }
   return {
-    range: (range as AnomalyRange | undefined) ?? ANOMALY_DEFAULT_RANGE,
+    range: range === undefined || range === '' ? ANOMALY_DEFAULT_RANGE : (range as AnomalyRange),
     origin: origin === undefined || origin === '' ? null : (origin as Origin),
     projectId: projectId === undefined || projectId === '' ? null : (projectId as string),
     kind: kind === undefined || kind === '' ? null : (kind as AnomalyKind),
   };
 }
 
-/** A summary computed for a session (onSummary). `running`: the session runs, or left running moments ago. */
+/**
+ * A summary computed for a session (onSummary). `runningUntil`: the latest time (wall clock, ms) the session was seen
+ * running — Infinity while it runs, the moment it left running when that was at most ANOMALY_RUNNING_GRACE_MS ago, else
+ * null.
+ */
 export interface AnomalySummaryEvent {
   session: Session;
   anomalies: readonly Anomaly[];
-  running: boolean;
+  runningUntil: number | null;
 }
 
 export interface LiveTimers {
@@ -122,7 +132,7 @@ const realTimers: LiveTimers = {
 };
 
 export interface AnomaliesServiceOptions {
-  /** Most session summaries kept. Default STATS_CACHE_CAPACITY. */
+  /** Most session summaries kept (also bounds the per-session state). Default STATS_CACHE_CAPACITY. */
   capacity?: number;
   /** Most turn costs kept over all summaries. Default ANOMALIES_CACHE_MAX_WEIGHT. */
   maxWeight?: number;
@@ -131,8 +141,8 @@ export interface AnomaliesServiceOptions {
   now?: () => number;
   /** Monotonic clock (ms) for the live recompute's pacing. Default performance.now. */
   clock?: () => number;
-  /** pipeline.importing(): answers say `computing` meanwhile; no live recomputes meanwhile. */
-  importing?: () => boolean;
+  /** pipeline.startupDone(): until it holds, answers say `computing` and nothing is recomputed in the background. */
+  startupDone?: () => boolean;
   answerWaitMs?: number;
   /** Whether running sessions are recomputed in the background on change (the notification switches). Default never. */
   live?: () => boolean;
@@ -154,7 +164,6 @@ interface Derived {
 interface LiveState {
   timer: unknown;
   running: boolean;
-  pending: boolean;
   lastDurationMs: number;
   lastEndAt: number;
 }
@@ -165,7 +174,9 @@ interface RunState {
   lastRunningAt: number | null;
 }
 
-/** ms of an anomaly's `at`; unparseable counts as 0 (as detection does). */
+type Read = { session: Session; nodes: GraphNode[]; seq: number } | null;
+
+/** ms of an anomaly's `at`; unparseable counts as 0 (detection only emits parseable ones). */
 const atMs = (a: Anomaly): number => {
   const ms = Date.parse(a.at);
   return Number.isNaN(ms) ? 0 : ms;
@@ -178,19 +189,36 @@ export function byAtThenId(a: Anomaly, b: Anomaly): number {
 
 const emptyTotals = (): Record<AnomalyKind, number> => ({ loop: 0, failures: 0, churn: 0, cost: 0 });
 
+/** Puts `key` at the most recent end of an insertion-ordered map, dropping the oldest entries beyond `max`. */
+function touch<K, V>(map: Map<K, V>, key: K, value: V, max: number): void {
+  map.delete(key);
+  map.set(key, value);
+  while (map.size > max) map.delete(map.keys().next().value as K);
+}
+
 export class AnomaliesService {
   private readonly cache: SessionSummaryCache<AnomalySummary>;
+  private readonly capacity: number;
   private readonly now: () => number;
   private readonly clock: () => number;
-  private readonly importing: () => boolean;
+  private readonly startupDone: () => boolean;
   private readonly answerWaitMs: number;
   private readonly live: () => boolean;
   private readonly liveDelayMs: number;
   private readonly liveCostFactor: number;
   private readonly timers: LiveTimers;
   private readonly summarizeFn: (session: Session, nodes: GraphNode[]) => AnomalySummary;
-  /** The latest summary computed per session (answers while the summaries are still being built). */
+  /** The latest summary computed per session (answers while the summaries are still being built); LRU of `capacity`. */
   private readonly latest = new Map<string, SummaryEntry<AnomalySummary>>();
+  /** Reads in flight by session id (shared by the cache's refresh and one()). */
+  private readonly reading = new Map<string, Promise<Read>>();
+  /** The summary of a read's node list (one summary per read, whoever asked). */
+  private readonly summaryOfRead = new WeakMap<GraphNode[], AnomalySummary>();
+  /** Session id -> seq of the latest read / the latest change noted. */
+  private readonly readSeq = new Map<string, number>();
+  private readonly changedSeq = new Map<string, number>();
+  /** Sessions whose last read failed. */
+  private readonly failedReads = new Set<string>();
   /** Bumped by every summary computed. */
   private version = 0;
   private derived: Derived | null = null;
@@ -201,19 +229,24 @@ export class AnomaliesService {
   private liveRecomputes = 0;
   private closed = false;
 
-  constructor(source: AnomaliesSource, options: AnomaliesServiceOptions = {}) {
+  constructor(private readonly source: AnomaliesSource, options: AnomaliesServiceOptions = {}) {
     this.summarizeFn = options.summarize ?? summarizeAnomalies;
-    this.cache = new SessionSummaryCache(source, {
+    this.capacity = Math.max(1, options.capacity ?? STATS_CACHE_CAPACITY);
+    const shared: AnomaliesSource = {
+      sessions: () => source.sessions(),
+      readSession: (id, stopped) => this.sharedRead(id, stopped),
+    };
+    this.cache = new SessionSummaryCache(shared, {
       summarize: (session, nodes) => this.summarize(session, nodes),
       weight: (summary) => summary.costs.length + summary.anomalies.length,
-      capacity: options.capacity ?? STATS_CACHE_CAPACITY,
+      capacity: this.capacity,
       maxWeight: options.maxWeight ?? ANOMALIES_CACHE_MAX_WEIGHT,
       yieldAfterMs: options.yieldAfterMs ?? STATS_YIELD_AFTER_MS,
       closedMessage: CLOSED,
     });
     this.now = options.now ?? Date.now;
     this.clock = options.clock ?? (() => performance.now());
-    this.importing = options.importing ?? (() => false);
+    this.startupDone = options.startupDone ?? (() => true);
     this.answerWaitMs = Math.max(0, options.answerWaitMs ?? ANOMALY_ANSWER_WAIT_MS);
     this.live = options.live ?? (() => false);
     this.liveDelayMs = Math.max(0, options.liveDelayMs ?? ANOMALY_LIVE_DELAY_MS);
@@ -230,22 +263,19 @@ export class AnomaliesService {
     const now = this.now();
     const touched = new Set<string>();
     for (const c of changes) {
-      touched.add(sessionIdOfChange(c));
+      const id = sessionIdOfChange(c);
+      touched.add(id);
+      if ((this.changedSeq.get(id) ?? -Infinity) < c.seq) touch(this.changedSeq, id, c.seq, this.capacity);
       if (c.type === 'session_upserted') this.noteStatus(c.session, now, true);
     }
     if (!this.wantLive()) return;
-    for (const id of touched) if (this.isRunning(id, now)) this.scheduleLive(id);
+    for (const id of touched) if (this.runningUntil(id, now) !== null) this.scheduleLive(id);
   }
 
   /** Listens to every summary computed (see AnomalySummaryEvent); returns the unsubscribe. */
   onSummary(listener: (event: AnomalySummaryEvent) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
-  }
-
-  /** Shares session reads with the stats and file caches (one read builds every summary). */
-  shareReadsWith(...caches: SessionSummaryCache<any>[]): void {
-    for (const c of caches) this.cache.shareReadsWith(c);
   }
 
   /** Builds (or refreshes) every session's summary ahead of a request (see StatsService.warm). Never rejects. */
@@ -269,10 +299,14 @@ export class AnomaliesService {
 
   // ---------------------------------------------------------------- routes
 
-  /** GET /api/sessions/:id/anomalies; null for an unknown session. */
-  async session(sessionId: string): Promise<SessionAnomaliesResponse | null> {
+  /**
+   * GET /api/sessions/:id/anomalies; null for an unknown session; 'failed' when its detection threw (the route answers
+   * 500, as the file route does for a session it cannot summarize).
+   */
+  async session(sessionId: string): Promise<SessionAnomaliesResponse | null | 'failed'> {
     const entry = await this.cache.one(sessionId);
     if (entry === null) return null;
+    if (entry.summary.failed) return 'failed';
     const d = await this.state();
     const own = entry.summary.anomalies;
     const cost = (d.sessions.get(sessionId)?.anomalies ?? []).filter((a) => a.kind === 'cost');
@@ -334,36 +368,71 @@ export class AnomaliesService {
     return this.liveRecomputes;
   }
 
-  /** The summary cache, for linking with another service's (SessionSummaryCache.shareReadsWith). */
-  summaryCache(): SessionSummaryCache<AnomalySummary> {
-    return this.cache;
+  /** Sizes of the per-session state (bounded by `capacity`, pruned when a session is no longer listed). */
+  stateSizes(): Record<string, number> {
+    return {
+      latest: this.latest.size, runState: this.runState.size, liveState: this.liveState.size,
+      readSeq: this.readSeq.size, changedSeq: this.changedSeq.size, failedReads: this.failedReads.size,
+    };
   }
 
   // ---------------------------------------------------------------- internals
 
-  private computing(d: Derived): boolean {
-    let importing = false;
+  private isStartupDone(): boolean {
     try {
-      importing = this.importing();
+      return this.startupDone();
     } catch {
-      // unknown: not importing
+      return false;
     }
-    return !d.complete || importing;
   }
 
-  /** The cache's summarize: never throws (a failure is a failed summary), records it and tells the listeners. */
+  private computing(d: Derived): boolean {
+    return !d.complete || !this.isStartupDone();
+  }
+
+  /** One read per session at a time, whoever asks; records its seq and whether it failed. */
+  private sharedRead(sessionId: string, stopped?: () => boolean): Promise<Read> {
+    const current = this.reading.get(sessionId);
+    if (current !== undefined) return current;
+    const promise = (async (): Promise<Read> => {
+      try {
+        const read = await this.source.readSession(sessionId, stopped);
+        this.failedReads.delete(sessionId);
+        if (read !== null) touch(this.readSeq, sessionId, read.seq, this.capacity);
+        return read;
+      } catch (err) {
+        if (!this.closed && this.failedReads.size < this.capacity) this.failedReads.add(sessionId);
+        throw err;
+      }
+    })();
+    this.reading.set(sessionId, promise);
+    const clear = (): void => {
+      if (this.reading.get(sessionId) === promise) this.reading.delete(sessionId);
+    };
+    void promise.then(clear, clear);
+    return promise;
+  }
+
+  /**
+   * The cache's summarize: never throws (a failure is a failed summary), one per read (a second caller of the same read
+   * gets the same summary, and the listeners hear it once), records it and tells the listeners.
+   */
   private summarize(session: Session, nodes: GraphNode[]): AnomalySummary {
+    const known = this.summaryOfRead.get(nodes);
+    if (known !== undefined) return known;
     let summary: AnomalySummary;
     try {
       summary = this.summarizeFn(session, nodes);
     } catch {
       summary = FAILED_SUMMARY;
     }
-    this.latest.set(session.id, { session, summary });
+    this.summaryOfRead.set(nodes, summary);
+    touch(this.latest, session.id, { session, summary }, this.capacity);
     this.version++;
-    this.noteStatus(session, this.now(), false);
+    const now = this.now();
+    this.noteStatus(session, now, false);
     if (!summary.failed && this.listeners.size > 0) {
-      const event: AnomalySummaryEvent = { session, anomalies: summary.anomalies, running: this.isRunning(session.id, this.now(), session) };
+      const event: AnomalySummaryEvent = { session, anomalies: summary.anomalies, runningUntil: this.runningUntil(session.id, now, session) };
       for (const l of this.listeners) {
         try {
           l(event);
@@ -380,22 +449,24 @@ export class AnomaliesService {
     const prev = this.runState.get(session.id);
     if (!fromFeed && prev !== undefined) return;
     const running = isRunningStatus(session.status);
-    this.runState.set(session.id, {
+    touch(this.runState, session.id, {
       running,
       lastRunningAt: running || prev?.running === true ? now : (prev?.lastRunningAt ?? null),
-    });
+    }, this.capacity);
   }
 
-  private isRunning(sessionId: string, now: number, session?: Session): boolean {
-    if (session !== undefined && isRunningStatus(session.status)) return true;
+  /** See AnomalySummaryEvent.runningUntil. */
+  private runningUntil(sessionId: string, now: number, session?: Session): number | null {
+    if (session !== undefined && isRunningStatus(session.status)) return Infinity;
     const st = this.runState.get(sessionId);
-    if (st === undefined) return false;
-    return st.running || (st.lastRunningAt !== null && now - st.lastRunningAt <= ANOMALY_RUNNING_GRACE_MS);
+    if (st === undefined) return null;
+    if (st.running) return Infinity;
+    return st.lastRunningAt !== null && now - st.lastRunningAt <= ANOMALY_RUNNING_GRACE_MS ? st.lastRunningAt : null;
   }
 
   private wantLive(): boolean {
     try {
-      return this.live() && !this.importing();
+      return this.live() && this.isStartupDone();
     } catch {
       return false;
     }
@@ -404,14 +475,10 @@ export class AnomaliesService {
   private scheduleLive(sessionId: string): void {
     let st = this.liveState.get(sessionId);
     if (st === undefined) {
-      st = { timer: null, running: false, pending: false, lastDurationMs: 0, lastEndAt: -Infinity };
-      this.liveState.set(sessionId, st);
+      st = { timer: null, running: false, lastDurationMs: 0, lastEndAt: -Infinity };
+      touch(this.liveState, sessionId, st, this.capacity);
     }
-    if (st.timer !== null) return; // armed: the burst's first change set the time
-    if (st.running) {
-      st.pending = true;
-      return;
-    }
+    if (st.timer !== null || st.running) return; // armed, or in flight (it re-arms itself when a change is newer)
     const sinceEnd = this.clock() - st.lastEndAt;
     const delay = Math.max(this.liveDelayMs, this.liveCostFactor * st.lastDurationMs - sinceEnd);
     const state = st;
@@ -434,10 +501,22 @@ export class AnomaliesService {
       st.running = false;
       st.lastEndAt = this.clock();
       st.lastDurationMs = st.lastEndAt - t0;
-      if (st.pending && !this.closed) {
-        st.pending = false;
-        if (this.wantLive()) this.scheduleLive(sessionId);
-      }
+      // A change newer than the read used (e.g. a shared read begun before it): once more.
+      const stale = (this.changedSeq.get(sessionId) ?? -Infinity) > (this.readSeq.get(sessionId) ?? -Infinity);
+      if (stale && !this.closed && this.wantLive() && this.runningUntil(sessionId, this.now()) !== null) this.scheduleLive(sessionId);
+    }
+  }
+
+  /** Forgets every per-session record of the sessions not listed any more (deleted). */
+  private prune(listed: ReadonlySet<string>): void {
+    for (const map of [this.latest, this.runState, this.readSeq, this.changedSeq] as Map<string, unknown>[]) {
+      for (const id of [...map.keys()]) if (!listed.has(id)) map.delete(id);
+    }
+    for (const id of [...this.failedReads]) if (!listed.has(id)) this.failedReads.delete(id);
+    for (const [id, st] of [...this.liveState]) {
+      if (listed.has(id)) continue;
+      if (st.timer !== null) this.timers.clearTimeout(st.timer);
+      this.liveState.delete(id);
     }
   }
 
@@ -465,38 +544,35 @@ export class AnomaliesService {
     }
     if (waited !== null) {
       const { entries, failed } = waited.snap;
-      // Sessions gone from the listing are dropped from the partial answers too.
-      if (this.latest.size > entries.length) {
-        const listed = new Set(entries.map((e) => e.session.id));
-        for (const id of this.latest.keys()) if (!listed.has(id)) this.latest.delete(id);
-      }
+      this.prune(new Set(this.source.sessions().map((s) => s.id)));
       return this.derive(entries, true, failed);
     }
-    return this.derive([...this.latest.values()], false, 0);
+    // Partial: the summaries so far, and the sessions whose last read failed.
+    return this.derive([...this.latest.values()], false, this.failedReads.size);
   }
 
   private derive(entries: readonly SummaryEntry<AnomalySummary>[], complete: boolean, failedReads: number): Derived {
     const key = `${complete ? 'c' : 'p'}:${this.version}:${entries.length}:${failedReads}`;
     if (this.derived !== null && this.derived.key === key) return this.derived;
     this.derivations++;
-    const groups = new Map<string, TurnCost[]>();
+    const groups = new Map<string, { origin: Origin; costs: TurnCost[] }>();
+    const groupKey = (s: Session): string => `${s.projectId}\u0000${s.origin}`;
     let failed = failedReads;
     for (const { session, summary } of entries) {
       if (summary.failed) {
         failed++;
         continue;
       }
-      const group = `${session.projectId}\u0000${session.origin}`;
-      let list = groups.get(group);
-      if (list === undefined) groups.set(group, (list = []));
-      for (const c of summary.costs) list.push(c);
+      let group = groups.get(groupKey(session));
+      if (group === undefined) groups.set(groupKey(session), (group = { origin: session.origin, costs: [] }));
+      for (const c of summary.costs) group.costs.push(c);
     }
-    const baselines = new Map<string, ReturnType<typeof costBaseline>>();
-    for (const [group, costs] of groups) baselines.set(group, costBaseline(costs));
+    const baselines = new Map<string, CostBaseline>();
+    for (const [key, { origin, costs }] of groups) baselines.set(key, costBaseline(costs, { origin }));
     const sessions = new Map<string, { session: Session; anomalies: Anomaly[] }>();
     for (const { session, summary } of entries) {
       if (summary.failed) continue;
-      const baseline = baselines.get(`${session.projectId}\u0000${session.origin}`);
+      const baseline = baselines.get(groupKey(session));
       const cost = baseline !== undefined && summary.costs.length > 0 ? costAnomalies(summary.costs, baseline) : [];
       const anomalies = cost.length === 0 ? summary.anomalies : [...summary.anomalies, ...cost].sort(byAtThenId);
       sessions.set(session.id, { session, anomalies });

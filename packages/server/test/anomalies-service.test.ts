@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { detectAnomalies, type GraphNode, type SeqChange, type Session } from '@agent-canvas/shared';
+import { detectAnomalies, type GraphNode, type SeqChange, type Session, type SessionAnomaliesResponse } from '@agent-canvas/shared';
 import {
   AnomaliesService,
   parseAnomalyListQuery,
@@ -90,6 +90,8 @@ describe('parseAnomalyListQuery', () => {
   test('defaults: 30d, no filters; empty strings mean no filter', () => {
     expect(parseAnomalyListQuery({})).toEqual({ range: '30d', origin: null, projectId: null, kind: null });
     expect(parseAnomalyListQuery({ range: '7d', origin: '', projectId: '', kind: '' })).toEqual({ range: '7d', origin: null, projectId: null, kind: null });
+    // An empty range is like the other empty filters: the default.
+    expect(parseAnomalyListQuery({ range: '' })).toEqual({ range: '30d', origin: null, projectId: null, kind: null });
     expect(parseAnomalyListQuery({ range: 'all', origin: 'codex', projectId: 'p', kind: 'churn' })).toEqual({ range: 'all', origin: 'codex', projectId: 'p', kind: 'churn' });
   });
   test.each([
@@ -109,11 +111,11 @@ describe('AnomaliesService', () => {
     const src = new FakeSource();
     src.set('a', [...loopTurn('a', 'T1', NOW - 10 * MIN, 3), ...loopTurn('a', 'T2', NOW - 20 * MIN, 4)]);
     const svc = make(src);
-    const r = await svc.session('a');
+    const r = (await svc.session('a')) as SessionAnomaliesResponse;
     expect(r).not.toBeNull();
-    expect(r!.computing).toBe(false);
-    expect(r!.anomalies.map((a) => [a.kind, a.turnKey, a.count])).toEqual([['loop', 'T2', 4], ['loop', 'T1', 3]]);
-    expect(r!.anomalies).toEqual(detectAnomalies(src.data.get('a')!.nodes));
+    expect(r.computing).toBe(false);
+    expect(r.anomalies.map((a) => [a.kind, a.turnKey, a.count])).toEqual([['loop', 'T2', 4], ['loop', 'T1', 3]]);
+    expect(r.anomalies).toEqual(detectAnomalies(src.data.get('a')!.nodes));
     expect(await svc.session('nope')).toBeNull();
   });
 
@@ -140,10 +142,10 @@ describe('AnomaliesService', () => {
     src.set('a', nodes, { status: 'running' });
     let summaries = 0;
     const svc = make(src, { summarize: (s, n) => { summaries++; return summarizeAnomalies(s, n); } });
-    expect((await svc.session('a'))!.anomalies).toEqual([]);
+    expect(((await svc.session('a')) as SessionAnomaliesResponse).anomalies).toEqual([]);
     expect(summaries).toBe(1);
     svc.noteChanges([src.upsert('a', { status: 'idle' })]);
-    const after = (await svc.session('a'))!.anomalies;
+    const after = ((await svc.session('a')) as SessionAnomaliesResponse).anomalies;
     expect(summaries).toBe(2);
     expect(after.map((a) => [a.kind, a.basis, a.turnKey])).toEqual([['cost', 'time', 'T99']]);
   });
@@ -219,7 +221,7 @@ describe('AnomaliesService', () => {
     expect(r.items[0]!.baselineValue).toBe(MIN);
     // Filtering on the session's own project / origin gives the same judgement.
     expect((await svc.list({ ...ALL, range: '7d', origin: 'claude', projectId: 'p1' })).items).toHaveLength(1);
-    expect((await svc.session('b'))!.anomalies.map((a) => a.kind)).toEqual(['cost']);
+    expect(((await svc.session('b')) as SessionAnomaliesResponse).anomalies.map((a) => a.kind)).toEqual(['cost']);
     expect((await svc.counts()).counts).toEqual({ b: { total: 1, byKind: { cost: 1 } } });
     const derivations = svc.derivationCount();
     await svc.list({ ...ALL, kind: 'cost' });
@@ -252,7 +254,7 @@ describe('AnomaliesService', () => {
     expect(r.items.map((i) => i.sessionId)).toEqual(['a']);
     await svc.list(ALL);
     expect(attempts).toBe(1);
-    expect((await svc.session('bad'))!.anomalies).toEqual([]);
+    expect(await svc.session('bad')).toBe('failed');
     broken = false;
     svc.noteChanges(src.add('bad', [mkNode('bad', 'bad-x', NOW - DAY + 60_000, { turnId: 'T1' })]));
     const after = await svc.list(ALL);
@@ -286,14 +288,14 @@ describe('AnomaliesService', () => {
     });
   });
 
-  test('importing: answers say computing', async () => {
+  test('until the start-up work is over (startupDone), answers say computing', async () => {
     const src = new FakeSource();
     src.set('a', loopTurn('a', 'T1', NOW - DAY, 3));
-    let importing = true;
-    const svc = make(src, { importing: () => importing });
+    let done = false;
+    const svc = make(src, { startupDone: () => done });
     expect((await svc.counts()).computing).toBe(true);
-    expect((await svc.session('a'))!.computing).toBe(true);
-    importing = false;
+    expect(((await svc.session('a')) as SessionAnomaliesResponse).computing).toBe(true);
+    done = true;
     expect((await svc.list(ALL)).computing).toBe(false);
   });
 
@@ -305,9 +307,94 @@ describe('AnomaliesService', () => {
     const events: AnomalySummaryEvent[] = [];
     svc.onSummary((e) => events.push(e));
     await svc.warm();
-    expect(events.map((e) => [e.session.id, e.running, e.anomalies.length])).toEqual([['a', true, 1], ['b', false, 1]]);
+    expect(events.map((e) => [e.session.id, e.runningUntil, e.anomalies.length])).toEqual([['a', Infinity, 1], ['b', null, 1]]);
     await svc.warm();
     expect(events).toHaveLength(2);
+  });
+});
+
+describe('AnomaliesService: fix round 1', () => {
+  /** 25 finished turns of 1 minute and 100,000 tokens, then one of 30 minutes and 900,000 tokens. */
+  function heavy(id: string): GraphNode[] {
+    const nodes: GraphNode[] = [];
+    const withTokens = (list: GraphNode[], tokens: number): GraphNode[] =>
+      list.map((n) => (n.kind === 'tool' ? n : { ...n, usage: { inputTokens: tokens - 1000, outputTokens: 1000 }, messageId: `${n.id}-m` }));
+    for (let i = 0; i < 25; i++) nodes.push(...withTokens(costTurn(id, `T${String(i).padStart(2, '0')}`, NOW - 2 * DAY + i * 10 * MIN, MIN), 100_000));
+    nodes.push(...withTokens(costTurn(id, 'T99', NOW - DAY, 30 * MIN), 900_000));
+    return nodes;
+  }
+
+  test('Cursor groups are judged on time only: no token cost anomaly however many token-bearing turns', async () => {
+    const src = new FakeSource();
+    src.set('claude', heavy('claude'));
+    src.set('cursor', heavy('cursor'), { origin: 'cursor' });
+    const svc = make(src);
+    const bases = (id: string) => async () => ((await svc.session(id)) as SessionAnomaliesResponse).anomalies.map((a) => a.basis);
+    expect(await bases('claude')()).toEqual(['time', 'tokens']);
+    expect(await bases('cursor')()).toEqual(['time']);
+  });
+
+  test('the baseline crosses sessions: the turns of another session finishing make this one judged', async () => {
+    const src = new FakeSource();
+    const nodes: GraphNode[] = [];
+    for (let i = 0; i < 10; i++) nodes.push(...costTurn('a', `T${String(i).padStart(2, '0')}`, NOW - 3 * DAY + i * 10 * MIN, MIN));
+    nodes.push(...costTurn('a', 'T99', NOW - DAY, 30 * MIN));
+    src.set('a', nodes);
+    const other: GraphNode[] = [];
+    for (let i = 0; i < 9; i++) other.push(...costTurn('b', `T${String(i).padStart(2, '0')}`, NOW - 2 * DAY + i * 10 * MIN, MIN));
+    src.set('b', other, { status: 'running' }); // its last turn is unfinished: 11 + 8 = 19 finished turns, one short
+    const svc = make(src);
+    expect((await svc.counts()).counts).toEqual({});
+    svc.noteChanges([src.upsert('b', { status: 'idle' })]);
+    expect((await svc.counts()).counts).toEqual({ a: { total: 1, byKind: { cost: 1 } } });
+  });
+
+  test('a refresh and a session request reading the same session at once share one read and one summary', async () => {
+    const src = new FakeSource();
+    src.set('a', loopTurn('a', 'T1', NOW - DAY, 3));
+    src.delayMs = 30;
+    const svc = make(src);
+    const events: AnomalySummaryEvent[] = [];
+    svc.onSummary((e) => events.push(e));
+    await Promise.all([svc.warm(), svc.session('a'), svc.counts()]);
+    expect(src.reads).toEqual(['a']);
+    expect(events).toHaveLength(1);
+  });
+
+  test('partial answers count failed reads; a deleted session is forgotten', async () => {
+    const src = new FakeSource();
+    src.set('a', loopTurn('a', 'T1', NOW - DAY, 3));
+    src.set('gone', loopTurn('gone', 'T1', NOW - DAY, 3), { status: 'running' });
+    const svc = make(src, { answerWaitMs: 10 });
+    await svc.warm();
+    src.failing.add('a');
+    svc.noteChanges(src.add('a', [mkNode('a', 'a-x', NOW - DAY + MIN, { turnId: 'T1' })]));
+    await svc.warm(); // the read of a fails
+    src.failing.clear();
+    src.set('c', loopTurn('c', 'T1', NOW - DAY, 3));
+    src.delayMs = 200;
+    const partial = await svc.list(ALL);
+    expect(partial.computing).toBe(true);
+    expect(partial.failedSessions).toBe(1);
+    await svc.warm();
+    expect((await svc.list(ALL)).failedSessions).toBe(0);
+    src.delayMs = 0;
+    src.data.delete('gone');
+    svc.noteChanges([{ type: 'session_upserted', session: mkSession('gone', { sourceDeleted: true }), seq: ++src.seq }]);
+    const after = await svc.counts();
+    expect(Object.keys(after.counts).sort()).toEqual(['a', 'c']);
+    const sizes = svc.stateSizes();
+    expect(sizes.latest).toBe(2);
+    expect(sizes.runState).toBeLessThanOrEqual(2);
+    expect(sizes.changedSeq).toBeLessThanOrEqual(2);
+  });
+
+  test('per-session state is bounded by the capacity', async () => {
+    const src = new FakeSource();
+    for (let i = 0; i < 6; i++) src.set(`s${i}`, loopTurn(`s${i}`, 'T1', NOW - DAY, 3));
+    const svc = make(src, { capacity: 3 });
+    for (let i = 0; i < 6; i++) await svc.session(`s${i}`);
+    for (const v of Object.values(svc.stateSizes())) expect(v).toBeLessThanOrEqual(3);
   });
 });
 
@@ -387,6 +474,7 @@ describe('AnomaliesService: background recompute of running sessions', () => {
     events.length = 0;
     svc.noteChanges([...src.add('run', [mkNode('run', 'run-x', NOW - 10_000, { turnId: 'T1', status: 'failed', inputKey: 'aaaaaaaaaaaaaaaa' })]), src.upsert('run', { status: 'idle' })]);
     await timers.fire();
-    expect(events.map((e) => [e.session.id, e.running, e.anomalies.length])).toEqual([['run', true, 1]]);
+    // Seen running until it left (NOW on the service's clock).
+    expect(events.map((e) => [e.session.id, e.runningUntil, e.anomalies.length])).toEqual([['run', NOW, 1]]);
   });
 });

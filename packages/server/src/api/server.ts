@@ -162,7 +162,7 @@ function parseClientMessage(raw: string): ClientMessage | null {
  * reports.
  * `files`: the service behind /api/files and /api/sessions/:id/files (default: one reading `store`); told the same.
  * `anomalies`: the service behind /api/anomalies, /api/anomalies/counts and /api/sessions/:id/anomalies (default: one
- * reading `store`, its answers saying `computing` while the pipeline imports); told the same.
+ * reading `store`, its answers saying `computing` until pipeline.startupDone()); told the same.
  */
 export function buildServer(deps: {
   store: Store;
@@ -180,7 +180,7 @@ export function buildServer(deps: {
   const { store, pipeline, config, notifications } = deps;
   const stats = deps.stats ?? new StatsService(storeStatsSource(store));
   const files = deps.files ?? new FilesService(storeStatsSource(store));
-  const anomalies = deps.anomalies ?? new AnomaliesService(storeStatsSource(store), { importing: () => pipeline.importing() });
+  const anomalies = deps.anomalies ?? new AnomaliesService(storeStatsSource(store), { startupDone: () => pipeline.startupDone() });
   // One read of a session builds both its stats and its file summary. The anomaly service reads on its own: sharing would
   // put three summaries of a large session in one synchronous stretch (measured: 450 ms instead of 250 ms for a
   // 100,000-node session) and make every background recompute of a running session rebuild its stats too.
@@ -355,6 +355,7 @@ export function buildServer(deps: {
   app.get<{ Params: { id: string } }>('/api/sessions/:id/anomalies', async (req, reply) => {
     const result = await anomalies.session(req.params.id);
     if (result === null) return reply.code(404).send({ error: 'session not found' });
+    if (result === 'failed') return reply.code(500).send({ error: 'anomaly detection failed for this session' });
     return result;
   });
   // 400 for an unknown range / origin / kind or a repeated parameter; an unknown project is an empty result.

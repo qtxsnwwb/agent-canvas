@@ -61,8 +61,9 @@ describe('anomalies: start wiring', () => {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ hook_event_name: 'UserPromptSubmit', session_id: 's1', cwd: '/work/demo', transcript_path: file, prompt: 'hi' }),
     });
-    const t = Date.now() - 10_000;
-    const at = (i: number): string => new Date(t + i * 1000).toISOString();
+    // After the start (anything before it never notifies): the calls are a few seconds apart from now on.
+    const t = Date.now();
+    const at = (i: number): string => new Date(t + i * 300).toISOString();
     const call = (n: number, parent: string): RawEvent[] => [
       assistantBlock(`a${n}`, parent, { type: 'tool_use', id: `tu${n}`, name: 'Bash', input: { command: 'npm test' } }, { timestamp: at(n * 2) }),
       toolResult(`r${n}`, `a${n}`, `tu${n}`, 'failed', true, { timestamp: at(n * 2 + 1) }),
@@ -82,5 +83,68 @@ describe('anomalies: start wiring', () => {
     expect(notifier.sent.filter((m) => m.title.startsWith('原地打转'))).toHaveLength(1);
     const counts = (await (await fetch(`${app.url}/api/anomalies/counts`)).json()) as AnomalyCountsResponse;
     expect(counts.counts.s1).toEqual({ total: 1, byKind: { loop: 1 } });
+  });
+  test('restart: history and a loop completed while the service was down never notify, even with a summary taken mid-import; a new loop does', { timeout: 60_000 }, async () => {
+    const overrides = { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), port: 0, cursorDbPath: null };
+    const file = path.join(overrides.projectsDir, '-work-demo', 's1.jsonl');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const hook = (url: string) => fetch(`${url}/hooks`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ hook_event_name: 'UserPromptSubmit', session_id: 's1', cwd: '/work/demo', transcript_path: file, prompt: 'hi' }),
+    });
+    const idle = async (url: string) =>
+      vi.waitFor(async () => expect(((await (await fetch(`${url}/api/diagnostics`)).json()) as Diagnostics).importing).toBe(false), { timeout: 10_000 });
+    const iso = (ms: number): string => new Date(ms).toISOString();
+    const call = (n: number, parent: string, at: number, failed = true): RawEvent[] => [
+      assistantBlock(`a${n}`, parent, { type: 'tool_use', id: `tu${n}`, name: 'Bash', input: { command: failed ? 'npm test' : `ls ${n}` } }, { timestamp: iso(at) }),
+      toolResult(`r${n}`, `a${n}`, `tu${n}`, 'out', failed, { timestamp: iso(at + 500) }),
+    ];
+
+    // First run: an old loop in history (yesterday), and a running turn with two failures.
+    const first = await start(overrides, { notifier: new FakeNotifier(), storage: false, searchIndex: false });
+    apps.push(first);
+    await fetch(`${first.url}/api/notifications/settings`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...DEFAULT_NOTIFICATION_SETTINGS, enabled: true, finished: false, stuck: false, loop: true, failures: true }),
+    });
+    await idle(first.url);
+    const old = Date.now() - 86_400_000;
+    const t = Date.now() - 20_000;
+    await fs.writeFile(file, linesOf([
+      userPrompt('u0', null, 'old', { timestamp: iso(old) }), ...call(90, 'u0', old + 1000), ...call(91, 'r90', old + 3000), ...call(92, 'r91', old + 5000),
+      userPrompt('u1', 'r92', 'hello', { timestamp: iso(t) }), ...call(1, 'u1', t + 1000), ...call(2, 'r1', t + 3000),
+    ]));
+    await hook(first.url);
+    await new Promise((r) => setTimeout(r, 1500));
+    apps.splice(0);
+    await first.close();
+
+    // While it is down, the third failure lands (just before the restart).
+    await fs.appendFile(file, linesOf(call(3, 'r2', Date.now() - 2000)));
+
+    const notifier = new FakeNotifier();
+    const second = await start(overrides, { notifier, storage: false, searchIndex: false, statsWarmup: true });
+    apps.push(second);
+    // A page open across the restart asks at once (during the initial scan).
+    await fetch(`${second.url}/api/sessions/s1/anomalies`);
+    await idle(second.url);
+    await second.statsWarmup;
+    // The session keeps running: a fresh successful call triggers a background recompute.
+    await hook(second.url);
+    await fs.appendFile(file, linesOf(call(4, 'r3', Date.now(), false)));
+    await vi.waitFor(async () => {
+      const counts = (await (await fetch(`${second.url}/api/anomalies/counts`)).json()) as AnomalyCountsResponse;
+      expect(counts.counts.s1?.byKind.loop).toBe(2);
+    }, { timeout: 10_000 });
+    await new Promise((r) => setTimeout(r, 2500));
+    expect(notifier.sent.filter((m) => m.title.startsWith('原地打转') || m.title.startsWith('失败扎堆'))).toEqual([]);
+
+    // A new loop in a new turn after the restart does notify.
+    const n = Date.now();
+    await hook(second.url);
+    await fs.appendFile(file, linesOf([userPrompt('u2', 'r4', 'again', { timestamp: iso(n) }), ...call(5, 'u2', n + 100), ...call(6, 'r5', n + 200), ...call(7, 'r6', n + 300)]));
+    await vi.waitFor(() => expect(notifier.sent.filter((m) => m.title.startsWith('原地打转'))).toHaveLength(1), { timeout: 10_000, interval: 100 });
   });
 });

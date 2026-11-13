@@ -12,6 +12,7 @@ import type {
   SessionAnomaliesResponse,
 } from '@agent-canvas/shared';
 import { AnomaliesService } from '../src/anomalies/service.js';
+import { summarizeAnomalies } from '../src/anomalies/summary.js';
 import { buildServer } from '../src/api/server.js';
 import { loadConfig, type Config } from '../src/config.js';
 import { Pipeline } from '../src/pipeline.js';
@@ -61,7 +62,16 @@ describe('anomaly routes', () => {
     await fs.mkdir(config.projectsDir, { recursive: true });
     store = openStore(':memory:');
     pipeline = new Pipeline(store, config);
-    const anomalies = new AnomaliesService(storeStatsSource(store), { now: () => NOW, importing: () => pipeline.importing() });
+    // No scan runs in these tests: the start-up work counts as over unless a test says otherwise.
+    vi.spyOn(pipeline, 'startupDone').mockReturnValue(true);
+    const anomalies = new AnomaliesService(storeStatsSource(store), {
+      now: () => NOW,
+      startupDone: () => pipeline.startupDone(),
+      summarize: (session, nodes) => {
+        if (session.id === 'broken') throw new Error('boom');
+        return summarizeAnomalies(session, nodes);
+      },
+    });
     app = buildServer({ store, pipeline, config, anomalies });
   });
   afterEach(async () => {
@@ -113,6 +123,14 @@ describe('anomaly routes', () => {
     expect((await get('/api/anomalies?projectId=unknown')).statusCode).toBe(200);
   });
 
+  test('500 for a session whose detection failed; the list counts it', async () => {
+    store.applyChanges([...seed('a', 3), ...seed('broken', 3)]);
+    const res = await get('/api/sessions/broken/anomalies');
+    expect(res.statusCode).toBe(500);
+    expect(res.json()).toEqual({ error: 'anomaly detection failed for this session' });
+    expect(((await get('/api/anomalies?range=all')).json() as AnomalyListResponse).failedSessions).toBe(1);
+  });
+
   test('no conversation content, tool input or output in any answer', async () => {
     store.applyChanges([...seed('a', 5)]);
     for (const url of ['/api/sessions/a/anomalies', '/api/anomalies?range=all', '/api/anomalies/counts']) {
@@ -121,9 +139,9 @@ describe('anomaly routes', () => {
     }
   });
 
-  test('while the pipeline imports, answers say computing', async () => {
+  test('until the start-up work is over, answers say computing', async () => {
     store.applyChanges(seed('a', 3));
-    vi.spyOn(pipeline, 'importing').mockReturnValue(true);
+    vi.spyOn(pipeline, 'startupDone').mockReturnValue(false);
     expect(((await get('/api/anomalies/counts')).json() as AnomalyCountsResponse).computing).toBe(true);
     expect(((await get('/api/sessions/a/anomalies')).json() as SessionAnomaliesResponse).computing).toBe(true);
   });

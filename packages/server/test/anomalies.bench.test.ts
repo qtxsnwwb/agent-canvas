@@ -128,13 +128,11 @@ describe.skipIf(!BENCH)('anomalies benchmark', () => {
       const base = storeStatsSource(store);
       const counting: StatsSource = { ...base, readSession: (id, stopped) => { reads++; return base.readSession(id, stopped); } };
 
-      // Start-up warm-up as start() runs it: stats (sharing reads with files), files, anomalies (its own reads; with
-      // AGENT_CANVAS_BENCH_SHARE=1 shared with the stats cache, as measured for the report).
+      // Start-up warm-up as start() runs it: stats (sharing reads with files), files, anomalies (its own reads).
       const stats = new StatsService(counting, { now: () => NOW });
       const files = new FilesService(counting, { now: () => NOW });
       const anomalies = new AnomaliesService(counting, { now: () => NOW });
       files.shareReadsWith(stats);
-      if (process.env.AGENT_CANVAS_BENCH_SHARE === '1') anomalies.shareReadsWith(stats.summaryCache());
       const warm = await measured(async () => {
         await stats.warm();
         await files.warm();
