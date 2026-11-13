@@ -10,6 +10,7 @@ import {
 } from '@agent-canvas/shared';
 import type { RawEvent } from '../store/store.js';
 import { claudeTouches, filesFields, filesPatch, nodeFiles } from './files.js';
+import { inputKeyFields, inputKeyOf, inputKeyPatch } from './input-key.js';
 import { parseHook, type HookDescription, type HookNodeEffect } from './hooks.js';
 import { summarize } from './summary.js';
 import {
@@ -348,6 +349,7 @@ export class Normalizer implements AgentNormalizer {
       childAgentId: null,
       endedAt: null,
       ...filesFields(nodeFiles(claudeTouches(spec.toolName, spec.input), state.session.cwd)),
+      ...inputKeyFields(inputKeyOf(spec.toolName, spec.input)),
     };
     state.nodes.set(id, node);
     state.toolInputs.set(id, spec.input);
@@ -1117,6 +1119,8 @@ export class Normalizer implements AgentNormalizer {
       };
       this.earlierStart(state, existing, str(record.timestamp), patch);
       Object.assign(patch, filesPatch(existing, nodeFiles(claudeTouches(c.name, c.input), state.session.cwd)));
+      // The record's input is the node's input from here on (it replaces the hook's in the detail): so is its key.
+      Object.assign(patch, inputKeyPatch(existing, inputKeyOf(c.name, c.input)));
       // An agent meta's description already owns the summary of a dispatch node.
       if (!pending) patch.summary = summary;
       state.nodes.set(id, { ...existing, ...patch });
@@ -1139,6 +1143,7 @@ export class Normalizer implements AgentNormalizer {
       messageId: meta.messageId,
       usage: meta.usage,
       ...filesFields(nodeFiles(claudeTouches(c.name, c.input), state.session.cwd)),
+      ...inputKeyFields(inputKeyOf(c.name, c.input)),
     };
     this.emitNode(state, record.uuid, node, { input: c.input }, agentId, true, changes);
     const agentMeta = state.agentMetas.get(c.toolUseId);

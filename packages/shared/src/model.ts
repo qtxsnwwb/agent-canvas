@@ -47,6 +47,13 @@ export interface GraphNode {
   files?: FileTouch[];
   /** True when the call named more files than MAX_FILES_PER_NODE and the rest were dropped. */
   filesTruncated?: boolean;
+  /**
+   * Only tool and subagent (dispatch) nodes: fingerprint of the call — a hash (16 hex characters) of the tool name and
+   * the full input in canonical form (object keys sorted), following the node's latest input. Two calls with the same
+   * toolName and inputKey are "the same call". Absent when the input is missing and on nodes derived before it existed.
+   * Never carries content.
+   */
+  inputKey?: string;
 }
 
 /** What a tool call did to a file. `write` is "created or overwrote" (the tool does not say which). */

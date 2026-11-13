@@ -1,6 +1,7 @@
 import type { NodeDetail, Usage } from '@agent-canvas/shared';
 import { promptTitle } from './codex.js';
 import { cursorTouches, type RawTouch } from './files.js';
+import { inputKeyOf } from './input-key.js';
 import { summarize } from './summary.js';
 
 /*
@@ -121,6 +122,8 @@ export interface BubbleView {
   resultAgentId: string | null;
   /** The files the call names, as its params wrote them (resolved against the composer's cwd when derived). */
   fileTouches: RawTouch[];
+  /** Tool / task bubbles: the call's input fingerprint (inputKeyOf of the tool name and the params as derived). */
+  inputKey?: string;
 }
 
 /** `params` keys naming a call's main argument for tools without their own entry (camelCase and snake_case). */
@@ -323,6 +326,8 @@ export function bubbleView(rec: Obj, bubbleId: string, nodeId: string): { view: 
       view.toolCallId = str(t.toolCallId);
       view.summary = toolSummary(name, input);
       view.fileTouches = cursorTouches(name, input);
+      const key = inputKeyOf(name, input);
+      if (key !== undefined) view.inputKey = key;
       view.rejected = isObject(output) && output.rejected === true;
       if (name === TERMINAL_TOOL && isObject(output)) view.exitCode = num(output.exitCode);
       if (kind === 'subagent') {

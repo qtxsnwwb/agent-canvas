@@ -15,6 +15,7 @@ import {
 } from './cursor-bubbles.js';
 import { parseCursorHook } from './cursor-hooks.js';
 import { filesFields, filesPatch, nodeFiles } from './files.js';
+import { inputKeyFields, inputKeyPatch } from './input-key.js';
 import type { AgentNormalizer, BatchItem, BatchResult, NormalizeResult } from './types.js';
 
 /*
@@ -352,6 +353,7 @@ function nodePatch(old: GraphNode, next: GraphNode): Partial<GraphNode> {
   const nu = next.usage;
   if ((ou === null) !== (nu === null) || (ou !== null && nu !== null && (ou.inputTokens !== nu.inputTokens || ou.outputTokens !== nu.outputTokens))) patch.usage = nu;
   Object.assign(patch, filesPatch(old, next));
+  Object.assign(patch, inputKeyPatch(old, next.inputKey));
   return patch;
 }
 
@@ -984,6 +986,7 @@ export class CursorNormalizer implements AgentNormalizer {
           usage: b.usage,
           systemSubtype: b.kind === 'notification' ? 'task_notification' : null,
           ...filesFields(nodeFiles(b.fileTouches, cwd)),
+          ...inputKeyFields(b.inputKey),
         },
       });
       prevNode = b.nodeId;

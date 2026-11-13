@@ -8,6 +8,7 @@ import {
 } from '@agent-canvas/shared';
 import type { RawEvent } from '../store/store.js';
 import { parseCodexHook, type CodexHook } from './codex-hooks.js';
+import { inputKeyFields, inputKeyOf } from './input-key.js';
 import { codexCallTouches, fileChangeTouches, filesFields, filesPatch, mergeFiles, nodeFiles, type NodeFiles } from './files.js';
 import { summarize } from './summary.js';
 import type { AgentNormalizer, NormalizeResult } from './types.js';
@@ -1015,6 +1016,7 @@ export class CodexNormalizer implements AgentNormalizer {
         toolUseId: callId,
         status: 'running',
         files: nodeFiles(codexCallTouches(toolName, input), thread.cwd),
+        inputKey: inputKeyOf(toolName, input),
         detail: { input },
       },
       true,
@@ -1242,6 +1244,7 @@ export class CodexNormalizer implements AgentNormalizer {
       durationMs?: number | null;
       systemSubtype?: string;
       files?: NodeFiles;
+      inputKey?: string;
     },
     isCall = false,
   ): string | null {
@@ -1292,6 +1295,7 @@ export class CodexNormalizer implements AgentNormalizer {
       usage: null,
       systemSubtype: spec.systemSubtype ?? null,
       ...filesFields(spec.files ?? {}),
+      ...inputKeyFields(spec.inputKey),
     };
     const sid = state.session.id;
     state.nodes.set(id, placed);

@@ -130,7 +130,7 @@ describe('cursor origin', () => {
   });
 
   test('NORMALIZER_VERSION bumped for the cursor origin (and once for the fix wave)', () => {
-    expect(NORMALIZER_VERSION).toBe(30); // 29: files fix round (patch-running tools only, cut Cursor params, turn cwd); 30: compact edge table
+    expect(NORMALIZER_VERSION).toBe(31); // 29: files fix round (patch-running tools only, cut Cursor params, turn cwd); 30: compact edge table; 31: inputKey
   });
 
   test('without a cursor normalizer (factory null) a cursor raw event yields no changes', () => {
