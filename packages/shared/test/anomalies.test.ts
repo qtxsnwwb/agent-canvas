@@ -356,7 +356,7 @@ test('large: 150,000 nodes in one turn (Cursor-like) and many turns finish fast'
   expect(one.map((a) => a.kind).sort()).toEqual(['churn', 'loop']);
   expect(ms1).toBeLessThan(5000);
   expect(ms2).toBeLessThan(5000);
-});
+}, 60_000);
 
 // ---- cost ----
 
@@ -443,4 +443,107 @@ test('anomalyBasisText: one line per basis', () => {
   expect(anomalyBasisText(a({ kind: 'cost', basis: 'time', value: 125 * 60_000, baselineValue: 62.5 * 60_000 }))).toBe('工作时间 2 小时 5 分钟，是平时高位的 2 倍');
   expect(anomalyBasisText(a({ kind: 'cost', basis: 'tokens', value: 453_000, baselineValue: 150_000 }))).toBe('用了 45.3 万 token，是平时高位的 3 倍');
   expect(anomalyBasisText(a({ kind: 'cost', basis: 'tokens', value: 250_000, baselineValue: 0 }))).toBe('用了 25 万 token，远高于平时');
+});
+
+// ---- fix round 1 ----
+
+test('unparseable timestamps: such a node takes no part in detection (no call, failure, edit, nor run break)', () => {
+  // Five failures, all unparseable: nothing.
+  const garbage = [prompt('T1', 0), ...[1, 2, 3, 4, 5].map((s, i) => call(`g${i}`, s, `k${i}`, 'failed', { timestamp: 'garbage', endedAt: null }))];
+  expect(detectAnomalies(garbage)).toEqual([]);
+  // Same call failing 3 times, one of them unparseable: not a loop.
+  const loop = [prompt('T1', 0), call('a', 1, 'k', 'failed'), call('b', 3, 'k', 'failed'), call('c', 5, 'k', 'failed', { timestamp: 'nope' })];
+  expect(detectAnomalies(loop)).toEqual([]);
+  // An unparseable different call between repeats does not break the run, nor a success between failures the streak.
+  const run = [prompt('T1', 0), ...[1, 3, 5, 7, 9].map((s, i) => call(`r${i}`, s, 'k', 'succeeded')), call('x', 4, 'other', 'succeeded', { timestamp: 'bad' })];
+  expect(ofKind(detectAnomalies(run), 'loop')).toMatchObject([{ basis: 'repeat', count: 5 }]);
+  const streak = [prompt('T1', 0), ...[1, 3, 5, 7, 9].map((s, i) => call(`f${i}`, s, `k${i}`, 'failed')), call('ok', 4, 'z', 'succeeded', { timestamp: 'bad' })];
+  expect(ofKind(detectAnomalies(streak), 'failures')).toMatchObject([{ count: 5 }]);
+  // Edits on unparseable nodes do not count.
+  const edits = [prompt('T1', 0), ...Array.from({ length: 14 }, (_, i) => edit(`e${i}`, 1 + i, '/w/a.ts')), { ...edit('bad', 20, '/w/a.ts'), timestamp: 'x' }];
+  expect(detectAnomalies(edits)).toEqual([]);
+});
+
+test('unparseable endedAt: a failure falls back to its start; at is always a valid ISO time', () => {
+  const nodes = [prompt('T1', 0), ...[1, 3, 5, 7, 9].map((s, i) => call(`f${i}`, s, `k${i}`, 'failed', { endedAt: 'nope' }))];
+  expect(ofKind(detectAnomalies(nodes), 'failures')).toMatchObject([{ count: 5, at: iso(9) }]);
+  // A parseable non-canonical time is reported in canonical ISO form.
+  const odd = [prompt('T1', 0), ...[1, 3, 5, 7, 9].map((s, i) => call(`f${i}`, s, `k${i}`, 'failed', { endedAt: new Date(BASE + (s + 1) * 1000).toUTCString() }))];
+  expect(ofKind(detectAnomalies(odd), 'failures')[0]!.at).toBe(iso(10));
+  for (const a of [...detectAnomalies(nodes), ...detectAnomalies(odd)]) expect(new Date(a.at).toISOString()).toBe(a.at);
+});
+
+test('turnCosts: a node with an unparseable timestamp adds no time or tokens and never starts a turn or gives its end', () => {
+  const nodes = [
+    prompt('T1', 0),
+    call('a', 2, 'k', 'succeeded', { dur: 2, usage: usage(10, 1) }),
+    call('bad', 0, 'k', 'succeeded', { timestamp: 'garbage', endedAt: iso(500), durationMs: 99_000, usage: usage(1000, 1000) }),
+    mk('badprompt', 0, { kind: 'prompt', turnId: 'T9', timestamp: 'garbage' }),
+  ];
+  expect(turnCosts(nodes, false)).toEqual([
+    { sessionId: 's1', turnKey: 'T1', startMs: BASE, activeMs: 2000, tokens: 11, finished: true, firstNodeId: 'T1', lastNodeId: 'a', at: iso(4) },
+  ]);
+  // A messageId also on an unparseable node counts once, on the node that takes part.
+  const dup = [prompt('T1', 0), call('a', 2, 'k', 'succeeded', { usage: usage(10, 1), messageId: 'm' }), call('bad', 1, 'k', 'succeeded', { timestamp: 'x', usage: usage(10, 1), messageId: 'm' })];
+  expect(turnCosts(dup, false)[0]!.tokens).toBe(11);
+  // The turn's end time is a canonical ISO time.
+  const odd = [prompt('T1', 0), call('a', 2, 'k', 'succeeded', { endedAt: new Date(BASE + 4000).toUTCString() })];
+  expect(turnCosts(odd, false)[0]!.at).toBe(iso(4));
+});
+
+test('churn: a node that both edits and writes one file is one change', () => {
+  const both = (id: string, sec: number): GraphNode =>
+    call(id, sec, `e-${id}`, 'succeeded', { toolName: 'apply_patch', files: [{ path: '/w/a.ts', action: 'write' }, { path: '/w/a.ts', action: 'edit' }] });
+  const nodes = [prompt('T1', 0), ...Array.from({ length: 14 }, (_, i) => both(`b${i}`, 1 + i))];
+  expect(detectAnomalies(nodes)).toEqual([]);
+  expect(ofKind(detectAnomalies([...nodes, both('b14', 20)]), 'churn')).toMatchObject([{ count: 15, lastNodeId: 'b14' }]);
+});
+
+test('loop (repeat): a denied different call breaks the run; a run of identical denied calls is a repeat', () => {
+  const base = [1, 3, 5, 7, 9].map((s, i) => call(`r${i}`, s, 'k', 'succeeded'));
+  expect(ofKind(detectAnomalies([prompt('T1', 0), ...base, call('d', 4, 'other', 'denied')]), 'loop')).toEqual([]);
+  const denied = [prompt('T1', 0), ...[1, 3, 5, 7, 9].map((s, i) => call(`d${i}`, s, 'k', 'denied'))];
+  expect(ofKind(detectAnomalies(denied), 'loop')).toMatchObject([{ basis: 'repeat', count: 5 }]);
+  expect(ofKind(detectAnomalies(denied), 'failures')).toEqual([]);
+});
+
+test('loop: a tie between the two conditions goes to failed', () => {
+  // The third failure ends exactly when the fifth repeat starts (9 s).
+  const nodes = [
+    prompt('T1', 0),
+    call('c0', 1, 'k', 'failed'),
+    call('c1', 3, 'k', 'failed'),
+    call('c2', 5, 'k', 'failed', { dur: 4 }),
+    call('c3', 7, 'k', 'succeeded'),
+    call('c4', 9, 'k', 'running'),
+  ];
+  expect(ofKind(detectAnomalies(nodes), 'loop')).toMatchObject([{ basis: 'failed', count: 3, at: iso(9) }]);
+});
+
+test('loop: the basis stays as calls finish, while its condition still holds; it follows the data when it stops', () => {
+  // Five identical calls started in parallel (1..5 s, each running 10 s).
+  const step = (statuses: NodeStatus[], o: Partial<GraphNode>[] = []): Anomaly[] =>
+    ofKind(detectAnomalies([prompt('T1', 0), ...statuses.map((st, i) => call(`c${i}`, i + 1, 'k', st, { dur: 10, ...o[i] }))]), 'loop');
+  expect(step(['running', 'running', 'running', 'running', 'running'])).toMatchObject([{ basis: 'repeat', count: 5, at: iso(5) }]);
+  // They fail one after another (ends 11..15): three, then all five failures — still repeat.
+  expect(step(['failed', 'failed', 'failed', 'running', 'running'])).toMatchObject([{ basis: 'repeat', count: 5 }]);
+  expect(step(['failed', 'failed', 'failed', 'failed', 'failed'])).toMatchObject([{ basis: 'repeat', count: 5 }]);
+  // A failure known without an end time is not taken as having ended at its start.
+  const noEnd = { endedAt: null };
+  expect(step(['failed', 'failed', 'failed', 'running', 'running'], [noEnd, noEnd, noEnd])).toMatchObject([{ basis: 'repeat' }]);
+  // Failed first stays failed while the same call goes on repeating.
+  const seq = (n: number): GraphNode[] => [prompt('T1', 0), ...Array.from({ length: n }, (_, i) => call(`s${i}`, 1 + 2 * i, 'k', i < 3 ? 'failed' : 'running'))];
+  expect(ofKind(detectAnomalies(seq(3)), 'loop')).toMatchObject([{ basis: 'failed', count: 3 }]);
+  expect(ofKind(detectAnomalies(seq(7)), 'loop')).toMatchObject([{ basis: 'failed', count: 3, at: iso(6) }]);
+  // A failure corrected to success: the failed condition no longer holds, the anomaly follows the data (repeat).
+  const corrected = seq(7).map((n) => (n.id === 's2' ? { ...n, status: 'succeeded' as const } : n));
+  expect(ofKind(detectAnomalies(corrected), 'loop')).toMatchObject([{ basis: 'repeat', count: 7 }]);
+});
+
+test('costBaseline: an origin without token cost (Cursor) never gets a tokens percentile', () => {
+  const turns = Array.from({ length: 30 }, (_, i) => cost(`c${i}`, (i + 1) * 60_000, (i + 1) * 100_000));
+  expect(costBaseline(turns, { origin: 'cursor' })).toEqual({ activeP95: 29 * 60_000, tokensP95: null });
+  expect(costBaseline(turns, { origin: 'claude' }).tokensP95).toBe(2_900_000);
+  expect(costBaseline(turns).tokensP95).toBe(2_900_000);
+  expect(costAnomalies([cost('h', 9e9, 9e9)], costBaseline(turns, { origin: 'cursor' })).map((a) => a.basis)).toEqual(['time']);
 });

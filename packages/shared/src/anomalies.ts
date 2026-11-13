@@ -117,10 +117,16 @@ interface Item {
   ms: number;
 }
 
-/** Nodes with their start (unparseable: 0), by start then id — the one sort of a detection. */
+/**
+ * Nodes with their start, by start then id — the one sort of a detection. A node whose timestamp cannot be parsed is
+ * left out: it cannot be judged (spec 7), so it takes no part in turns, detection or costs.
+ */
 function sortedItems(nodes: Iterable<GraphNode>): Item[] {
   const items: Item[] = [];
-  for (const node of nodes) items.push({ node, ms: parseMs(node.timestamp) ?? 0 });
+  for (const node of nodes) {
+    const ms = parseMs(node.timestamp);
+    if (ms !== null) items.push({ node, ms });
+  }
   items.sort((a, b) => a.ms - b.ms || cmpId(a.node.id, b.node.id));
   return items;
 }
@@ -170,7 +176,7 @@ function turnsOfItems(items: Item[]): DetectionTurn[] {
  * The detection turns of a session (spec 3.1): per thread (agentId; main = null). The main thread's turns are exactly
  * groupTurns'; a subagent thread's follow the same rule, a prompt of that thread without a turnId also starting a turn
  * (a thread without any is one turn, `<agentId>:__prelude__`). A dispatch node belongs to the thread that dispatched it
- * (its agentId). Ordered by start, then key.
+ * (its agentId). Nodes whose timestamp cannot be parsed are left out. Ordered by start, then key.
  */
 export function detectionTurns(nodes: Iterable<GraphNode>): DetectionTurn[] {
   return turnsOfItems(sortedItems(nodes));
@@ -180,8 +186,10 @@ export function detectionTurns(nodes: Iterable<GraphNode>): DetectionTurn[] {
 
 interface Found {
   basis: AnomalyBasis;
+  /** When the threshold was reached (Anomaly.at). */
   atMs: number;
-  at: string;
+  /** The time used to tell which loop condition came first (atMs, or Infinity when the end is not known). */
+  cmpMs: number;
   count: number;
   first: GraphNode;
   last: GraphNode;
@@ -189,34 +197,44 @@ interface Found {
   path?: string;
 }
 
-const endMsOf = (n: GraphNode, startMs: number): number => parseMs(n.endedAt) ?? startMs;
-const endIsoOf = (n: GraphNode): string => (n.endedAt !== null && parseMs(n.endedAt) !== null ? n.endedAt : n.timestamp);
 const callKey = (n: GraphNode): string | null => (n.inputKey === undefined ? null : `${n.toolName ?? ''}\u0000${n.inputKey}`);
 
 interface Call {
   node: GraphNode;
   ms: number;
+  /** endedAt, null when it does not parse. */
+  knownEndMs: number | null;
+  /** knownEndMs, else the start. */
   endMs: number;
 }
 
-/** loop, basis failed: the first call (in end order) to fail LOOP_FAILED_MIN times; count = its failures in the turn. */
-function loopFailed(byEnd: Call[]): Found | null {
+/**
+ * loop, basis failed: the first call (in end order) to fail LOOP_FAILED_MIN times; count = its failures in the turn.
+ * A failure without a usable end time comes after every failure with one (it is not taken as having ended at its
+ * start, which would move the condition back in time once its status arrives): cmpMs is then Infinity and `at` its
+ * start.
+ */
+function loopFailed(byStart: Call[]): Found | null {
+  const failures = byStart.filter((c) => c.node.status === 'failed' && callKey(c.node) !== null);
+  failures.sort(
+    (a, b) => (a.knownEndMs ?? Infinity) - (b.knownEndMs ?? Infinity) || a.ms - b.ms || cmpId(a.node.id, b.node.id),
+  );
   const counts = new Map<string, { count: number; first: GraphNode; last: GraphNode }>();
-  let hit: { key: string; atMs: number; at: string } | null = null;
-  for (const c of byEnd) {
-    if (c.node.status !== 'failed') continue;
-    const key = callKey(c.node);
-    if (key === null) continue;
+  let hit: { key: string; c: Call } | null = null;
+  for (const c of failures) {
+    const key = callKey(c.node)!;
     const e = counts.get(key);
     if (e) {
       e.count++;
       e.last = c.node;
     } else counts.set(key, { count: 1, first: c.node, last: c.node });
-    if (hit === null && counts.get(key)!.count === LOOP_FAILED_MIN) hit = { key, atMs: c.endMs, at: endIsoOf(c.node) };
+    if (hit === null && counts.get(key)!.count === LOOP_FAILED_MIN) hit = { key, c };
   }
   if (hit === null) return null;
   const e = counts.get(hit.key)!;
-  return { basis: 'failed', atMs: hit.atMs, at: hit.at, count: e.count, first: e.first, last: e.last, toolName: e.first.toolName };
+  const atMs = hit.c.knownEndMs ?? hit.c.ms;
+  const cmpMs = hit.c.knownEndMs ?? Infinity;
+  return { basis: 'failed', atMs, cmpMs, count: e.count, first: e.first, last: e.last, toolName: e.first.toolName };
 }
 
 /** loop, basis repeat: the first run (in start order) of the same call reaching LOOP_REPEAT_MIN; count = its length. */
@@ -235,7 +253,7 @@ function loopRepeat(byStart: Call[]): Found | null {
       while (end + 1 < byStart.length && callKey(byStart[end + 1]!.node) === key) end++;
       const at = byStart[i]!;
       const first = byStart[runStart]!.node;
-      return { basis: 'repeat', atMs: at.ms, at: at.node.timestamp, count: end - runStart + 1, first, last: byStart[end]!.node, toolName: first.toolName };
+      return { basis: 'repeat', atMs: at.ms, cmpMs: at.ms, count: end - runStart + 1, first, last: byStart[end]!.node, toolName: first.toolName };
     }
   }
   return null;
@@ -260,7 +278,7 @@ function failureStreak(byEnd: Call[]): Found | null {
     streak = [];
   }
   if (hit === null) return null;
-  return { basis: 'streak', atMs: hit.endMs, at: endIsoOf(hit.node), count: streak.length, first: streak[0]!.node, last: streak[streak.length - 1]!.node };
+  return { basis: 'streak', atMs: hit.endMs, cmpMs: hit.endMs, count: streak.length, first: streak[0]!.node, last: streak[streak.length - 1]!.node };
 }
 
 interface FileCount {
@@ -271,12 +289,12 @@ interface FileCount {
   /** Order in which files reached CHURN_MIN (-1: not yet). */
   reached: number;
   atMs: number;
-  at: string;
 }
 
 /**
- * churn: per file (pathKey), the edit / write touches of calls whose status is not failed / denied, in start order; the
- * file with the most reaching CHURN_MIN (a tie: the one that reached it first).
+ * churn: per file (pathKey), the calls (status not failed / denied) that edit or write it, in start order — a call
+ * counts once per file, even when it both edits and writes it; the file with the most reaching CHURN_MIN (a tie: the
+ * one that reached it first).
  */
 function churn(byStart: Call[]): Found | null {
   const files = new Map<string, FileCount>();
@@ -284,17 +302,21 @@ function churn(byStart: Call[]): Found | null {
   for (const c of byStart) {
     const n = c.node;
     if (!n.files || n.files.length === 0 || n.status === 'failed' || n.status === 'denied') continue;
+    const seen = n.files.length > 1 ? new Set<string>() : null;
     for (const f of n.files) {
       if (f.action !== 'edit' && f.action !== 'write') continue;
       const key = pathKey(f.path);
+      if (seen !== null) {
+        if (seen.has(key)) continue;
+        seen.add(key);
+      }
       let e = files.get(key);
-      if (!e) files.set(key, (e = { path: f.path, count: 0, first: n, last: n, reached: -1, atMs: 0, at: '' }));
+      if (!e) files.set(key, (e = { path: f.path, count: 0, first: n, last: n, reached: -1, atMs: 0 }));
       e.count++;
       e.last = n;
       if (e.count === CHURN_MIN) {
         e.reached = seq++;
         e.atMs = c.ms;
-        e.at = n.timestamp;
       }
     }
   }
@@ -304,7 +326,7 @@ function churn(byStart: Call[]): Found | null {
     if (best === null || e.count > best.count || (e.count === best.count && e.reached < best.reached)) best = e;
   }
   if (best === null) return null;
-  return { basis: 'edits', atMs: best.atMs, at: best.at, count: best.count, first: best.first, last: best.last, path: best.path };
+  return { basis: 'edits', atMs: best.atMs, cmpMs: best.atMs, count: best.count, first: best.first, last: best.last, path: best.path };
 }
 
 function toAnomaly(kind: AnomalyKind, sessionId: string, turn: DetectionTurn, f: Found): Anomaly {
@@ -318,7 +340,7 @@ function toAnomaly(kind: AnomalyKind, sessionId: string, turn: DetectionTurn, f:
     count: f.count,
     firstNodeId: f.first.id,
     lastNodeId: f.last.id,
-    at: f.at,
+    at: new Date(f.atMs).toISOString(),
   };
   if (f.toolName !== undefined) a.toolName = f.toolName;
   if (f.path !== undefined) a.path = f.path;
@@ -332,7 +354,9 @@ function toAnomaly(kind: AnomalyKind, sessionId: string, turn: DetectionTurn, f:
  * LOOP_REPEAT_MIN times in a row in start order (any status); when both hold, the one reached first (a tie: failed).
  * failures: FAILURE_STREAK_MIN calls in a row, in the order they finished (endedAt, else start), ending failed —
  * denied / running / awaiting-permission calls are skipped, a success breaks the streak; the first such streak.
- * churn: see churn(). Ordered by `at` (ms), then id. O(n log n).
+ * churn: see churn(). A node whose timestamp cannot be parsed takes no part; an unparseable endedAt counts as unknown
+ * (the start stands in for it, except in telling the loop conditions apart, see loopFailed). `at` is always an ISO
+ * time (toISOString). Ordered by `at`, then id. O(n log n).
  */
 export function detectAnomalies(nodes: Iterable<GraphNode>): Anomaly[] {
   const items = sortedItems(nodes);
@@ -341,15 +365,16 @@ export function detectAnomalies(nodes: Iterable<GraphNode>): Anomaly[] {
     const byStart: Call[] = [];
     for (const n of turn.nodes) {
       if (!isCall(n)) continue;
-      const ms = parseMs(n.timestamp) ?? 0;
-      byStart.push({ node: n, ms, endMs: endMsOf(n, ms) });
+      const ms = parseMs(n.timestamp)!; // sortedItems kept parseable ones only
+      const knownEndMs = parseMs(n.endedAt);
+      byStart.push({ node: n, ms, knownEndMs, endMs: knownEndMs ?? ms });
     }
     if (byStart.length === 0) continue;
     const byEnd = [...byStart].sort((a, b) => a.endMs - b.endMs || a.ms - b.ms || cmpId(a.node.id, b.node.id));
     const sessionId = byStart[0]!.node.sessionId;
-    const failed = loopFailed(byEnd);
+    const failed = loopFailed(byStart);
     const repeat = loopRepeat(byStart);
-    const loop = failed !== null && (repeat === null || failed.atMs <= repeat.atMs) ? failed : repeat;
+    const loop = failed !== null && (repeat === null || failed.cmpMs <= repeat.cmpMs) ? failed : repeat;
     if (loop !== null) out.push({ a: toAnomaly('loop', sessionId, turn, loop), atMs: loop.atMs });
     const streak = failureStreak(byEnd);
     if (streak !== null) out.push({ a: toAnomaly('failures', sessionId, turn, streak), atMs: streak.atMs });
@@ -368,7 +393,8 @@ const ACTIVE_KINDS: ReadonlySet<GraphNode['kind']> = new Set<GraphNode['kind']>(
  * rule (a messageId counts once per session), applied to the nodes by time then id so the result does not depend on
  * the input order; a counted subagent-internal node is attributed to the turn that dispatched its agent (the earliest
  * dispatch node naming it, followed up through nested agents), else to the latest turn started at or before it, else
- * the first turn — the stats page's rule.
+ * the first turn — the stats page's rule. A node whose timestamp cannot be parsed is left out (no time, no tokens, never
+ * a turn's start or end); `at` is an ISO time (toISOString).
  */
 export function turnCosts(nodes: Iterable<GraphNode>, sessionRunning: boolean): TurnCost[] {
   const items = sortedItems(nodes);
@@ -377,16 +403,12 @@ export function turnCosts(nodes: Iterable<GraphNode>, sessionRunning: boolean): 
   const turnOfMain = new Map<string, number>();
   const costs: TurnCost[] = turns.map((t, i) => {
     let activeMs = 0;
-    let atMs = -Infinity;
-    let at = t.nodes[0]!.timestamp;
+    let atMs = t.startMs;
     for (const n of t.nodes) {
       turnOfMain.set(n.id, i);
       if (ACTIVE_KINDS.has(n.kind) && typeof n.durationMs === 'number' && Number.isFinite(n.durationMs) && n.durationMs > 0) activeMs += n.durationMs;
-      const end = parseMs(n.endedAt) ?? parseMs(n.timestamp);
-      if (end !== null && end > atMs) {
-        atMs = end;
-        at = endIsoOf(n);
-      }
+      const end = parseMs(n.endedAt) ?? parseMs(n.timestamp)!;
+      if (end > atMs) atMs = end;
     }
     return {
       sessionId: t.nodes[0]!.sessionId,
@@ -397,7 +419,7 @@ export function turnCosts(nodes: Iterable<GraphNode>, sessionRunning: boolean): 
       finished: i < turns.length - 1 || !sessionRunning,
       firstNodeId: t.nodes[0]!.id,
       lastNodeId: t.nodes[t.nodes.length - 1]!.id,
-      at,
+      at: new Date(atMs).toISOString(),
     };
   });
 
@@ -441,11 +463,18 @@ function nearestRank(sorted: number[], p: number): number | null {
 }
 
 /**
+ * Origins whose turns are never judged by tokens (spec 3.4: Cursor only by active time — its token counts are partial).
+ */
+export const COST_NO_TOKEN_ORIGINS: readonly Origin[] = ['cursor'];
+
+/**
  * The 95th percentiles (nearest rank) of the finished turns' active time and tokens (unfinished turns are left out);
  * tokens over the turns with tokens > 0 only. Each null when fewer than COST_MIN_TURNS turns qualify. Grouping the
- * turns (by project and origin) is the caller's.
+ * turns (by project and origin) is the caller's; `options.origin` is the group's origin: for one in
+ * COST_NO_TOKEN_ORIGINS tokensP95 is always null, so costAnomalies never judges its tokens.
  */
-export function costBaseline(costs: Iterable<TurnCost>): CostBaseline {
+export function costBaseline(costs: Iterable<TurnCost>, options: { origin?: Origin } = {}): CostBaseline {
+  const judgeTokens = options.origin === undefined || !COST_NO_TOKEN_ORIGINS.includes(options.origin);
   const active: number[] = [];
   const tokens: number[] = [];
   for (const c of costs) {
@@ -457,7 +486,7 @@ export function costBaseline(costs: Iterable<TurnCost>): CostBaseline {
   tokens.sort((a, b) => a - b);
   return {
     activeP95: active.length >= COST_MIN_TURNS ? nearestRank(active, 0.95) : null,
-    tokensP95: tokens.length >= COST_MIN_TURNS ? nearestRank(tokens, 0.95) : null,
+    tokensP95: judgeTokens && tokens.length >= COST_MIN_TURNS ? nearestRank(tokens, 0.95) : null,
   };
 }
 
