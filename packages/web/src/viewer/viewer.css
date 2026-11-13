@@ -1,0 +1,28 @@
+/* The exported file's page: the banner on top, the session page filling the rest (there is no app header). */
+.viewer { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+.viewer .session-page { flex: 1; min-height: 0; height: auto; }
+
+.viewer-banner {
+  flex: none; padding: 8px 20px; border-bottom: 2px solid var(--edge); background: var(--paper-deep);
+  display: flex; flex-direction: column; gap: 4px; font-size: 12px; overflow-wrap: anywhere;
+}
+.viewer-headline { margin: 0; font: 800 14px/1.4 var(--font-fun); }
+.viewer-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.viewer-mask { font-weight: 700; }
+.viewer-chip {
+  padding: 0 8px; border: 2px solid var(--edge); border-radius: 999px; background: var(--card); font-weight: 700;
+  white-space: nowrap;
+}
+.viewer-options { color: var(--ink-soft); }
+.viewer-caution { margin: 0; color: #a2361f; font-weight: 700; }
+
+.viewer-message {
+  box-sizing: border-box; min-height: 100vh; padding: 48px 20px; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; text-align: center; gap: 8px;
+}
+.viewer-message h1 { margin: 0; font: 800 22px/1.3 var(--font-fun); }
+.viewer-message p { margin: 0; max-width: 36em; }
+
+@media (max-width: 600px) {
+  .viewer-banner { padding: 6px 12px; }
+}
