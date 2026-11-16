@@ -13,6 +13,9 @@ export const NORMALIZER_FACTORIES: NormalizerFactories = {
   claude: () => new Normalizer(),
   codex: () => new CodexNormalizer(),
   cursor: () => new CursorNormalizer(),
+  gemini: null,
+  grok: null,
+  copilot: null,
 };
 
 const originOf = (event: RawEvent): Origin => event.origin ?? 'claude';

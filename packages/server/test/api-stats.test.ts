@@ -97,7 +97,7 @@ describe('GET /api/stats', () => {
   });
 
   test('an unknown range or origin is a 400 with a short message', async () => {
-    for (const q of ['range=1y', 'origin=gemini', 'range=7d&range=30d']) {
+    for (const q of ['range=1y', 'origin=aider', 'range=7d&range=30d']) {
       const res = await get(`/api/stats?${q}`);
       expect(res.statusCode).toBe(400);
       expect(typeof res.json().error).toBe('string');

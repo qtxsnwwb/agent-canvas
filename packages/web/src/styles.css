@@ -136,6 +136,7 @@ pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
 .origin-claude { --origin-bg: var(--claude-soft); --origin-edge: var(--claude-edge); --origin-fg: var(--claude-ink); }
 .origin-codex { --origin-bg: var(--codex-soft); --origin-edge: var(--codex-edge); --origin-fg: var(--codex-ink); }
 .origin-cursor { --origin-bg: var(--cursor-soft); --origin-edge: var(--cursor-edge); --origin-fg: var(--cursor-ink); }
+.origin-other { --origin-bg: var(--line); --origin-edge: var(--edge-strong); --origin-fg: var(--ink-soft); }
 .origin-icon { flex: none; }
 .origin-badge-dot { padding: 0; width: 18px; height: 18px; justify-content: center; }
 .origin-dots { display: inline-flex; gap: 4px; }

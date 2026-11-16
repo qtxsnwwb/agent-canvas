@@ -13,6 +13,15 @@ export interface Config {
    * variable set to the empty string). Only ever opened read-only.
    */
   cursorDbPath: string | null;
+  /**
+   * Gemini CLI's directory (`AGENT_CANVAS_GEMINI_DIR`, else `$GEMINI_CLI_HOME/.gemini`, else `~/.gemini`); null =
+   * Gemini CLI is not read (the variable set to the empty string). See resolveToolDir.
+   */
+  geminiDir: string | null;
+  /** Grok Build's directory (`AGENT_CANVAS_GROK_DIR`, else `$GROK_HOME`, else `~/.grok`); null = not read. */
+  grokDir: string | null;
+  /** Copilot CLI's directory (`AGENT_CANVAS_COPILOT_DIR`, else `$COPILOT_HOME`, else `~/.copilot`); null = not read. */
+  copilotDir: string | null;
   dataDir: string;
   dbPath: string;
   host: '127.0.0.1';
@@ -46,6 +55,27 @@ export function defaultCursorDbPath(
   return path.posix.join(home, '.config', ...tail);
 }
 
+/**
+ * A tool directory, first hit wins: the explicit override (null included) → our variable `ownVar` (the empty string:
+ * null, the tool is not read) → the tool's own variable `toolVar` (unset or empty: skipped), through `fromToolVar` →
+ * `fallback` (under the home directory).
+ */
+function resolveToolDir(
+  override: string | null | undefined,
+  env: NodeJS.ProcessEnv,
+  ownVar: string,
+  toolVar: string,
+  fromToolVar: (value: string) => string,
+  fallback: string,
+): string | null {
+  if (override !== undefined) return override;
+  const own = env[ownVar];
+  if (own !== undefined) return own === '' ? null : own;
+  const tool = env[toolVar];
+  if (tool !== undefined && tool !== '') return fromToolVar(tool);
+  return fallback;
+}
+
 /** Explicit overrides win over environment variables, which win over defaults. */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env, overrides: Partial<Config> = {}): Config {
   const dataDir = overrides.dataDir ?? env.AGENT_CANVAS_DATA_DIR ?? path.join(os.homedir(), '.agent-canvas');
@@ -68,6 +98,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, overrides: Part
         : cursorEnv === ''
           ? null
           : cursorEnv;
+  const home = os.homedir();
+  const geminiDir = resolveToolDir(overrides.geminiDir, env, 'AGENT_CANVAS_GEMINI_DIR', 'GEMINI_CLI_HOME', (v) => path.join(v, '.gemini'), path.join(home, '.gemini'));
+  const grokDir = resolveToolDir(overrides.grokDir, env, 'AGENT_CANVAS_GROK_DIR', 'GROK_HOME', (v) => v, path.join(home, '.grok'));
+  const copilotDir = resolveToolDir(overrides.copilotDir, env, 'AGENT_CANVAS_COPILOT_DIR', 'COPILOT_HOME', (v) => v, path.join(home, '.copilot'));
   return {
     host: '127.0.0.1',
     port: 4317,
@@ -79,6 +113,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, overrides: Part
     projectsDir,
     codexSessionsDir,
     cursorDbPath,
+    geminiDir,
+    grokDir,
+    copilotDir,
     dataDir,
     dbPath: overrides.dbPath ?? path.join(dataDir, 'data.db'),
   };

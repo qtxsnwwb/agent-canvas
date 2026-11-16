@@ -457,6 +457,7 @@ function changeSessionId(c: Change): string {
       return c.edge.sessionId;
     case 'node_updated':
     case 'edge_removed':
+    case 'node_removed':
       return c.sessionId;
   }
 }
@@ -683,12 +684,14 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   const selectNodeRowid = db.prepare(`SELECT rowid FROM node WHERE session_id = ? AND id = ?`).pluck();
   const selectNodeRow = db.prepare(`SELECT rowid, body FROM node WHERE session_id = ? AND id = ?`);
   const updateNode = db.prepare(`UPDATE node SET body = ? WHERE session_id = ? AND id = ?`);
+  const deleteNode = db.prepare(`DELETE FROM node WHERE session_id = ? AND id = ?`);
   const insertDetail = db.prepare(`INSERT OR REPLACE INTO node_detail (session_id, node_id, data, enc) VALUES (?, ?, ?, ?)`);
   const upsertDetail = (sessionId: string, nodeId: string, detail: string): void => {
     const { data, enc } = encodeBody(detail);
     insertDetail.run(sessionId, nodeId, data, enc);
   };
   const selectDetail = db.prepare(`SELECT data, enc FROM node_detail WHERE session_id = ? AND node_id = ?`);
+  const deleteDetail = db.prepare(`DELETE FROM node_detail WHERE session_id = ? AND node_id = ?`);
   const selectNodeWithDetail = db.prepare(
     `SELECT d.data AS data, d.enc AS enc FROM node n
      LEFT JOIN node_detail d ON d.session_id = n.session_id AND d.node_id = n.id
@@ -698,6 +701,8 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   const deleteEdgeKey = db.prepare(`DELETE FROM edge WHERE session_id = ? AND from_id = ? AND to_id = ? AND tag = ?`);
   // Only for an id that is not of the from->to form (never written by the normalizers): scans the session's edges.
   const deleteEdgeByTag = db.prepare(`DELETE FROM edge WHERE session_id = ? AND tag = ?`);
+  // A removed node's edges, both ways (to_id: a scan of the session's edges, a prefix range of the primary key).
+  const deleteEdgesOfNode = db.prepare(`DELETE FROM edge WHERE session_id = ? AND (from_id = ? OR to_id = ?)`);
   /** Removes the edge with this id (whichever of its possible keys it is stored under); true when one was removed. */
   const deleteEdgeById = (sessionId: string, id: string, oddToo = true): boolean => {
     let removed = false;
@@ -1012,6 +1017,21 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
       case 'edge_removed':
         deleteEdgeById(c.sessionId, c.id);
         break;
+      case 'node_removed': {
+        const rowid = selectNodeRowid.get(c.sessionId, c.id) as number | undefined;
+        if (rowid === undefined) break; // removals of unknown nodes are ignored, as in shared applyChange
+        const key = detailKey(c.sessionId, c.id);
+        // Its index row is under the rowid it had before this call (a node added in this call: not written yet).
+        const pending = pendingIndex.get(key);
+        search.deleteRows(pending !== undefined ? [pending.stale ?? rowid, rowid] : [rowid]);
+        pendingIndex.delete(key);
+        pendingDetails.delete(key);
+        unreadableDetails.delete(key);
+        deleteNode.run(c.sessionId, c.id);
+        deleteDetail.run(c.sessionId, c.id);
+        deleteEdgesOfNode.run(c.sessionId, c.id, c.id);
+        break;
+      }
     }
   }
 

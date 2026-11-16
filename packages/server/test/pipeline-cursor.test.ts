@@ -122,7 +122,7 @@ async function started(): Promise<PollSink> {
 
 describe('cursor origin', () => {
   test('ORIGINS, key prefix and origin of a cursor: key', () => {
-    expect(ORIGINS).toEqual(['claude', 'codex', 'cursor']);
+    expect(ORIGINS).toEqual(['claude', 'codex', 'cursor', 'gemini', 'grok', 'copilot']);
     expect(KEY_PREFIXES.cursor).toBe('cursor:');
     expect(originOfKey('cursor:abc-123')).toBe('cursor');
     expect(originOfKey('codex:2026/x.jsonl')).toBe('codex');

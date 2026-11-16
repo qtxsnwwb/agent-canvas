@@ -640,6 +640,12 @@ export class SearchIndex {
     if (text !== '') this.insertRow.run(rowid, text);
   }
 
+  /** Removes the rows under these rowids (a removed node's: its current one, and the one its row was indexed under). */
+  deleteRows(rowids: Iterable<number>): void {
+    if (!this.maintained || this.suspended) return;
+    for (const rowid of rowids) this.deleteRow.run(rowid);
+  }
+
   /** Removes the rows of one session's nodes (before the nodes themselves are deleted). */
   deleteForSession(sessionId: string): void {
     if (!this.maintained || this.suspended) return;

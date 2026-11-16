@@ -70,7 +70,14 @@ export const TITLE_MAX = 100;
 
 const RUNNING: ReadonlySet<SessionStatus> = new Set(['running', 'awaiting_permission']);
 const FINISHED: ReadonlySet<SessionStatus> = new Set(['idle', 'awaiting_input']);
-const ORIGIN_LABEL: Record<Origin, string> = { claude: 'Claude Code', codex: 'Codex', cursor: 'Cursor' };
+const ORIGIN_LABEL: Record<Origin, string> = {
+  claude: 'Claude Code',
+  codex: 'Codex',
+  cursor: 'Cursor',
+  gemini: 'Gemini CLI',
+  grok: 'Grok',
+  copilot: 'Copilot CLI',
+};
 const KIND_LABEL: Record<NotificationKind, string> = {
   permission: '等你确认权限',
   finished: '跑完了',
@@ -89,7 +96,8 @@ export const ANOMALY_SEEN_MAX_SESSIONS = 10_000;
 
 /**
  * Hooks that by themselves say the current turn failed or was interrupted (main thread): Claude Code `StopFailure`,
- * Codex `Interrupt`, Cursor `stop` whose `status` is `error` or `aborted`. Codex `Stop` carries no failure field.
+ * Codex `Interrupt`, Cursor `stop` whose `status` is `error` or `aborted`. Codex `Stop` carries no failure field. The
+ * origins without hooks (Gemini CLI, Grok Build, Copilot CLI) never have one.
  */
 export function isErrorHook(origin: Origin, eventName: string, payload: Readonly<Record<string, unknown>> | null): boolean {
   switch (origin) {
@@ -99,6 +107,10 @@ export function isErrorHook(origin: Origin, eventName: string, payload: Readonly
       return eventName === 'Interrupt';
     case 'cursor':
       return eventName === 'stop' && (payload?.status === 'error' || payload?.status === 'aborted');
+    case 'gemini':
+    case 'grok':
+    case 'copilot':
+      return false; // no hooks
   }
 }
 

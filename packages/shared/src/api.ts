@@ -66,6 +66,12 @@ export interface Diagnostics {
   };
   /** The content search index; absent from servers before it existed. */
   search?: SearchIndexStatus;
+  /**
+   * Hook calls to `/hooks` as Claude Code or Cursor whose payload is another tool's (Grok Build, Copilot CLI reading our
+   * installed hooks; see hook-guard.ts), dropped since the service started. Always sent by this server; absent from
+   * servers before it existed.
+   */
+  foreignHooksDropped?: number;
 }
 
 /**

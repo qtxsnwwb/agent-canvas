@@ -4,6 +4,16 @@ import { originLook } from './home';
 import { OPENAI_MARK_PATH } from './openaiMark';
 
 /**
+ * Placeholder marks (24×24 view box) of the origins that have none of their own yet: plain shapes, no vendor logo, one
+ * per origin so the marks stay distinct.
+ */
+const PLACEHOLDER_MARKS = {
+  gemini: 'M12 2C12.6 7.4 16.6 11.4 22 12C16.6 12.6 12.6 16.6 12 22C11.4 16.6 7.4 12.6 2 12C7.4 11.4 11.4 7.4 12 2Z',
+  grok: 'M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18zM4.5 18.1L18.1 4.5L19.5 5.9L5.9 19.5Z',
+  copilot: 'M6 4h12a4 4 0 0 1 4 4v8a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V8a4 4 0 0 1 4-4z',
+} as const;
+
+/**
  * The mark shown for each origin, drawn in the badge's text colour: each product's own mark. Claude Code and Cursor
  * come from simple-icons; Codex has no mark of its own and uses OpenAI's (see openaiMark.ts). The marks are trademarks
  * of their owners and are used only to identify which tool a session comes from.
@@ -12,6 +22,9 @@ export const ORIGIN_MARKS: Readonly<Record<Origin, { viewBox: string; path: stri
   claude: { viewBox: '0 0 24 24', path: siClaude.path },
   cursor: { viewBox: '0 0 24 24', path: siCursor.path },
   codex: { viewBox: '0 0 24 24', path: OPENAI_MARK_PATH },
+  gemini: { viewBox: '0 0 24 24', path: PLACEHOLDER_MARKS.gemini },
+  grok: { viewBox: '0 0 24 24', path: PLACEHOLDER_MARKS.grok },
+  copilot: { viewBox: '0 0 24 24', path: PLACEHOLDER_MARKS.copilot },
 };
 
 function OriginIcon({ origin }: { origin: Origin }) {

@@ -226,7 +226,7 @@ describe('parseStatsQuery', () => {
   });
   test('unknown range or origin, or a repeated parameter, is an error', () => {
     expect(parseStatsQuery({ range: '1y' })).toEqual({ error: expect.stringContaining('range') });
-    expect(parseStatsQuery({ origin: 'gemini' })).toEqual({ error: expect.stringContaining('origin') });
+    expect(parseStatsQuery({ origin: 'aider' })).toEqual({ error: expect.stringContaining('origin') });
     expect(parseStatsQuery({ range: ['7d', '30d'] })).toEqual({ error: expect.stringContaining('range') });
     expect(parseStatsQuery({ projectId: ['a', 'b'] })).toEqual({ error: expect.stringContaining('projectId') });
   });

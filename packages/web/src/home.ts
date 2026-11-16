@@ -5,6 +5,10 @@ export const ORIGIN_LOOK: Record<Origin, { label: string; className: string }> =
   claude: { label: 'Claude Code', className: 'origin-claude' },
   codex: { label: 'Codex', className: 'origin-codex' },
   cursor: { label: 'Cursor', className: 'origin-cursor' },
+  // Placeholders until the page work for these origins (a neutral badge).
+  gemini: { label: 'Gemini CLI', className: 'origin-other' },
+  grok: { label: 'Grok', className: 'origin-other' },
+  copilot: { label: 'Copilot CLI', className: 'origin-other' },
 };
 
 export function originLook(origin: Origin): { label: string; className: string } {

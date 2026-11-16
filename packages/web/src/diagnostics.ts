@@ -57,11 +57,19 @@ export const EXPECTED_HOOK_EVENTS_BY_ORIGIN: Record<Origin, readonly string[]> =
   claude: EXPECTED_HOOK_EVENTS,
   codex: EXPECTED_CODEX_HOOK_EVENTS,
   cursor: EXPECTED_CURSOR_HOOK_EVENTS,
+  // No hooks are installed for these origins.
+  gemini: [],
+  grok: [],
+  copilot: [],
 };
 
-/** The origin of a file by its store key: Codex files are `codex:`-prefixed, Cursor conversations `cursor:`-prefixed. */
+/**
+ * The origin of a file by its store key: every origin but Claude Code prefixes its keys with `<origin>:` (Codex files,
+ * Cursor conversations, Gemini CLI / Grok Build / Copilot CLI files); Claude Code's are unprefixed.
+ */
 export function fileOrigin(path: string): Origin {
-  return path.startsWith('codex:') ? 'codex' : path.startsWith('cursor:') ? 'cursor' : 'claude';
+  for (const origin of ORIGINS) if (origin !== 'claude' && path.startsWith(`${origin}:`)) return origin;
+  return 'claude';
 }
 
 /** Whether hooks were received, and how long ago, from the time of the last one (null: never). */

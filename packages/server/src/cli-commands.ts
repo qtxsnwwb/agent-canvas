@@ -28,6 +28,7 @@ import { ClaudeFileSource } from './sources/claude.js';
 import { storeLookup } from './sources/codex/lookup.js';
 import { CodexFileSource } from './sources/codex/source.js';
 import { CursorSource } from './sources/cursor/source.js';
+import { isExistingDir } from './sources/dirs.js';
 import type { PollSource } from './sources/poll.js';
 import type { FileSource } from './sources/source.js';
 import { startWatcher } from './sources/transcript/watcher.js';
@@ -140,13 +141,7 @@ export const PACKAGE_NAME = '@qtxsnwwb/agent-canvas';
 export function fileSources(config: Config, store?: Store): FileSource[] {
   const sources: FileSource[] = [new ClaudeFileSource(config.projectsDir)];
   const codexDir = config.codexSessionsDir;
-  let isDir = false;
-  try {
-    isDir = codexDir !== null && codexDir !== '' && fs.statSync(codexDir).isDirectory();
-  } catch {
-    isDir = false;
-  }
-  if (isDir) sources.push(new CodexFileSource(codexDir!, store ? storeLookup(store, config.projectsDir) : undefined));
+  if (isExistingDir(codexDir)) sources.push(new CodexFileSource(codexDir!, store ? storeLookup(store, config.projectsDir) : undefined));
   return sources;
 }
 
