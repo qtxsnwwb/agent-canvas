@@ -118,7 +118,7 @@ describe('the previous release (main)', () => {
     ];
   }
   const config = (): ReturnType<typeof loadConfig> =>
-    loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), cursorDbPath: null, codexSessionsDir: null });
+    loadConfig({}, { geminiDir: null, grokDir: null, copilotDir: null, projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), cursorDbPath: null, codexSessionsDir: null });
   const strip = (g: GraphSnapshot): unknown => ({ session: g.session, nodes: g.nodes, edges: g.edges });
 
   test('它写的库：打开时改名列、加 enc、换 edge 表，自动重建后与新库推导结果一致，迁移后每行都能解码', (ctx) => {

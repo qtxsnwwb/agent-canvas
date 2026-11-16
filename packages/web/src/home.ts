@@ -5,6 +5,9 @@ export const ORIGIN_LOOK: Record<Origin, { label: string; className: string }> =
   claude: { label: 'Claude Code', className: 'origin-claude' },
   codex: { label: 'Codex', className: 'origin-codex' },
   cursor: { label: 'Cursor', className: 'origin-cursor' },
+  gemini: { label: 'Gemini CLI', className: 'origin-gemini' },
+  grok: { label: 'Grok', className: 'origin-grok' },
+  copilot: { label: 'Copilot CLI', className: 'origin-copilot' },
 };
 
 export function originLook(origin: Origin): { label: string; className: string } {
@@ -15,24 +18,42 @@ export function originLook(origin: Origin): { label: string; className: string }
 export type OriginFilter = 'all' | Origin;
 /** The viewer's filter choice, remembered in this browser (like the density switch). */
 export const ORIGIN_FILTER_KEY = 'agent-canvas.origin';
+/** Every filter option, in ORIGINS order; the switch shows those of originFilterOptions. */
 export const ORIGIN_FILTER_OPTIONS: readonly { value: OriginFilter; label: string }[] = [
   { value: 'all', label: '全部' },
   ...ORIGINS.map((o) => ({ value: o, label: ORIGIN_LOOK[o].label })),
 ];
+
+/** The origins some project has sessions of, in ORIGINS order. */
+export function presentOrigins(projects: readonly Project[]): Origin[] {
+  const seen = new Set<Origin>();
+  for (const p of projects) for (const o of p.origins) seen.add(o);
+  return ORIGINS.filter((o) => seen.has(o));
+}
+
+/** The options the switch shows: 全部, then only the origins that have data (an origin without sessions has no button). */
+export function originFilterOptions(projects: readonly Project[]): { value: OriginFilter; label: string }[] {
+  const present = new Set<OriginFilter>(presentOrigins(projects));
+  return ORIGIN_FILTER_OPTIONS.filter((o) => o.value === 'all' || present.has(o.value));
+}
 
 /** A stored filter value; anything unknown (or nothing) is `all`. */
 export function parseOriginFilter(value: string | null): OriginFilter {
   return value === 'all' || (ORIGINS as readonly string[]).includes(value ?? '') ? (value as OriginFilter) : 'all';
 }
 
-/** The filter is offered only once some project has Codex or Cursor sessions (a Claude-only install looks as before). */
+/** The filter is offered only once some project has sessions of an origin other than Claude Code (a Claude-only install looks as before). */
 export function showOriginFilter(projects: readonly Project[]): boolean {
   return projects.some((p) => p.origins.some((o) => o !== 'claude'));
 }
 
-/** The filter in force: the chosen one while the filter is offered, `all` otherwise. */
+/**
+ * The filter in force: the chosen one while the filter is offered and that origin has data, `all` otherwise (a
+ * remembered choice whose origin has no sessions here is not lost, just not applied).
+ */
 export function effectiveOriginFilter(chosen: OriginFilter, projects: readonly Project[]): OriginFilter {
-  return showOriginFilter(projects) ? chosen : 'all';
+  if (!showOriginFilter(projects)) return 'all';
+  return chosen === 'all' || presentOrigins(projects).includes(chosen) ? chosen : 'all';
 }
 
 export function matchesOrigin(filter: OriginFilter, origin: Origin): boolean {

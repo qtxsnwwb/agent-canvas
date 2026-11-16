@@ -121,6 +121,16 @@ CREATE TABLE IF NOT EXISTS meta (
 `;
 
 /**
+ * Index of the edges by their target node, for removing a node's incoming edges (node_removed) without scanning the
+ * session's edges. Created by openStore after migrateSchema (edgeCompact recreates the edge table, which drops its
+ * indexes), on new and existing databases alike: an extra index changes nothing for an older build that opens the
+ * database afterwards (it is maintained by SQLite on every write). Statements that need it name it with INDEXED BY:
+ * without ANALYZE statistics the planner keeps the primary key's session range for `to_id = ?`.
+ */
+export const EDGE_TO_INDEX = 'edge_to';
+export const EDGE_TO_INDEX_SQL = `CREATE INDEX IF NOT EXISTS ${EDGE_TO_INDEX} ON edge (session_id, to_id)`;
+
+/**
  * Steps that bring an older database up to SCHEMA_SQL; migrateSchema (store.ts) runs each one only when its column is
  * missing, after SCHEMA_SQL, in one transaction. rawEventOrigin: every existing row is a Claude Code row.
  * hookStatByOrigin: rekeys hook_stat by (origin, event name), keeping the existing counters as 'claude'. rawEventEnc /

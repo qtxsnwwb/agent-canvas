@@ -112,7 +112,8 @@ test('表结构：WITHOUT ROWID，没有 JSON body，也没有单独的主键索
     const cols = (db.prepare(`PRAGMA table_info(edge)`).all() as { name: string }[]).map((c) => c.name);
     expect(cols).not.toContain('body');
     expect(cols).not.toContain('id');
-    expect(db.prepare(`SELECT name FROM sqlite_schema WHERE type = 'index' AND tbl_name = 'edge'`).all()).toEqual([]);
+    // The only index besides the table itself (its primary key): edge_to, for a removed node's incoming edges.
+    expect(db.prepare(`SELECT name FROM sqlite_schema WHERE type = 'index' AND tbl_name = 'edge'`).all()).toEqual([{ name: 'edge_to' }]);
   } finally {
     db.close();
   }

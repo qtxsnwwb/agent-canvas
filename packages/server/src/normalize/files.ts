@@ -127,6 +127,160 @@ export function cursorTouches(toolName: string | null, params: unknown): RawTouc
   return path === null ? [] : [{ path, action: spec.action }];
 }
 
+// ---- Gemini CLI ----
+
+/** Gemini CLI tools that read or change one named file (spec 5.1's table; search / shell / subagent tools touch none). */
+const GEMINI_TOOLS: Record<string, FileAction> = {
+  read_file: 'read',
+  read_many_files: 'read',
+  write_file: 'write',
+  replace: 'edit',
+};
+/** Path arguments, tried in this order (current and older argument names). */
+const GEMINI_PATH_KEYS = ['file_path', 'absolute_path', 'path', 'dir_path', 'directory'];
+
+/** The file a Gemini CLI tool call names: the first path argument present (GEMINI_PATH_KEYS order). */
+export function geminiTouches(toolName: string | null, args: unknown): RawTouch[] {
+  const action = toolName !== null && Object.hasOwn(GEMINI_TOOLS, toolName) ? GEMINI_TOOLS[toolName] : undefined;
+  if (action === undefined || !isObject(args)) return [];
+  for (const key of GEMINI_PATH_KEYS) {
+    const path = stringField(args, key);
+    if (path !== null) return [{ path, action }];
+  }
+  return [];
+}
+
+// ---- GitHub Copilot CLI ----
+
+/** Copilot CLI tools that read or change a named file (spec 5.3's table; shell / search / subagent tools touch none). */
+const COPILOT_TOOLS: Record<string, FileAction> = {
+  view: 'read',
+  create: 'write',
+  edit: 'edit',
+  apply_patch: 'edit',
+};
+/** Path arguments, tried in this order (spec 5.3). */
+const COPILOT_PATH_KEYS = ['path', 'file_path', 'filePath', 'fileName'];
+/** Where an `apply_patch` call may carry its patch text when it names no path (argument name unverified). */
+const COPILOT_PATCH_KEYS = ['input', 'patch'];
+
+/**
+ * The file a Copilot CLI tool call names: the first path argument present (COPILOT_PATH_KEYS order). `args` given as a
+ * JSON string is parsed first. An `apply_patch` call without a path argument: the files of its patch text (the
+ * arguments themselves when they are a string that is not JSON, else an `input` / `patch` argument).
+ */
+export function copilotTouches(toolName: string | null, args: unknown): RawTouch[] {
+  const action = toolName !== null && Object.hasOwn(COPILOT_TOOLS, toolName) ? COPILOT_TOOLS[toolName] : undefined;
+  if (action === undefined) return [];
+  let parsed: unknown = args;
+  if (typeof args === 'string') {
+    try {
+      parsed = JSON.parse(args);
+    } catch {
+      parsed = args;
+    }
+  }
+  if (isObject(parsed)) {
+    for (const key of COPILOT_PATH_KEYS) {
+      const path = stringField(parsed, key);
+      if (path !== null) return [{ path, action }];
+    }
+  }
+  if (toolName !== 'apply_patch') return [];
+  if (typeof parsed === 'string') return applyPatchTouches(parsed);
+  if (!isObject(parsed)) return [];
+  for (const key of COPILOT_PATCH_KEYS) {
+    const v = parsed[key];
+    if (typeof v === 'string') return applyPatchTouches(v);
+  }
+  return [];
+}
+
+// ---- Grok Build ----
+
+/** What a Grok Build tool does (spec 5.2's table): the categories of spec 4.4. */
+export type GrokToolCategory = 'read' | 'write' | 'edit' | 'delete' | 'exec' | 'search' | 'subagent' | 'other';
+
+/** Grok Build wire tool names (every toolset's aliases, spec 5.2). Names not here are `other`. */
+const GROK_TOOLS: Record<string, GrokToolCategory> = {
+  run_terminal_cmd: 'exec',
+  run_terminal_command: 'exec',
+  bash: 'exec',
+  read_file: 'read',
+  read: 'read',
+  write: 'write',
+  write_file: 'write',
+  search_replace: 'edit',
+  edit: 'edit',
+  edit_file: 'edit',
+  hashline_edit: 'edit',
+  apply_patch: 'edit',
+  list_dir: 'search',
+  glob: 'search',
+  grep: 'search',
+  task: 'subagent',
+  Task: 'subagent',
+  spawn_subagent: 'subagent',
+};
+/**
+ * ACP `kind` of a call whose tool name is not known (spec 5.2). `move` is taken as a write (of the file it names; a
+ * move's destination is a write in the Codex table too); `think`, `other` and anything else: other.
+ */
+const GROK_KINDS: Record<string, GrokToolCategory> = {
+  read: 'read',
+  edit: 'edit',
+  delete: 'delete',
+  move: 'write',
+  search: 'search',
+  execute: 'exec',
+  fetch: 'other',
+};
+/** Path arguments, tried in this order before `locations[0].path` (spec 5.2). */
+const GROK_PATH_KEYS = ['target_file', 'file_path', 'path', 'target_directory', 'filePath'];
+/** Where an `apply_patch` call may carry its patch text (argument name unverified). */
+const GROK_PATCH_KEYS = ['input', 'patch'];
+
+/** The category of a Grok Build call: by tool name when there is one (not in the table: other), else by ACP `kind`. */
+export function grokToolCategory(toolName: string | null, kind: string | null): GrokToolCategory {
+  if (toolName !== null) return Object.hasOwn(GROK_TOOLS, toolName) ? GROK_TOOLS[toolName]! : 'other';
+  return kind !== null && Object.hasOwn(GROK_KINDS, kind) ? GROK_KINDS[kind]! : 'other';
+}
+
+/**
+ * The file a Grok Build call names, for calls that read, write, edit or delete one (grokToolCategory): the first path
+ * argument of `rawInput` present (GROK_PATH_KEYS order), else (an `apply_patch`) the files of its patch text, else the
+ * first entry of the ACP `locations`.
+ */
+export function grokTouches(toolName: string | null, kind: string | null, rawInput: unknown, locations: unknown): RawTouch[] {
+  const category = grokToolCategory(toolName, kind);
+  if (category !== 'read' && category !== 'write' && category !== 'edit' && category !== 'delete') return [];
+  const action: FileAction = category;
+  if (isObject(rawInput)) {
+    for (const key of GROK_PATH_KEYS) {
+      const path = stringField(rawInput, key);
+      if (path !== null) return [{ path, action }];
+    }
+  }
+  if (toolName === 'apply_patch') {
+    if (typeof rawInput === 'string') {
+      const t = applyPatchTouches(rawInput);
+      if (t.length > 0) return t;
+    } else if (isObject(rawInput)) {
+      for (const key of GROK_PATCH_KEYS) {
+        const v = rawInput[key];
+        if (typeof v !== 'string') continue;
+        const t = applyPatchTouches(v);
+        if (t.length > 0) return t;
+      }
+    }
+  }
+  if (Array.isArray(locations) && isObject(locations[0])) {
+    const path = stringField(locations[0], 'path');
+    if (path !== null) return [{ path, action }];
+  }
+  return [];
+}
+
 // ---- Codex ----
 
 const BEGIN = '*** Begin Patch';

@@ -18,8 +18,9 @@ export default defineConfig({
   },
   test: {
     // Never the real Cursor database: a test that wants one passes a temp path (cursorDbPath override or stubbed env).
+    // Never the real Gemini CLI / Grok / Copilot CLI directories either (start() reads process.env): a test that wants one passes a temp dir.
     // No stats warm-up in start() unless a test asks for it (StartOptions.statsWarmup).
-    env: { AGENT_CANVAS_CURSOR_DB: '', AGENT_CANVAS_STATS_WARMUP: '0' },
+    env: { AGENT_CANVAS_CURSOR_DB: '', AGENT_CANVAS_GEMINI_DIR: '', AGENT_CANVAS_GROK_DIR: '', AGENT_CANVAS_COPILOT_DIR: '', AGENT_CANVAS_STATS_WARMUP: '0' },
     projects: [
       ...readdirSync(packagesDir, { withFileTypes: true })
         .filter((d) => d.isDirectory())

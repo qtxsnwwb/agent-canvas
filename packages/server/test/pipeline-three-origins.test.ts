@@ -34,6 +34,7 @@ beforeEach(async () => {
   config = loadConfig(
     {},
     {
+      geminiDir: null, grokDir: null, copilotDir: null,
       projectsDir: path.join(tmp, 'projects'),
       dataDir: path.join(tmp, 'data'),
       codexSessionsDir: path.join(tmp, 'codex', 'sessions'),

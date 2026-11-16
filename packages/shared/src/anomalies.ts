@@ -487,12 +487,28 @@ function nearestRank(sorted: number[], p: number): number | null {
 export const COST_NO_TOKEN_ORIGINS: readonly Origin[] = ['cursor'];
 
 /**
+ * Origins never judged for `cost` at all, on either basis (more-sources spec section 6: Copilot CLI records usage only
+ * once per run, at its shutdown, so it has no per-turn cost). Baselines are per (project, origin), so leaving these
+ * groups out changes no other origin's results.
+ */
+export const COST_EXCLUDED_ORIGINS: readonly Origin[] = ['copilot'];
+
+/**
+ * Origins whose sessions take part in `cost` only when they record per-turn usage (more-sources spec section 6: a Grok
+ * Build session without turn-completion records has none): a session of these origins with no node carrying usage
+ * contributes no turn costs, so it is neither judged nor part of its group's baseline. Sessions with usage take part.
+ */
+export const COST_USAGE_REQUIRED_ORIGINS: readonly Origin[] = ['grok'];
+
+/**
  * The 95th percentiles (nearest rank) of the finished turns' active time and tokens (unfinished turns are left out);
  * tokens over the turns with tokens > 0 only. Each null when fewer than COST_MIN_TURNS turns qualify. Grouping the
  * turns (by project and origin) is the caller's; `options.origin` is the group's origin: for one in
- * COST_NO_TOKEN_ORIGINS tokensP95 is always null, so costAnomalies never judges its tokens.
+ * COST_NO_TOKEN_ORIGINS tokensP95 is always null, so costAnomalies never judges its tokens; for one in
+ * COST_EXCLUDED_ORIGINS both are null, so it is never judged.
  */
 export function costBaseline(costs: Iterable<TurnCost>, options: { origin?: Origin } = {}): CostBaseline {
+  if (options.origin !== undefined && COST_EXCLUDED_ORIGINS.includes(options.origin)) return { activeP95: null, tokensP95: null };
   const judgeTokens = options.origin === undefined || !COST_NO_TOKEN_ORIGINS.includes(options.origin);
   const active: number[] = [];
   const tokens: number[] = [];

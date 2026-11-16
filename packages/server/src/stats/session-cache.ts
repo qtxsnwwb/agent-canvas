@@ -58,6 +58,7 @@ export function sessionIdOfChange(c: Change): string {
       return c.node.sessionId;
     case 'node_updated':
     case 'edge_removed':
+    case 'node_removed':
       return c.sessionId;
     case 'edge_added':
       return c.edge.sessionId;

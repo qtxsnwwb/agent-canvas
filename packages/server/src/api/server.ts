@@ -10,6 +10,8 @@ import {
   type ClientMessage,
   type ContentSearchResponse,
   type Diagnostics,
+  type FileOnlyOrigin,
+  type FileSourceStatus,
   type NotificationSettingsResponse,
   type NotificationTestResponse,
   type Origin,
@@ -19,10 +21,12 @@ import {
   type ServerMessage,
 } from '@agent-canvas/shared';
 import type { Config } from '../config.js';
+import { isForeignHookPayload } from '../hook-guard.js';
 import { cursorHookConversationId, cursorHookWorkspaceRoot, sanitizeCursorHookPayload } from '../normalize/cursor-hooks.js';
 import { NORMALIZER_VERSION } from '../normalize/version.js';
 import type { NotificationService } from '../notify/service.js';
 import type { Pipeline } from '../pipeline.js';
+import { isExistingDir, sourceDirOf } from '../sources/dirs.js';
 import { KEY_PREFIXES } from '../sources/source.js';
 import { storageStatus, type StorageDiagnostics } from '../store/migrate-storage.js';
 import { SAMPLE_MAX, type Store } from '../store/store.js';
@@ -34,6 +38,9 @@ import { FilesService, parseFilesQuery } from '../files/service.js';
 import { parseStatsQuery, StatsService, storeStatsSource } from '../stats/service.js';
 
 const HOOK_BODY_LIMIT = 64 * 1024 * 1024;
+/** The origins `/hooks?origin=` accepts (the others install no hooks); anything else is Claude Code. */
+const HOOK_ORIGINS = ['claude', 'codex', 'cursor'] as const;
+type HookOrigin = (typeof HOOK_ORIGINS)[number];
 /** More changes than this to catch up on: tell the client to refetch the snapshot instead. */
 export const CATCHUP_MAX = 5000;
 /** Changes per catch-up message. */
@@ -59,6 +66,7 @@ function sessionIdOf(c: Change): string {
     case 'edge_added':
       return c.edge.sessionId;
     case 'edge_removed':
+    case 'node_removed':
       return c.sessionId;
   }
 }
@@ -149,6 +157,17 @@ function isFile(file: string | null): boolean {
   }
 }
 
+/** Diagnostics.sources: each file-only origin's directory (stat only, never read) and its stored session count. */
+function fileOnlySources(config: Config, store: Store, pipeline: Pipeline): Record<FileOnlyOrigin, FileSourceStatus> {
+  const counts = store.sessionCountsByOrigin();
+  const reading = new Set(pipeline.fileSources().map((s) => s.origin));
+  const one = (origin: FileOnlyOrigin): FileSourceStatus => {
+    const dir = sourceDirOf(config, origin);
+    return { dir, present: isExistingDir(dir), reading: reading.has(origin), sessionCount: counts[origin] ?? 0 };
+  };
+  return { gemini: one('gemini'), grok: one('grok'), copilot: one('copilot') };
+}
+
 /** Whether the path names an existing directory (only stat'ed, never read). */
 function isDirectory(dir: string | null): boolean {
   if (dir === null || dir === '') return false;
@@ -217,6 +236,8 @@ export function buildServer(deps: {
   const learned = new LearnedValuesService(store);
   const app = Fastify();
   const connections = new Set<Connection>();
+  /** Hook calls dropped by the foreign-payload guard since the server was built (Diagnostics.foreignHooksDropped). */
+  let foreignHooksDropped = 0;
 
   app.addHook('onSend', async (_req, reply, payload) => {
     reply.header('X-Content-Type-Options', 'nosniff');
@@ -433,6 +454,8 @@ export function buildServer(deps: {
         ...(notifications !== undefined ? { notifications: notifications.diagnostics() } : {}),
         storage: deps.storage?.status() ?? storageStatus(store),
         search: deps.search?.status() ?? store.searchIndexStatus(),
+        foreignHooksDropped,
+        sources: fileOnlySources(config, store, pipeline),
       };
       if (req.query.mask !== '1') return d;
       reply.header('cache-control', 'no-store');
@@ -502,7 +525,7 @@ export function buildServer(deps: {
       // `?origin=codex|cursor` comes from `agent-canvas hook-forward`; anything else (none: Claude Code's http hooks) is
       // Claude.
       const q = req.query.origin;
-      const origin: Origin = typeof q === 'string' && (ORIGINS as readonly string[]).includes(q) ? (q as Origin) : 'claude';
+      const origin: HookOrigin = typeof q === 'string' && (HOOK_ORIGINS as readonly string[]).includes(q) ? (q as HookOrigin) : 'claude';
       void reply.code(200).send();
       setImmediate(() => {
         try {
@@ -511,6 +534,11 @@ export function buildServer(deps: {
             parsed = JSON.parse(text);
           } catch {
             // not JSON: the raw text is stored as the payload
+          }
+          // Another tool calling our Claude Code / Cursor hook (spec section 7): answered as usual, nothing stored.
+          if (isForeignHookPayload(origin, parsed)) {
+            foreignHooksDropped += 1;
+            return;
           }
           const obj = typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : {};
           const eventName = typeof obj.hook_event_name === 'string' ? obj.hook_event_name : 'unknown';

@@ -28,6 +28,10 @@ import { ClaudeFileSource } from './sources/claude.js';
 import { storeLookup } from './sources/codex/lookup.js';
 import { CodexFileSource } from './sources/codex/source.js';
 import { CursorSource } from './sources/cursor/source.js';
+import { isExistingDir, sourceDirOf } from './sources/dirs.js';
+import { CopilotFileSource } from './sources/copilot/source.js';
+import { GeminiFileSource } from './sources/gemini/source.js';
+import { GrokFileSource } from './sources/grok/source.js';
 import type { PollSource } from './sources/poll.js';
 import type { FileSource } from './sources/source.js';
 import { startWatcher } from './sources/transcript/watcher.js';
@@ -134,19 +138,23 @@ export const PACKAGE_NAME = '@qtxsnwwb/agent-canvas';
 
 /**
  * The session-file directories read for this configuration: Claude Code's projects directory, and Codex's sessions
- * directory when `codexSessionsDir` names an existing directory (otherwise Codex is skipped silently). `store` lets the
+ * directory, Gemini CLI's `tmp`, Copilot CLI's `session-state` and Grok Build's `sessions` when they name an existing directory (otherwise that
+ * origin is skipped silently). `store` lets the
  * Codex source place files from their stored raw events (files that are gone, restarts) without reading them.
  */
 export function fileSources(config: Config, store?: Store): FileSource[] {
   const sources: FileSource[] = [new ClaudeFileSource(config.projectsDir)];
   const codexDir = config.codexSessionsDir;
-  let isDir = false;
-  try {
-    isDir = codexDir !== null && codexDir !== '' && fs.statSync(codexDir).isDirectory();
-  } catch {
-    isDir = false;
-  }
-  if (isDir) sources.push(new CodexFileSource(codexDir!, store ? storeLookup(store, config.projectsDir) : undefined));
+  if (isExistingDir(codexDir)) sources.push(new CodexFileSource(codexDir!, store ? storeLookup(store, config.projectsDir) : undefined));
+  // Gemini CLI: read only when its tmp directory exists at start (spec 4.2); nothing is ever created under it.
+  const geminiTmp = sourceDirOf(config, 'gemini');
+  if (isExistingDir(geminiTmp)) sources.push(new GeminiFileSource(geminiTmp!, store ? storeLookup(store, config.projectsDir) : undefined));
+  // GitHub Copilot CLI: likewise, only when <copilotDir>/session-state exists at start.
+  const copilotState = sourceDirOf(config, 'copilot');
+  if (isExistingDir(copilotState)) sources.push(new CopilotFileSource(copilotState!, store ? storeLookup(store, config.projectsDir) : undefined));
+  // Grok Build: likewise, only when <grokDir>/sessions exists at start.
+  const grokSessions = sourceDirOf(config, 'grok');
+  if (isExistingDir(grokSessions)) sources.push(new GrokFileSource(grokSessions!, store ? storeLookup(store, config.projectsDir) : undefined));
   return sources;
 }
 

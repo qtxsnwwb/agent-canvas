@@ -45,7 +45,7 @@ test('parseOriginFilter：认得的值原样返回，其余（含 null）为 all
   expect(parseOriginFilter('codex')).toBe('codex');
   expect(parseOriginFilter('all')).toBe('all');
   expect(parseOriginFilter(null)).toBe('all');
-  expect(parseOriginFilter('gemini')).toBe('all');
+  expect(parseOriginFilter('aider')).toBe('all');
 });
 
 test('showOriginFilter 只在有项目含 codex 时为真；effectiveOriginFilter 此外一律是 all', () => {
@@ -121,7 +121,7 @@ test('heroTotals：项目数随筛选；会话数只在都准确时给出，否�
 test('ORIGIN_LOOK：两个来源各有名字和不同的类名', () => {
   expect(originLook('claude')).toEqual({ label: 'Claude Code', className: 'origin-claude' });
   expect(originLook('codex')).toEqual({ label: 'Codex', className: 'origin-codex' });
-  expect(ORIGIN_FILTER_OPTIONS.map((o) => [o.value, o.label])).toEqual([['all', '全部'], ['claude', 'Claude Code'], ['codex', 'Codex'], ['cursor', 'Cursor']]);
+  expect(ORIGIN_FILTER_OPTIONS.map((o) => [o.value, o.label])).toEqual([['all', '全部'], ['claude', 'Claude Code'], ['codex', 'Codex'], ['cursor', 'Cursor'], ['gemini', 'Gemini CLI'], ['grok', 'Grok'], ['copilot', 'Copilot CLI']]);
 });
 
 test('showOriginFilter：只有 Cursor 的项目也提供筛选；parseOriginFilter 认 cursor', () => {

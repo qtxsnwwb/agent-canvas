@@ -34,7 +34,14 @@ export type MaybePromise<T> = T | Promise<T>;
  * Prefix of each origin's store keys (raw_event.file, file_offset.file). Claude Code keys are the paths relative to
  * projectsDir, unprefixed as before origins existed; every other origin's keys carry its prefix.
  */
-export const KEY_PREFIXES: Readonly<Record<Origin, string>> = { claude: '', codex: 'codex:', cursor: 'cursor:' };
+export const KEY_PREFIXES: Readonly<Record<Origin, string>> = {
+  claude: '',
+  codex: 'codex:',
+  cursor: 'cursor:',
+  gemini: 'gemini:',
+  grok: 'grok:',
+  copilot: 'copilot:',
+};
 
 /** The origin a store key belongs to: the one whose prefix is the longest that matches. */
 export function originOfKey(key: string): Origin {
@@ -57,6 +64,19 @@ export interface FileSource {
   readonly rootDir: string;
   /** chokidar depth below rootDir that reaches every file of the source. */
   readonly watchDepth: number;
+  /**
+   * Optional. How a line of the source's session files is told apart from the others when stored (the raw-event dedupe):
+   * `content` (default) by its text alone — a byte-identical line anywhere in the file is the same line; `offset` by its
+   * text, its byte offset and the file's generation (bumped each time the file is found shorter than what was read, so
+   * a rewritten file is read again whole) — for append-only logs whose lines may legitimately repeat (Grok's streamed
+   * chunks). A re-read of an unchanged file adds nothing either way.
+   */
+  readonly lineIdentity?: 'content' | 'offset';
+  /**
+   * Optional. Absolute paths of files to ingest right after the index file `key` was read: files whose classification
+   * depends on it (e.g. a session log that is not a session until its summary exists).
+   */
+  afterIndex?(key: string): string[];
   /** Absolute paths of the files that may belong to this source (listed without reading them), sorted. */
   listFiles(): Promise<string[]>;
   /** Store key of an absolute path, or null when the path is not one of this source's files' locations. */

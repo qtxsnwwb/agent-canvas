@@ -6,7 +6,12 @@ export type Change =
   | { type: 'node_updated'; sessionId: string; id: string; patch: Partial<GraphNode>; detail?: Partial<NodeDetail> }
   | { type: 'edge_added'; edge: GraphEdge }
   /** An edge a normalizer no longer derives (a re-derived part of the graph). Unknown ids are ignored. */
-  | { type: 'edge_removed'; sessionId: string; id: string };
+  | { type: 'edge_removed'; sessionId: string; id: string }
+  /**
+   * A node a normalizer no longer derives (a rewind or a deletion in the session's file): the node, its detail and every
+   * edge from or to it go. Unknown ids are ignored.
+   */
+  | { type: 'node_removed'; sessionId: string; id: string };
 export type SeqChange = Change & { seq: number };
 
 export interface Graph { nodes: Record<string, GraphNode>; edges: Record<string, GraphEdge> }
@@ -15,7 +20,7 @@ export function emptyGraph(): Graph {
   return { nodes: {}, edges: {} };
 }
 
-/** Immutable update. session_upserted is returned unchanged; updates to unknown nodes and removals of unknown edges are ignored. */
+/** Immutable update. session_upserted is returned unchanged; updates to unknown nodes and removals of unknown nodes or edges are ignored. */
 export function applyChange(graph: Graph, change: Change): Graph {
   switch (change.type) {
     case 'node_added':
@@ -31,6 +36,13 @@ export function applyChange(graph: Graph, change: Change): Graph {
       if (!(change.id in graph.edges)) return graph;
       const { [change.id]: _removed, ...edges } = graph.edges;
       return { ...graph, edges };
+    }
+    case 'node_removed': {
+      if (!(change.id in graph.nodes)) return graph;
+      const { [change.id]: _removed, ...nodes } = graph.nodes;
+      const edges: Graph['edges'] = {};
+      for (const [id, e] of Object.entries(graph.edges)) if (e.from !== change.id && e.to !== change.id) edges[id] = e;
+      return { ...graph, nodes, edges };
     }
     case 'session_upserted':
       return graph;
@@ -61,6 +73,14 @@ export function applyChanges(graph: Graph, changes: Change[]): Graph {
       case 'edge_removed':
         if (c.id in (edges ?? graph.edges)) delete (edges ??= { ...graph.edges })[c.id];
         break;
+      case 'node_removed': {
+        if (!(c.id in (nodes ?? graph.nodes))) break;
+        delete (nodes ??= { ...graph.nodes })[c.id];
+        for (const [id, e] of Object.entries(edges ?? graph.edges)) {
+          if (e.from === c.id || e.to === c.id) delete (edges ??= { ...graph.edges })[id];
+        }
+        break;
+      }
       case 'session_upserted':
         break;
     }

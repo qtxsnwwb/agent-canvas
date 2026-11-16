@@ -18,7 +18,14 @@ import { buildStructure, type DocStep } from './structure.js';
  */
 
 const CAUTION = '导出内容可能仍含敏感信息，分享前请自己再看一遍。';
-const ORIGIN_LABELS: Record<Origin, string> = { claude: 'Claude Code', codex: 'Codex', cursor: 'Cursor' };
+const ORIGIN_LABELS: Record<Origin, string> = {
+  claude: 'Claude Code',
+  codex: 'Codex',
+  cursor: 'Cursor',
+  gemini: 'Gemini CLI',
+  grok: 'Grok',
+  copilot: 'Copilot CLI',
+};
 const STATUS_LABELS: Record<NodeStatus, string> = {
   running: '运行中',
   awaiting_permission: '等待授权',

@@ -49,7 +49,7 @@ describe('GET /api/stats', () => {
 
   beforeEach(async () => {
     tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-api-stats-'));
-    config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), cursorDbPath: null });
+    config = loadConfig({}, { geminiDir: null, grokDir: null, copilotDir: null, projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), cursorDbPath: null });
     await fs.mkdir(config.projectsDir, { recursive: true });
     store = openStore(':memory:');
     pipeline = new Pipeline(store, config);
@@ -97,7 +97,7 @@ describe('GET /api/stats', () => {
   });
 
   test('an unknown range or origin is a 400 with a short message', async () => {
-    for (const q of ['range=1y', 'origin=gemini', 'range=7d&range=30d']) {
+    for (const q of ['range=1y', 'origin=aider', 'range=7d&range=30d']) {
       const res = await get(`/api/stats?${q}`);
       expect(res.statusCode).toBe(400);
       expect(typeof res.json().error).toBe('string');

@@ -1,4 +1,5 @@
-import { ORIGINS, type Diagnostics, type Origin } from '@agent-canvas/shared';
+import { FILE_ONLY_ORIGINS, ORIGINS, type Diagnostics, type FileOnlyOrigin, type FileSourceStatus, type Origin } from '@agent-canvas/shared';
+import { ORIGIN_LOOK } from './home';
 
 /** The hook events `agent-canvas hooks install` registers. Kept in step with docs/hooks-snippet.json by a test. */
 export const EXPECTED_HOOK_EVENTS: readonly string[] = [
@@ -57,11 +58,19 @@ export const EXPECTED_HOOK_EVENTS_BY_ORIGIN: Record<Origin, readonly string[]> =
   claude: EXPECTED_HOOK_EVENTS,
   codex: EXPECTED_CODEX_HOOK_EVENTS,
   cursor: EXPECTED_CURSOR_HOOK_EVENTS,
+  // No hooks are installed for these origins.
+  gemini: [],
+  grok: [],
+  copilot: [],
 };
 
-/** The origin of a file by its store key: Codex files are `codex:`-prefixed, Cursor conversations `cursor:`-prefixed. */
+/**
+ * The origin of a file by its store key: every origin but Claude Code prefixes its keys with `<origin>:` (Codex files,
+ * Cursor conversations, Gemini CLI / Grok Build / Copilot CLI files); Claude Code's are unprefixed.
+ */
 export function fileOrigin(path: string): Origin {
-  return path.startsWith('codex:') ? 'codex' : path.startsWith('cursor:') ? 'cursor' : 'claude';
+  for (const origin of ORIGINS) if (origin !== 'claude' && path.startsWith(`${origin}:`)) return origin;
+  return 'claude';
 }
 
 /** Whether hooks were received, and how long ago, from the time of the last one (null: never). */
@@ -144,6 +153,60 @@ export function cursorPollLine(lastPollAt: string | null, nowMs: number): string
 export function cursorHooks(d: Diagnostics): OriginHooks {
   return hooksByOrigin({ ...d, cursor: { ...d.cursor, dbExists: true } }).find((h) => h.origin === 'cursor')
     ?? { origin: 'cursor', events: [], missing: [], lastAt: null };
+}
+
+/**
+ * Unknown records of a file-only origin (Gemini CLI, Grok Build, Copilot CLI): their normalizers report every type as
+ * `<origin>:<type>`.
+ */
+export function originUnknownRecords(d: Diagnostics, origin: FileOnlyOrigin): Diagnostics['unknownRecords'] {
+  return d.unknownRecords.filter((r) => r.recordType.startsWith(`${origin}:`));
+}
+
+export interface FileSourceBlock extends FileSourceStatus {
+  origin: FileOnlyOrigin;
+  unknown: Diagnostics['unknownRecords'];
+}
+
+/**
+ * The blocks of the file-only origins (ORIGINS order), each shown once its directory exists or any of its data is
+ * known (stored sessions, unknown records). A configured default directory alone says nothing (the tool may not be
+ * installed), and a server before `sources` existed shows none.
+ */
+export function fileSourceBlocks(d: Diagnostics): FileSourceBlock[] {
+  const out: FileSourceBlock[] = [];
+  for (const origin of FILE_ONLY_ORIGINS) {
+    const s = d.sources?.[origin] ?? { dir: null, present: false, reading: false, sessionCount: 0 };
+    const unknown = originUnknownRecords(d, origin);
+    if (s.present || s.sessionCount > 0 || unknown.length > 0) out.push({ origin, ...s, unknown });
+  }
+  return out;
+}
+
+/**
+ * A file-only origin's line about its directory: not enabled / exists and read / exists but not read (it appeared after
+ * the service started) / does not exist. `reading` absent (a server from before it existed) counts as read when present.
+ */
+export function fileSourceDirLine(origin: FileOnlyOrigin, s: FileSourceStatus): string {
+  const label = ORIGIN_LOOK[origin].label;
+  if (s.dir === null) return `${label} 会话目录：未启用`;
+  const state = !s.present
+    ? '不存在。目录出现后要重启服务才会读取'
+    : s.reading === false ? '存在，但服务启动时还没有这个目录，尚未读取。重启服务后读取' : '存在';
+  return `${label} 会话目录：${s.dir}（${state}）`;
+}
+
+/**
+ * The line about hook calls dropped by the foreign-payload guard (Diagnostics.foreignHooksDropped); null for a server
+ * that does not send it.
+ */
+export function foreignHooksLine(n: number | undefined): { text: string; warn: boolean } | null {
+  if (n === undefined) return null;
+  if (n === 0) return { text: '被丢弃的外来 hook 调用：0 次', warn: false };
+  return {
+    text: `被丢弃的外来 hook 调用：${n} 次。Grok 或 Copilot CLI 读到了为 Claude Code / Cursor 安装的 hook，这些调用已忽略，不影响数据`,
+    warn: true,
+  };
 }
 
 /** The Codex block's line about the sessions directory. */

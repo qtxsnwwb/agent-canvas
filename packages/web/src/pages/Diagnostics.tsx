@@ -2,8 +2,8 @@ import { useEffect, useMemo, useState } from 'react';
 import type { Diagnostics as DiagnosticsData, Origin } from '@agent-canvas/shared';
 import { api } from '../client';
 import {
-  codexDirLine, createPoller, cursorBlockVisible, cursorDbLine, cursorHooks, cursorPollLine, cursorUnknownRecords, fileOrigin, formatAge, hookState, hooksByOrigin, summarizeDiagnostics, truncateSample, FILES_BEHIND_MAX,
-  type OriginHooks,
+  codexDirLine, createPoller, cursorBlockVisible, cursorDbLine, cursorHooks, cursorPollLine, cursorUnknownRecords, fileOrigin, fileSourceBlocks, fileSourceDirLine, foreignHooksLine, formatAge, hookState, hooksByOrigin, summarizeDiagnostics, truncateSample, FILES_BEHIND_MAX,
+  type FileSourceBlock, type OriginHooks,
 } from '../diagnostics';
 import { useMask } from '../MaskContext';
 import { maskDiagnostics } from '../masking';
@@ -114,6 +114,43 @@ function CursorPoll({ lastPollAt }: { lastPollAt: string | null }) {
   return <p>上次轮询：{cursorPollLine(lastPollAt, now)}</p>;
 }
 
+/** Unknown record types with their samples (the shared list and the per-origin blocks). */
+function UnknownList({ records }: { records: DiagnosticsData['unknownRecords'] }) {
+  if (records.length === 0) return <p className="muted">无</p>;
+  return (
+    <ul>
+      {records.map((r) => (
+        <li key={r.recordType}>
+          <div>{r.recordType}：{r.count} 次</div>
+          {r.sample !== '' && (
+            <details>
+              <summary>样例</summary>
+              <pre>{truncateSample(r.sample)}</pre>
+            </details>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/**
+ * Gemini CLI, Grok Build or Copilot CLI: directory, session count and the unknown records. These are read from files
+ * only (no hooks, no waiting states) and their formats were not checked against real data.
+ */
+function FileSourceSection({ block }: { block: FileSourceBlock }) {
+  return (
+    <section>
+      <h2><OriginBadge origin={block.origin} /></h2>
+      <p>{fileSourceDirLine(block.origin, block)}</p>
+      <p>会话数：{block.sessionCount}</p>
+      <p className="muted">只读会话文件，没有 hook，不显示“等待确认”等实时状态。格式未经真实数据核对：显示不对时先看下面的未识别记录</p>
+      <h3>未识别的记录</h3>
+      <UnknownList records={block.unknown} />
+    </section>
+  );
+}
+
 /** Shown when Cursor's database exists or any Cursor data is known. */
 function CursorSection({ data }: { data: DiagnosticsData }) {
   const c = data.cursor;
@@ -128,23 +165,7 @@ function CursorSection({ data }: { data: DiagnosticsData }) {
       <h3>Hooks</h3>
       <OriginHookSection hooks={hooks} lastAt={hooks.lastAt} titled={false} codex={data.codex} />
       <h3>未识别的气泡形状</h3>
-      {unknown.length === 0 ? (
-        <p className="muted">无</p>
-      ) : (
-        <ul>
-          {unknown.map((r) => (
-            <li key={r.recordType}>
-              <div>{r.recordType}：{r.count} 次</div>
-              {r.sample !== '' && (
-                <details>
-                  <summary>样例</summary>
-                  <pre>{truncateSample(r.sample)}</pre>
-                </details>
-              )}
-            </li>
-          ))}
-        </ul>
-      )}
+      <UnknownList records={unknown} />
     </section>
   );
 }
@@ -187,6 +208,7 @@ export function Diagnostics() {
   const hooks = hooksByOrigin(data).filter((h) => h.origin !== 'cursor');
   // With only Claude Code hooks the server's own "last hook" time is used, exactly as before the Codex split.
   const onlyClaude = data.hookEvents.every((e) => e.origin === 'claude');
+  const foreign = foreignHooksLine(data.foreignHooksDropped);
   return (
     <div className="diag">
       {error !== null && <p className="error">刷新失败：{error}</p>}
@@ -206,11 +228,14 @@ export function Diagnostics() {
           <OriginHookSection key={h.origin} hooks={h} titled={hooks.length > 1} codex={data.codex}
             lastAt={h.origin === 'claude' && onlyClaude ? data.lastHookAt : h.lastAt} />
         ))}
+        {foreign !== null && <p className={foreign.warn ? 'diag-warn' : 'muted'}>{foreign.text}</p>}
       </section>
 
       <NotificationsSection data={data.notifications} />
 
       {cursorBlockVisible(data) && <CursorSection data={data} />}
+
+      {fileSourceBlocks(data).map((b) => <FileSourceSection key={b.origin} block={b} />)}
 
       <section>
         <h2>导入失败</h2>
@@ -236,23 +261,7 @@ export function Diagnostics() {
 
       <section>
         <h2>未识别的记录类型</h2>
-        {data.unknownRecords.length === 0 ? (
-          <p className="muted">无</p>
-        ) : (
-          <ul>
-            {data.unknownRecords.map((r) => (
-              <li key={r.recordType}>
-                <div>{r.recordType}：{r.count} 次</div>
-                {r.sample !== '' && (
-                  <details>
-                    <summary>样例</summary>
-                    <pre>{truncateSample(r.sample)}</pre>
-                  </details>
-                )}
-              </li>
-            ))}
-          </ul>
-        )}
+        <UnknownList records={data.unknownRecords} />
       </section>
 
       <section>

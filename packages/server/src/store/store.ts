@@ -29,7 +29,7 @@ import {
 } from '@agent-canvas/shared';
 import { CorruptBodyError, decodeBody, encodeBody, parseDetail } from './codec.js';
 import { STORAGE_META, type BodyTable, type ConvertResult } from './migrate-storage.js';
-import { DERIVED_TABLES, MIGRATIONS, SCHEMA_SQL } from './schema.js';
+import { DERIVED_TABLES, EDGE_TO_INDEX, EDGE_TO_INDEX_SQL, MIGRATIONS, SCHEMA_SQL } from './schema.js';
 import {
   DEFAULT_SEARCH_DETAIL,
   INDEXED_NODE_FIELDS,
@@ -149,8 +149,12 @@ function snippetAround(text: string, atUnits: number, needle: string): string {
 export interface Store {
   /** Runs `fn` in one SQLite transaction (nested calls become savepoints); all or nothing. */
   transaction<T>(fn: () => T): T;
-  /** Returns the ingestId, or null for a duplicate transcript line. */
-  insertRaw(event: RawEvent): number | null;
+  /**
+   * Returns the ingestId, or null for a duplicate transcript line. A transcript line is a duplicate when its file already
+   * has a line with the same dedupe hash: SHA-1 of the line, or (with `identity`, for sources whose lines are identified
+   * by their place in the file, see FileSource.lineIdentity) SHA-1 of `identity`, NUL and the line.
+   */
+  insertRaw(event: RawEvent, options?: { identity?: string }): number | null;
   /** True when this exact line is stored as a transcript raw event under `file` (the dedupe index; nothing inserted). */
   hasTranscriptLine(file: string, line: string): boolean;
   /** Highest `offset` of the transcript raw events stored under `file`, or null when there is none. */
@@ -171,6 +175,8 @@ export interface Store {
    * lexicographically smallest; null when none does.
    */
   listProjects(nowMs: number): Project[];
+  /** Stored sessions per origin (a session row from before origins counts as claude); an origin with none is absent. */
+  sessionCountsByOrigin(): Partial<Record<Origin, number>>;
   /** Ordered by lastActivityAt descending. */
   listSessions(projectId: string): Session[];
   getSession(sessionId: string): Session | null;
@@ -362,6 +368,17 @@ function withBody<T extends object>(event: T, text: string): T & { body: Buffer 
   return { ...event, body: data, enc }; // bound to the data column
 }
 
+/**
+ * The dedupe hash of a transcript line (raw_event.line_hash): SHA-1 of the line, as it always was; with `identity` (a
+ * source whose lines are identified by their place in the file, e.g. `<generation>:<offset>`), SHA-1 of identity, NUL
+ * and the line — so a byte-identical line elsewhere in the file is a line of its own.
+ */
+export function transcriptLineHash(line: string, identity?: string): string {
+  const h = createHash('sha1');
+  if (identity !== undefined) h.update(`${identity}\u0000`);
+  return h.update(line).digest('hex');
+}
+
 /** A stored node detail as an object, or null when it cannot be decoded or parsed. */
 const readDetail = parseDetail;
 /** meta key set once hook_stat holds every stored hook row (backfilled, or created empty with a new database). */
@@ -457,6 +474,7 @@ function changeSessionId(c: Change): string {
       return c.edge.sessionId;
     case 'node_updated':
     case 'edge_removed':
+    case 'node_removed':
       return c.sessionId;
   }
 }
@@ -568,6 +586,7 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   db.pragma(`journal_size_limit = ${options.walSizeLimitBytes ?? WAL_SIZE_LIMIT_BYTES}`);
   db.exec(SCHEMA_SQL);
   migrateSchema(db);
+  db.exec(EDGE_TO_INDEX_SQL);
   // Undecodable details met by the index (its build, a search's verification) count as unreadable too.
   const search = new SearchIndex(db, options.searchDetail ?? DEFAULT_SEARCH_DETAIL, (sessionId, nodeId) =>
     unreadableDetails.add(detailKey(sessionId, nodeId)),
@@ -683,12 +702,14 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   const selectNodeRowid = db.prepare(`SELECT rowid FROM node WHERE session_id = ? AND id = ?`).pluck();
   const selectNodeRow = db.prepare(`SELECT rowid, body FROM node WHERE session_id = ? AND id = ?`);
   const updateNode = db.prepare(`UPDATE node SET body = ? WHERE session_id = ? AND id = ?`);
+  const deleteNode = db.prepare(`DELETE FROM node WHERE session_id = ? AND id = ?`);
   const insertDetail = db.prepare(`INSERT OR REPLACE INTO node_detail (session_id, node_id, data, enc) VALUES (?, ?, ?, ?)`);
   const upsertDetail = (sessionId: string, nodeId: string, detail: string): void => {
     const { data, enc } = encodeBody(detail);
     insertDetail.run(sessionId, nodeId, data, enc);
   };
   const selectDetail = db.prepare(`SELECT data, enc FROM node_detail WHERE session_id = ? AND node_id = ?`);
+  const deleteDetail = db.prepare(`DELETE FROM node_detail WHERE session_id = ? AND node_id = ?`);
   const selectNodeWithDetail = db.prepare(
     `SELECT d.data AS data, d.enc AS enc FROM node n
      LEFT JOIN node_detail d ON d.session_id = n.session_id AND d.node_id = n.id
@@ -698,6 +719,9 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   const deleteEdgeKey = db.prepare(`DELETE FROM edge WHERE session_id = ? AND from_id = ? AND to_id = ? AND tag = ?`);
   // Only for an id that is not of the from->to form (never written by the normalizers): scans the session's edges.
   const deleteEdgeByTag = db.prepare(`DELETE FROM edge WHERE session_id = ? AND tag = ?`);
+  // A removed node's edges: outgoing through the primary key's (session_id, from_id) prefix, incoming through edge_to.
+  const deleteEdgesFromNode = db.prepare(`DELETE FROM edge WHERE session_id = ? AND from_id = ?`);
+  const deleteEdgesToNode = db.prepare(`DELETE FROM edge INDEXED BY ${EDGE_TO_INDEX} WHERE session_id = ? AND to_id = ?`);
   /** Removes the edge with this id (whichever of its possible keys it is stored under); true when one was removed. */
   const deleteEdgeById = (sessionId: string, id: string, oddToo = true): boolean => {
     let removed = false;
@@ -721,6 +745,9 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
      FROM session GROUP BY project_id, cwd, origin ORDER BY project_id`,
   );
   const selectSessions = db.prepare(`SELECT body FROM session WHERE project_id = ? ORDER BY last_activity_at DESC, id`);
+  const selectOriginCounts = db.prepare(
+    `SELECT COALESCE(json_extract(body, '$.origin'), 'claude') AS origin, COUNT(*) AS n FROM session GROUP BY origin`,
+  );
   const selectSession = db.prepare(`SELECT body FROM session WHERE id = ?`).pluck();
   const selectLiveSessions = db
     .prepare(`SELECT body FROM session WHERE status IN ('running', 'awaiting_permission') ORDER BY last_activity_at DESC, id`)
@@ -1012,6 +1039,22 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
       case 'edge_removed':
         deleteEdgeById(c.sessionId, c.id);
         break;
+      case 'node_removed': {
+        const rowid = selectNodeRowid.get(c.sessionId, c.id) as number | undefined;
+        if (rowid === undefined) break; // removals of unknown nodes are ignored, as in shared applyChange
+        const key = detailKey(c.sessionId, c.id);
+        // Its index row is under the rowid it had before this call (a node added in this call: not written yet).
+        const pending = pendingIndex.get(key);
+        search.deleteRows(pending !== undefined ? [pending.stale ?? rowid, rowid] : [rowid]);
+        pendingIndex.delete(key);
+        pendingDetails.delete(key);
+        unreadableDetails.delete(key);
+        deleteNode.run(c.sessionId, c.id);
+        deleteDetail.run(c.sessionId, c.id);
+        deleteEdgesFromNode.run(c.sessionId, c.id);
+        deleteEdgesToNode.run(c.sessionId, c.id);
+        break;
+      }
     }
   }
 
@@ -1111,9 +1154,10 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     transaction<T>(fn: () => T): T {
       return db.transaction(fn)();
     },
-    insertRaw(event) {
+    insertRaw(event, options) {
       if (event.source === 'transcript') {
-        const lineHash = createHash('sha1').update(event.line).digest('hex');
+        const identity = options?.identity;
+        const lineHash = transcriptLineHash(event.line, identity);
         const res = insertRawTranscript.run({ ...withBody(event, event.line), origin: event.origin ?? 'claude', projectId: event.projectId ?? null, lineHash });
         return res.changes === 0 ? null : Number(res.lastInsertRowid);
       }
@@ -1123,7 +1167,7 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
       );
     },
     hasTranscriptLine(file, line) {
-      return selectTranscriptLine.get(file, createHash('sha1').update(line).digest('hex')) !== undefined;
+      return selectTranscriptLine.get(file, transcriptLineHash(line)) !== undefined;
     },
     maxTranscriptOffset(file) {
       return (selectMaxTranscriptOffset.get(file) as { off: number | null }).off;
@@ -1168,6 +1212,11 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
         const origins = ORIGINS.filter((o) => project.origins.includes(o));
         return { ...project, cwd: best?.cwd ?? null, origins };
       });
+    },
+    sessionCountsByOrigin() {
+      const out: Partial<Record<Origin, number>> = {};
+      for (const r of selectOriginCounts.all() as { origin: Origin; n: number }[]) out[r.origin] = r.n;
+      return out;
     },
     listSessions(projectId) {
       return (selectSessions.all(projectId) as { body: string }[]).map((r) => JSON.parse(r.body) as Session);

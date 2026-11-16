@@ -25,6 +25,8 @@ const HYDRATE_PAGE_ROWS = 200;
 const HYDRATE_PAGE_BYTES = 256 * 1024;
 const LIVE_STATUSES: ReadonlySet<string> = new Set(['running', 'awaiting_permission', 'awaiting_input']);
 const UNKNOWN_PROJECT = 'unknown';
+/** Meta key prefix of a file's line generation (FileSource.lineIdentity 'offset'): `line-generation:<store key>`. */
+export const LINE_GENERATION_PREFIX = 'line-generation:';
 const REBUILD_PROGRESS_EVERY = 100;
 
 /**
@@ -1053,7 +1055,12 @@ export class Pipeline {
     const classified = this.classifyAt(absPath, source, file);
     const cls = isPromise(classified) ? await classified : classified;
     if (cls === null) return;
-    if (cls.kind === 'index') return this.ingestIndex(absPath, source, file);
+    if (cls.kind === 'index') {
+      await this.ingestIndex(absPath, source, file);
+      // Files whose classification depended on this index file (a log waiting for its summary): read them now.
+      for (const follow of source.afterIndex?.(file) ?? []) if (follow !== absPath) await this.safeIngest(follow);
+      return;
+    }
     if (cls.kind === 'title' || cls.kind === 'agent_meta') return this.ingestMeta(absPath, source, file, cls);
 
     const agentId = cls.kind === 'agent' ? (cls.agentId ?? null) : null;
@@ -1073,6 +1080,14 @@ export class Pipeline {
       const from = this.store.getOffset(file);
       const res = await readNewLines(absPath, from, READ_BUDGET_BYTES);
       if (this.writeHold !== null) await this.writable();
+      // Lines identified by their place (FileSource.lineIdentity 'offset'): the file's generation, bumped when it was found
+      // shorter than what was read (rewritten: every line of the new content is a new line).
+      let generation = 0;
+      if (source.lineIdentity === 'offset') {
+        const genKey = `${LINE_GENERATION_PREFIX}${file}`;
+        generation = Number(this.store.getMeta(genKey) ?? '0') || 0;
+        if (res.truncated) this.store.setMeta(genKey, String((generation += 1)));
+      }
       const progressed = res.newOffset !== from || res.truncated;
       // The size stored with an offset is the size this read accounts for: the whole file only when the read reached
       // its end. A slice cut short (read budget, kill, failure) leaves a stored size below the real one, so unchanged()
@@ -1095,7 +1110,8 @@ export class Pipeline {
               agentId,
               projectId,
             };
-            if (this.store.insertRaw(event) === null) continue;
+            const inserted = source.lineIdentity === 'offset' ? this.store.insertRaw(event, { identity: `${generation}:${offset}` }) : this.store.insertRaw(event);
+            if (inserted === null) continue;
             const out = this.normalizer.apply(event, cls.projectId);
             changes.push(...out.changes);
             if (out.unknownRecordType !== undefined) this.store.bumpUnknown(out.unknownRecordType, text);
@@ -1133,6 +1149,9 @@ export class Pipeline {
       // a file that was never recorded cannot have a stored copy, so skip the lookup.
       if (this.store.getOffset(file) > 0 && this.store.latestMeta(file) === content) return;
       const event: RawEvent = { source: 'meta', origin: source.origin, file, sessionId: cls.sessionId, agentId, payload: content };
+      // Stored only when the key does not name the project (Gemini's legacy `.json`), as for transcript lines, so a
+      // replay gives the normalizer the same project without reading anything. Claude Code's keys name it: unchanged.
+      if (source.projectOfKey(file) === null) event.projectId = cls.projectId;
       this.atomically(
         cls.sessionId,
         () => {

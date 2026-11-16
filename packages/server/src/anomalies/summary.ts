@@ -1,4 +1,5 @@
 import {
+  COST_USAGE_REQUIRED_ORIGINS,
   detectAnomalies,
   turnCosts,
   type Anomaly,
@@ -28,9 +29,14 @@ export const isRunningStatus = (status: SessionStatus): boolean => RUNNING_STATU
 export function summarizeAnomalies(session: Session, nodes: readonly GraphNode[]): AnomalySummary {
   return {
     anomalies: detectAnomalies(nodes),
-    costs: turnCosts(nodes, isRunningStatus(session.status)),
+    costs: takesPartInCost(session, nodes) ? turnCosts(nodes, isRunningStatus(session.status)) : [],
     failed: false,
   };
+}
+
+/** False for a session of a COST_USAGE_REQUIRED_ORIGINS origin none of whose nodes carries usage (spec 6). */
+function takesPartInCost(session: Session, nodes: readonly GraphNode[]): boolean {
+  return !COST_USAGE_REQUIRED_ORIGINS.includes(session.origin) || nodes.some((n) => n.usage !== null);
 }
 
 /** The summary of a session whose computation failed. */

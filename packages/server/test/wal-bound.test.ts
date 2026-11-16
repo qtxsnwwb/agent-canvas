@@ -106,7 +106,7 @@ test('完整重建和随后的索引建立：WAL 有界', async () => {
     }
   });
   await new Promise((r) => setTimeout(r, 1500)); // the inserts' WAL is checkpointed and restarts with the next write
-  const config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), cursorDbPath: null, codexSessionsDir: null });
+  const config = loadConfig({}, { geminiDir: null, grokDir: null, copilotDir: null, projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), cursorDbPath: null, codexSessionsDir: null });
   let max = 0;
   const apply = s.applyChanges.bind(s);
   vi.spyOn(s, 'applyChanges').mockImplementation((changes) => {
