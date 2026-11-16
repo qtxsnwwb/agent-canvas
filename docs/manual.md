@@ -166,11 +166,14 @@ node packages/server/dist/cli.js hooks uninstall --codex    # 只移除本安装
 ```
 
 - 写入 11 个事件：`SessionStart`、`SessionEnd`、`UserPromptSubmit`、`PreToolUse`、`PermissionRequest`、`PostToolUse`、`SubagentStart`、`SubagentStop`、`Stop`、`PostCompact`、`Interrupt`。每条都是 `async: true`（后台运行，不改变 Codex 的结果），`command` 和 `commandWindows` 都写，用绝对路径指向当前的 `node` 和这份 `cli.js`。超时：`SessionEnd`、`Interrupt` 是 3 秒（Codex 对这两个事件最多允许 3 秒），其余 5 秒。
+- Windows 上的命令（`commandWindows`）不带引号，路径里有空格时换成 Windows 的 8.3 短路径，例如 `C:\PROGRA~1\nodejs\node.exe D:\tools\agent-canvas\packages\server\dist\cli.js hook-forward --origin codex --port 4317`。原因：Codex 在 Windows 上用 PowerShell（`powershell -NoProfile -Command <命令>`）执行 hook 命令，只有本地环境没准备好时才退回用 `cmd /C`；以带引号的路径开头的命令在 PowerShell 里是语法错误，`& "…"` 的写法在 cmd 里又是语法错误，只有不带引号的写法两边都能运行。短路径在安装时向系统查询（`cmd.exe` 的 `%~s`），确认指向同一个文件才用。查不到短路径（该磁盘关闭了 8.3 短名）或路径里有特殊字符时，改用 PowerShell 的调用形式 `& "<node>" "<cli.js>" hook-forward …`，安装时会多打印一行说明：这种形式在 Codex 退回用 cmd 时不能运行。路径里有 `"`、`` ` `` 或 `$` 又没有短路径时拒绝安装（这几个字符在 PowerShell 的双引号里会被解释），请把 node 或 agent-canvas 装到别的路径。
+- **从旧版本升级的 Windows 用户**：旧版本写的 Windows 命令（`"<node>" "<cli.js>" …`，以带引号的路径开头）在 PowerShell 里无法运行，所以这些 hooks 实际上从没转发过任何事件。升级后请再运行一次 `hooks install --codex`：它认得出旧版本写的条目，把 11 条都原位换成新写法，然后需要在 Codex 里重新确认信任。
 - 选项和 Claude Code 的一样：`--port <n>`、`--yes`（非交互终端必须加）、`--settings <file>`（写别的文件）；环境变量 `AGENT_CANVAS_CODEX_HOOKS_FILE` 改默认路径。`~/.codex` 目录不存在时视为没装 Codex，不做任何改动。
 - **装完要在 Codex 里确认信任这些 hooks 才会运行**：桌面应用在“设置 → Hooks”，CLI 里输入 `/hooks`。没确认时 agent-canvas 只靠会话文件工作，诊断页的 Codex 一栏会显示“尚未收到 Codex 的 hook”。
-- Codex 的信任绑定在 hook 的内容上。移动或升级 agent-canvas 后命令里的路径会变：先 `hooks uninstall --codex`（在旧位置运行）或手动删掉旧的几条，再在新位置 `hooks install --codex`，并重新确认信任。
-- 换了 node（例如用 nvm / fnm 升级后旧路径失效）时，再运行一次 `hooks install --codex`：它认得出本安装的旧条目、说明它们已过期，并在同一次写入里换成当前 `node` 的命令（之后同样要在 Codex 里重新确认信任）。判断“本安装的条目”时按命令解析出 `cli.js` 的路径比较（Windows 上不分大小写），端口写成 `--port 4317`、`--port=4317` 或不写（默认 4317）都认。
-- 失败行为：转发命令永远以退出码 0 结束、不输出任何内容、不读写文件；服务没启动时立刻退出（连接被拒），服务不回应时 1 秒后放弃。Codex 的行为不受影响。每个 hook 事件会启动一次 node（本机实测转发命令从启动到退出约 0.25 秒，和空跑 `node` 差不多）。大多数事件因为是 `async` 在后台运行，不拖慢 Codex；但 `SessionEnd`（以及 `Interrupt`）即使写了 `async: true`，Codex 也同步运行它，所以退出（或打断）时会多等一次转发：通常约 0.25 秒，服务卡住时最多约 1.3 秒（转发命令自己的 1 秒上限加启动），无论如何不超过 3 秒的超时。
+- Codex 的信任绑定在 hook 的内容和位置上（按 hooks.json 路径、事件、第几组、组里第几个记录）。移动或升级 agent-canvas 后命令里的路径会变：先 `hooks uninstall --codex`（在旧位置运行）或手动删掉旧的几条，再在新位置 `hooks install --codex`，并重新确认信任。
+- 换了 node（例如用 nvm / fnm 升级后旧路径失效），或命令是旧版本的写法时，再运行一次 `hooks install --codex`：它认得出本安装的旧条目、说明它们已过期，并在同一次写入里原位换成当前的命令（同一个事件、同一组、组里同一个位置，所以同一文件里别人的 hooks 位置不变、信任不受影响；替换后的条目要在 Codex 里重新确认信任）。新装的事件仍然加在末尾。判断“本安装的条目”时按命令解析出 `cli.js` 的路径比较（Windows 上不分大小写，长路径和短路径都认），端口写成 `--port 4317`、`--port=4317` 或不写（默认 4317）都认。
+- 卸载时删掉我们的条目，不留空组（Codex 是否接受空组未知）。如果同一事件里排在我们后面还有别人的 hooks，它们的位置会前移，Codex 会把它们当成改动过的、需要重新确认；卸载时会打印一行列出这些事件。
+- 失败行为：转发命令永远以退出码 0 结束、不输出任何内容、不读写文件；服务没启动时立刻退出（连接被拒），服务不回应时 1 秒后放弃。Codex 的行为不受影响。每个 hook 事件会启动一次 node（本机实测转发命令从启动到退出约 0.25 秒，和空跑 `node` 差不多）。大多数事件（包括 `Interrupt`）因为是 `async` 在后台运行，不拖慢 Codex；但 `SessionEnd` 即使写了 `async: true`，Codex 也同步运行它，所以退出时会多等一次转发：通常约 0.25 秒，服务卡住时最多约 1.3 秒（转发命令自己的 1 秒上限加启动），无论如何不超过 3 秒的超时。
 - hooks 只给出会话状态和权限等待，节点、状态、开始和结束时间都以会话文件为准。会话状态由会话文件里主线程的轮次和 hook 留下的标记一起算出，与两者到达的先后无关：子代理线程的 hook（带 `agent_id`，或它的轮次已在会话文件里归到子线程）不会把已经结束的会话改回运行中；同一轮次在 `Stop` 之后又收到 `UserPromptSubmit` 或 `PermissionRequest`，说明这一轮还在继续，会重新算作运行中；`Stop` 先于或晚于会话文件里的轮次结束到达，结果一样。
 
 已知限制：
@@ -181,7 +184,11 @@ node packages/server/dist/cli.js hooks uninstall --codex    # 只移除本安装
 - Codex 的会话文件格式不是稳定接口，升级 Codex 后可能出现未识别的记录，可在诊断页查看。
 - Codex 自己发起的审批复核线程（不是由某次工具调用派出的）不显示。
 - Codex hooks 需要使用者在 Codex 里手动确认信任，改动或重新安装后要再确认一次；没确认时只靠会话文件，延迟几秒。
-- Codex hook 载荷的字段取自官方文档，还没有用真实载荷核对过（尤其是 `turn_id` 是否和会话文件里的轮次 id 一致、子代理里的 hook 带什么 `session_id` / `agent_id`，以及 Windows 上 `commandWindows` 由哪个 shell 执行）。所以第一版的 hooks 不建节点（例如在 `exec` 里跑的命令，hook 报的工具名和 id 都可能和会话文件里的调用对不上）；录到真实载荷后再考虑让 hooks 提前显示工具节点。
+- Codex hooks 的核对状态（对照 Codex 源码 openai/codex `main` 的提交 `75fc67e`，约 rust-v0.171；还没有用真实的 Codex 运行核对）：
+  - 已对照源码确认：`~/.codex/hooks.json` 的格式和 11 个事件名；hooks 默认开启（功能开关 `hooks`，只有 `[features] hooks = false` 才关）；`timeout` 的单位是秒，`SessionEnd` / `Interrupt` 最多 3 秒；`async: true` 的 hook 在后台运行；各事件的字段（`session_id`、`transcript_path`、`cwd`、`hook_event_name`、`model`，工具事件的 `tool_name` / `tool_input` / `tool_use_id`，`PermissionRequest` 不带 `tool_use_id`）；`turn_id` 就是会话文件里的轮次 id；子代理的 hook 带 `agent_id`（子代理自己的线程 id）和 `agent_type`；信任要在 `/hooks`（或桌面应用的设置）里逐条确认，按内容和位置记录，内容或位置变了就要重新确认，没确认的 hook 不运行。
+  - 更正了原先的说法：只有 `SessionEnd` 被强制同步运行，`Interrupt` 照样在后台运行；`SessionStart` 和 `SessionEnd` 不带 `turn_id`（`SessionEnd` 也不带 `model`）；子代理的 hook 带的是根会话的 `session_id`，不是派出它的父会话的。
+  - 还要用真实运行确认：某台 Windows 机器上 hook 实际由哪个 shell 执行（PowerShell 还是退回的 cmd，新写法两者都能运行）；Codex 内部的非子代理线程（例如审批复核）会不会把工具 hook 发到根会话上；`tool_use_id` 是否和会话文件里调用的 id 一致（`exec` 里跑的命令尤其不确定）；已经在运行的会话会不会接上新装的 hooks。
+  - 所以第一版的 hooks 不建节点（hook 报的工具名和 id 可能和会话文件里的调用对不上）；用真实运行核对后再考虑让 hooks 提前显示工具节点。
 - 权限确认之后到工具结束之前没有 hook，所以批准后那个工具节点和会话会一直显示“等待权限确认”，直到该轮次的下一个 hook（例如工具结束的 `PostToolUse`）或会话文件里该轮次的调用都结束。权限请求不带工具调用的 id，显示等待的是该轮次里最新一个还在执行的工具节点，并行调用时可能不是真正在等的那个。
 - 派发子代理的调用找不到对应的子代理线程时（例如派出失败），派发节点在派出它的轮次进行中显示执行中，轮次结束后显示失败；之后子代理线程出现，就改为跟着它走。
 - 追加给子代理的任务（`followup_task`、`send_message`），在逐步视角的因果链上接在子代理上一个任务的回复之后，而不是接在发出追加任务的那次调用上。
