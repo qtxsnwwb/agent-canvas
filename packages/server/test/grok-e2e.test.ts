@@ -102,7 +102,7 @@ describe('Grok Build end to end', () => {
     expect(fileSources(cfg(path.join(tmp, 'missing'))).map((s) => s.origin)).toEqual(['claude']);
   });
 
-  test('one-shot ingest = line-by-line appended ingest = rebuild from raw events; restart re-ingests nothing', async () => {
+  test('one-shot ingest = line-by-line appended ingest = rebuild from raw events; restart re-ingests nothing', { timeout: 30_000 }, async () => {
     await writeAll();
     const s1 = open();
     const p1 = newPipeline(s1);
@@ -252,5 +252,161 @@ describe('Grok Build end to end', () => {
     await p.ingestFile(abs(UPDATES_REL));
     await p.idle();
     expect(store.getSession(SID)).toMatchObject({ title: 'Fix failing unit test in parser', projectId: PROJECT });
+  });
+
+  test('C1: byte-identical lines (repeated chunks, tool updates, rewind markers) are all applied; live = one-shot = rebuild = re-hydrate', { timeout: 30_000 }, async () => {
+    const same = (t: string): string => chunk('agent', t, { ts: T0 + 1, promptId: 'p' });
+    const lines = [
+      chunk('user', 'zero', { ts: T0, promptId: 'p0' }),
+      chunk('user', 'go', { ts: T0 + 1, promptId: 'p' }),
+      ...['1', '\n\n', '2', '\n\n', '3', '\n\n'].map(same),
+      upd({ sessionUpdate: 'tool_call', toolCallId: 't1', kind: 'execute', rawInput: { command: 'x' } }, { ts: T0 + 1, meta: { promptId: 'p' } }),
+      upd({ sessionUpdate: 'tool_call_update', toolCallId: 't1', status: 'in_progress' }, { ts: T0 + 1, meta: { promptId: 'p' } }),
+      upd({ sessionUpdate: 'tool_call_update', toolCallId: 't1', status: 'in_progress' }, { ts: T0 + 1, meta: { promptId: 'p' } }),
+      upd({ sessionUpdate: 'tool_call_update', toolCallId: 't1', status: 'completed' }, { ts: T0 + 1, meta: { promptId: 'p' } }),
+      ...['a', 'a', 'a'].map(same),
+      ext({ sessionUpdate: 'rewind_marker', target_prompt_index: 1 }, { ts: T0 + 2 }),
+      chunk('user', 'again', { ts: T0 + 2, promptId: 'p2' }),
+      ...['b', 'b'].map((t) => chunk('agent', t, { ts: T0 + 2, promptId: 'p2' })),
+      ext({ sessionUpdate: 'rewind_marker', target_prompt_index: 1 }, { ts: T0 + 2 }),
+      chunk('user', 'last', { ts: T0 + 3, promptId: 'p3' }),
+      ...['c', 'c', 'c'].map((t) => chunk('agent', t, { ts: T0 + 3, promptId: 'p3' })),
+    ];
+    const textsOf = (v: NonNullable<ReturnType<typeof full>>): unknown[] => Object.values(v.nodes).filter((n) => n.kind === 'text').map((n) => v.details[n.id]?.text);
+
+    // Before the rewinds: every repeated chunk is there, the repeated updates did no harm.
+    await writeRel(SUMMARY_REL, summaryJson());
+    await writeRel(UPDATES_REL, body(lines.slice(0, 15)));
+    const s0 = open();
+    const p0 = newPipeline(s0);
+    await p0.scanAll();
+    await p0.idle();
+    const v0 = full(s0, SID)!;
+    expect(textsOf(v0).sort()).toEqual(['1\n\n2\n\n3\n\n', 'aaa']);
+    expect(Object.values(v0.nodes).find((n) => n.kind === 'tool')!.status).toBe('succeeded');
+
+    // The whole file: two identical rewind markers, each applied.
+    await writeRel(UPDATES_REL, body(lines));
+    const s1 = open();
+    const p1 = newPipeline(s1);
+    await p1.scanAll();
+    await p1.idle();
+    const want = full(s1, SID)!;
+    expect(textsOf(want)).toEqual(['ccc']);
+    expect(Object.values(want.nodes).map((n) => n.kind).sort()).toEqual(['prompt', 'prompt', 'text']);
+
+    // Live, one line at a time, a fresh pipeline (re-hydration from the stored lines) for every line.
+    const s2 = open();
+    let text = '';
+    for (const line of lines) {
+      text += `${line}\n`;
+      await writeRel(UPDATES_REL, text);
+      const p = newPipeline(s2);
+      await p.ingestFile(abs(SUMMARY_REL));
+      await p.ingestFile(abs(UPDATES_REL));
+      await p.idle();
+      expect(p.ingestFailures()).toEqual([]);
+    }
+    expect(full(s2, SID)).toEqual(want);
+    p1.rebuild();
+    expect(full(s1, SID)).toEqual(want);
+
+    // A re-read of the unchanged file from offset 0 adds nothing.
+    const rawBefore = s1.rawForSessionAfter(SID, 0, 10_000, 1e9).length;
+    s1.setOffset(`grok:${UPDATES_REL}`, 0, 0);
+    const again = newPipeline(s1);
+    await again.ingestFile(abs(UPDATES_REL));
+    await again.idle();
+    expect(s1.rawForSessionAfter(SID, 0, 10_000, 1e9).length).toBe(rawBefore);
+    expect(full(s1, SID)).toEqual(want);
+  });
+
+  test('C1: a file rewritten shorter with shifted offsets: the thread shows the new content, as a fresh read of it does (live and rebuild)', async () => {
+    const before = [chunk('user', 'first', { ts: T0, promptId: 'p1' }), chunk('agent', 'x', { ts: T0, promptId: 'p1' }), chunk('agent', 'y', { ts: T0, promptId: 'p1' }), chunk('agent', 'z', { ts: T0, promptId: 'p1' })];
+    const after = [chunk('user', 'first', { ts: T0, promptId: 'p1' }), chunk('agent', 'y', { ts: T0, promptId: 'p1' })];
+    await writeRel(SUMMARY_REL, summaryJson());
+    await writeRel(UPDATES_REL, body(before));
+    const store = open();
+    const p = newPipeline(store);
+    await p.scanAll();
+    await p.idle();
+    await writeRel(UPDATES_REL, body(after));
+    await p.ingestFile(abs(UPDATES_REL));
+    await p.idle();
+    const fresh = open();
+    const pf = newPipeline(fresh);
+    await pf.scanAll();
+    await pf.idle();
+    const want = full(fresh, SID)!;
+    expect(Object.values(want.nodes).filter((n) => n.kind === 'text').map((n) => want.details[n.id]?.text)).toEqual(['y']);
+    expect(full(store, SID)).toEqual(want);
+    p.rebuild();
+    expect(full(store, SID)).toEqual(want);
+  });
+
+  test('I1: grandchild and orphan subagents: no phantom session; the grandchild hangs off the dispatch in the child thread, in any order', { timeout: 30_000 }, async () => {
+    const GRAND = '22222222-3333-4444-8555-666666666666';
+    const ORPHAN = '33333333-3333-4444-8555-666666666666';
+    const MISSING = '44444444-3333-4444-8555-666666666666';
+    const rel = (id: string, f: string): string => `%2Fhome%2Fdev%2Fdemo/${id}/${f}`;
+    const childWithDispatch = [
+      ...childLines(),
+      upd({ sessionUpdate: 'tool_call', toolCallId: 'task_g', kind: 'other', rawInput: { prompt: 'deeper', subagent_type: 'explore' }, _meta: { toolName: 'task' } }, { ts: T0 + 46, meta: { promptId: 'c1' } }),
+      upd({ sessionUpdate: 'tool_call_update', toolCallId: 'task_g', status: 'completed', rawOutput: { subagent_id: GRAND } }, { ts: T0 + 48, meta: { promptId: 'c1' } }),
+    ];
+    const files: [string, string][] = [
+      [SUMMARY_REL, summaryJson()],
+      [UPDATES_REL, body(mainLines())],
+      [CHILD_SUMMARY_REL, childSummary()],
+      [CHILD_UPDATES_REL, body(childWithDispatch)],
+      [rel(GRAND, 'summary.json'), summaryJson({ id: GRAND, kind: 'subagent', parent: CHILD, title: null })],
+      [rel(GRAND, 'updates.jsonl'), body([chunk('user', 'deeper', { ts: T0 + 47, promptId: 'g1' }), chunk('agent', 'nothing', { ts: T0 + 47, promptId: 'g1' })])],
+      [rel(ORPHAN, 'summary.json'), summaryJson({ id: ORPHAN, kind: 'subagent', parent: MISSING, title: null })],
+      [rel(ORPHAN, 'updates.jsonl'), body([chunk('user', 'lost', { ts: T0 + 5, promptId: 'o1' })])],
+    ];
+    for (const [r, c] of files) await writeRel(r, c);
+    const results = [];
+    for (const order of [files.map(([r]) => r), [...files.map(([r]) => r)].reverse()]) {
+      const store = open();
+      const p = newPipeline(store);
+      for (const r of order) await p.ingestFile(abs(r));
+      await p.idle();
+      expect(p.ingestFailures()).toEqual([]);
+      for (const id of [CHILD, GRAND, ORPHAN, MISSING]) expect(store.getSession(id), id).toBeNull();
+      results.push(full(store, SID));
+      // A full scan and a rebuild change nothing.
+      await p.scanAll();
+      await p.idle();
+      p.rebuild();
+      expect(full(store, SID)).toEqual(results[results.length - 1]);
+      for (const id of [CHILD, GRAND, ORPHAN, MISSING]) expect(store.getSession(id), id).toBeNull();
+      // The orphan's parent appears: the orphan becomes a thread of it.
+      await writeRel(rel(MISSING, 'summary.json'), summaryJson({ id: MISSING, title: 'Found parent' }));
+      await writeRel(rel(MISSING, 'updates.jsonl'), body([chunk('user', 'parent prompt', { ts: T0 + 1 })]));
+      await p.ingestFile(abs(rel(MISSING, 'summary.json')));
+      await p.idle();
+      expect(store.getSession(MISSING)).toMatchObject({ title: 'Found parent' });
+      expect(store.getGraph(MISSING)!.nodes.map((n) => n.agentId).sort()).toEqual([ORPHAN, null].sort());
+      await fs.rm(abs(rel(MISSING, 'summary.json')));
+      await fs.rm(abs(rel(MISSING, 'updates.jsonl')));
+    }
+    expect(results[1]).toEqual(results[0]);
+    const v = results[0]!;
+    const grandFirst = Object.values(v.nodes).find((n) => n.agentId === GRAND && n.kind === 'prompt')!;
+    expect(grandFirst.parentId).toBe(grokNodeId(SID, CHILD, 'call:task_g'));
+    expect(v.nodes[grokNodeId(SID, CHILD, 'call:task_g')]).toMatchObject({ kind: 'subagent', childAgentId: GRAND, agentId: CHILD });
+  });
+
+  test('M2: summary.json written after updates.jsonl: the session appears as soon as the summary is read', async () => {
+    await writeRel(UPDATES_REL, body(exampleLines()));
+    const store = open();
+    const p = newPipeline(store);
+    await p.ingestFile(abs(UPDATES_REL));
+    await p.idle();
+    expect(store.getSession(SID)).toBeNull();
+    await writeRel(SUMMARY_REL, summaryJson());
+    await p.ingestFile(abs(SUMMARY_REL));
+    await p.idle();
+    expect(store.getSession(SID)).toMatchObject({ title: 'Fix failing unit test in parser' });
   });
 });

@@ -149,8 +149,12 @@ function snippetAround(text: string, atUnits: number, needle: string): string {
 export interface Store {
   /** Runs `fn` in one SQLite transaction (nested calls become savepoints); all or nothing. */
   transaction<T>(fn: () => T): T;
-  /** Returns the ingestId, or null for a duplicate transcript line. */
-  insertRaw(event: RawEvent): number | null;
+  /**
+   * Returns the ingestId, or null for a duplicate transcript line. A transcript line is a duplicate when its file already
+   * has a line with the same dedupe hash: SHA-1 of the line, or (with `identity`, for sources whose lines are identified
+   * by their place in the file, see FileSource.lineIdentity) SHA-1 of `identity`, NUL and the line.
+   */
+  insertRaw(event: RawEvent, options?: { identity?: string }): number | null;
   /** True when this exact line is stored as a transcript raw event under `file` (the dedupe index; nothing inserted). */
   hasTranscriptLine(file: string, line: string): boolean;
   /** Highest `offset` of the transcript raw events stored under `file`, or null when there is none. */
@@ -360,6 +364,17 @@ function edgeKeysOf(id: string): [string, string, string][] {
 function withBody<T extends object>(event: T, text: string): T & { body: Buffer | string; enc: number } {
   const { data, enc } = encodeBody(text);
   return { ...event, body: data, enc }; // bound to the data column
+}
+
+/**
+ * The dedupe hash of a transcript line (raw_event.line_hash): SHA-1 of the line, as it always was; with `identity` (a
+ * source whose lines are identified by their place in the file, e.g. `<generation>:<offset>`), SHA-1 of identity, NUL
+ * and the line — so a byte-identical line elsewhere in the file is a line of its own.
+ */
+export function transcriptLineHash(line: string, identity?: string): string {
+  const h = createHash('sha1');
+  if (identity !== undefined) h.update(`${identity}\u0000`);
+  return h.update(line).digest('hex');
 }
 
 /** A stored node detail as an object, or null when it cannot be decoded or parsed. */
@@ -1134,9 +1149,10 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     transaction<T>(fn: () => T): T {
       return db.transaction(fn)();
     },
-    insertRaw(event) {
+    insertRaw(event, options) {
       if (event.source === 'transcript') {
-        const lineHash = createHash('sha1').update(event.line).digest('hex');
+        const identity = options?.identity;
+        const lineHash = transcriptLineHash(event.line, identity);
         const res = insertRawTranscript.run({ ...withBody(event, event.line), origin: event.origin ?? 'claude', projectId: event.projectId ?? null, lineHash });
         return res.changes === 0 ? null : Number(res.lastInsertRowid);
       }
@@ -1146,7 +1162,7 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
       );
     },
     hasTranscriptLine(file, line) {
-      return selectTranscriptLine.get(file, createHash('sha1').update(line).digest('hex')) !== undefined;
+      return selectTranscriptLine.get(file, transcriptLineHash(line)) !== undefined;
     },
     maxTranscriptOffset(file) {
       return (selectMaxTranscriptOffset.get(file) as { off: number | null }).off;

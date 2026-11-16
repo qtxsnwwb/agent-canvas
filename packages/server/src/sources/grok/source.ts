@@ -19,6 +19,10 @@ const UNKNOWN_PROJECT = 'unknown';
 export const GROK_SUMMARY_ENTRY_PREFIX = `${PREFIX}@summary/`;
 /** Largest `summary.json` read (by the source, and classified for the pipeline); a larger one counts as missing. */
 export const GROK_SUMMARY_MAX_BYTES = 1024 * 1024;
+/** Most links followed from a subagent up to its root session. */
+export const GROK_CHAIN_MAX = 16;
+/** Most subagent logs held waiting for a parent's summary.json (see GrokFileSource.held). */
+export const GROK_HELD_MAX = 10_000;
 /** Largest `<cwd dir>/.cwd` read (it holds one path); a larger one counts as missing. */
 export const GROK_CWD_MAX_BYTES = 4 * 1024;
 
@@ -115,8 +119,10 @@ type Shape = { kind: 'updates' | 'summary'; dir: string; id: string };
  *
  * `updates.jsonl` is classified from its directory's `summary.json` (bounded read, cached by mtime and size): a
  * `session_kind: "subagent"` with a `parent_session_id` makes it an agent thread of that parent (agent id = its own
- * id); anything else (forks included) a session of its own. Until `summary.json` can be read it is not classified
- * ("cannot tell yet"). The result is cached per key, and taken from the stored raw events when there are any (a
+ * id) — of the ROOT session: the chain of parents is followed while a parent is a subagent itself, so a grandchild is a
+ * thread of the root too. A subagent whose chain cannot be read to its root yet (an orphan, a parent not written yet) is
+ * held: not classified, and read again when the missing summary appears (afterIndex). Anything else (forks included) is
+ * a session of its own. Until `summary.json` can be read it is not classified ("cannot tell yet"). The result is cached per key, and taken from the stored raw events when there are any (a
  * rebuild or a vanished file reads nothing). Project: the encoded `info.cwd`, else the URL-decoded directory name when
  * it looks absolute, else `<cwd dir>/.cwd`, else unknown.
  *
@@ -128,8 +134,21 @@ export class GrokFileSource implements FileSource {
   readonly origin = 'grok' as const;
   /** Reaches `<encoded cwd>/<session id>/updates.jsonl` (two directories below rootDir). */
   readonly watchDepth = 2;
+  /**
+   * Lines are told apart by their place in the file: streamed chunks repeat byte for byte (same text, same second, same
+   * `_meta`), and each one is a chunk of its own.
+   */
+  readonly lineIdentity = 'offset' as const;
   /** Key of an updates.jsonl -> its class, once decided. */
   private readonly classes = new Map<string, FileClass>();
+  /** Session id -> the encoded-cwd directory it was seen in (listing, classification, summaries read). */
+  private readonly dirsById = new Map<string, string>();
+  /**
+   * Session id whose summary.json is missing -> keys of subagent logs held until it appears (spec 5.2: a subagent whose
+   * parent is not seen yet is held). At most GROK_HELD_MAX keys in all; one past the cap waits for the next full scan.
+   */
+  private readonly held = new Map<string, Set<string>>();
+  private heldCount = 0;
   private readonly resolver: ProjectIdResolver;
 
   constructor(
@@ -160,6 +179,7 @@ export class GrokFileSource implements FileSource {
         if (!s.isDirectory() || !validId(s.name)) continue;
         const at = path.join(this.rootDir, d.name, s.name);
         if (!(await isFile(path.join(at, SUMMARY)))) continue;
+        this.dirsById.set(s.name, d.name);
         out.push(path.join(at, SUMMARY));
         if (await isFile(path.join(at, UPDATES))) out.push(path.join(at, UPDATES));
       }
@@ -184,24 +204,39 @@ export class GrokFileSource implements FileSource {
     if (shape === null) return null;
     if (shape.kind === 'summary') {
       // Classified only when it exists and is small: the pipeline then reads it whole (an index file).
-      try {
-        const st = fs.statSync(this.pathOf(key)!);
-        if (!st.isFile() || st.size > GROK_SUMMARY_MAX_BYTES) return null;
-      } catch {
-        return null;
-      }
-      return { kind: 'index', projectId: '', sessionId: '' };
+      this.dirsById.set(shape.id, shape.dir);
+      return fsp.stat(this.pathOf(key)!).then(
+        (st): FileClass | null => (st.isFile() && st.size <= GROK_SUMMARY_MAX_BYTES ? { kind: 'index', projectId: '', sessionId: '' } : null),
+        () => null,
+      );
     }
     const known = this.known(key);
     if (known !== null) return known;
-    const summary = this.readSummary(shape);
+    const summary = this.readSummary(shape.dir, shape.id);
     if (summary === null) return null; // not a session (yet)
+    this.dirsById.set(shape.id, shape.dir);
     const projectId = this.project(shape.dir, summary).projectId;
-    const cls: FileClass =
-      summary.kind === 'subagent' && summary.parent !== null && summary.parent !== shape.id
-        ? { kind: 'agent', projectId, sessionId: summary.parent, agentId: shape.id }
-        : { kind: 'session', projectId, sessionId: shape.id };
-    return this.remember(key, cls);
+    if (!isSubagent(summary, shape.id)) return this.remember(key, { kind: 'session', projectId, sessionId: shape.id });
+    const root = this.rootOf(summary.parent!, shape.id, shape.dir, key);
+    return root === null ? null : this.remember(key, { kind: 'agent', projectId, sessionId: root, agentId: shape.id });
+  }
+
+  /**
+   * The subagent logs held for the session of a `summary.json` just read (its parent appeared), and its own log (a log
+   * read before its summary existed): read again now.
+   */
+  afterIndex(key: string): string[] {
+    const shape = shapeOf(key);
+    if (shape?.kind !== 'summary') return [];
+    this.dirsById.set(shape.id, shape.dir);
+    const out = [path.join(this.rootDir, shape.dir, shape.id, UPDATES)];
+    const waiting = this.held.get(shape.id);
+    if (waiting !== undefined) {
+      this.held.delete(shape.id);
+      this.heldCount -= waiting.size;
+      for (const k of [...waiting].sort()) out.push(this.pathOf(k)!);
+    }
+    return out;
   }
 
   /** No key names the project: it is stored with each raw event. */
@@ -227,7 +262,7 @@ export class GrokFileSource implements FileSource {
     const shape = shapeOf(key);
     if (shape?.kind !== 'summary' || Buffer.byteLength(content) > GROK_SUMMARY_MAX_BYTES) return [];
     const summary = parseGrokSummary(content);
-    if (summary === null || (summary.kind === 'subagent' && summary.parent !== null && summary.parent !== shape.id)) return [];
+    if (summary === null || isSubagent(summary, shape.id)) return [];
     const { projectId, cwd } = this.project(shape.dir, summary);
     const payload: GrokSummaryPayload = { title: summary.title, summary: summary.summary, model: summary.model, cwd, branch: summary.branch, createdAt: summary.createdAt };
     return [{ key: GROK_SUMMARY_ENTRY_PREFIX + shape.id, sessionId: shape.id, agentId: null, projectId, payload: JSON.stringify(payload) }];
@@ -256,8 +291,40 @@ export class GrokFileSource implements FileSource {
     return cls;
   }
 
-  private readSummary(shape: Shape): GrokSummary | null {
-    return readSidecar(path.join(this.rootDir, shape.dir, shape.id, SUMMARY), GROK_SUMMARY_MAX_BYTES, parseGrokSummary);
+  private readSummary(dir: string, id: string): GrokSummary | null {
+    return readSidecar(path.join(this.rootDir, dir, id, SUMMARY), GROK_SUMMARY_MAX_BYTES, parseGrokSummary);
+  }
+
+  /**
+   * The root session of a subagent whose parent is `parent`: up the chain of `parent_session_id`s while the parent is a
+   * subagent itself, so every subagent at any depth is a thread of the root session. Null ("cannot tell yet") while a
+   * link's summary cannot be read (the log is held until it appears), on a cycle, or past GROK_CHAIN_MAX links.
+   */
+  private rootOf(parent: string, self: string, dir: string, key: string): string | null {
+    const seen = new Set([self]);
+    let id = parent;
+    for (let depth = 0; depth < GROK_CHAIN_MAX; depth++) {
+      if (seen.has(id)) return null; // a cycle: never a session
+      seen.add(id);
+      const at = this.dirsById.get(id) ?? dir;
+      const summary = this.readSummary(at, id);
+      if (summary === null) {
+        this.hold(id, key);
+        return null;
+      }
+      this.dirsById.set(id, at);
+      if (!isSubagent(summary, id)) return id;
+      id = summary.parent!;
+    }
+    return null;
+  }
+
+  private hold(missing: string, key: string): void {
+    let keys = this.held.get(missing);
+    if (keys?.has(key) === true || this.heldCount >= GROK_HELD_MAX) return;
+    if (keys === undefined) this.held.set(missing, (keys = new Set()));
+    keys.add(key);
+    this.heldCount += 1;
   }
 
   /** The session's working directory (spec 5.2 order) and project id; never throws. */
@@ -268,6 +335,9 @@ export class GrokFileSource implements FileSource {
     return { projectId: this.resolver.forCwd(cwd), cwd };
   }
 }
+
+/** A subagent session: kind `subagent` with a parent other than itself (spec 5.2; a fork is a session of its own). */
+const isSubagent = (s: GrokSummary, id: string): boolean => s.kind === 'subagent' && s.parent !== null && s.parent !== id;
 
 async function isFile(p: string): Promise<boolean> {
   try {

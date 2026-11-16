@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import { applyChanges, emptyGraph, type Change, type Graph, type GraphNode, type Session } from '@agent-canvas/shared';
 import { grokTouches } from '../src/normalize/files.js';
-import { grokNodeId, GrokNormalizer } from '../src/normalize/grok.js';
+import { GROK_RUN_MAX_CHARS, grokNodeId, GrokNormalizer } from '../src/normalize/grok.js';
 import { NORMALIZER_FACTORIES } from '../src/normalize/registry.js';
 import type { RawEvent } from '../src/store/store.js';
 import { CHILD, chunk, CWD, exampleLines, ext, iso, PROJECT, SID, summaryEntry, T0, text, transcript, upd, UPDATES_KEY } from './grok-fixtures.js';
@@ -284,15 +284,27 @@ describe('records', () => {
     expect(() => n.apply({ source: 'hook', origin: 'grok', receivedAt: iso(T0), eventName: 'x', sessionId: SID, payload: '{}' }, 'p')).not.toThrow();
   });
 
-  test('a repeated line with the same _meta.eventId changes nothing', () => {
-    const a = upd({ sessionUpdate: 'agent_message_chunk', content: text('once') }, { meta: { eventId: 'e-1' } });
-    const lines = [chunk('user', 'q'), a, a];
+  test('byte-identical lines at different offsets are all applied (no line dedupe in the normalizer; eventIds ignored)', () => {
+    const same = (t: string): string => upd({ sessionUpdate: 'agent_message_chunk', content: text(t) }, { meta: { eventId: 'msg-1', promptId: 'p' } });
+    const lines = [chunk('user', 'q', { promptId: 'p' }), same('1'), same('\n\n'), same('2'), same('\n\n'), same('3'), same('\n\n')];
+    expect(go(transcript(lines)).details.get(at(lines, 1))).toEqual({ text: '1\n\n2\n\n3\n\n' });
+  });
+
+  test('M1: object-prototype names are not chunk kinds', () => {
+    const lines = [chunk('user', 'q'), ...['constructor', '__proto__', 'toString', 'hasOwnProperty'].map((k) => upd({ sessionUpdate: k, content: text('x') }))];
     const f = go(transcript(lines));
-    expect(f.details.get(at(lines, 1))).toEqual({ text: 'once' });
-    // Chunks that share an eventId but differ (an id per message, not per line) are all kept.
-    const shared = (t: string): string => upd({ sessionUpdate: 'agent_message_chunk', content: text(t) }, { meta: { eventId: 'msg-1' } });
-    const l2 = [chunk('user', 'q'), shared('a'), shared('b'), shared('b')];
-    expect(go(transcript(l2)).details.get(at(l2, 1))).toEqual({ text: 'ab' });
+    expect(f.unknown).toEqual(['grok:constructor', 'grok:__proto__', 'grok:toString', 'grok:hasOwnProperty']);
+    expect(Object.keys(f.graph.nodes)).toHaveLength(1);
+  });
+
+  test('a file read again from its start (rewritten): the thread is rebuilt from the new content, as a fresh read gives', () => {
+    const old = [chunk('user', 'old prompt', { promptId: 'p1' }), chunk('agent', 'old answer', { promptId: 'p1' }), upd({ sessionUpdate: 'tool_call', toolCallId: 'k', kind: 'read', rawInput: { target_file: 'a.ts' } }, { meta: { promptId: 'p1' } })];
+    const fresh = [chunk('user', 'new prompt', { promptId: 'p1' }), chunk('agent', 'new answer', { promptId: 'p1' })];
+    const n = new GrokNormalizer();
+    const changes: Change[] = [];
+    for (const e of [ENTRY, ...transcript(old), ...transcript(fresh)]) changes.push(...n.apply(e, PROJECT).changes);
+    const want = go([ENTRY, ...transcript(fresh)]);
+    expect(comparable(fold(changes))).toEqual(comparable(want));
   });
 });
 
@@ -360,6 +372,97 @@ describe('rewind', () => {
     const f = go(transcript(lines));
     expect(Object.keys(f.graph.nodes)).toEqual([at(lines, 8)]);
     expect(f.session?.title).toBe('fresh start');
+  });
+});
+
+describe('rewind by _meta.promptIndex (M4)', () => {
+  test('turns without a promptIndex (no user prompt) are not prompts of their own', () => {
+    const lines = [
+      chunk('user', 'qa', { promptId: 'pa' }).replace('"promptId":"pa"', '"promptId":"pa","promptIndex":0'),
+      chunk('agent', 'host', { promptId: 'pb' }),
+      chunk('user', 'qc', { promptId: 'pc' }).replace('"promptId":"pc"', '"promptId":"pc","promptIndex":1'),
+      chunk('agent', 'rc', { promptId: 'pc' }),
+      ext({ sessionUpdate: 'rewind_marker', target_prompt_index: 1 }),
+    ];
+    const f = go(transcript(lines));
+    expect(Object.keys(f.graph.nodes)).toEqual([at(lines, 0), at(lines, 1)]);
+  });
+});
+
+describe('a rewind that removes a dispatch keeps the subagent thread, detached, with its usage (I4 ruling)', () => {
+  test('no surviving node or edge points at a removed node', () => {
+    const parent = [
+      chunk('user', 'zero', { promptId: 'p0' }),
+      chunk('user', 'one', { promptId: 'p1' }),
+      upd({ sessionUpdate: 'tool_call', toolCallId: 'task_1', kind: 'other', rawInput: { prompt: 'x', subagent_type: 'explore' }, _meta: { toolName: 'task' } }, { meta: { promptId: 'p1' } }),
+      upd({ sessionUpdate: 'tool_call_update', toolCallId: 'task_1', status: 'completed', rawOutput: { subagent_id: CHILD } }, { meta: { promptId: 'p1' } }),
+      ext({ sessionUpdate: 'rewind_marker', target_prompt_index: 1 }),
+    ];
+    const child = transcript([chunk('user', 'go', { promptId: 'c' }), chunk('agent', 'did it', { promptId: 'c' }), ext({ sessionUpdate: 'turn_completed', prompt_id: 'c', usage: { inputTokens: 50, outputTokens: 5 } })], { agentId: CHILD });
+    for (const events of [[ENTRY, ...transcript(parent), ...child], [ENTRY, ...child, ...transcript(parent)]]) {
+      const f = go(events);
+      const nodes = Object.values(f.graph.nodes);
+      expect(nodes.filter((n) => n.agentId === CHILD)).toHaveLength(2);
+      expect(nodes.find((n) => n.agentId === CHILD && n.kind === 'text')!.usage).toEqual({ inputTokens: 50, cachedInputTokens: 0, outputTokens: 5 });
+      expect(nodes.find((n) => n.agentId === CHILD && n.kind === 'prompt')!.parentId).toBeNull();
+      for (const n of nodes) if (n.parentId !== null) expect(f.graph.nodes[n.parentId], n.id).toBeDefined();
+      for (const e of Object.values(f.graph.edges)) expect(f.graph.nodes[e.from] !== undefined && f.graph.nodes[e.to] !== undefined).toBe(true);
+    }
+  });
+});
+
+describe('open runs: bounded rewrites (I5)', () => {
+  /** Bytes of node detail the store would serialize with one line per transaction (each change's detail, whole). */
+  function stream(total: number, chunks: number): { bytes: number; texts: string[]; visibleOk: boolean } {
+    const n = new GrokNormalizer();
+    const piece = `${'w'.repeat(Math.round(total / chunks) - 1)} `;
+    const lines = [chunk('user', 'go'), ...Array.from({ length: chunks }, () => chunk('agent', piece))];
+    const events = transcript(lines);
+    let bytes = 0;
+    let visibleOk = true;
+    const texts = new Map<string, string>();
+    events.forEach((e, i) => {
+      for (const c of n.apply(e, PROJECT).changes) {
+        if (c.type === 'node_added') {
+          bytes += ((c.detail.text as string | undefined)?.length ?? 0) + 11; // {"text":""}
+          if (c.node.kind === 'text') texts.set(c.node.id, c.detail.text as string);
+        }
+        if (c.type === 'node_updated' && c.detail !== undefined) {
+          bytes += ((c.detail.text as string | undefined)?.length ?? 0) + 11;
+          texts.set(c.id, c.detail.text as string);
+        }
+      }
+      // (a) after every applied line the whole text received so far is in the details.
+      if (i > 0 && i % 97 === 0 && [...texts.values()].join('').length !== i * piece.length) visibleOk = false;
+    });
+    return { bytes, texts: [...texts.values()], visibleOk };
+  }
+
+  test('a 250 Ki answer in 2,500 chunks: at most 50× its size serialized, every byte visible after every line', () => {
+    const r = stream(256_000, 2500);
+    expect(r.visibleOk).toBe(true);
+    expect(r.bytes / 256_000).toBeLessThan(50);
+    expect(r.texts.every((t) => t.length <= GROK_RUN_MAX_CHARS + 103)).toBe(true);
+  });
+
+  test('a 2 MB answer in 20,000 chunks: linear too', { timeout: 60_000 }, () => {
+    const r = stream(2_000_000, 20_000);
+    expect(r.visibleOk).toBe(true);
+    expect(r.bytes / 2_000_000).toBeLessThan(50);
+  });
+
+  test('a typical answer stays one node; a continuation never splits a chunk (or a surrogate pair)', () => {
+    const lines = [chunk('user', 'go'), ...Array.from({ length: 300 }, () => chunk('agent', 'word '))];
+    expect(Object.values(go(transcript(lines)).graph.nodes).filter((n) => n.kind === 'text')).toHaveLength(1);
+    const emoji = '\u{1F600}';
+    const big = [chunk('user', 'go'), ...Array.from({ length: GROK_RUN_MAX_CHARS }, () => chunk('agent', emoji))];
+    const f = go(transcript(big));
+    const texts = Object.values(f.graph.nodes).filter((n) => n.kind === 'text').map((n) => f.details.get(n.id)!.text as string);
+    expect(texts.length).toBeGreaterThan(1);
+    expect(texts.join('')).toBe(emoji.repeat(GROK_RUN_MAX_CHARS));
+    for (const t of texts) expect(t.length % 2).toBe(0);
+    const single = go(transcript([chunk('user', 'go'), chunk('agent', emoji.repeat(GROK_RUN_MAX_CHARS))]));
+    expect(Object.values(single.graph.nodes).filter((n) => n.kind === 'text')).toHaveLength(1);
   });
 });
 

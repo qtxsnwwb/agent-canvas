@@ -1,7 +1,6 @@
 import v8 from 'node:v8';
 import vm from 'node:vm';
 import { describe, expect, test } from 'vitest';
-import type { Change } from '@agent-canvas/shared';
 import { GROK_RUN_MAX_CHARS, GrokNormalizer } from '../src/normalize/grok.js';
 import type { RawEvent } from '../src/store/store.js';
 import { chunk, ext, PROJECT, SID, T0, upd, UPDATES_KEY } from './grok-fixtures.js';
@@ -35,7 +34,7 @@ function turn(i: number): string[] {
 }
 
 describe('Grok normalizer: cost of long sessions and long chunk runs', () => {
-  test('50,000 agent_message_chunk lines one by one into one node: linear, one node, the whole text, little held', () => {
+  test('50,000 agent_message_chunk lines one by one: linear, the whole text, little held', () => {
     const gc = gcFn();
     offset = 0;
     const n = new GrokNormalizer();
@@ -44,26 +43,30 @@ describe('Grok normalizer: cost of long sessions and long chunk runs', () => {
     const before = process.memoryUsage().heapUsed;
     const slices: number[] = [];
     let added = 0;
-    let last: Change | undefined;
+    const texts = new Map<string, string>();
     const piece = 'tok1 '; // 5 characters: 250,000 characters in all (under GROK_RUN_MAX_CHARS)
     for (let s = 0; s < 5; s++) {
       const lines = Array.from({ length: 10_000 }, () => chunk('agent', piece));
       const t0 = performance.now();
       for (const line of lines) {
         for (const c of n.apply(event(line), PROJECT).changes) {
-          if (c.type === 'node_added') added++;
-          if (c.type === 'node_updated' && c.detail !== undefined) last = c;
+          if (c.type === 'node_added') {
+            added++;
+            texts.set(c.node.id, c.detail.text as string);
+          }
+          if (c.type === 'node_updated' && c.detail !== undefined) texts.set(c.id, c.detail.text as string);
         }
       }
       slices.push(performance.now() - t0);
     }
-    expect(added).toBe(1);
-    const text = (last as Extract<Change, { type: 'node_updated' }>).detail!.text as string;
-    expect(text.length).toBe(50_000 * piece.length);
+    // Continuations every GROK_RUN_MAX_CHARS characters (never cutting a chunk).
+    expect(added).toBeGreaterThanOrEqual(Math.ceil((50_000 * piece.length) / (GROK_RUN_MAX_CHARS + piece.length)));
+    expect(added).toBeLessThanOrEqual(Math.ceil((50_000 * piece.length) / GROK_RUN_MAX_CHARS));
+    expect([...texts.values()].join('').length).toBe(50_000 * piece.length);
     // Linear: the last slice within 3× the first (+ 50 ms of noise); per-chunk work growing with the run would be ~9×.
     expect(slices[4]!).toBeLessThan(slices[0]! * 3 + 50);
     expect(slices.reduce((a, b) => a + b, 0)).toBeLessThan(10_000);
-    last = undefined;
+    texts.clear();
     gc();
     const held = process.memoryUsage().heapUsed - before;
     // Held: the open run's text (250 KB of characters) and bookkeeping; a copy per chunk would be gigabytes.
@@ -72,14 +75,31 @@ describe('Grok normalizer: cost of long sessions and long chunk runs', () => {
     expect(n.hasSession(SID)).toBe(true);
   });
 
-  test('a run longer than GROK_RUN_MAX_CHARS continues in a new node', () => {
+  test('a run longer than GROK_RUN_MAX_CHARS continues in a new node; a chunk is never cut', () => {
     offset = 0;
     const n = new GrokNormalizer();
     let added = 0;
-    const big = 'x'.repeat(64 * 1024);
-    const lines = [chunk('user', 'go'), ...Array.from({ length: Math.ceil(GROK_RUN_MAX_CHARS / big.length) + 1 }, () => chunk('agent', big))];
-    for (const line of lines) for (const c of n.apply(event(line), PROJECT).changes) if (c.type === 'node_added') added++;
+    const big = 'x'.repeat(GROK_RUN_MAX_CHARS * 2);
+    for (const line of [chunk('user', 'go'), chunk('agent', big), chunk('agent', big)]) for (const c of n.apply(event(line), PROJECT).changes) if (c.type === 'node_added') added++;
     expect(added).toBe(3); // prompt, text, its continuation
+  });
+
+  test('I2: lines carrying _meta.eventId hold nothing per line', () => {
+    const gc = gcFn();
+    offset = 0;
+    gc();
+    const before = process.memoryUsage().heapUsed;
+    const n = new GrokNormalizer();
+    n.apply(event(chunk('user', 'go', { promptId: 'p' })), PROJECT);
+    for (let i = 0; i < 200_000; i++) {
+      const id = `0b7c9a52-3f1e-4c6a-9d2b-${i.toString(16).padStart(12, '0')}`;
+      n.apply(event(upd({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'x' } }, { meta: { promptId: 'p', eventId: id } })), PROJECT);
+    }
+    gc();
+    const held = process.memoryUsage().heapUsed - before;
+    console.log(`[grok timing] 200k lines with eventId: held ${(held / 1e6).toFixed(2)} MB`);
+    expect(held).toBeLessThan(8e6); // 32 MB with the former set of eventIds
+    expect(n.hasSession(SID)).toBe(true);
   });
 
   test('30,000 lines of turns one by one: the last 6,000 cost about what the first 6,000 did', () => {

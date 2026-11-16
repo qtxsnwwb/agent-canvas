@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import * as sidecar from '../src/sources/sidecar.js';
-import { GROK_SUMMARY_ENTRY_PREFIX, GROK_SUMMARY_MAX_BYTES, GrokFileSource, type GrokLookup } from '../src/sources/grok/source.js';
+import { GROK_HELD_MAX, GROK_SUMMARY_ENTRY_PREFIX, GROK_SUMMARY_MAX_BYTES, GrokFileSource, type GrokLookup } from '../src/sources/grok/source.js';
 import { CHILD, CWD, DIR, iso, PROJECT, SID, summaryJson, T0 } from './grok-fixtures.js';
 
 let tmp: string;
@@ -78,6 +78,7 @@ describe('GrokFileSource', () => {
   });
 
   test('a subagent directory is an agent thread of its parent; a fork (parent, kind not subagent) is its own session', async () => {
+    await writeRel(`${DIR}/${SID}/summary.json`, summaryJson()); // the parent is there (else the subagent is held)
     await writeRel(`${DIR}/${CHILD}/summary.json`, summaryJson({ id: CHILD, kind: 'subagent', parent: SID }));
     const FORK = '11111111-2222-4333-8444-555555555555';
     await writeRel(`${DIR}/${FORK}/summary.json`, summaryJson({ id: FORK, kind: 'worktree', parent: SID, extra: { forked_at: '2026-11-10T09:05:00Z' } }));
@@ -91,6 +92,49 @@ describe('GrokFileSource', () => {
     // Summary entries: the main sessions only (a subagent's title is not its parent's).
     expect(s.indexEntries(key(`${DIR}/${CHILD}/summary.json`), summaryJson({ id: CHILD, kind: 'subagent', parent: SID }))).toEqual([]);
     expect(s.indexEntries(key(`${DIR}/${FORK}/summary.json`), summaryJson({ id: FORK, kind: 'worktree', parent: SID })).map((e) => e.sessionId)).toEqual([FORK]);
+  });
+
+  test('I1: a grandchild is a thread of the ROOT session; an orphan is held, then read when its parent appears', async () => {
+    const GRAND = '22222222-3333-4444-8555-666666666666';
+    const ORPHAN = '33333333-3333-4444-8555-666666666666';
+    const MISSING = '44444444-3333-4444-8555-666666666666';
+    const OTHER_DIR = '%2Fhome%2Fdev%2Felsewhere';
+    await writeRel(`${DIR}/${SID}/summary.json`, summaryJson());
+    await writeRel(`${OTHER_DIR}/${CHILD}/summary.json`, summaryJson({ id: CHILD, kind: 'subagent', parent: SID })); // spawned with another cwd
+    await writeRel(`${DIR}/${GRAND}/summary.json`, summaryJson({ id: GRAND, kind: 'subagent', parent: CHILD }));
+    await writeRel(`${DIR}/${ORPHAN}/summary.json`, summaryJson({ id: ORPHAN, kind: 'subagent', parent: MISSING }));
+    const s = new GrokFileSource(root);
+    await s.listFiles(); // learns which directory each session id is in
+    expect(await s.classify(key(`${DIR}/${GRAND}/updates.jsonl`))).toEqual({ kind: 'agent', projectId: PROJECT, sessionId: SID, agentId: GRAND });
+    expect(await s.classify(key(`${OTHER_DIR}/${CHILD}/updates.jsonl`))).toEqual({ kind: 'agent', projectId: PROJECT, sessionId: SID, agentId: CHILD });
+    // The orphan: held (nothing to classify), and named when the missing parent's summary is read.
+    expect(await s.classify(key(`${DIR}/${ORPHAN}/updates.jsonl`))).toBeNull();
+    expect(s.afterIndex(key(`${DIR}/${SID}/summary.json`))).toEqual([abs(`${DIR}/${SID}/updates.jsonl`)]);
+    await writeRel(`${DIR}/${MISSING}/summary.json`, summaryJson({ id: MISSING }));
+    expect(s.afterIndex(key(`${DIR}/${MISSING}/summary.json`))).toEqual([abs(`${DIR}/${MISSING}/updates.jsonl`), abs(`${DIR}/${ORPHAN}/updates.jsonl`)]);
+    expect(await s.classify(key(`${DIR}/${ORPHAN}/updates.jsonl`))).toEqual({ kind: 'agent', projectId: PROJECT, sessionId: MISSING, agentId: ORPHAN });
+  });
+
+  test('I1: a grandchild whose middle link is missing is held, not attached to the middle id', async () => {
+    const GRAND = '22222222-3333-4444-8555-666666666666';
+    await writeRel(`${DIR}/${GRAND}/summary.json`, summaryJson({ id: GRAND, kind: 'subagent', parent: CHILD }));
+    const s = new GrokFileSource(root);
+    expect(await s.classify(key(`${DIR}/${GRAND}/updates.jsonl`))).toBeNull();
+    await writeRel(`${DIR}/${CHILD}/summary.json`, summaryJson({ id: CHILD, kind: 'subagent', parent: SID }));
+    expect(await s.classify(key(`${DIR}/${GRAND}/updates.jsonl`))).toBeNull(); // the root is still missing
+    await writeRel(`${DIR}/${SID}/summary.json`, summaryJson());
+    expect(await s.classify(key(`${DIR}/${GRAND}/updates.jsonl`))).toMatchObject({ kind: 'agent', sessionId: SID, agentId: GRAND });
+  });
+
+  test('I1: a cycle of parents never makes a session and never loops; the held set is bounded', async () => {
+    const A = 'aaaaaaaa-3333-4444-8555-666666666666';
+    const B = 'bbbbbbbb-3333-4444-8555-666666666666';
+    await writeRel(`${DIR}/${A}/summary.json`, summaryJson({ id: A, kind: 'subagent', parent: B }));
+    await writeRel(`${DIR}/${B}/summary.json`, summaryJson({ id: B, kind: 'subagent', parent: A }));
+    const s = new GrokFileSource(root);
+    expect(await s.classify(key(`${DIR}/${A}/updates.jsonl`))).toBeNull();
+    expect(await s.classify(key(`${DIR}/${B}/updates.jsonl`))).toBeNull();
+    expect(GROK_HELD_MAX).toBeLessThanOrEqual(10_000);
   });
 
   test('summary entry: a projection of summary.json (title fields, model, cwd, branch, start), keyed per session', async () => {

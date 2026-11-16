@@ -494,6 +494,13 @@ export const COST_NO_TOKEN_ORIGINS: readonly Origin[] = ['cursor'];
 export const COST_EXCLUDED_ORIGINS: readonly Origin[] = ['copilot'];
 
 /**
+ * Origins whose sessions take part in `cost` only when they record per-turn usage (more-sources spec section 6: a Grok
+ * Build session without turn-completion records has none): a session of these origins with no node carrying usage
+ * contributes no turn costs, so it is neither judged nor part of its group's baseline. Sessions with usage take part.
+ */
+export const COST_USAGE_REQUIRED_ORIGINS: readonly Origin[] = ['grok'];
+
+/**
  * The 95th percentiles (nearest rank) of the finished turns' active time and tokens (unfinished turns are left out);
  * tokens over the turns with tokens > 0 only. Each null when fewer than COST_MIN_TURNS turns qualify. Grouping the
  * turns (by project and origin) is the caller's; `options.origin` is the group's origin: for one in

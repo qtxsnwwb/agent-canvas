@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import type { Change, GraphNode, NodeDetail, Session, Usage } from '@agent-canvas/shared';
 import { GROK_SUMMARY_ENTRY_PREFIX, type GrokSummaryPayload } from '../sources/grok/source.js';
 import type { RawEvent } from '../store/store.js';
@@ -23,11 +22,18 @@ import { unknownTypeName } from './unknown-type.js';
  * turn extend one node (prompt / text / thinking). A line that adds a node of its own, a chunk of another kind, a new
  * turn, a `turn_completed` or a rewind closes the run; records that add no node (a tool_call_update, ignored records)
  * do not. Only the open run's text is held; the node's detail carries the whole text, emitted once per apply / batch
- * (node_updated detail replaces the stored text). A run longer than RUN_MAX_CHARS continues in a new node, so a
- * pathological run never makes each store write cost its whole length.
+ * (node_updated detail replaces the stored text). A run that has reached GROK_RUN_MAX_CHARS continues in a new node
+ * (between chunks: a chunk, and so a surrogate pair, is never cut), so a streamed answer costs each store write at most
+ * that much: the bytes rewritten stay linear in the answer's length (about GROK_RUN_MAX_CHARS / (2 × chunk length) times
+ * it).
+ *
+ * Lines are never deduplicated here: two byte-identical lines are two chunks (the pipeline tells them apart by offset,
+ * FileSource.lineIdentity). A line at or before the last offset read of its thread means the file is being read again
+ * from its start (rewritten): the thread is cleared and rebuilt from the new content.
  *
  * Turns: `_meta.promptId` (params first, then params.update) changing opens a turn; without one, a user chunk that
- * does not continue a user run opens one. Turn index (rewind `target_prompt_index`) = position among the thread's turns.
+ * does not continue a user run opens one. Rewind `target_prompt_index`: by the turns' `_meta.promptIndex` when the lines
+ * carry one, else the position among the thread's turns.
  */
 
 const EPOCH = '1970-01-01T00:00:00.000Z';
@@ -40,7 +46,7 @@ const CHUNKS: Record<string, RunKind> = { user_message_chunk: 'user', agent_mess
 /** Characters of a run kept for its summary / prompt title (the head of the text). */
 const PREFIX_MAX = 2048;
 /** A chunk run longer than this continues in a new node. */
-export const GROK_RUN_MAX_CHARS = 256 * 1024;
+export const GROK_RUN_MAX_CHARS = 4 * 1024;
 /** Keys of a dispatch's output (or `_meta`) that name the subagent session it ran (research A2: `subagent_id`). */
 const CHILD_ID_KEYS = ['subagent_id', 'subagentId', 'child_session_id', 'childSessionId'];
 const MAX_CHILD_IDS = 8;
@@ -129,6 +135,8 @@ interface Turn {
   /** The turn's first node (its turnId); '' until it has one. */
   id: string;
   promptId: string | null;
+  /** `_meta.promptIndex` of the line that opened the turn, if any (Grok's own prompt index: rewinds go by it). */
+  promptIndex: number | null;
   /** A prompt turn (counts for rewind indices); false: the nodes read before any turn. */
   counted: boolean;
   nodes: string[];
@@ -171,6 +179,17 @@ interface Thread {
   run: Run | null;
   /** The earliest turn that has a prompt title (the session's fallback title). */
   firstTitled: Turn | null;
+  /** Keys of this thread's calls removed by a rewind (a late update must not bring one back). */
+  removedCalls: Set<string>;
+  /** File offset of the latest line read (a smaller one: the file was rewritten and is read again from its start). */
+  lastOffset: number;
+  /** `_meta.promptIndex` of the line being applied (a turn opened by it takes it). */
+  promptIndex: number | null;
+  /** Some turn of the thread has a promptIndex (rewinds then go by it). */
+  indexed: boolean;
+  /** Earliest / latest line time of the thread. */
+  minMs: number | null;
+  maxMs: number | null;
   /** The dispatch this agent thread hangs off. */
   linkedTo: Call | null;
 }
@@ -209,20 +228,14 @@ interface SessionState {
   projectId: string;
   summary: GrokSummaryPayload | null;
   entryProjectId: string | null;
-  minMs: number | null;
-  maxMs: number | null;
   threads: Map<string, Thread>;
   /** Every live node as emitted. */
   nodes: Map<string, GraphNode>;
   calls: Map<string, Call>;
   /** Node id -> the call it shows. */
   callByNode: Map<string, Call>;
-  /** Keys of calls removed by a rewind (a late update must not bring one back). */
-  removedCalls: Set<string>;
   /** Child (agent) id -> the calls naming it, in the order they named it. */
   childCalls: Map<string, Call[]>;
-  /** `_meta.eventId` + line hash of the lines applied (a repeated line changes nothing). */
-  seenEvents: Set<string>;
   /** Runs whose text is not emitted yet. */
   pending: Set<Run>;
 }
@@ -307,15 +320,11 @@ export class GrokNormalizer implements AgentNormalizer {
         projectId,
         summary: null,
         entryProjectId: null,
-        minMs: null,
-        maxMs: null,
         threads: new Map(),
         nodes: new Map(),
         calls: new Map(),
         callByNode: new Map(),
-        removedCalls: new Set(),
         childCalls: new Map(),
-        seenEvents: new Set(),
         pending: new Set(),
       };
       this.sessions.set(sessionId, state);
@@ -327,7 +336,7 @@ export class GrokNormalizer implements AgentNormalizer {
     const key = agentId ?? MAIN;
     let t = state.threads.get(key);
     if (t === undefined) {
-      t = { agentId, turns: [], current: null, byPrompt: new Map(), prev: null, prevTs: null, lastTs: null, first: null, run: null, firstTitled: null, linkedTo: null };
+      t = { agentId, turns: [], current: null, byPrompt: new Map(), prev: null, prevTs: null, lastTs: null, first: null, run: null, firstTitled: null, removedCalls: new Set(), lastOffset: -1, promptIndex: null, indexed: false, minMs: null, maxMs: null, linkedTo: null };
       state.threads.set(key, t);
       if (agentId !== null) this.relink(state, t, changes); // a dispatch naming it may have been read already
     }
@@ -362,6 +371,11 @@ export class GrokNormalizer implements AgentNormalizer {
   // ---- records ----
 
   private record(state: SessionState, event: Extract<RawEvent, { source: 'transcript' }>, projectId: string, changes: Change[]): string | undefined {
+    const t = this.thread(state, event.agentId, changes);
+    // A thread is one file read in order: a line at or before the last one read means the file was rewritten and is
+    // being read again from its start (a new line generation, FileSource.lineIdentity): what the old content made goes.
+    if (event.offset <= t.lastOffset) this.resetThread(state, t, changes);
+    t.lastOffset = event.offset;
     let rec: unknown;
     try {
       rec = JSON.parse(event.line);
@@ -381,33 +395,26 @@ export class GrokNormalizer implements AgentNormalizer {
     const type = isExt ? (nonEmpty(update?.sessionUpdate) ?? nonEmpty(update?.type) ?? nonEmpty(params.type)) : nonEmpty(update?.sessionUpdate);
     if (type === null) return unknownTypeName('grok', null);
     if (!isExt && IGNORED_UPDATES.has(type)) return undefined;
-    const known = isExt ? isTurnCompleted(type) || /rewind/i.test(type) : type in CHUNKS || type === 'tool_call' || type === 'tool_call_update';
+    const known = isExt ? isTurnCompleted(type) || /rewind/i.test(type) : Object.hasOwn(CHUNKS, type) || type === 'tool_call' || type === 'tool_call_update';
     if (!known) return unknownTypeName('grok', type);
 
-    const t = this.thread(state, event.agentId, changes);
-    const eventId = meta('eventId');
-    if (eventId !== null) {
-      // A line read before (same eventId and same content: appended twice) changes nothing. The content is part of the
-      // key because whether an eventId is unique per line or shared by the chunks of one message is not known.
-      const k = `${t.agentId ?? ''}\u0000${eventId.slice(0, 200)}\u0000${createHash('sha256').update(event.line).digest('hex').slice(0, 16)}`;
-      if (state.seenEvents.has(k)) return undefined;
-      state.seenEvents.add(own(k));
-    }
     if (projectId !== 'unknown' && (event.agentId === null || state.projectId === 'unknown')) state.projectId = projectId;
     const ms = msOfTimestamp(rec.timestamp);
     const ts = ms === null ? null : isoOfMs(ms);
     if (ms !== null) {
-      state.minMs = state.minMs === null ? ms : Math.min(state.minMs, ms);
-      state.maxMs = state.maxMs === null ? ms : Math.max(state.maxMs, ms);
+      t.minMs = t.minMs === null ? ms : Math.min(t.minMs, ms);
+      t.maxMs = t.maxMs === null ? ms : Math.max(t.maxMs, ms);
     }
     const rawPrompt = meta('promptId');
     const promptId = rawPrompt === null ? null : own(rawPrompt.slice(0, 200));
+    const pIndex = (isObject(params._meta) ? params._meta.promptIndex : undefined) ?? (update !== null && isObject(update._meta) ? update._meta.promptIndex : undefined);
+    t.promptIndex = typeof pIndex === 'number' && Number.isInteger(pIndex) && pIndex >= 0 ? pIndex : null;
     let unknown: string | undefined;
     if (isExt) {
       const u = update ?? params;
       if (isTurnCompleted(type)) this.turnCompleted(state, t, u, params, promptId, changes);
       else unknown = this.rewindMarker(state, t, u, params, type, changes);
-    } else if (type in CHUNKS) {
+    } else if (Object.hasOwn(CHUNKS, type)) {
       this.chunk(state, t, CHUNKS[type]!, blockText(update!.content), ts, promptId, event.offset, changes);
     } else {
       this.toolRecord(state, t, update!, params, ts, promptId, event.offset, type === 'tool_call_update', changes);
@@ -440,7 +447,9 @@ export class GrokNormalizer implements AgentNormalizer {
 
   private openTurn(state: SessionState, t: Thread, promptId: string | null, counted: boolean, changes: Change[]): Turn {
     this.closeRun(state, t, changes);
-    const turn: Turn = { id: '', promptId, counted, nodes: [], lastReply: null, usageOn: null, title: undefined, removed: false };
+    const promptIndex = counted ? t.promptIndex : null;
+    if (promptIndex !== null) t.indexed = true;
+    const turn: Turn = { id: '', promptId, promptIndex, counted, nodes: [], lastReply: null, usageOn: null, title: undefined, removed: false };
     t.turns.push(turn);
     t.current = turn;
     if (promptId !== null) t.byPrompt.set(promptId, turn);
@@ -506,7 +515,7 @@ export class GrokNormalizer implements AgentNormalizer {
       run.text += text;
       run.chars += text.length;
       if (run.prefix.length < PREFIX_MAX) {
-        run.prefix += text.slice(0, PREFIX_MAX - run.prefix.length);
+        run.prefix += head(text, PREFIX_MAX - run.prefix.length);
         run.summary = null;
         if (run.titles) run.turn.title = promptTitle(run.prefix);
       }
@@ -515,7 +524,7 @@ export class GrokNormalizer implements AgentNormalizer {
       return;
     }
     this.closeRun(state, t, changes);
-    const prefix = text.slice(0, PREFIX_MAX);
+    const prefix = head(text, PREFIX_MAX);
     const summary = brief(prefix);
     const spec = kind === 'user' ? { kind: 'prompt' as const, title: 'Prompt' } : kind === 'agent' ? { kind: 'text' as const, title: 'Text' } : { kind: 'thinking' as const, title: 'Thinking' };
     const node = this.addNode(state, t, turn, { id: grokNodeId(state.session.id, t.agentId, `@${offset}`), childAgentId: null, kind: spec.kind, status: null, title: spec.title, summary, toolName: null, toolUseId: null, messageId: null, durationMs: null, endedAt: null, usage: null, systemSubtype: null }, ts, { text }, changes);
@@ -558,9 +567,9 @@ export class GrokNormalizer implements AgentNormalizer {
     const rawId = nonEmpty(u.toolCallId);
     const toolCallId = rawId === null ? null : own(rawId.slice(0, 200));
     const key = toolCallId !== null ? `${t.agentId ?? ''}\u0000${toolCallId}` : `${t.agentId ?? ''}\u0000@${offset}`;
-    if (state.removedCalls.has(key)) {
+    if (t.removedCalls.has(key)) {
       if (isUpdate) return; // a late update of a call a rewind removed
-      state.removedCalls.delete(key);
+      t.removedCalls.delete(key);
     }
     let call = state.calls.get(key);
     if (call === undefined) {
@@ -705,9 +714,31 @@ export class GrokNormalizer implements AgentNormalizer {
     const raw = u.target_prompt_index ?? u.targetPromptIndex ?? params.target_prompt_index ?? params.targetPromptIndex;
     if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 0) return unknownTypeName('grok', type);
     this.closeRun(state, t, changes);
-    const lead = t.turns[0]?.counted === false ? 1 : 0;
-    const from = lead + raw;
-    if (from >= t.turns.length) return undefined;
+    this.cutTurns(state, t, this.rewindFrom(t, raw), changes);
+    return undefined;
+  }
+
+  /**
+   * Position in t.turns of the first turn a rewind to prompt index `target` removes: by the turns' `_meta.promptIndex`
+   * when the thread's lines carry one (turns without one, e.g. opened by a promptId with no user prompt, are not
+   * prompts of their own), else by position among the prompt turns. Walks back from the end: cost ∝ turns removed.
+   */
+  private rewindFrom(t: Thread, target: number): number {
+    if (t.indexed) {
+      let from = t.turns.length;
+      for (let i = t.turns.length - 1; i >= 0; i--) {
+        const idx = t.turns[i]!.promptIndex;
+        if (!t.turns[i]!.counted || (idx !== null && idx < target)) break;
+        if (idx !== null) from = i;
+      }
+      return from;
+    }
+    return (t.turns[0]?.counted === false ? 1 : 0) + target;
+  }
+
+  /** Removes the turns from position `from` on (every node; calls; links of agent threads hung off them). */
+  private cutTurns(state: SessionState, t: Thread, from: number, changes: Change[]): void {
+    if (from >= t.turns.length) return;
     const gone = t.turns.splice(from);
     const affected = new Set<Thread>();
     for (const turn of gone) {
@@ -725,7 +756,27 @@ export class GrokNormalizer implements AgentNormalizer {
     // A rewind removes a suffix of turns: a titled turn before the removed first titled one cannot exist.
     if (t.firstTitled?.removed === true) t.firstTitled = null;
     for (const child of affected) this.relink(state, child, changes);
-    return undefined;
+  }
+
+  /** The thread's file is read again from its start: everything its old content made is removed. */
+  private resetThread(state: SessionState, t: Thread, changes: Change[]): void {
+    const run = t.run;
+    if (run !== null) {
+      t.run = null;
+      state.pending.delete(run);
+    }
+    this.cutTurns(state, t, 0, changes);
+    t.current = null;
+    t.byPrompt.clear();
+    t.prev = null;
+    t.prevTs = null;
+    t.lastTs = null;
+    t.first = null;
+    t.firstTitled = null;
+    t.removedCalls.clear();
+    t.indexed = false;
+    t.minMs = null;
+    t.maxMs = null;
   }
 
   /** Removes one node (the store drops its detail, search entry and edges); a call's node takes the call with it. */
@@ -738,7 +789,7 @@ export class GrokNormalizer implements AgentNormalizer {
     call.removed = true;
     state.callByNode.delete(id);
     state.calls.delete(call.key);
-    state.removedCalls.add(call.key);
+    call.thread.removedCalls.add(call.key);
     for (const childId of call.childIds) {
       const child = state.threads.get(childId);
       if (child !== undefined && child.linkedTo === call) affected.add(child);
@@ -757,8 +808,14 @@ export class GrokNormalizer implements AgentNormalizer {
     const s = state.summary;
     const main = state.threads.get(MAIN);
     const firstPrompt = main?.firstTitled?.title ?? null;
-    const startedAt = s?.createdAt ?? (state.minMs === null ? EPOCH : isoOfMs(state.minMs));
-    const lastMs = Math.max(state.maxMs ?? Number.NEGATIVE_INFINITY, Date.parse(startedAt));
+    let minMs: number | null = null;
+    let maxMs: number | null = null;
+    for (const th of state.threads.values()) {
+      if (th.minMs !== null) minMs = minMs === null ? th.minMs : Math.min(minMs, th.minMs);
+      if (th.maxMs !== null) maxMs = maxMs === null ? th.maxMs : Math.max(maxMs, th.maxMs);
+    }
+    const startedAt = s?.createdAt ?? (minMs === null ? EPOCH : isoOfMs(minMs));
+    const lastMs = Math.max(maxMs ?? Number.NEGATIVE_INFINITY, Date.parse(startedAt));
     const next: Session = {
       ...state.session,
       projectId: state.entryProjectId ?? state.projectId,
@@ -783,6 +840,13 @@ export class GrokNormalizer implements AgentNormalizer {
     state.session = next;
     changes.push({ type: 'session_upserted', session: next });
   }
+}
+
+/** The first `n` UTF-16 units of `s`, one fewer when the cut would split a surrogate pair. */
+function head(s: string, n: number): string {
+  if (s.length <= n) return s;
+  const code = s.charCodeAt(n - 1);
+  return s.slice(0, code >= 0xd800 && code <= 0xdbff ? n - 1 : n);
 }
 
 const isTurnCompleted = (type: string): boolean => type.replace(/[^a-z]/gi, '').toLowerCase() === 'turncompleted';
