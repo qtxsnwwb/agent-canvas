@@ -1,7 +1,9 @@
-import fs from 'node:fs';
 import path from 'node:path';
 import { normaliseCwd } from '../cursor/project.js';
 import { encodeProjectId, ProjectIdResolver } from '../project-ids.js';
+import { asWorkingDir, readSidecar } from '../sidecar.js';
+
+export { asWorkingDir, readSidecar, sidecarReads } from '../sidecar.js';
 
 /**
  * Store keys of the per-session project entries (meta raw events written from `.project_root` / `projects.json`, see
@@ -15,61 +17,6 @@ export const PROJECT_ROOT_MAX_BYTES = 4 * 1024;
 export const PROJECTS_JSON_MAX_BYTES = 1024 * 1024;
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
-
-/** Number of sidecar file contents read so far (tests: reads are cached by mtime and size). */
-export let sidecarReads = 0;
-
-interface Cached<T> {
-  mtimeMs: number;
-  size: number;
-  value: T;
-}
-const cache = new Map<string, Cached<unknown>>();
-
-/**
- * `parse` of a small file's content, at most `max` bytes, cached per path by mtime and size (re-read only when either
- * changes). Missing, unreadable or larger than `max`: `parse(null)`.
- */
-function readSidecar<T>(file: string, max: number, parse: (text: string | null) => T): T {
-  let fd: number;
-  try {
-    fd = fs.openSync(file, 'r');
-  } catch {
-    cache.delete(file);
-    return parse(null);
-  }
-  try {
-    const st = fs.fstatSync(fd);
-    const hit = cache.get(file);
-    if (hit !== undefined && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.value as T;
-    let value: T;
-    if (!st.isFile() || st.size > max) value = parse(null);
-    else {
-      const buf = Buffer.alloc(Math.min(st.size, max));
-      const n = fs.readSync(fd, buf, 0, buf.length, 0);
-      sidecarReads += 1;
-      value = parse(buf.subarray(0, n).toString('utf8'));
-    }
-    cache.set(file, { mtimeMs: st.mtimeMs, size: st.size, value });
-    return value;
-  } catch {
-    return parse(null);
-  } finally {
-    fs.closeSync(fd);
-  }
-}
-
-/**
- * A usable working directory: one absolute path (POSIX `/…`, Windows `X:\…` / `X:/…`, UNC `\\server\share…`) without
- * control characters; anything else (spec 8: a damaged sidecar) is null.
- */
-export function asWorkingDir(text: string | null): string | null {
-  if (text === null) return null;
-  const p = text.replace(/^\uFEFF/, '').replace(/[\r\n]+$/, '').trim();
-  if (p === '' || /[\u0000-\u001f\u007f]/.test(p)) return null;
-  if (p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p) || /^\\\\[^\\]+\\[^\\]+/.test(p)) return p;
-  return null;
-}
 
 /** The working directory `<tmp>/<slug>/.project_root` names, or null (missing, too large, not one absolute path). */
 export function readProjectRoot(tmpDir: string, slug: string): string | null {

@@ -31,6 +31,7 @@ import { CursorSource } from './sources/cursor/source.js';
 import { isExistingDir } from './sources/dirs.js';
 import { CopilotFileSource } from './sources/copilot/source.js';
 import { GeminiFileSource } from './sources/gemini/source.js';
+import { GrokFileSource } from './sources/grok/source.js';
 import type { PollSource } from './sources/poll.js';
 import type { FileSource } from './sources/source.js';
 import { startWatcher } from './sources/transcript/watcher.js';
@@ -137,7 +138,7 @@ export const PACKAGE_NAME = '@qtxsnwwb/agent-canvas';
 
 /**
  * The session-file directories read for this configuration: Claude Code's projects directory, and Codex's sessions
- * directory, Gemini CLI's `tmp` and Copilot CLI's `session-state` when they name an existing directory (otherwise that
+ * directory, Gemini CLI's `tmp`, Copilot CLI's `session-state` and Grok Build's `sessions` when they name an existing directory (otherwise that
  * origin is skipped silently). `store` lets the
  * Codex source place files from their stored raw events (files that are gone, restarts) without reading them.
  */
@@ -151,6 +152,9 @@ export function fileSources(config: Config, store?: Store): FileSource[] {
   // GitHub Copilot CLI: likewise, only when <copilotDir>/session-state exists at start.
   const copilotState = config.copilotDir === null || config.copilotDir === '' ? null : path.join(config.copilotDir, 'session-state');
   if (isExistingDir(copilotState)) sources.push(new CopilotFileSource(copilotState!, store ? storeLookup(store, config.projectsDir) : undefined));
+  // Grok Build: likewise, only when <grokDir>/sessions exists at start.
+  const grokSessions = config.grokDir === null || config.grokDir === '' ? null : path.join(config.grokDir, 'sessions');
+  if (isExistingDir(grokSessions)) sources.push(new GrokFileSource(grokSessions!, store ? storeLookup(store, config.projectsDir) : undefined));
   return sources;
 }
 
