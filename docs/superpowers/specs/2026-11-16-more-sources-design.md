@@ -1,7 +1,7 @@
 # 更多来源（Gemini CLI、Grok Build、Copilot CLI）设计规格
 
 - 日期：2026-11-16
-- 状态：待评审
+- 状态：已评审通过并实现；无真实数据可核对（见 9.1）
 - 路线图：第 8 项
 
 ## 1. 目标
@@ -45,7 +45,9 @@
 
 - `Origin` 增加 `'gemini' | 'grok' | 'copilot'`，`ORIGINS` 顺序为 `claude, codex, cursor, gemini, grok, copilot`。
 - 存储键前缀：`gemini:`、`grok:`、`copilot:`。
-- 新增变更类型 `node_removed { sessionId, id }`：节点及其详情、检索索引条目、相连的边一并移除；未知 id 忽略。用于回退和删除（Gemini 的 `$rewindTo` / `removeIds`、Grok 的回退标记）。重建数据库时由同一批原始事件得到同样结果。
+- 新增变更类型 `node_removed { sessionId, id }`：节点及其详情、检索索引条目、相连的边一并移除；未知 id 忽略。用于回退和删除（Gemini 的 `$rewindTo` / `removeIds`、Grok 的回退标记和文件重写）。重建数据库时由同一批原始事件得到同样结果。被移除节点的子树和指向它的其余节点由各归一化器自己发出 `node_removed` / `node_updated`。
+- 边按目标节点建索引 `edge_to (session_id, to_id)`，移除节点时不扫描整个会话的边。索引由打开数据库时 `CREATE INDEX IF NOT EXISTS` 建立：已有数据库在升级后的第一次启动时一次性创建，约每一百万条边 1–2 秒，此后不再花时间；不改表结构，旧版本照样能打开。
+- 异常检测的两个来源清单（`packages/shared/src/anomalies.ts`）：`COST_EXCLUDED_ORIGINS = ['copilot']`（这些来源的会话不判也不进“消耗异常高”的基线）；`COST_USAGE_REQUIRED_ORIGINS = ['grok']`（这些来源的会话没有任何带用量的节点时不判也不进基线）。见第 6 节。
 - 数据库列 `origin` 是不带约束的文本，不需要改表；`NORMALIZER_VERSION` 不变（现有来源的输出不变），不需要重建。
 - 环境变量（测试和自定义位置用）：`AGENT_CANVAS_GEMINI_DIR`、`AGENT_CANVAS_GROK_DIR`、`AGENT_CANVAS_COPILOT_DIR`。未设置时依次取工具自己的变量（`GEMINI_CLI_HOME` 下的 `.gemini`、`GROK_HOME`、`COPILOT_HOME`），再取主目录下的默认位置。
 
@@ -56,7 +58,8 @@
 三者都是“目录里的追加式 JSONL”，都实现现有的 `FileSource` 接口，由现有的监听、逐行读取、偏移记录、整库重建流程驱动；各有一个归一化器登记到 `NORMALIZER_FACTORIES`。不使用轮询来源。
 
 - 逐行读取已能处理文件变短（从头重读）和不完整的末行。
-- 小的旁路文件（标题、工作目录）按现有的 `title` 类文件整份读取。
+- 小的旁路文件整份读取，但都有大小上限，超过按缺失处理：Gemini 的 `.project_root`（4 KB）、`projects.json`（1 MB）和 Grok 的 `summary.json`（1 MB）作为 `index` 类文件，每个会话存一条投影后的记录；Copilot 的 `workspace.yaml`（64 KB）作为 `title` 类文件（大小在分类时检查）。
+- `FileSource.lineIdentity`（`'content'` 缺省 | `'offset'`）：决定存储如何识别重复行。缺省按行内容（现有来源不变）；Grok 设为 `'offset'`，行按（文件代次、偏移、内容）识别，所以内容完全相同的多行各自保留；文件变短时代次加一，整份重读。
 
 ### 4.2 来源是否启用
 
@@ -92,7 +95,7 @@
 
 **记录**（JSONL 每行一种，按此顺序判断）：
 
-1. `{"$rewindTo": id}`：移除该消息及其后的全部消息；id 未知则移除全部。
+1. `{"$rewindTo": id}`：移除该消息及其后的全部消息；id 未知则移除全部。值不是字符串时按未识别上报（`gemini:$rewindTo`），不移除任何消息。
 2. `{"$patch": {...}}`：`id`+`content` 或 `updates[]` 改消息内容；`toolCalls[{id, result}]` 按工具调用 id 补结果；`removeIds` 移除；`orderIds` 忽略顺序变化（节点顺序按首次出现）。
 3. 带字符串 `id` 的对象：一条消息。同一 `id` 再次出现时整条替换，位置不变。
 4. `{"$set": {...}}`：合并进会话元数据（`summary` 为标题）；其中的 `messages` 数组替换全部消息。
@@ -109,28 +112,38 @@
 
 **工具对照**：`read_file`、`read_many_files`（读）；`write_file`（写）；`replace`（改）；`run_shell_command`（执行，命令 `command`）；`list_directory`、`glob`、`grep_search`、`search_file_content`（搜索）；`invoke_agent`、`codebase_investigator`、`cli_help`（子代理）。路径参数依次尝试 `file_path`、`absolute_path`、`path`、`dir_path`、`directory`。
 
+**实现时补充的规则**：
+
+- 会话从第一条消息开始存在：只有元数据行、`$set` 的文件（或没有消息的旧版 `.json`）不产生会话。
+- `.project_root`、`projects.json` 有大小上限（4 KB、1 MB），按 mtime + 大小缓存；超过上限、内容不是单个绝对路径（含控制字符也不算）时按缺失处理，继续下一个回退。
+- 回退或删除移除了派发子代理的那次调用时，子代理线程保留（它的文件还在），改挂在会话下（`parentId` 为空）。
+
 **未定**：每轮实际写盘的顺序与重复次数；`agentId` 是否等于子会话 id；压缩后留下的记录；旧版参数名；大输出是否被换成指针。
 
 ### 5.2 Grok Build
 
-**位置**：`<根>/sessions/<编码后的工作目录>/<会话 id>/`，含 `summary.json` 才算会话。读 `updates.jsonl`（会话内容）和 `summary.json`（整份读取）。
+**位置**：`<根>/sessions/<编码后的工作目录>/<会话 id>/`，含 `summary.json` 才算会话。读 `updates.jsonl`（会话内容）和 `summary.json`。`summary.json` 整份读取（≤ 1 MB），但不整份存储：只取一条投影（标题、摘要、模型、工作目录、分支、创建时间）存为索引记录，投影变化时才存新的一条。
 
 **项目与标题**：工作目录取 `summary.json` 的 `info.cwd`；没有则对目录名做 URL 解码，结果像绝对路径才采用；再没有则读上级目录的 `.cwd`。标题取 `generated_title`，否则 `session_summary`。模型取 `current_model_id`。
 
-**子代理**：`summary.json` 里 `session_kind` 为 `subagent` 且有 `parent_session_id` 的会话，作为父会话的一个代理线程（代理 id 为子会话 id）。父会话尚未见到时先暂存，见到后挂上。有 `parent_session_id` 但不是子代理的（分叉）作为独立会话。
+**子代理**：`summary.json` 里 `session_kind` 为 `subagent` 且有 `parent_session_id` 的会话，作为父会话的一个代理线程（代理 id 为子会话 id）。沿 `parent_session_id` 一直找到最上层的会话（最多 16 层，有环则停）：子代理的子代理也是最上层会话的代理线程，挂在派出它的那一步下。链上某个 `summary.json` 还读不到时，这个子代理先暂存、不建任何会话（最多暂存 10,000 个），父会话出现后再挂上；重启后由全量扫描重新找到。有 `parent_session_id` 但不是子代理的（分叉）作为独立会话。
 
 **记录**：每行 `{timestamp（秒）, method, params}`；没有 `method` 的旧行把整行当作 `params`。
 
 - `method` 为 `session/update`：看 `params.update.sessionUpdate`：
-  - `user_message_chunk`、`agent_message_chunk`、`agent_thought_chunk`：文字片段。同一轮里连续的同类片段拼成一个节点。
+  - `user_message_chunk`、`agent_message_chunk`、`agent_thought_chunk`：文字片段。同一轮里连续的同类片段拼成一个节点；一段达到 4 Ki 个字符（`GROK_RUN_MAX_CHARS = 4096`）后，下一个片段接到新节点上（片段本身不切开），以限制反复改写长节点的代价。所以很长的回复显示为几个连续的节点。
   - `tool_call`：新建工具节点（`toolCallId`、`title`、`kind`、`status`、`rawInput`、`locations`）。
   - `tool_call_update`：按 `toolCallId` 更新状态、输出（`content[]` 里的文字，没有则 `rawOutput`）。`failed`、`error`、`cancelled` 为失败。
   - `plan`、`available_commands_update`、`current_mode_update`：忽略，不上报。
 - `method` 为 `_x.ai/session/update`：类型名依次从 `params.update.sessionUpdate`、`params.update.type`、`params.type` 取。
-  - 轮次结束（`turn_completed`）：用量取 `usage` 的 `inputTokens`、`outputTokens`、`cachedReadTokens`、`cacheCreationTokens`、`reasoningTokens`，记到该轮最后一个回复节点。
-  - 回退标记（类型名含 `rewind`）：有 `target_prompt_index` 时移除该序号及之后各轮的节点；取不到序号则不移除，按未识别上报。
+  - 轮次结束（`turn_completed`）：用量取 `usage` 的 `inputTokens`、`outputTokens`、`cachedReadTokens`、`cacheCreationTokens`、`reasoningTokens`，设到该轮最后一个回复节点（没有回复节点时设到该轮最后一个节点；之后同一轮又有回复时移到新的回复上；重复的记录是覆盖，不累加）。归类是推测的：新输入 = `inputTokens + cacheCreationTokens`，缓存读取 = `cachedReadTokens`，输出 = `outputTokens + reasoningTokens`。
+  - 回退标记（类型名含 `rewind`）：有 `target_prompt_index` 时移除该序号及之后各轮的节点；取不到序号则不移除，按未识别上报。被移除的调用派出的子代理线程保留：改挂到之后仍在、同样指名它的调用上，没有则挂在会话下。
   - 其余：上报为未识别。
 - 轮次：`_meta.promptId`（先看 `params._meta`，再看 `params.update._meta`）变化即新一轮；没有则以用户片段开始新一轮。
+
+**行的识别**：`updates.jsonl` 的行按位置加内容识别（见 4.1 的 `lineIdentity`），内容完全相同的片段每一行都生效。文件被改写（变短）时，受影响的线程按新文件从头重建：旧节点全部 `node_removed`，再按新内容生成，结果与第一次读新文件相同。
+
+**异常检测**：没有任何带用量节点的 Grok 会话不参与“消耗异常高”（不判，也不进基线），见第 6 节。
 
 **工具对照**：`run_terminal_cmd`、`run_terminal_command`、`bash`（执行，`command`）；`read_file`、`read`（读）；`write`、`write_file`（写）；`search_replace`、`edit`、`edit_file`、`hashline_edit`、`apply_patch`（改）；`list_dir`、`glob`、`grep`（搜索）；`task`、`Task`、`spawn_subagent`（子代理）。工具名取不到时用 ACP 的 `kind`（`read`、`edit`、`delete`、`move`、`search`、`execute`、`fetch`）归类。路径依次尝试 `rawInput` 的 `target_file`、`file_path`、`path`、`target_directory`、`filePath`，再取 `locations[0].path`。
 
@@ -149,25 +162,29 @@
 - `assistant.reasoning`：思考。`assistant.message`：回复文字（`content` 为空且有 `toolRequests` 时不建回复节点）。
 - `tool.execution_start`：工具节点（`toolCallId`、`toolName`、`arguments`；`arguments` 是字符串时尝试按 JSON 解析）。没有对应开始记录的 `assistant.message.toolRequests[]` 项也建工具节点。
 - `tool.execution_complete`：按 `toolCallId` 补结果；`success` 为假是失败，输出取 `result.content`，否则 `error.message`。
-- `subagent.started` / `subagent.completed` / `subagent.failed`：按 `toolCallId` 对应到子代理调用。带 `agentId` 的事件属于该代理线程；线程与调用的对应依次用：事件上的 `data.parentToolCallId`；`agentId` 等于某个调用的 `toolCallId`；`subagent.started` 之后首次出现的新 `agentId`。都对不上则线程挂在会话下，不连到调用。
+- `subagent.started` / `subagent.completed` / `subagent.failed`：按 `toolCallId` 对应到子代理调用。带 `agentId` 的事件属于该代理线程；线程与调用的对应依次用：事件上的 `data.parentToolCallId`；`agentId` 等于某个调用的 `toolCallId`；`subagent.started` 之后首次出现的新 `agentId`——这一条只在恰好有一个尚未结束、尚未被认领的 `subagent.started` 时才用（几个子代理同时运行时分不清，宁可不连）。都对不上则线程挂在会话下，不连到调用；之后的事件带上 `parentToolCallId` 或出现 id 相同的调用时再连上。
 - `session.compaction_complete`、`session.truncation`：压缩节点。
 - `session.error`、`abort`：错误 / 中断节点。
-- `session.shutdown`：会话结束；`modelMetrics` 里各模型的 `usage`（`inputTokens`、`outputTokens`，有则加 `cacheReadTokens`、`cacheWriteTokens`）合计为会话用量。
+- `session.shutdown`：会话结束；`modelMetrics` 里各模型的 `usage`（`inputTokens`、`outputTokens`，有则加 `cacheReadTokens`、`cacheWriteTokens`）合计为会话用量，记在这次结束的节点上（新输入 = `inputTokens + cacheWriteTokens`，缓存读取 = `cacheReadTokens`，输出 = `outputTokens`；归类是推测的）。一个会话有多次结束时：上一次的每个模型都还在、且没有一项变小，就只记增长的部分（数字若是累计值则正好，若是每次运行的值则少算）；否则整份记为新的一次。所以只会少算，不会多算。
 - 其余已知但无需显示的类型（`assistant.turn_start`、`assistant.turn_end`、`assistant.intent`、`session.resume`、`session.info`、`session.idle`、`hook.*`、`permission.*`、`skill.invoked` 等）：忽略，不上报。清单之外的上报为未识别。
 
 **工具对照**：`bash`、`powershell`（执行，命令依次 `command`、`fullCommandText`）；`view`（读）；`create`（写）；`edit`、`apply_patch`（改）；`glob`、`grep`、`rg`（搜索）；`task`（子代理）。路径依次尝试 `path`、`file_path`、`filePath`、`fileName`。
 
-**大文件**：单个 `events.jsonl` 实测可超过 500 MB。现有逐行读取是流式的；本来源不做任何整份读入 `events.jsonl` 的操作。
+**大文件**：单个 `events.jsonl` 实测可超过 500 MB。现有逐行读取是流式的；本来源不做任何整份读入 `events.jsonl` 的操作（取工作目录只读第一行，最多 256 KB）。归一化器不在内存里保留工具的参数和输出：它们出现时作为节点详情发出一次就丢掉，每个调用只留从中算出的有界字段（文件、输入指纹、摘要等）。
+
+**文件被改写**：Copilot 修复会话文件时会删掉坏行、重写文件。重读后，仍在的事件按事件 id 跳过，不会重复；已经不在文件里的事件，它们建的节点仍然保留（原始记录还在），实时、重建、重启的结果一致。
+
+**异常检测**：只有会话总用量，Copilot 的会话不参与“消耗异常高”（`COST_EXCLUDED_ORIGINS`），见第 6 节。
 
 **未定**：磁盘上的行是否与 SDK 类型逐字一致；各工具的参数名；`agentId` 与调用的对应方式；`workspace.yaml` 的键；旧版平铺文件的格式。
 
 ## 6. 对现有功能的影响
 
 - **统计**：Copilot 只有会话总用量，没有按轮用量；按日、按模型的统计把总量记在会话结束那一刻。Gemini 的 `cached` 记为缓存读取，`thoughts` 计入输出。
-- **异常检测**：“消耗异常高”需要按轮用量，Copilot 的会话不参与，Grok 没有轮次结束记录的会话不参与。其余三类照常。
+- **异常检测**：“消耗异常高”需要按轮用量，Copilot 的会话不参与（`COST_EXCLUDED_ORIGINS`），没有任何带用量节点的 Grok 会话不参与（`COST_USAGE_REQUIRED_ORIGINS`）；不参与的会话既不判也不进同项目同来源的基线。其余三类照常。
 - **通知**：照常，但没有钩子，“等待确认”类通知不会出现。
 - **导出与遮蔽、检索、按文件视图**：照常，不需要按来源改动。
-- **页面**：来源标签和筛选增加三项；诊断页增加三个来源的状态块（目录、是否存在、会话数、未识别记录），沿用现有布局。
+- **页面**：来源标签和筛选增加三项（标记是自绘的字母 G、K、C，不用厂商标志）；诊断页增加三个来源的状态块（目录、是否存在、会话数、未识别记录，接口 `GET /api/diagnostics` 的 `sources`），以及“被丢弃的外来 hook 调用”的计数（`foreignHooksDropped`），沿用现有布局。
 
 ## 7. 钩子串扰
 

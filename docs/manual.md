@@ -2,7 +2,7 @@
 
 > 这里是完整的参考说明。想快速上手请看[项目首页](../README.md)。
 
-agent-canvas 是一个本地服务：它读取 Claude Code 的 transcript 文件、OpenAI Codex 的会话文件和 Cursor 的本地数据库，并接收 hook 事件，在固定的本地网址上用网页展示每个会话正在做什么。两种工具的会话用同一套页面展示（Codex 见下文“Codex”）。
+agent-canvas 是一个本地服务：它读取 Claude Code 的 transcript 文件、OpenAI Codex 的会话文件和 Cursor 的本地数据库，以及 Gemini CLI、Grok、GitHub Copilot CLI 的会话文件（这三个未经真实数据核对），并接收 hook 事件，在固定的本地网址上用网页展示每个会话正在做什么。各种工具的会话用同一套页面展示（见下文“Codex”“Cursor”“Gemini CLI、Grok、Copilot CLI”）。
 每个会话显示为一张实时更新的画布。默认的“概览”视角只画骨架（每个轮次一张卡片，下面挂它派出的子代理），选中一个轮次或子代理，它的执行过程在下方以瀑布图列出。另有逐步、拓扑、因果、复盘四个视角（见下文“画布”）。首页可以检索会话，诊断页给出服务和 hooks 的运行情况。
 
 ## 从 claude-canvas 升级
@@ -220,6 +220,44 @@ node packages/server/dist/cli.js hooks uninstall --cursor    # 只移除本安�
 - 转发命令永远以退出码 0 结束，不读写文件；只在 `beforeSubmitPrompt` 时向 Cursor 输出 `{"continue":true}`（明确放行），其他事件不输出。
 - hooks 只给出会话状态，不建、不改节点；节点一律来自数据库。存下来的 hook 内容不含你的邮箱（载荷里的 `user_email` 会被去掉），但包含提示正文，和另外两个工具的 hook 一样。
 
+## Gemini CLI、Grok、Copilot CLI
+
+**这三个来源未经真实数据核对。** 开发时手边没有这三个工具产生的会话，读法完全依据它们的公开源码、文档和第三方读取器写成，测试用的也全是自造的样例。真实数据的样子可能不一样：某些步骤缺失、标题或项目不对、用量偏差都有可能。觉得哪里不对时，先打开诊断页（见下文“诊断页”）看两处：该来源一栏里的**未识别的记录**（读到了但不认识的记录类型和次数），和 Hooks 一栏里的**被丢弃的外来 hook 调用**。
+
+### 从哪里读
+
+服务启动时，下面的目录存在才读取该来源，并持续监视；不存在时跳过，不报错、不创建任何东西。**服务运行期间才装上的工具，要重启服务后才会读取**。对这三个工具的目录只读，从不写入。
+
+| 来源 | 默认读取的目录 | 改位置 |
+| --- | --- | --- |
+| Gemini CLI（Google） | `~/.gemini/tmp/<项目目录名>/chats/` 下的 `session-*.jsonl`（旧版的 `session-*.json` 也读），子代理在 `chats/<会话 id>/` 下 | `AGENT_CANVAS_GEMINI_DIR`（指向 `.gemini` 这一层）；没设时用 Gemini 自己的 `GEMINI_CLI_HOME` 下的 `.gemini` |
+| Grok（xAI 官方的 `grok` 命令，Grok Build） | `~/.grok/sessions/<编码后的工作目录>/<会话 id>/` 里的 `updates.jsonl` 和 `summary.json` | `AGENT_CANVAS_GROK_DIR`（指向 `.grok` 这一层）；没设时用 Grok 自己的 `GROK_HOME` |
+| GitHub Copilot CLI | `~/.copilot/session-state/<会话 id>/events.jsonl` 和同目录的 `workspace.yaml`（1.0 以前的 `session-state/<会话 id>.jsonl` 也读） | `AGENT_CANVAS_COPILOT_DIR`（指向 `.copilot` 这一层）；没设时用 Copilot 自己的 `COPILOT_HOME` |
+
+三个变量设为空字符串都表示不读取该来源。社区项目 `grok-cli`（`~/.grok/grok.db`）不读。
+
+### 显示什么
+
+- 和另外三种来源一样：用户输入、回复、思考、工具调用及结果、子代理、标题、模型、工作目录、token 用量（该工具有记录的部分）。会话按工作目录归到项目，和同目录的 Claude Code、Codex、Cursor 会话在同一个项目下；首页、检索、统计、文件页、异常页的来源筛选里各有一项。
+- 来源标记是本项目自己画的字母（G、K、C），不是这些产品的标志。
+- 检索、统计、按文件看、异常、导出与遮蔽照常工作，例外见下。
+- Gemini CLI：标题取 Gemini 给会话写的摘要，没有时取第一条提示。工作目录取 `<项目目录名>/.project_root`，没有时查 `~/.gemini/projects.json`；这两个文件过大（超过 4 KB / 1 MB）或内容不是一个绝对路径时当作没有，项目显示为 `gemini:<项目目录名>`。在 Gemini 里回退（rewind）或删掉的消息，这里也随之消失；被回退掉的派发下面的子代理线程保留，改挂在会话下。只有元数据、还没有任何消息的会话文件不产生会话。
+- Grok：标题取 `summary.json` 里 Grok 生成的标题，没有时取它的摘要，再没有时取第一条提示。子代理是单独的会话，这里显示为父会话的子代理线程（父会话还没读到时先等着，读到后再挂上；子代理的子代理也挂在最上层的会话里）。在 Grok 里回退的轮次会被移除。
+- Copilot CLI：标题取 `workspace.yaml` 的 `name`，没有时取 `summary`，再没有时取第一条提示。工作目录取会话开始时的目录，之后切换目录不改变会话所属的项目。会话正常退出后显示“已结束”。
+
+### 限制
+
+- **没有 hooks**：不为这三个工具安装任何 hook，也就没有“等待权限确认”“等待输入”这类实时状态，“等待确认”类通知不会出现。会话状态只靠会话文件推断（运行中、空闲；Copilot CLI 正常退出后为已结束；超过 15 分钟没有活动的“运行中”显示为“长时间无活动”），延迟几秒。
+- **Gemini CLI**：Gemini 默认把 30 天以前的会话文件自动删掉，被删的会话在这里显示为“源文件已删除”，已采集的内容仍可看。旧版的整份 `.json` 会话照样读取；同一会话同时有新旧两种文件时只读新的。统计里 `cached` 记为缓存读取，思考用的 token（`thoughts`）计入输出。
+- **Grok**：一段很长的回复（或思考）显示为几个连续的节点，每满约 4,000 个字符接着一个新节点，内容不缺。token 用量来自每轮结束的记录（新输入 = `inputTokens + cacheCreationTokens`，缓存读取 = `cachedReadTokens`，输出 = `outputTokens + reasoningTokens`，对应关系是推测的），记在该轮最后一个回复节点上；一条用量记录都没有的 Grok 会话不参与“消耗异常高”的判断。
+- **Copilot CLI**：只有整个会话的总用量，记在会话结束（`session.shutdown`）那一步上，按日统计时把总量算在结束那一刻，不能按轮看 token。Copilot 会话不参与“消耗异常高”的判断（另外三类异常照常）。一个会话退出多次时，后一次只计比前一次多出来的部分，宁可少算也不多算。几个子代理同时运行时，分不清哪个线程属于哪次派发的，那几个线程挂在会话下，不连到派发的那一步。Copilot 自己修复会话文件时删掉的记录，这里已经显示过的步骤仍然保留。
+- **工具装在服务启动之后**：要重启服务才会读取（见上）。
+- 工具名和参数名按公开资料对照（哪些是读、写、改、执行、搜索、子代理），对照表之外的工具归为“其他”，仍显示名字、输入和输出。
+
+### 钩子串扰
+
+Grok 和 Copilot CLI 会读取 Claude Code（和 Cursor）的 hook 配置，因此可能调用我们为 Claude Code / Cursor 安装的 hook，但发来的内容是它们自己的格式。服务认出这种调用后直接丢弃（不存、不建会话），并在诊断页的 Hooks 一栏计数“被丢弃的外来 hook 调用”。这个数不为 0 说明发生过这种情况，不影响数据，也不需要处理。
+
 ## 按文件看
 
 除了按时间看一个会话，还可以按文件看。
@@ -254,11 +292,13 @@ node packages/server/dist/cli.js hooks uninstall --cursor    # 只移除本安�
 | 新建 | ⚠️ `Write` 分不清新建还是覆盖，统一显示为“写入” | ✅ | ⚠️ 分不清，算作“改” |
 | 删除 | ❌ 没有专用工具 | ✅ | ✅ `delete_file` |
 
+Gemini CLI（`read_file`、`write_file`、`replace` 等）、Grok（`read_file`、`write`、`search_replace`、`apply_patch` 等）、Copilot CLI（`view`、`create`、`edit`、`apply_patch`）的读、写、改工具同样计入；它们的工具名和参数名取自公开资料，未经真实数据核对。
+
 ## 统计
 
 顶栏的“统计”打开统计页，汇总全部会话。顶部可以选时间范围（最近 7 天、最近 30 天、全部）、来源和项目，选择记在这个浏览器里。
 
-页面内容：总量、按天（范围超过两个月时按周）的活跃时长、三种工具的对比、时间花在哪类工具上、最慢的 10 次调用、最常失败的工具、按项目的汇总。
+页面内容：总量、按天（范围超过两个月时按周）的活跃时长、各来源的对比、时间花在哪类工具上、最慢的 10 次调用、最常失败的工具、按项目的汇总。
 
 每个数字的口径：
 
@@ -282,8 +322,9 @@ token 的三类：
 
 - 两家原始记录里的“输入”含义不同（Claude Code 的不含缓存读取，Codex 的包含），所以这里拆开再归类，否则两边的数字没法比。会话页和复盘视角里的 token 用的是同一套分类。
 - Cursor 的数据库不记录每一步的 token（计数全为 0），所以 Cursor 的 token 显示为“—”。
+- Gemini CLI、Grok、Copilot CLI 的归类方法和限制（Copilot CLI 只有会话总用量）见“Gemini CLI、Grok、Copilot CLI”一节。
 - 不换算成金额：各家的价格和套餐不同。
-- 工具名按各来源自己的叫法显示，不跨来源合并（`Bash`、`exec`、`run_terminal_command_v2` 不是同一个东西）。三种工具的对比用的是每轮中位时长、每轮平均调用数、失败率这类不依赖名字的指标。
+- 工具名按各来源自己的叫法显示，不跨来源合并（`Bash`、`exec`、`run_terminal_command_v2` 不是同一个东西）。各来源的对比用的是每轮中位时长、每轮平均调用数、失败率这类不依赖名字的指标。
 - “最慢的 10 次调用”每一行可以点开那个会话（目前不会自动定位到那一步）。“最常失败的工具”里调用不足 5 次的不上榜。
 - 统计只用已经推导好的节点，不含任何对话内容；接口 `GET /api/stats?range=7d|30d|all&origin=…&projectId=…` 返回的也只有计数、时长、名字和 id。
 - 性能：每个会话的小结会缓存，只有变过的会话才重算；服务启动完成后会在后台预先算好，所以打开页面通常是即时的。启动导入或重建还在进行时，页面会提示数字仍在变化。
@@ -301,7 +342,7 @@ token 的三类：
 
 - “同一个调用”指工具名相同、**完整输入**也相同（比较的是输入的哈希，不存内容）。Cursor 的编辑调用输入里只有文件路径，所以还要改前、改后的内容也相同才算同一个调用。
 - “一轮”是从一条提示到下一条提示之前。子代理内部的步骤各自成轮，同样检测，异常记在它所属的会话上。
-- “工作时间”是这一轮里工具、子代理、思考的耗时之和，不含等你回复的时间。历史不足 20 轮的项目不判“消耗异常高”；Cursor 没有 token 数据，只看时间。基线会随数据变化，所以这一类的旧结果可能略有变动。
+- “工作时间”是这一轮里工具、子代理、思考的耗时之和，不含等你回复的时间。历史不足 20 轮的项目不判“消耗异常高”；Cursor 没有 token 数据，只看时间；Copilot CLI 只有会话总用量，不判这一类；一条用量记录都没有的 Grok 会话也不判、不进基线。基线会随数据变化，所以这一类的旧结果可能略有变动。
 - 这些是启发式规则，**会有误报和漏报**：故意反复跑同一个测试会被算作原地打转；用命令行改文件不计入“反复改同一个文件”。阈值是固定的，暂不能自定义。
 
 在哪里看：
@@ -402,6 +443,8 @@ token 的三类：
 | 出错中断 | ✅ 用户中断；接口报错需要装 hooks 才看得出来 | ✅ | ⚠️ 只有中止时正好有工具在运行才看得出来，否则会被当成“跑完了” |
 | 卡住了 | ✅ | ✅ | ✅ |
 
+Gemini CLI、Grok、Copilot CLI 没有 hooks：没有“等你确认权限”，其余几种按会话文件判断，晚几秒。
+
 ## Hooks（可选）
 
 不装 hooks 也能用：服务只靠 transcript 就能工作。区别是：
@@ -450,6 +493,8 @@ agent-canvas 没有运行时，HTTP hook 连接失败会立刻报错，而 Claud
 - 服务：是否正在导入、推导规则版本、数据库标识。
 - 数据库：文件大小；数据库整理（压缩旧数据）的进度；回收空间是否完成，被跳过时说明原因和补救办法；检索索引是已建好、正在建（已建 / 总数）还是失败（下次启动自动重试）；有损坏的数据时给出条数。详见下文“数据库的大小与整理”。
 - Hooks：是否收到过 hook、最近一次收到的时间（超过 10 分钟没有收到时提示）；每个事件收到的次数和最近一次的时间；以及 14 个事件中哪些从未收到过（装了 hooks 但某些事件一直没出现，通常只是还没有触发它的操作，例如 `PermissionDenied`）。Codex 会话目录存在（即使还没有 Codex 会话）或有 Codex 数据时按来源分成 Claude Code 和 Codex 两部分（只装了 Claude Code 的机器上不出现 Codex）；Codex 一栏先显示一行 Codex 会话目录及它是否存在，再按它自己的 11 个事件计算从未收到的事件；一个 Codex hook 都没收到时提示 Codex hooks 尚未安装或尚未在 Codex 里确认信任。
+- Hooks 一栏的最后一行是“被丢弃的外来 hook 调用”：Grok、Copilot CLI 调用了为 Claude Code / Cursor 安装的 hook、被服务认出并丢弃的次数（见“钩子串扰”）。
+- Gemini CLI、Grok、Copilot CLI：目录存在、已有会话或读到未识别记录时，各有一栏：读取的目录及它是否存在、会话数、该来源的未识别记录（类型以 `gemini:`、`grok:`、`copilot:` 开头，同样也列在下面的总表里）。这三个来源未经真实数据核对，显示不对时先看这里。
 - 导入失败：读取或处理失败的文件、错误信息和时间。
 - 未识别的记录类型：每种类型的次数和一条样例（样例可能含对话内容，展开后才显示）。
 - 文件读取进度：已记录的文件总数和尚未读完的文件（已读 / 总字节）。Codex 文件的路径以 `codex:` 开头，前面带 Codex 标记（导入失败一节同样）。
@@ -462,6 +507,9 @@ agent-canvas 没有运行时，HTTP hook 连接失败会立刻报错，而 Claud
 | `AGENT_CANVAS_DATA_DIR` | `~/.agent-canvas` | 数据目录，数据库文件为 `data.db` |
 | `AGENT_CANVAS_CODEX_DIR` | `~/.codex/sessions` | 读取 Codex 会话文件的目录；空字符串表示不读取 |
 | `AGENT_CANVAS_CURSOR_DB` | Cursor 的 `state.vscdb`（按平台，见“Cursor”一节） | Cursor 的本地数据库，只读打开；空字符串表示不读取 |
+| `AGENT_CANVAS_GEMINI_DIR` | `$GEMINI_CLI_HOME/.gemini`，否则 `~/.gemini` | Gemini CLI 的目录（读其中的 `tmp`）；空字符串表示不读取 |
+| `AGENT_CANVAS_GROK_DIR` | `$GROK_HOME`，否则 `~/.grok` | Grok 的目录（读其中的 `sessions`）；空字符串表示不读取 |
+| `AGENT_CANVAS_COPILOT_DIR` | `$COPILOT_HOME`，否则 `~/.copilot` | Copilot CLI 的目录（读其中的 `session-state`）；空字符串表示不读取 |
 | `AGENT_CANVAS_SETTINGS_FILE` | `~/.claude/settings.json` | `hooks install` / `hooks uninstall` 修改的 settings 文件 |
 | `AGENT_CANVAS_CODEX_HOOKS_FILE` | `~/.codex/hooks.json` | `hooks install --codex` / `hooks uninstall --codex` 修改的文件 |
 | `AGENT_CANVAS_CURSOR_HOOKS_FILE` | `~/.cursor/hooks.json` | `hooks install --cursor` / `hooks uninstall --cursor` 修改的文件 |
@@ -493,6 +541,8 @@ agent-canvas compact          # 从源码运行时：node packages/server/dist/c
 ```
 
 它做完剩下的压缩并回收空间，打印前后的文件大小。加 `--force` 表示即使之前记录为已完成也再回收一次。服务在运行时它会以“already running”报错退出。
+
+**升级到支持 Gemini CLI、Grok、Copilot CLI 的版本后的第一次启动**会先给数据库建一个索引（按边的目标节点，删除节点时用），一次性的，每一百万条边约 1–2 秒，建好之后服务才开始工作；以后的启动不再需要。
 
 **升级前建议备份**：停掉服务，把数据目录里的 `data.db`（连同旁边的 `data.db-wal`、`data.db-shm`，如果有）复制到别处。
 
@@ -526,6 +576,7 @@ agent-canvas compact          # 从源码运行时：node packages/server/dist/c
 - Cursor：一条记录的内容改回到和之前某一版完全相同时，不会再存一次；重建后该节点停在中间那一版，直到它下一次变化。
 - Cursor hooks 的载荷字段和 Windows 上的调用方式取自官方文档，还没有用真实的 Cursor 核对过。
 - Cursor：会话很长（上万步）时，第一次导入需要一段时间，在后台进行。
+- Gemini CLI、Grok、Copilot CLI：读法按公开资料写成，**未经真实数据核对**；各自的限制见上文“Gemini CLI、Grok、Copilot CLI”一节。
 
 ## 开发
 

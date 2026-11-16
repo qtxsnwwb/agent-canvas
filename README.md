@@ -6,7 +6,7 @@
 
 <p align="center">
   Agent Canvas 是一个跑在你本机的小服务。<br/>
-  它读取 Claude Code、OpenAI Codex 和 Cursor 的会话记录，在浏览器里实时画出每个会话的来龙去脉：<br/>
+  它读取 Claude Code、OpenAI Codex、Cursor 的会话记录（Gemini CLI、Grok、GitHub Copilot CLI 也能读，尚未经真实数据核对），在浏览器里实时画出每个会话的来龙去脉：<br/>
   问了什么、调了哪些工具、派了哪些子代理、哪一步慢、哪一步失败。
 </p>
 
@@ -18,6 +18,7 @@
   <img src="https://img.shields.io/badge/Claude%20Code-%E2%9C%93-D97757" alt="Claude Code"/>
   <img src="https://img.shields.io/badge/Codex-%E2%9C%93-5B6CFF" alt="Codex"/>
   <img src="https://img.shields.io/badge/Cursor-%E2%9C%93-14B8A6" alt="Cursor"/>
+  <img src="https://img.shields.io/badge/Gemini%20CLI%20%C2%B7%20Grok%20%C2%B7%20Copilot%20CLI-%E6%9C%AA%E6%A0%B8%E5%AF%B9-lightgrey" alt="Gemini CLI · Grok · Copilot CLI：未核对"/>
   <img src="https://img.shields.io/badge/%E6%95%B0%E6%8D%AE-%E5%8F%AA%E5%9C%A8%E6%9C%AC%E6%9C%BA-2EA44F" alt="数据只在本机"/>
 </p>
 
@@ -46,8 +47,8 @@
 ### 🤖 子代理不再是黑盒
 主线派出的子代理挂在对应的轮次下面，可以展开看它内部的每一步；后台运行的子代理会一直跟到它真正结束。
 
-### 🧩 三种工具，一个页面
-Claude Code、Codex 和 Cursor 的会话放在一起。同一个工作目录下的会话归到同一个项目，每个会话带来源标记，首页可以按来源筛选。
+### 🧩 多种工具，一个页面
+Claude Code、Codex、Cursor 的会话放在一起，Gemini CLI、Grok、Copilot CLI 的也能放进来（这三个还没用真实数据核对过，见[手册](./docs/manual.md#gemini-cligrokcopilot-cli)）。同一个工作目录下的会话归到同一个项目，每个会话带来源标记，首页可以按来源筛选。
 
 ### ⚡ 接近实时
 只靠会话文件就能工作，延迟几秒。装上 hooks 之后状态变化在 1 秒内到达，还能看到“正在等你确认权限”。
@@ -59,7 +60,7 @@ Claude Code、Codex 和 Cursor 的会话放在一起。同一个工作目录下�
 记得某句回复、某条命令、某段报错，却忘了在哪个会话里？首页的检索能搜到会话里面的内容（提示、回复、命令、工具输出），中文、英文、路径都行，点结果直接跳到那一步。
 
 ### 📊 跨会话的统计
-时间花在哪、哪类工具调用最慢、哪些命令最常失败、token 用了多少，以及三种工具在同一个项目上的差别，一页看全。可按时间范围、来源、项目筛选。
+时间花在哪、哪类工具调用最慢、哪些命令最常失败、token 用了多少，以及各工具在同一个项目上的差别，一页看全。可按时间范围、来源、项目筛选。
 
 ### 🚨 揪出不对劲的地方
 代理卡在循环里、一连串调用失败、同一个文件改个没完、某一轮消耗离谱——这些情况会被自动标出来，首页和画布上一眼可见，点一下定位到那一步。正在运行的会话原地打转时还能弹通知，让你及时打断。
@@ -167,6 +168,18 @@ agent-canvas hooks install --cursor
 | hooks：等待权限确认 | ✅ | ⚠️ 同上 | ❌ 不做（见手册） |
 | 已归档的会话 | — | ❌ 不导入 | ❌ 不导入 |
 
+另外三个来源只读会话文件，**未经真实数据核对**（手边没有这些工具产生的数据，读法依据公开源码和文档）：
+
+| 能力 | Gemini CLI | Grok | Copilot CLI |
+|------|:----------:|:----:|:-----------:|
+| 数据来源 | 会话文件 `~/.gemini/tmp` | 会话文件 `~/.grok/sessions` | 会话文件 `~/.copilot/session-state` |
+| 轮次、工具调用、回复、子代理 | ⚠️ 未核对 | ⚠️ 未核对 | ⚠️ 未核对 |
+| token 用量 | ⚠️ 每次回复 | ⚠️ 每轮，对应关系是推测的 | ⚠️ 只有整个会话的总量 |
+| “消耗异常高”检测 | ✅ | ⚠️ 只看有用量记录的会话 | ❌ 不参与 |
+| hooks、实时状态、等待权限确认 | ❌ 不做 | ❌ 不做 | ❌ 不做 |
+
+服务启动之后才装上的工具，要重启服务才会读取。显示不对时先看诊断页里该来源的“未识别的记录”。细节和各自的限制见[使用手册 · Gemini CLI、Grok、Copilot CLI](./docs/manual.md#gemini-cligrokcopilot-cli)。
+
 | 平台 | 状态 |
 |------|------|
 | Windows | ✅ 经过测试 |
@@ -179,6 +192,7 @@ flowchart LR
   A["Claude Code<br/>~/.claude/projects"] -->|会话文件| S
   B["Codex<br/>~/.codex/sessions"] -->|会话文件| S
   C["Cursor<br/>state.vscdb"] -->|只读轮询| S
+  G["Gemini CLI · Grok · Copilot CLI<br/>~/.gemini · ~/.grok · ~/.copilot"] -->|会话文件| S
   A -.->|hooks（可选）| S
   B -.->|hooks（可选）| S
   C -.->|hooks（可选）| S
@@ -186,7 +200,7 @@ flowchart LR
   S -->|WebSocket| W["浏览器里的画布"]
 ```
 
-服务监视 Claude Code 和 Codex 的会话文件，每隔几秒只读地查一次 Cursor 的本地数据库，把三种来源的记录归一成同一种图（节点和边），存进本地数据库，再通过 WebSocket 推给页面。原始记录也一并保存，升级后可以据此重新推导，不需要重新导入。
+服务监视 Claude Code、Codex（以及 Gemini CLI、Grok、Copilot CLI）的会话文件，每隔几秒只读地查一次 Cursor 的本地数据库，把各来源的记录归一成同一种图（节点和边），存进本地数据库，再通过 WebSocket 推给页面。原始记录也一并保存，升级后可以据此重新推导，不需要重新导入。
 
 ## ⚙️ 配置
 
@@ -197,6 +211,9 @@ flowchart LR
 | `AGENT_CANVAS_PROJECTS_DIR` | `~/.claude/projects` | Claude Code 会话文件的目录 |
 | `AGENT_CANVAS_CODEX_DIR` | `~/.codex/sessions` | Codex 会话文件的目录；设为空字符串表示不读取 |
 | `AGENT_CANVAS_CURSOR_DB` | Cursor 的 `state.vscdb`（按平台，见手册） | Cursor 的本地数据库，只读打开；设为空字符串表示不读取 |
+| `AGENT_CANVAS_GEMINI_DIR` | `~/.gemini`（或 `$GEMINI_CLI_HOME/.gemini`） | Gemini CLI 的目录；设为空字符串表示不读取 |
+| `AGENT_CANVAS_GROK_DIR` | `~/.grok`（或 `$GROK_HOME`） | Grok 的目录；设为空字符串表示不读取 |
+| `AGENT_CANVAS_COPILOT_DIR` | `~/.copilot`（或 `$COPILOT_HOME`） | Copilot CLI 的目录；设为空字符串表示不读取 |
 | `AGENT_CANVAS_DATA_DIR` | `~/.agent-canvas` | 数据目录（数据库 `data.db`） |
 
 完整列表见[使用手册 · 数据与环境变量](./docs/manual.md#数据与环境变量)。
@@ -205,7 +222,7 @@ flowchart LR
 
 - 只监听 `127.0.0.1`，不对局域网开放；来自非本机页面的请求会被拒绝。
 - 没有账号、没有遥测、不联网。
-- 对会话文件只读；Cursor 的数据库只读打开，只做按主键的短查询，从不写入。只有你主动运行 `hooks install` 时，才会修改 Claude Code、Codex 或 Cursor 的配置文件，并且先备份。
+- 对会话文件只读，从不往 Gemini CLI、Grok、Copilot CLI 的目录写任何东西；Cursor 的数据库只读打开，只做按主键的短查询，从不写入。只有你主动运行 `hooks install` 时，才会修改 Claude Code、Codex 或 Cursor 的配置文件，并且先备份。
 - 数据库里是你的对话和工具输出的明文，请像对待对话记录本身一样对待数据目录。
 
 ## 📚 文档
@@ -217,6 +234,7 @@ flowchart LR
 - [导出与分享](./docs/manual.md#导出与分享)：HTML 和 Markdown 两种格式、范围和内容选项、大小上限
 - [遮蔽敏感信息](./docs/manual.md#遮蔽敏感信息)：遮什么、已知会漏什么、页面上的遮蔽开关防的是什么
 - [通知](./docs/manual.md#通知)：六种提醒的判定、设置、各来源的差别
+- [Gemini CLI、Grok、Copilot CLI](./docs/manual.md#gemini-cligrokcopilot-cli)：读哪里、显示什么、各自的限制（未经真实数据核对）
 - [诊断页](./docs/manual.md#诊断页)：页面右上角的“诊断”，看导入进度、hook 是否收到、未识别的记录
 - [已知限制](./docs/manual.md#已知限制)
 
@@ -241,4 +259,4 @@ pnpm release                            # 在 release/ 里生成要发布到 npm
 
 [MIT](./LICENSE)
 
-Claude、Claude Code、Codex、OpenAI、Cursor 等名称和标志是各自所有者的商标。界面里用它们只是为了标明会话来自哪个工具；本项目与这些公司没有隶属或合作关系，这些标志也不在 MIT 许可的范围内。
+Claude、Claude Code、Codex、OpenAI、Cursor、Gemini、Grok、GitHub Copilot 等名称和标志是各自所有者的商标。界面里用它们只是为了标明会话来自哪个工具（Gemini CLI、Grok、Copilot CLI 用的是本项目自绘的字母标记，不是它们的标志）；本项目与这些公司没有隶属或合作关系，这些标志也不在 MIT 许可的范围内。
