@@ -72,7 +72,9 @@ describe('the example file, line by line (spec 5.3)', () => {
     const order = [PROMPT, THINK, VIEW, BASH, TEXT, TASK, END];
     expect(nodeOf(r, PROMPT).parentId).toBeNull();
     for (let i = 1; i < order.length; i++) expect(nodeOf(r, order[i]!).parentId).toBe(order[i - 1]);
-    for (const nid of [THINK, VIEW, BASH, TEXT, TASK]) expect(nodeOf(r, nid).turnId).toBe(PROMPT);
+    for (const nid of [THINK, VIEW, BASH, TEXT]) expect(nodeOf(r, nid).turnId).toBe(PROMPT);
+    // Final review I-1: the dispatch comes after a session.resume without a new prompt, so it is a turn of its own.
+    expect(nodeOf(r, TASK).turnId).toBe(id(`resume:${E(12)}`));
     expect(nodeOf(r, GREP)).toMatchObject({ parentId: TASK, agentId: 'agent-explore-1' });
     expect(Object.values(r.graph.edges).find((e) => e.to === GREP)).toMatchObject({ from: TASK, kind: 'spawn' });
     expect(Object.values(r.graph.edges).filter((e) => e.kind === 'sequence')).toHaveLength(order.length - 1);

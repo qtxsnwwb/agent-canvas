@@ -51,9 +51,9 @@ const diagnostics = async (app: FastifyInstance): Promise<Diagnostics> => (await
 test('not configured: dir null, not present, no sessions', async () => {
   const { app } = await serve(configFor({ geminiDir: null, grokDir: null, copilotDir: null }));
   expect((await diagnostics(app)).sources).toEqual({
-    gemini: { dir: null, present: false, sessionCount: 0 },
-    grok: { dir: null, present: false, sessionCount: 0 },
-    copilot: { dir: null, present: false, sessionCount: 0 },
+    gemini: { dir: null, present: false, reading: false, sessionCount: 0 },
+    grok: { dir: null, present: false, reading: false, sessionCount: 0 },
+    copilot: { dir: null, present: false, reading: false, sessionCount: 0 },
   });
 });
 
@@ -61,9 +61,9 @@ test('configured but absent: the directory the source would read, not present, n
   const dirs = { geminiDir: path.join(tmp, 'no-gemini'), grokDir: path.join(tmp, 'no-grok'), copilotDir: path.join(tmp, 'no-copilot') };
   const { app } = await serve(configFor(dirs));
   expect((await diagnostics(app)).sources).toEqual({
-    gemini: { dir: path.join(dirs.geminiDir, 'tmp'), present: false, sessionCount: 0 },
-    grok: { dir: path.join(dirs.grokDir, 'sessions'), present: false, sessionCount: 0 },
-    copilot: { dir: path.join(dirs.copilotDir, 'session-state'), present: false, sessionCount: 0 },
+    gemini: { dir: path.join(dirs.geminiDir, 'tmp'), present: false, reading: false, sessionCount: 0 },
+    grok: { dir: path.join(dirs.grokDir, 'sessions'), present: false, reading: false, sessionCount: 0 },
+    copilot: { dir: path.join(dirs.copilotDir, 'session-state'), present: false, reading: false, sessionCount: 0 },
   });
   for (const d of Object.values(dirs)) await expect(fs.stat(d)).rejects.toThrow();
 });
@@ -77,11 +77,22 @@ test('a Gemini CLI directory with one session: present, one session; the others 
   const { app } = await serve(configFor({ geminiDir, grokDir: null, copilotDir: null }));
   const d = await diagnostics(app);
   expect(d.sources).toEqual({
-    gemini: { dir: path.join(geminiDir, 'tmp'), present: true, sessionCount: 1 },
-    grok: { dir: null, present: false, sessionCount: 0 },
-    copilot: { dir: null, present: false, sessionCount: 0 },
+    gemini: { dir: path.join(geminiDir, 'tmp'), present: true, reading: true, sessionCount: 1 },
+    grok: { dir: null, present: false, reading: false, sessionCount: 0 },
+    copilot: { dir: null, present: false, reading: false, sessionCount: 0 },
   });
   // The masked answer keeps the block (the dir is a path, masked by the page, not by the server).
   const masked = (await app.inject({ method: 'GET', url: '/api/diagnostics?mask=1' })).json() as Diagnostics;
   expect(masked.sources?.gemini).toEqual(d.sources?.gemini);
+});
+
+test('a source directory that appears after start: present, but not read until a restart (final review M-2)', async () => {
+  const copilotDir = path.join(tmp, '.copilot');
+  const { app } = await serve(configFor({ geminiDir: null, grokDir: null, copilotDir }));
+  expect((await diagnostics(app)).sources?.copilot).toEqual({ dir: path.join(copilotDir, 'session-state'), present: false, reading: false, sessionCount: 0 });
+  await fs.mkdir(path.join(copilotDir, 'session-state'), { recursive: true });
+  expect((await diagnostics(app)).sources?.copilot).toEqual({ dir: path.join(copilotDir, 'session-state'), present: true, reading: false, sessionCount: 0 });
+  // After a restart (a new pipeline built from the same config) the source exists and is read.
+  const { app: restarted } = await serve(configFor({ geminiDir: null, grokDir: null, copilotDir }));
+  expect((await diagnostics(restarted)).sources?.copilot).toMatchObject({ present: true, reading: true });
 });

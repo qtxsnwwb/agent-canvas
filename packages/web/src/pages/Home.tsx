@@ -6,7 +6,7 @@ import { ANOMALY_POLL_MS, anomalyErrorText, homeMarker } from '../anomalies';
 import { api, openLiveSessions } from '../client';
 import { sessionStatusView } from '../labels';
 import {
-  effectiveOriginFilter, filterEmptyMessage, heroTotals, matchesOrigin, ORIGIN_FILTER_KEY, ORIGIN_FILTER_OPTIONS, originLook, parseOriginFilter,
+  effectiveOriginFilter, filterEmptyMessage, heroTotals, matchesOrigin, ORIGIN_FILTER_KEY, originFilterOptions, originLook, parseOriginFilter,
   projectCountsExact, projectLook, projectName, relativeTime, shownProjectId, showOriginFilter, stripProjects,
   type OriginFilter,
 } from '../home';
@@ -58,12 +58,12 @@ function readOriginFilter(): OriginFilter {
   try { return parseOriginFilter(window.localStorage.getItem(ORIGIN_FILTER_KEY)); } catch { return 'all'; }
 }
 
-/** 全部 / Claude Code / Codex / Cursor; shown only when some project has Codex or Cursor sessions. */
-function OriginFilterSwitch({ value, onChange }: { value: OriginFilter; onChange(value: OriginFilter): void }) {
+/** 全部 plus one button per origin that has sessions; shown only when some project has an origin other than Claude Code. */
+function OriginFilterSwitch({ value, onChange, projects }: { value: OriginFilter; onChange(value: OriginFilter): void; projects: readonly Project[] }) {
   return (
     <div className="origin-filter">
       <div className="view-switch" role="group" aria-label="来源">
-        {ORIGIN_FILTER_OPTIONS.map((o) => (
+        {originFilterOptions(projects).map((o) => (
           <button key={o.value} type="button" data-origin={o.value} aria-pressed={value === o.value} onClick={() => onChange(o.value)}>
             {o.label}
           </button>
@@ -202,7 +202,8 @@ export function Home({ projectId: addressed }: { projectId: string | null }) {
     try { window.localStorage.setItem(ORIGIN_FILTER_KEY, value); } catch { /* storage unavailable: not remembered */ }
     setChosenFilter(value);
   };
-  // Without any Codex or Cursor project the filter is hidden and has no effect.
+  // Without a project of another origin than Claude Code the filter is hidden and has no effect; a remembered origin
+  // without sessions here counts as 全部.
   const filter = effectiveOriginFilter(chosenFilter, projects);
   // With no project in the address, the busiest visible one is shown (the page is never an empty "pick something");
   // a project in the address is shown even when the filter hides it.
@@ -341,7 +342,7 @@ export function Home({ projectId: addressed }: { projectId: string | null }) {
     ) : (
     <div className="home">
       {error !== null && <p className="error">加载失败：{m.text(error)}</p>}
-      {showOriginFilter(projects) && <OriginFilterSwitch value={chosenFilter} onChange={chooseFilter} />}
+      {showOriginFilter(projects) && <OriginFilterSwitch value={filter} onChange={chooseFilter} projects={projects} />}
       <nav className="project-strip" aria-label="项目">
         {projects.length === 0 && <p className="muted">还没有项目。在任意目录里用一次 Claude Code、Codex 或 Cursor，它就会出现在这里。</p>}
         {filterEmptyMessage(projects, filter) !== null && <p className="muted">{filterEmptyMessage(projects, filter)}</p>}

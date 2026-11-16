@@ -25,7 +25,7 @@ import { CodexThread } from './codex-fixtures.js';
 import { rolloutRel } from './codex-rollout.js';
 import * as copilot from './copilot-fixtures.js';
 import { CursorDbFixture, T0 as CURSOR_T0, textBubble, thinkingBubble, toolBubble, userBubble } from './cursor-fixtures.js';
-import { assistantBlock, userPrompt } from './fixtures.js';
+import { assistantBlock, toolResult, userPrompt } from './fixtures.js';
 import * as gemini from './gemini-fixtures.js';
 import * as grok from './grok-fixtures.js';
 
@@ -158,7 +158,9 @@ describe('the three new origins in projects, search, stats and export', () => {
     }
   });
 
-  test('cost anomaly: 25 Copilot sessions with one 50× outlier give none (and do not fail); the same shape in Gemini CLI does', async () => {
+  // 50 sessions written, ingested and summarized: about 3–5 s on a loaded machine, so the default 5 s is too tight
+  // (final review M-11); nothing in it is a timing bound.
+  test('cost anomaly: 25 Copilot sessions with one 50× outlier give none (and do not fail); the same shape in Gemini CLI does', { timeout: 30_000 }, async () => {
     const d = dirs();
     const gTmp = path.join(d.geminiDir, 'tmp');
     await write(path.join(gTmp, 'demo-app', '.project_root'), '/home/dev/demo-app');
@@ -198,13 +200,16 @@ describe('the three new origins in projects, search, stats and export', () => {
 
     const kinds = async (id: string): Promise<string[]> =>
       (await getJson<SessionAnomaliesResponse>(app, `/api/sessions/${encodeURIComponent(id)}/anomalies`)).anomalies.map((a) => a.kind);
-    for (let i = 0; i < 25; i++) expect(await kinds(`cop-${i}`), `cop-${i}`).not.toContain('cost');
-    // The control: the Gemini outlier is found, so the setup can produce a cost anomaly.
-    expect(await kinds('9e000000-0000-4000-8000-000000000024')).toContain('cost');
+    // Every Copilot session at once: the list covers all 25 (none failed, none still computing), then the outlier itself.
     const list = await getJson<AnomalyListResponse>(app, '/api/anomalies?range=all&origin=copilot');
     expect(list.totals.cost).toBe(0);
+    expect(list.items.filter((x) => x.kind === 'cost')).toEqual([]);
     expect(list.computing).toBe(false);
     expect(list.failedSessions).toBe(0);
+    expect(await kinds('cop-24')).not.toContain('cost');
+    // The control: the Gemini outlier is found, so the setup can produce a cost anomaly.
+    expect(await kinds('9e000000-0000-4000-8000-000000000024')).toContain('cost');
+    expect((await getJson<AnomalyListResponse>(app, '/api/anomalies?range=all&origin=gemini')).totals.cost).toBeGreaterThan(0);
   });
 });
 
@@ -220,14 +225,27 @@ describe('Claude Code, Codex and Cursor are unchanged by the new origins', () =>
     try {
       const project = cwd.replace(/[^A-Za-z0-9]/g, '-');
       const claudeBody = (events: RawEvent[]): string => body(events.map((e) => (e.source === 'transcript' ? e.line : '')));
+      // Each old origin runs the same call five times in a row (a `loop` anomaly), so anomalies exist to compare.
+      const claudeLoop: RawEvent[] = [];
+      let prev = 'u1';
+      for (let i = 0; i < 5; i++) {
+        claudeLoop.push(assistantBlock(`t${i}`, prev, { type: 'tool_use', id: `tu${i}`, name: 'Bash', input: { command: 'npm test' } }));
+        claudeLoop.push(toolResult(`r${i}`, `t${i}`, `tu${i}`, 'ok'));
+        prev = `r${i}`;
+      }
       await write(path.join(projectsDir, project, 'c1.jsonl'), claudeBody([
         userPrompt('u1', null, 'claude prompt about the parser', { sessionId: 'c1' }),
-        assistantBlock('a1', 'u1', { type: 'text', text: 'looked at the parser' }),
+        ...claudeLoop,
+        assistantBlock('a1', prev, { type: 'text', text: 'looked at the parser' }),
       ]));
       const codex = new CodexThread({ id: CODEX_ROOT, cwd });
       codex.meta();
       codex.started('t1');
       codex.user('p1', 'codex prompt about the parser');
+      for (let i = 0; i < 5; i++) {
+        codex.exec(`call_${i}`, 'npm test');
+        codex.output(`call_${i}`);
+      }
       codex.assistant('m1', 'done');
       codex.complete();
       await write(path.join(codexSessionsDir, ...rolloutRel(CODEX_ROOT).split('/')), body(codex.lines));
@@ -237,6 +255,7 @@ describe('Claude Code, Codex and Cursor are unchanged by the new origins', () =>
           userBubble('u1', 'find the parser', s(1)),
           thinkingBubble('th1', 'where would it be', s(2)),
           toolBubble('t1', 'grep', 'completed', s(3), { params: { pattern: 'parse' } }),
+          ...[0, 1, 2, 3, 4].map((i) => toolBubble(`loop${i}`, 'run_terminal_command_v2', 'completed', s(4 + i), { params: { command: 'npm test' } })),
           textBubble('a1', 'it is in src/parser.ts', s(20), { turnDurationMs: 19_000 }),
         ],
       });
@@ -269,10 +288,55 @@ describe('Claude Code, Codex and Cursor are unchanged by the new origins', () =>
         return out;
       };
       const a = await view(without);
+      // Not vacuous: each old session has anomalies, and the lists are not empty.
+      for (const id of ['c1', CODEX_ROOT, 'cur-root']) expect((a[`anomalies:${id}`] as SessionAnomaliesResponse).anomalies.length, id).toBeGreaterThan(0);
+      for (const origin of ['claude', 'codex', 'cursor']) expect((a[`anomalyList:${origin}`] as AnomalyListResponse).items.length, origin).toBeGreaterThan(0);
       expect(a['graph:c1']).not.toBeNull();
       expect(a['graph:cur-root']).not.toBeNull();
       expect(a[`graph:${CODEX_ROOT}`]).not.toBeNull();
       expect(await view(withNew)).toEqual(a);
+    } finally {
+      fx.close();
+    }
+  });
+});
+
+describe('one directory, one project (final review M-6)', () => {
+  test('all six origins on the same directory, with and without a trailing separator, Windows and POSIX style: one project; another directory stays apart', async () => {
+    const cwd = path.join(tmp, 'work', 'app');
+    const other = path.join(tmp, 'work', 'app2');
+    const posix = cwd.replace(/\\/g, '/');
+    const projectsDir = path.join(tmp, 'projects');
+    const codexSessionsDir = path.join(tmp, 'codex', 'sessions');
+    const fx = new CursorDbFixture(path.join(tmp, 'Cursor'));
+    try {
+      const project = cwd.replace(/[^A-Za-z0-9]/g, '-');
+      await write(path.join(projectsDir, project, 'c1.jsonl'), body([userPrompt('u1', null, 'hello', { sessionId: 'c1' })].map((e) => (e.source === 'transcript' ? e.line : ''))));
+      const codex = new CodexThread({ id: '019a0000-0000-7000-8000-0000000000c2', cwd });
+      codex.meta();
+      codex.started('t1');
+      codex.user('p1', 'hello');
+      codex.complete();
+      await write(path.join(codexSessionsDir, ...rolloutRel('019a0000-0000-7000-8000-0000000000c2').split('/')), body(codex.lines));
+      fx.put({ id: 'cur-1', name: 'c', status: 'completed', dataFsPath: cwd, createdAt: CURSOR_T0, lastUpdatedAt: CURSOR_T0 + 1000, bubbles: [userBubble('u1', 'hello', CURSOR_T0)] });
+      const d = dirs();
+      // Gemini: lower-cased with a trailing separator (as .project_root may be); Grok: forward slashes and a trailing one.
+      await writeNewSources(d, { gemini: `${cwd.toLowerCase()}\\`, grok: `${posix}/`, copilot: `${cwd}\\` });
+      const state = path.join(d.copilotDir, 'session-state');
+      const copilotSession = async (id: string, dir: string): Promise<void> =>
+        write(path.join(state, id, 'events.jsonl'), body([copilot.startLine(dir), copilot.ev('user.message', { content: 'hello' }, { at: '2026-11-12T08:00:01.000Z' })]));
+      await copilotSession('cop-posix', `${posix}/`);
+      await copilotSession('cop-plain', cwd);
+      await copilotSession('cop-other', `${other}\\`);
+      const config = loadConfig({}, { projectsDir, dataDir: path.join(tmp, 'data'), codexSessionsDir, cursorDbPath: fx.dbPath, geminiDir: d.geminiDir, grokDir: d.grokDir, copilotDir: d.copilotDir });
+      const { store, pipeline } = await serve(config, [new CursorSource({ dbPath: fx.dbPath, now: () => NOW, timers: NO_TIMERS })]);
+      expect(pipeline.ingestFailures()).toEqual([]);
+      const projects = store.listProjects(NOW).map((p) => [p.id, p.sessionCount, p.origins]).sort();
+      expect(projects).toEqual([
+        [project, 8, ['claude', 'codex', 'cursor', 'gemini', 'grok', 'copilot']],
+        [other.replace(/[^A-Za-z0-9]/g, '-'), 1, ['copilot']],
+      ].sort());
+      expect(store.getSession(copilot.SID)?.cwd).toBe(cwd);
     } finally {
       fx.close();
     }

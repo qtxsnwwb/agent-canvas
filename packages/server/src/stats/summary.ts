@@ -45,7 +45,10 @@ export interface SummaryTurn {
   outputTokens: number;
 }
 
-/** Internal nodes of a session without any main-thread turn: one per node that is a call or carries counted usage. */
+/**
+ * Internal nodes of a session without any main-thread turn, and session-exit nodes (isSessionExit): one per node that
+ * is a call or carries counted usage, dated by the node's own time.
+ */
 export interface SummaryExtra {
   atMs: number;
   dated: boolean;
@@ -126,9 +129,16 @@ export function turnDurationMs(turn: SummaryTurn, nowMs: number): number {
   return Math.max(0, end - turn.startMs);
 }
 
+/**
+ * A session-exit node (Copilot CLI's `session.shutdown`: main thread, system, subtype `shutdown`, no turn): it marks
+ * when the tool exited, not work of a turn, so it is an extra at its own time (its usage, the session total, is
+ * booked at the exit) and never stretches the last turn to the exit. No other origin emits this subtype.
+ */
+const isSessionExit = (n: GraphNode): boolean => n.agentId === null && n.kind === 'system' && n.systemSubtype === 'shutdown';
+
 /** `nodes`: the session's nodes in snapshot order (store rowid order; getGraph's order) — it decides the token rule. */
 export function summarizeSession(session: Session, nodes: readonly GraphNode[]): SessionSummary {
-  const grouped = groupTurns(nodes);
+  const grouped = groupTurns(nodes.filter((n) => !isSessionExit(n)));
   const turns: SummaryTurn[] = grouped.map((g) => {
     let endMs = g.startMs;
     let lastActivityMs = g.startMs;
@@ -198,7 +208,7 @@ export function summarizeSession(session: Session, nodes: readonly GraphNode[]):
     const call = isCall(node);
     const counts = counted.has(node);
     let turn: number;
-    if (node.agentId === null) turn = turnOfMain.get(node.id)!;
+    if (node.agentId === null) turn = turnOfMain.get(node.id) ?? -1; // -1: a session exit (isSessionExit)
     else if (turns.length === 0) turn = -1;
     else {
       turn = resolveAgent(node.agentId) ?? turnByTime(ms ?? 0);

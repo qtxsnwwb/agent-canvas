@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { Change, GraphNode, NodeDetail, Session, Usage } from '@agent-canvas/shared';
 import { parseWorkspaceYaml, type CopilotWorkspace } from '../sources/copilot/workspace.js';
+import { normaliseCwd } from '../sources/cursor/project.js';
 import type { RawEvent } from '../store/store.js';
 import { promptTitle } from './codex.js';
 import { copilotTouches, filesFields, nodeFiles, type NodeFiles } from './files.js';
@@ -433,7 +434,11 @@ export class CopilotNormalizer implements AgentNormalizer {
       case 'session.start': {
         state.startTime ??= isoOrNull(data.startTime) ?? ts;
         const ctx = isObject(data.context) ? data.context : {};
-        state.startCwd ??= nonEmpty(ctx.cwd);
+        // Trailing separator and drive-letter case as the other sources write the cwd (same project, same files).
+        if (state.startCwd === null) {
+          const cwd = nonEmpty(ctx.cwd);
+          state.startCwd = cwd === null ? null : normaliseCwd(cwd);
+        }
         state.branch = nonEmpty(ctx.branch) ?? state.branch;
         this.start(state, changes);
         break;
@@ -442,7 +447,12 @@ export class CopilotNormalizer implements AgentNormalizer {
       case 'session.context_changed': {
         const ctx = isObject(data.context) ? data.context : data;
         state.branch = nonEmpty(ctx.branch) ?? state.branch;
-        if (type === 'session.resume') this.start(state, changes);
+        if (type === 'session.resume') {
+          this.start(state, changes);
+          // Work after a resume without a new prompt is a turn of its own (it never stretches the turn before the
+          // gap); a prompt right after the resume opens its own turn as usual, leaving this one empty (no group).
+          if (agentId === null) t.turn = copilotNodeId(state.session.id, `resume:${eventKey}`);
+        }
         break;
       }
       case 'user.message': {
@@ -785,7 +795,7 @@ export class CopilotNormalizer implements AgentNormalizer {
     const next: Session = {
       ...state.session,
       projectId: state.projectId,
-      cwd: state.startCwd ?? ws.cwd ?? null,
+      cwd: state.startCwd ?? (ws.cwd === undefined ? null : normaliseCwd(ws.cwd)),
       title,
       gitBranch: state.branch,
       status: state.ended ? 'ended' : 'running',

@@ -18,8 +18,11 @@ const IGNORED = /\.(tmp|unreadable)-/;
 const FIRST_LINE_MAX_BYTES = 1024 * 1024;
 /** How much of a legacy `.json` is read to find its `sessionId` before parsing the whole file. */
 const HEAD_BYTES = 64 * 1024;
-/** Largest legacy `.json` parsed whole when its head does not name the session. */
-const LEGACY_MAX_BYTES = 64 * 1024 * 1024;
+/**
+ * Largest legacy `.json` read at all (the pipeline reads it whole as one meta record, and its session id may need a whole
+ * parse). Gemini CLI stopped writing them at 0.39; a larger one is reported as a failure and nothing of it is ingested.
+ */
+export const GEMINI_LEGACY_MAX_BYTES = 64 * 1024 * 1024;
 const CHUNK = 64 * 1024;
 const NEWLINE = 0x0a;
 
@@ -79,10 +82,14 @@ export class GeminiFileSource implements FileSource {
   /** Project ids in use, reused (Windows) when a cwd differs only in letter case. */
   private readonly projects: ProjectIdResolver;
 
+  private readonly legacyMaxBytes: number;
+
   constructor(
     readonly rootDir: string,
     private readonly lookup: GeminiLookup = NO_LOOKUP,
+    options: { legacyMaxBytes?: number } = {},
   ) {
+    this.legacyMaxBytes = options.legacyMaxBytes ?? GEMINI_LEGACY_MAX_BYTES;
     this.projectsPath = path.join(path.dirname(path.resolve(rootDir)), PROJECTS_JSON);
     this.projects = new ProjectIdResolver(() => this.lookup.knownProjectIds());
   }
@@ -157,6 +164,8 @@ export class GeminiFileSource implements FileSource {
     if (shape === null) return null;
     if (shape.kind === 'projects' || shape.kind === 'root') return { kind: 'index', projectId: '', sessionId: '' };
     if (shape.legacy && this.hasJsonl(key)) return null;
+    // Checked at every classification (the pipeline classifies before each whole read), not only the first one.
+    if (shape.legacy) this.checkLegacySize(key);
     const known = this.known(key, shape);
     if (known !== null) return toClass(known, shape.legacy);
     if (shape.kind === 'sub') return toClass(this.remember(key, shape.slug, shape.parent, shape.agentId), shape.legacy);
@@ -261,6 +270,17 @@ export class GeminiFileSource implements FileSource {
     return id;
   }
 
+  /** Throws (reported in the failures list, nothing ingested) when a legacy `.json` is larger than the cap. */
+  private checkLegacySize(key: string): void {
+    let size: number;
+    try {
+      size = fs.statSync(this.pathOf(key)!).size;
+    } catch {
+      return; // gone: the pipeline handles a missing file
+    }
+    if (size > this.legacyMaxBytes) throw new Error(`gemini legacy session: ${size} bytes, larger than ${this.legacyMaxBytes}; not read`);
+  }
+
   /** A legacy `.json`'s `sessionId`: from its head (it is the first key Gemini writes), else from the whole file. */
   private async legacySessionId(key: string): Promise<string | null> {
     const abs = this.pathOf(key)!;
@@ -277,9 +297,7 @@ export class GeminiFileSource implements FileSource {
     }
     let rec: unknown;
     try {
-      const stat = await fsp.stat(abs);
-      if (stat.size > LEGACY_MAX_BYTES) throw new Error('gemini legacy session: too large');
-      rec = JSON.parse(await fsp.readFile(abs, 'utf8'));
+      rec = JSON.parse(await fsp.readFile(abs, 'utf8')); // size checked by classify (checkLegacySize)
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
       throw new Error('gemini legacy session: not a JSON object (yet)');

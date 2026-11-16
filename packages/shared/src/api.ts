@@ -75,8 +75,9 @@ export interface Diagnostics {
   /**
    * The file sources without hooks, read only when their directory exists at start (spec more-sources 4.2): dir = the
    * directory read (`<geminiDir>/tmp`, `<grokDir>/sessions`, `<copilotDir>/session-state`; null when the origin is
-   * disabled), present = it exists now (stat only), sessionCount = that origin's stored sessions. Absent from servers
-   * before it existed.
+   * disabled), present = it exists now (stat only), reading = the source was created at start (the directory existed
+   * then; one that appeared later is read after a restart), sessionCount = that origin's stored sessions. Absent from
+   * servers before it existed.
    */
   sources?: Record<FileOnlyOrigin, FileSourceStatus>;
 }
@@ -84,7 +85,7 @@ export interface Diagnostics {
 /** The origins read from files only (no hooks, no live waiting states). */
 export type FileOnlyOrigin = 'gemini' | 'grok' | 'copilot';
 export const FILE_ONLY_ORIGINS: readonly FileOnlyOrigin[] = ['gemini', 'grok', 'copilot'];
-export interface FileSourceStatus { dir: string | null; present: boolean; sessionCount: number }
+export interface FileSourceStatus { dir: string | null; present: boolean; reading: boolean; sessionCount: number }
 
 /**
  * The content search index (Diagnostics.search). indexing: the index is incomplete (a database from before it existed,

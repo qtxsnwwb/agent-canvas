@@ -176,18 +176,24 @@ export interface FileSourceBlock extends FileSourceStatus {
 export function fileSourceBlocks(d: Diagnostics): FileSourceBlock[] {
   const out: FileSourceBlock[] = [];
   for (const origin of FILE_ONLY_ORIGINS) {
-    const s = d.sources?.[origin] ?? { dir: null, present: false, sessionCount: 0 };
+    const s = d.sources?.[origin] ?? { dir: null, present: false, reading: false, sessionCount: 0 };
     const unknown = originUnknownRecords(d, origin);
     if (s.present || s.sessionCount > 0 || unknown.length > 0) out.push({ origin, ...s, unknown });
   }
   return out;
 }
 
-/** A file-only origin's line about its directory: not enabled / exists / does not exist. */
+/**
+ * A file-only origin's line about its directory: not enabled / exists and read / exists but not read (it appeared after
+ * the service started) / does not exist. `reading` absent (a server from before it existed) counts as read when present.
+ */
 export function fileSourceDirLine(origin: FileOnlyOrigin, s: FileSourceStatus): string {
   const label = ORIGIN_LOOK[origin].label;
   if (s.dir === null) return `${label} 会话目录：未启用`;
-  return `${label} 会话目录：${s.dir}（${s.present ? '存在' : '不存在。目录出现后要重启服务才会读取'}）`;
+  const state = !s.present
+    ? '不存在。目录出现后要重启服务才会读取'
+    : s.reading === false ? '存在，但服务启动时还没有这个目录，尚未读取。重启服务后读取' : '存在';
+  return `${label} 会话目录：${s.dir}（${state}）`;
 }
 
 /**

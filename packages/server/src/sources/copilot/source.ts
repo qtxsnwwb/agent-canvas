@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
+import { normaliseCwd } from '../cursor/project.js';
 import { ProjectIdResolver } from '../project-ids.js';
 import { KEY_PREFIXES, type FileClass, type FileSource, type MaybePromise } from '../source.js';
 import { parseWorkspaceYaml, type CopilotWorkspace } from './workspace.js';
@@ -288,11 +289,11 @@ export class CopilotFileSource implements FileSource {
       }
       decided = true;
       const cwd = first.kind === 'line' ? startCwd(first.text) : null;
-      if (cwd !== null) return this.remember(sessionId, this.resolver.forCwd(cwd));
+      if (cwd !== null) return this.remember(sessionId, this.resolver.forCwd(normaliseCwd(cwd)));
       break;
     }
     const ws = copilotIo.readWorkspace(path.join(this.rootDir, sessionId, WORKSPACE), COPILOT_WORKSPACE_MAX_BYTES);
-    const projectId = ws?.cwd !== undefined ? this.resolver.forCwd(ws.cwd) : UNKNOWN_PROJECT;
+    const projectId = ws?.cwd !== undefined ? this.resolver.forCwd(normaliseCwd(ws.cwd)) : UNKNOWN_PROJECT;
     return decided ? this.remember(sessionId, projectId) : projectId;
   }
 }

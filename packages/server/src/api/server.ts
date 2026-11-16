@@ -158,11 +158,12 @@ function isFile(file: string | null): boolean {
 }
 
 /** Diagnostics.sources: each file-only origin's directory (stat only, never read) and its stored session count. */
-function fileOnlySources(config: Config, store: Store): Record<FileOnlyOrigin, FileSourceStatus> {
+function fileOnlySources(config: Config, store: Store, pipeline: Pipeline): Record<FileOnlyOrigin, FileSourceStatus> {
   const counts = store.sessionCountsByOrigin();
+  const reading = new Set(pipeline.fileSources().map((s) => s.origin));
   const one = (origin: FileOnlyOrigin): FileSourceStatus => {
     const dir = sourceDirOf(config, origin);
-    return { dir, present: isExistingDir(dir), sessionCount: counts[origin] ?? 0 };
+    return { dir, present: isExistingDir(dir), reading: reading.has(origin), sessionCount: counts[origin] ?? 0 };
   };
   return { gemini: one('gemini'), grok: one('grok'), copilot: one('copilot') };
 }
@@ -454,7 +455,7 @@ export function buildServer(deps: {
         storage: deps.storage?.status() ?? storageStatus(store),
         search: deps.search?.status() ?? store.searchIndexStatus(),
         foreignHooksDropped,
-        sources: fileOnlySources(config, store),
+        sources: fileOnlySources(config, store, pipeline),
       };
       if (req.query.mask !== '1') return d;
       reply.header('cache-control', 'no-store');

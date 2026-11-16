@@ -31,10 +31,10 @@
   --cursor-soft: #d9f5e0;
   --cursor-edge: #aee3bb;
   --cursor-ink: #1f7a3d;
-  /* Gemini CLI a soft sky, Grok a soft lavender, Copilot CLI a soft rose (badge families of their series colours). */
-  --gemini-soft: #e0f0ff;
-  --gemini-edge: #b5d4f5;
-  --gemini-ink: #1d4f91;
+  /* Gemini CLI a soft cyan, Grok a soft lavender, Copilot CLI a soft rose (badge families of their series colours). */
+  --gemini-soft: #dcf3fa;
+  --gemini-edge: #a9dcec;
+  --gemini-ink: #0b5d78;
   --grok-soft: #f2e1f7;
   --grok-edge: #dcb8e8;
   --grok-ink: #6b1a7d;
@@ -47,8 +47,9 @@
   --series-claude: #e3743f;
   --series-codex: #5f6bdc;
   --series-cursor: #136b3d;
-  /* The six together pass the validator over all pairs (CVD worst 10.8, normal-vision worst 17.2, all >= 3:1). */
-  --series-gemini: #3607e6;
+  /* The six together pass the validator over all pairs (CVD worst 11.0, normal-vision worst 15.6, all >= 3:1); Gemini a
+     cyan, 51 degrees of hue away from Codex. */
+  --series-gemini: #00a0c8;
   --series-grok: #801895;
   --series-copilot: #e62d83;
   --chart-grid: #f0ebf6;
