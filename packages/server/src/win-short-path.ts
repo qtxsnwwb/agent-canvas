@@ -29,6 +29,16 @@ function sameFile(a: fs.BigIntStats, b: fs.BigIntStats): boolean {
   return a.ino !== 0n && a.ino === b.ino && a.dev === b.dev;
 }
 
+/** True when both paths name the same existing file (device and file id); false on any error. */
+export function sameExistingFile(word: string, longPath: string): boolean {
+  try {
+    const a = fs.statSync(word, { bigint: true });
+    return a.isFile() && sameFile(a, fs.statSync(longPath, { bigint: true }));
+  } catch {
+    return false;
+  }
+}
+
 /**
  * The Windows 8.3 short form of an existing file's absolute path, when it is a plain token (see isPlainToken) naming
  * the same file; null otherwise (8.3 names disabled on the volume, a component without a short name, a query that

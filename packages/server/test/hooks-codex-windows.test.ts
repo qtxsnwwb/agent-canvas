@@ -43,10 +43,30 @@ const formD = (node = NODE, cli = CLI, port = 4317) => ({
 });
 const foreign = (name: string) => ({ type: 'command', command: name });
 
-test('plain token: letters, digits and _ . : \\ / ~ - only', () => {
+test('plain token: letters, digits and _ . : \\ / ~ - only, plus @ anywhere but first', () => {
   expect(isPlainToken(NODE_SHORT)).toBe(true);
   expect(isPlainToken('D:/a-b/c_d.e~1/x.js')).toBe(true);
-  for (const bad of [NODE, 'C:\\a&b', 'C:\\a$b', "C:\\it's", 'C:\\a(1)', 'C:\\ä', '', 'C:\\a;b', 'C:\\a"b', 'C:\\a`b']) expect(isPlainToken(bad), bad).toBe(false);
+  // A scoped npm package (npm install -g @qtxsnwwb/agent-canvas): `\@name` inside one word is fine for PowerShell and cmd.
+  expect(isPlainToken(SCOPED_CLI)).toBe(true);
+  expect(isPlainToken('C:\\a@b\\x.js')).toBe(true);
+  // At the start of a word PowerShell reads @ as splatting / an array or hash literal.
+  for (const bad of ['@x', '@(x)', NODE, 'C:\\a&b', 'C:\\a$b', "C:\\it's", 'C:\\a(1)', 'C:\\ä', '', 'C:\\a;b', 'C:\\a"b', 'C:\\a`b', 'C:\\a#b']) {
+    expect(isPlainToken(bad), bad).toBe(false);
+  }
+});
+
+const SCOPED_CLI = 'C:\\Users\\u\\AppData\\Roaming\\npm\\node_modules\\@qtxsnwwb\\agent-canvas\\packages\\server\\dist\\cli.js';
+
+test('global npm install (scoped package path): form A, the path written as is, no short-path lookup', () => {
+  const ask = vi.fn(shortPath);
+  const c = codexForwardCommands(spec({ cliPath: SCOPED_CLI, shortPath: ask }));
+  expect(c.windowsForm).toBe('plain');
+  expect(c.commandWindows).toBe(`${NODE_SHORT} ${SCOPED_CLI} ${TAIL}`);
+  expect(ask.mock.calls.map((a) => a[0])).toEqual([NODE]);
+  const t = codexHookTarget(spec({ cliPath: SCOPED_CLI }));
+  const entry = (t.entry('Stop') as any).hooks[0];
+  expect(t.isOurs(entry)).toBe(true);
+  expect(t.isOutdated?.(entry)).toBe(false);
 });
 
 describe('commandWindows', () => {
@@ -67,10 +87,21 @@ describe('commandWindows', () => {
   test.each([
     ['no short form', () => null],
     ['a short form that is not plain', (p: string) => p.replace('My Tools', 'MY TOO~1')],
-  ])('form E when a path cannot be made plain (%s): the PowerShell call form, double-quoted', (_name, sp) => {
+  ])('form E when a path cannot be made plain (%s): the PowerShell call form; that path double-quoted, a plain one bare', (_name, sp) => {
     const c = codexForwardCommands(spec({ shortPath: (p) => (p === CLI ? sp(p) : shortPath(p)) }));
-    expect(c.commandWindows).toBe(`& "${NODE}" "${CLI}" ${TAIL}`);
+    expect(c.commandWindows).toBe(`& ${NODE_SHORT} "${CLI}" ${TAIL}`);
     expect(c.windowsForm).toBe('call');
+    expect(codexForwardCommands(spec({ shortPath: () => null })).commandWindows).toBe(`& "${NODE}" "${CLI}" ${TAIL}`);
+  });
+
+  test('a path PowerShell would expand is not refused when it has a plain short form, even in form E', () => {
+    const node = 'C:\\a$b\\node.exe';
+    const c = codexForwardCommands(spec({ nodePath: node, shortPath: (p) => (p === node ? 'C:\\AB~1\\node.exe' : null) }));
+    expect(c.commandWindows).toBe(`& C:\\AB~1\\node.exe "${CLI}" ${TAIL}`);
+    const t = codexHookTarget(spec({ nodePath: node, shortPath: (p) => (p === node ? 'C:\\AB~1\\node.exe' : null) }));
+    const entry = (t.entry('Stop') as any).hooks[0];
+    expect(t.isOurs(entry)).toBe(true);
+    expect(t.isOutdated?.(entry)).toBe(false);
   });
 
   test('form E without a short-path function (another platform)', () => {
@@ -99,7 +130,7 @@ describe('commandWindows', () => {
 
   test('another platform never refuses (Codex does not run commandWindows there): such a path is escaped', () => {
     const c = codexForwardCommands({ nodePath: '/usr/bin/node', cliPath: '/opt/a$b/cli.js', port: 4317, platform: 'darwin' });
-    expect(c.commandWindows).toBe(`& "/usr/bin/node" "/opt/a\`$b/cli.js" ${TAIL}`);
+    expect(c.commandWindows).toBe(`& /usr/bin/node "/opt/a\`$b/cli.js" ${TAIL}`);
   });
 });
 
@@ -145,6 +176,19 @@ describe('recognising our entries on Windows', () => {
 
   test('ours without commandWindows on Windows: outdated (Codex would run the POSIX command there)', () => {
     expect(t.isOutdated?.({ type: 'command', command: current.command })).toBe(true);
+  });
+
+  test('a short-path lookup that fails this time does not demote a working form A entry (same files: up to date)', () => {
+    const files: Record<string, string> = { [NODE_SHORT]: NODE, [CLI_SHORT]: CLI };
+    const sameFile = (word: string, long: string): boolean => files[word] === long;
+    const flaky = codexHookTarget(spec({ shortPath: () => null, sameFile }));
+    expect(flaky.isOurs({ type: 'command', commandWindows: current.commandWindows })).toBe(true);
+    expect(flaky.isOutdated?.(current)).toBe(false);
+    // Without a way to tell, it stays outdated (it is ours through the POSIX command).
+    const blind = codexHookTarget(spec({ shortPath: () => null }));
+    expect(blind.isOutdated?.(current)).toBe(true);
+    // Plain words naming other files: not ours by commandWindows, and outdated.
+    expect(flaky.isOutdated?.({ ...current, commandWindows: `C:\\other\\node.exe ${CLI_SHORT} ${TAIL}` })).toBe(true);
   });
 
   test('on another platform the Windows form does not matter: an old form D entry is not rewritten', () => {

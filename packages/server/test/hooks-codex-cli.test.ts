@@ -298,6 +298,23 @@ test('Windows：路径写不成不带引号的形式时用 PowerShell 调用形�
   expect(lines[0]).toContain('PowerShell');
 });
 
+test('Windows：短路径这次没查到，但已装的不带引号的条目指向同一个文件：不改写（不丢信任）', async () => {
+  expect(await runCodexHooksInstall(winOpts(), fakeIo())).toBe(0);
+  const before = fs.readFileSync(file, 'utf8');
+  const files: Record<string, string> = Object.fromEntries(Object.entries(SHORTS).map(([long, short]) => [short, long]));
+  const io = fakeIo();
+  expect(await runCodexHooksInstall(winOpts({ shortPath: () => null, sameFile: (w: string, long: string) => files[w] === long }), io)).toBe(0);
+  expect(io.outs.join('\n')).toContain('无需改动');
+  expect(fs.readFileSync(file, 'utf8')).toBe(before);
+});
+
+test('Windows：卸载时不打印 PowerShell 调用形式的提示', async () => {
+  expect(await runCodexHooksInstall(winOpts({ shortPath: () => null }), fakeIo())).toBe(0);
+  const io = fakeIo();
+  expect(await runCodexHooksUninstall(winOpts({ shortPath: () => null }), io)).toBe(0);
+  expect(io.outs.join('\n')).not.toContain('退回用 cmd');
+});
+
 test('Windows：路径含 $ 时拒绝安装（不写可能被 PowerShell 展开的命令）；卸载照常', async () => {
   seed('{}');
   const io = fakeIo();

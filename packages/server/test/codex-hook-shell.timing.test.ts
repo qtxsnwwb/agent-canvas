@@ -21,7 +21,14 @@ const ON_WINDOWS = process.platform === 'win32';
 const SKIP_REASON = !ON_WINDOWS ? 'Windows only' : !HAVE_CLI ? `${CLI} is missing: run the build first` : '';
 if (SKIP_REASON !== '') console.warn(`codex-hook-shell.timing.test.ts skipped: ${SKIP_REASON}`);
 
+type Way = 'powershell' | 'pwsh' | 'cmd' | 'cmd-raw';
+/** Codex prefers PowerShell 7 (`pwsh`) when it is installed, else Windows PowerShell: run both when both exist. */
+const HAVE_PWSH = ON_WINDOWS && spawnSync('pwsh.exe', ['-NoProfile', '-Command', 'exit 0'], { windowsHide: true, timeout: 20_000 }).status === 0;
+const POWERSHELLS: readonly Way[] = HAVE_PWSH ? ['powershell', 'pwsh'] : ['powershell'];
+if (ON_WINDOWS && !HAVE_PWSH) console.warn('codex-hook-shell: pwsh not found, only Windows PowerShell is checked');
+
 let tmp: string;
+let junction: string | undefined;
 let port: number;
 let server: ChildProcess | undefined;
 let env: NodeJS.ProcessEnv;
@@ -100,6 +107,16 @@ describe.skipIf(SKIP_REASON !== '')('hook commands run through the shells the to
       server.kill();
       await exited;
     }
+    // The junction points into this repository: remove the link itself first, so nothing ever walks into its target.
+    const link = junction === undefined ? undefined : fs.lstatSync(junction, { throwIfNoEntry: false });
+    if (link !== undefined && !link.isSymbolicLink()) throw new Error(`${junction} is not a link: temp dir left in place, remove it by hand`);
+    if (link !== undefined) {
+      try {
+        fs.unlinkSync(junction!);
+      } catch {
+        fs.rmdirSync(junction!); // removes a junction itself, never its target's contents
+      }
+    }
     if (tmp !== undefined) fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 10 });
   }, 30_000);
 
@@ -119,12 +136,12 @@ describe.skipIf(SKIP_REASON !== '')('hook commands run through the shells the to
     });
 
   /** Runs `line` the given way with `input` on stdin; returns the result and how many hooks of `origin` arrived. */
-  async function run(way: 'powershell' | 'cmd' | 'cmd-raw', line: string, input: string, origin = 'codex') {
+  async function run(way: Way, line: string, input: string, origin = 'codex') {
     const before = await hookCount(origin);
     const opts: SpawnSyncOptions = { input, env, encoding: 'utf8', timeout: 30_000, windowsHide: true };
     const r =
-      way === 'powershell'
-        ? spawnSync('powershell.exe', ['-NoProfile', '-Command', line], opts)
+      way === 'powershell' || way === 'pwsh'
+        ? spawnSync(way === 'pwsh' ? 'pwsh.exe' : 'powershell.exe', ['-NoProfile', '-Command', line], opts)
         : way === 'cmd'
           ? // Node's default quoting: the whole line as one argument (as Rust's Command::arg passes it).
             spawnSync('cmd.exe', ['/C', line], opts)
@@ -137,11 +154,43 @@ describe.skipIf(SKIP_REASON !== '')('hook commands run through the shells the to
   const installed = (): string =>
     codexForwardCommands({ nodePath: process.execPath, cliPath: CLI, port, platform: 'win32', shortPath: windowsShortPath }).commandWindows;
 
-  test('Codex commandWindows as installed: PowerShell -NoProfile -Command delivers, exit 0, no output', async () => {
-    const r = await run('powershell', installed(), codexPayload());
-    expect(r.error).toBeUndefined();
-    expect({ status: r.status, stdout: r.stdout, stderr: r.stderr, delivered: r.delivered }).toEqual({ status: 0, stdout: '', stderr: '', delivered: 1 });
+  test('Codex commandWindows as installed: PowerShell -NoProfile -Command delivers, exit 0, no output (also pwsh when present)', async () => {
+    for (const way of POWERSHELLS) {
+      const r = await run(way, installed(), codexPayload());
+      expect(r.error).toBeUndefined();
+      expect({ way, status: r.status, stdout: r.stdout, stderr: r.stderr, delivered: r.delivered }).toEqual({ way, status: 0, stdout: '', stderr: '', delivered: 1 });
+    }
   }, 60_000);
+
+  test('a global npm install path (`…\\node_modules\\@scope\\…`, real directories): plain form, delivered in every shell', async () => {
+    // node.exe hard-linked (copied if that fails) and the package reached through a junction, both under `@scope`.
+    const scope = path.join(tmp, 'npm', 'node_modules', '@qtxsnwwb');
+    fs.mkdirSync(path.join(scope, 'bin'), { recursive: true });
+    const node = path.join(scope, 'bin', 'node.exe');
+    // Idempotent: the timing project retries a failed test in the same temp dir.
+    if (!fs.existsSync(node)) {
+      try {
+        fs.linkSync(process.execPath, node);
+      } catch {
+        fs.copyFileSync(process.execPath, node);
+      }
+    }
+    junction = path.join(scope, 'agent-canvas');
+    if (fs.lstatSync(junction, { throwIfNoEntry: false }) === undefined) fs.symlinkSync(path.resolve(path.dirname(CLI), '..'), junction, 'junction');
+    const cli = path.join(scope, 'agent-canvas', 'dist', 'cli.js');
+    const c = codexForwardCommands({ nodePath: node, cliPath: cli, port, platform: 'win32', shortPath: windowsShortPath });
+    if (!/^[A-Za-z0-9_.:\\~-]+$/.test(tmp)) {
+      console.warn(`codex-hook-shell: temp dir ${tmp} is not plain; scoped-path check skipped`);
+      return;
+    }
+    expect(c.windowsForm).toBe('plain');
+    expect(c.commandWindows).toBe(`${node} ${cli} hook-forward --origin codex --port ${port}`);
+    expect(c.commandWindows).toContain('\\@qtxsnwwb\\');
+    for (const way of [...POWERSHELLS, 'cmd', 'cmd-raw'] as const) {
+      const r = await run(way, c.commandWindows, codexPayload());
+      expect({ way, status: r.status, stdout: r.stdout, stderr: r.stderr, delivered: r.delivered }).toEqual({ way, status: 0, stdout: '', stderr: '', delivered: 1 });
+    }
+  }, 120_000);
 
   test('Codex commandWindows as installed: cmd.exe /C delivers (when it is the plain form)', async () => {
     const line = installed();
@@ -172,8 +221,10 @@ describe.skipIf(SKIP_REASON !== '')('hook commands run through the shells the to
       status: 'completed',
       workspace_roots: ['C:\\work\\demo'],
     });
-    const r = await run('powershell', line, payload, 'cursor');
-    expect(r.error).toBeUndefined();
-    expect({ status: r.status, stdout: r.stdout, stderr: r.stderr, delivered: r.delivered }).toEqual({ status: 0, stdout: '', stderr: '', delivered: 1 });
+    for (const way of POWERSHELLS) {
+      const r = await run(way, line, payload, 'cursor');
+      expect(r.error).toBeUndefined();
+      expect({ way, status: r.status, stdout: r.stdout, stderr: r.stderr, delivered: r.delivered }).toEqual({ way, status: 0, stdout: '', stderr: '', delivered: 1 });
+    }
   }, 60_000);
 });

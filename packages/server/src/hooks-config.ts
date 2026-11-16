@@ -314,12 +314,22 @@ export interface CodexForwardSpec {
    * for a path that is not a plain token. Absent: no short forms (the PowerShell call form is used for such a path).
    */
   shortPath?: (longPath: string) => string | null;
+  /**
+   * Windows only: whether an absolute plain word names the same existing file as `longPath` (win-short-path.ts
+   * `sameExistingFile`). Lets an installed unquoted entry count as up to date when this run's short-path lookup
+   * failed. Absent: words are compared by name only.
+   */
+  sameFile?: (word: string, longPath: string) => boolean;
 }
 
-/** A word every shell Codex may use on Windows (PowerShell, cmd.exe) takes literally without quotes. */
-const PLAIN_TOKEN = /^[A-Za-z0-9_.:\\/~-]+$/;
+/**
+ * A word every shell Codex may use on Windows (PowerShell, cmd.exe) takes literally without quotes. `@` is allowed
+ * except as the first character (PowerShell reads a leading `@` as splatting or an `@(` / `@{` literal): a scoped npm
+ * package's path (`…\node_modules\@scope\…`) is one plain word.
+ */
+const PLAIN_TOKEN = /^[A-Za-z0-9_.:\\/~-][A-Za-z0-9_.:\\/~@-]*$/;
 
-/** True when `word` needs no quoting in PowerShell or cmd.exe: only letters, digits and `_ . : \ / ~ -`. */
+/** True when `word` needs no quoting in PowerShell or cmd.exe: letters, digits, `_ . : \ / ~ -`, and `@` after the first character. */
 export function isPlainToken(word: string): boolean {
   return PLAIN_TOKEN.test(word);
 }
@@ -369,16 +379,19 @@ function planCodexWindows(spec: CodexForwardSpec): CodexWindowsPlan {
   const names = (long: string, plain: string | null): string[] => (plain !== null && plain !== long ? [long, plain] : [long]);
   const base = { nodeNames: names(spec.nodePath, node), cliNames: names(spec.cliPath, cli) };
   if (node !== null && cli !== null) return { ...base, commandWindows: `${node} ${cli} ${tail}`, form: 'plain', refused: null };
-  const unsafe = [spec.nodePath, spec.cliPath].find((p) => POWERSHELL_UNSAFE.test(p));
+  // Form E: a word that has a plain form is written bare; only a path without one is double-quoted, and refused on
+  // Windows when it holds a character PowerShell interprets inside double quotes.
+  const unsafe = [[spec.nodePath, node] as const, [spec.cliPath, cli] as const].find(([p, plain]) => plain === null && POWERSHELL_UNSAFE.test(p))?.[0];
   if (win && unsafe !== undefined) {
     return {
       ...base,
       commandWindows: null,
       form: null,
-      refused: `路径 ${unsafe} 含有 PowerShell 会解释的字符（" \` $），也没有可用的 8.3 短路径，无法安全地写成 Codex 的 hook 命令；请把 node 或 agent-canvas 装到不含这些字符的路径`,
+      refused: `路径 ${unsafe} 含有 PowerShell 会解释的字符（" \` $ 或中文引号 “ ” „），也没有可用的 8.3 短路径，无法安全地写成 Codex 的 hook 命令；请把 node 或 agent-canvas 装到不含这些字符的路径`,
     };
   }
-  return { ...base, commandWindows: `& ${powershellQuote(spec.nodePath)} ${powershellQuote(spec.cliPath)} ${tail}`, form: 'call', refused: null };
+  const word = (long: string, plain: string | null): string => plain ?? powershellQuote(long);
+  return { ...base, commandWindows: `& ${word(spec.nodePath, node)} ${word(spec.cliPath, cli)} ${tail}`, form: 'call', refused: null };
 }
 
 /**
@@ -487,7 +500,9 @@ function splitWindowsCommand(cmd: string): { words: string[]; kind: CodexWindows
  * 4317) equal to ours; paths compare case-insensitively on win32. Outdated = ours, but the node word is missing or not
  * the current node binary (e.g. after a node upgrade), or — on Windows, where Codex runs it — the commandWindows is
  * missing or not in the form install writes now (e.g. the `"<node>" "<cli.js>" …` form earlier versions wrote, which
- * PowerShell cannot run).
+ * PowerShell cannot run). An unquoted commandWindows whose words name the current node and cli.js (by name, or by file
+ * through spec.sameFile) is up to date even when this run would write another form, e.g. after a failed short-path
+ * lookup: rewriting it would only cost the user Codex's trust.
  */
 export function codexHookTarget(spec: CodexForwardSpec): HookTarget {
   const w = planCodexWindows(spec);
@@ -495,10 +510,15 @@ export function codexHookTarget(spec: CodexForwardSpec): HookTarget {
   const win = (spec.platform ?? process.platform) === 'win32';
   const norm = (p: string): string => (win ? p.replace(/\//g, BACKSLASH).toLowerCase() : p);
   const samePath = (a: string, b: string): boolean => norm(a) === norm(b);
-  const isNode = (word: string): boolean => w.nodeNames.some((n) => samePath(n, word));
+  /** Same file by name, or (Windows, an absolute plain word) by asking spec.sameFile. */
+  const names = (known: string[], long: string) => (word: string, viaFile: boolean): boolean =>
+    known.some((n) => samePath(n, word)) ||
+    (viaFile && win && spec.sameFile !== undefined && isPlainToken(word) && /^([A-Za-z]:\\|\\\\)/.test(word) && spec.sameFile(word, long));
+  const nodeName = names(w.nodeNames, spec.nodePath);
+  const cliName = names(w.cliNames, spec.cliPath);
   /** The node word of our forwarder command (null when none precedes the cli.js); undefined = not ours. */
-  const nodeOf = (words: string[]): string | null | undefined => {
-    const at = words.findIndex((word) => w.cliNames.some((c) => samePath(c, word)));
+  const nodeOf = (words: string[], viaFile = false): string | null | undefined => {
+    const at = words.findIndex((word) => cliName(word, viaFile));
     if (at === -1 || words[at + 1] !== 'hook-forward') return undefined;
     if (parseForwardArgs(words.slice(at + 2)).port !== spec.port) return undefined;
     return at > 0 ? words[at - 1]! : null;
@@ -508,12 +528,16 @@ export function codexHookTarget(spec: CodexForwardSpec): HookTarget {
     if (!isPlainObject(hook) || hook.type !== 'command') return undefined;
     const posixNode = typeof hook.command === 'string' ? nodeOf(splitPosix(hook.command)) : undefined;
     const winSplit = typeof hook.commandWindows === 'string' ? splitWindowsCommand(hook.commandWindows) : undefined;
-    const winNode = winSplit !== undefined ? nodeOf(winSplit.words) : undefined;
+    // An unquoted line's words may be short forms this run could not look up: those may be matched by file.
+    const viaFile = winSplit?.kind === 'plain';
+    const winNode = winSplit !== undefined ? nodeOf(winSplit.words, viaFile) : undefined;
     if (posixNode === undefined && winNode === undefined) return undefined;
     if (posixNode !== undefined && (posixNode === null || !samePath(posixNode, spec.nodePath))) return true;
-    if (winNode !== undefined && (winNode === null || !isNode(winNode))) return true;
+    if (winNode !== undefined && (winNode === null || !nodeName(winNode, viaFile))) return true;
     if (win) {
-      if (winNode === undefined || w.form === null) return true;
+      if (winNode === undefined) return true;
+      // An unquoted line naming the current files runs in every shell: up to date whatever this run computed.
+      if (winSplit!.kind === 'plain') return false;
       if (winSplit!.kind !== w.form) return true;
     }
     return false;

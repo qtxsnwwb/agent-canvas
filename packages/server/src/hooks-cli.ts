@@ -20,7 +20,7 @@ import {
   type InstallPlan,
   type UninstallPlan,
 } from './hooks-config.js';
-import { windowsShortPath } from './win-short-path.js';
+import { sameExistingFile, windowsShortPath } from './win-short-path.js';
 
 export interface HooksCliIo {
   out(line: string): void;
@@ -69,6 +69,8 @@ export interface CodexHooksCliOptions extends HooksCliOptions {
   platform?: NodeJS.Platform;
   /** Codex on Windows: the 8.3 short form of a path, or null. Default: windowsShortPath (asks cmd.exe). */
   shortPath?: (longPath: string) => string | null;
+  /** Codex on Windows: whether a word names the same existing file as a path. Default: sameExistingFile. */
+  sameFile?: (word: string, longPath: string) => boolean;
 }
 
 /** Cursor's hooks file: `AGENT_CANVAS_CURSOR_HOOKS_FILE`, else `~/.cursor/hooks.json`. */
@@ -97,7 +99,7 @@ interface HooksProfile {
   /** Refuses (message) when the target file's directory must already exist and does not; null = go on. */
   precheck(file: string, mode: Mode): string | null;
   /** Lines describing what the hooks are, printed with the plan. */
-  describe(file: string): string[];
+  describe(file: string, mode: Mode): string[];
   /** Printed when there is nothing to remove. */
   nothingToRemove: string;
   /** Printed when the file does not exist yet and will be created. */
@@ -145,7 +147,7 @@ function codexProfile(opts: CodexHooksCliOptions): HooksProfile {
     cliPath: opts.cliPath,
     port: opts.port,
     platform,
-    ...(win ? { shortPath: memoize(opts.shortPath ?? ((p) => windowsShortPath(p))) } : {}),
+    ...(win ? { shortPath: memoize(opts.shortPath ?? ((p) => windowsShortPath(p))), sameFile: opts.sameFile ?? sameExistingFile } : {}),
   };
   let forward: ReturnType<typeof codexForwardCommands> | null = null;
   let refused: string | null = null;
@@ -158,21 +160,20 @@ function codexProfile(opts: CodexHooksCliOptions): HooksProfile {
   return {
     target: codexHookTarget(spec),
     nodePath: opts.nodePath,
-    outdatedReason: `命令里的 node 路径不是当前的 ${opts.nodePath}，或命令是旧版本的写法（旧版本在 Windows 上写的命令 PowerShell 无法运行）`,
+    outdatedReason: `命令和现在要写的不一致：node 路径不是当前的 ${opts.nodePath}，或 Windows 命令是旧版本的写法（旧版本写的 PowerShell 无法运行）或另一种写法`,
     replacedNote: '替换后的 hooks 内容变了，Codex 只有在你重新确认信任后才会运行它们（设置 → Hooks，或 CLI 里的 /hooks）；原位替换，其他 hooks 的位置不变',
     shiftedNote: (events) =>
-      `移除后，${events.join(', ')} 里排在 agent-canvas 之后的其他 hooks 位置前移了；Codex 按位置记录信任，它们需要在 Codex 里重新确认`,
+      `${events.join(', ')} 里排在 agent-canvas 之后的其他 hooks 会因为删掉我们的条目而前移；Codex 按位置记录信任，它们需要在 Codex 里重新确认`,
     // ~/.codex is Codex's own directory: never created here.
     precheck: (file, mode) => {
       if (mode !== 'install') return null;
       if (!isDirectory(path.dirname(file))) return `目录 ${path.dirname(file)} 不存在，Codex 似乎没有安装，未做任何改动`;
       return refused !== null ? `${refused}。未做任何改动` : null;
     },
-    describe: (file) => [
+    describe: (file, mode) => [
       `Codex hooks 文件：${file}`,
-      `hook 命令（macOS / Linux）：${forward?.command ?? ''}`,
-      `hook 命令（Windows）：${forward?.commandWindows ?? ''}`,
-      ...(win && forward?.windowsForm === 'call'
+      ...(forward !== null ? [`hook 命令（macOS / Linux）：${forward.command}`, `hook 命令（Windows）：${forward.commandWindows}`] : []),
+      ...(mode === 'install' && win && forward?.windowsForm === 'call'
         ? ['注意：node 或 cli.js 的路径没法写成不带引号的形式（没有 8.3 短路径或含特殊字符），Windows 命令用了 PowerShell 的调用形式（& "…"）；Codex 退回用 cmd 执行 hook 时这种形式不能运行']
         : []),
       `转发到：${hookUrl(opts.port)}?origin=codex`,
@@ -532,7 +533,7 @@ async function run(mode: Mode, opts: HooksCliOptions, io: HooksCliIo, profile: H
   if (isSymlink(opts.settingsFile)) {
     io.out(`（${opts.settingsFile} 是符号链接，实际写入 ${file}）`);
   }
-  for (const line of profile.describe(file)) io.out(line);
+  for (const line of profile.describe(file, mode)) io.out(line);
   if (events.length > 0) io.out(`将${mode === 'install' ? '添加' : '移除'}的事件（${events.length}）：${events.join(', ')}`);
   if (replaced.length > 0) {
     io.out(`已安装但已过期的 hooks（${profile.outdatedReason ?? `命令里的 node 路径不是当前的 ${profile.nodePath ?? 'node'}`}）`);
