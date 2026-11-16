@@ -178,7 +178,7 @@ agent-canvas hooks install --cursor
 | “消耗异常高”检测 | ✅ | ⚠️ 只看有用量记录的会话 | ❌ 不参与 |
 | hooks、实时状态、等待权限确认 | ❌ 不做 | ❌ 不做 | ❌ 不做 |
 
-服务启动之后才装上的工具，要重启服务才会读取。显示不对时先看诊断页里该来源的“未识别的记录”。细节和各自的限制见[使用手册 · Gemini CLI、Grok、Copilot CLI](./docs/manual.md#gemini-cligrokcopilot-cli)。
+这三个工具的会话目录在服务启动之后才出现的（通常是装好后第一次使用时），要重启服务才会读取。显示不对时先看诊断页里该来源的“未识别的记录”。细节和各自的限制见[使用手册 · Gemini CLI、Grok、Copilot CLI](./docs/manual.md#gemini-cligrokcopilot-cli)。
 
 | 平台 | 状态 |
 |------|------|

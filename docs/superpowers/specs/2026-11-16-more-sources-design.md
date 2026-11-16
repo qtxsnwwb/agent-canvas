@@ -46,7 +46,7 @@
 - `Origin` 增加 `'gemini' | 'grok' | 'copilot'`，`ORIGINS` 顺序为 `claude, codex, cursor, gemini, grok, copilot`。
 - 存储键前缀：`gemini:`、`grok:`、`copilot:`。
 - 新增变更类型 `node_removed { sessionId, id }`：节点及其详情、检索索引条目、相连的边一并移除；未知 id 忽略。用于回退和删除（Gemini 的 `$rewindTo` / `removeIds`、Grok 的回退标记和文件重写）。重建数据库时由同一批原始事件得到同样结果。被移除节点的子树和指向它的其余节点由各归一化器自己发出 `node_removed` / `node_updated`。
-- 边按目标节点建索引 `edge_to (session_id, to_id)`，移除节点时不扫描整个会话的边。索引由打开数据库时 `CREATE INDEX IF NOT EXISTS` 建立：已有数据库在升级后的第一次启动时一次性创建，约每一百万条边 1–2 秒，此后不再花时间；不改表结构，旧版本照样能打开。
+- 边按目标节点建索引 `edge_to (session_id, to_id)`，移除节点时不扫描整个会话的边。索引由打开数据库时 `CREATE INDEX IF NOT EXISTS` 建立：已有数据库在升级后的第一次启动时一次性创建，约每一百万条边 1–2 秒；不改表结构，旧版本照样能打开。它是长期的代价，所有来源都要付：边的表约大 84%，写入边约慢 2.2 倍（终审测量，22 万条边）；换来的是删除节点时不扫描整个会话的边。
 - 异常检测的两个来源清单（`packages/shared/src/anomalies.ts`）：`COST_EXCLUDED_ORIGINS = ['copilot']`（这些来源的会话不判也不进“消耗异常高”的基线）；`COST_USAGE_REQUIRED_ORIGINS = ['grok']`（这些来源的会话没有任何带用量的节点时不判也不进基线）。见第 6 节。
 - 数据库列 `origin` 是不带约束的文本，不需要改表；`NORMALIZER_VERSION` 不变（现有来源的输出不变），不需要重建。
 - 环境变量（测试和自定义位置用）：`AGENT_CANVAS_GEMINI_DIR`、`AGENT_CANVAS_GROK_DIR`、`AGENT_CANVAS_COPILOT_DIR`。未设置时依次取工具自己的变量（`GEMINI_CLI_HOME` 下的 `.gemini`、`GROK_HOME`、`COPILOT_HOME`），再取主目录下的默认位置。
@@ -108,7 +108,7 @@
 - `info` / `warning` / `error`：提示节点。
 - 工具调用状态：`success` 成功；`error`、`cancelled` 失败；其余进行中。结果取 `result[].functionResponse.response` 的 `output` 或 `error`。`agentId` 存在时把该调用与同 id 的子代理线程相连；对不上则只显示调用本身。
 
-**旧版 `.json`**：整份是一个对象（元数据 + `messages`）。整份读取，作为一条“替换全部消息”的记录处理。同一 `sessionId` 同时有 `.json` 和 `.jsonl` 时只读 `.jsonl`。
+**旧版 `.json`**：整份是一个对象（元数据 + `messages`）。整份读取，作为一条“替换全部消息”的记录处理。同一 `sessionId` 同时有 `.json` 和 `.jsonl` 时只读 `.jsonl`。超过 64 MB 的不读：每次分类时检查大小，超过则记入失败列表，什么也不存。
 
 **工具对照**：`read_file`、`read_many_files`（读）；`write_file`（写）；`replace`（改）；`run_shell_command`（执行，命令 `command`）；`list_directory`、`glob`、`grep_search`、`search_file_content`（搜索）；`invoke_agent`、`codebase_investigator`、`cli_help`（子代理）。路径参数依次尝试 `file_path`、`absolute_path`、`path`、`dir_path`、`directory`。
 
@@ -153,7 +153,7 @@
 
 **位置**：`<根>/session-state/<会话 id>/events.jsonl`；1.0 以前的 `<根>/session-state/<会话 id>.jsonl` 按同一格式读取。`workspace.yaml` 整份读取。
 
-**项目与标题**：工作目录取 `session.start` 的 `data.context.cwd`，之后的 `session.context_changed`、`session.resume` 里的 `context.cwd` 不改变会话所属项目。`workspace.yaml` 只取顶层的 `name`、`summary`、`cwd` 三个键（逐行按 `键: 值` 解析，取第一行，去引号；不引入 YAML 库）。标题取 `name`，否则 `summary`，否则第一条用户输入。
+**项目与标题**：工作目录取 `session.start` 的 `data.context.cwd`（和其他来源一样规整：去掉末尾的分隔符、盘符大写），之后的 `session.context_changed`、`session.resume` 里的 `context.cwd` 不改变会话所属项目。`workspace.yaml` 只取顶层的 `name`、`summary`、`cwd` 三个键（逐行按 `键: 值` 解析，取第一行，去引号；不引入 YAML 库）。标题取 `name`，否则 `summary`，否则第一条用户输入。
 
 **记录**：每行 `{type, data, id, timestamp, parentId, agentId?}`，顺序即文件顺序。
 
@@ -165,7 +165,7 @@
 - `subagent.started` / `subagent.completed` / `subagent.failed`：按 `toolCallId` 对应到子代理调用。带 `agentId` 的事件属于该代理线程；线程与调用的对应依次用：事件上的 `data.parentToolCallId`；`agentId` 等于某个调用的 `toolCallId`；`subagent.started` 之后首次出现的新 `agentId`——这一条只在恰好有一个尚未结束、尚未被认领的 `subagent.started` 时才用（几个子代理同时运行时分不清，宁可不连）。都对不上则线程挂在会话下，不连到调用；之后的事件带上 `parentToolCallId` 或出现 id 相同的调用时再连上。
 - `session.compaction_complete`、`session.truncation`：压缩节点。
 - `session.error`、`abort`：错误 / 中断节点。
-- `session.shutdown`：会话结束；`modelMetrics` 里各模型的 `usage`（`inputTokens`、`outputTokens`，有则加 `cacheReadTokens`、`cacheWriteTokens`）合计为会话用量，记在这次结束的节点上（新输入 = `inputTokens + cacheWriteTokens`，缓存读取 = `cacheReadTokens`，输出 = `outputTokens`；归类是推测的）。一个会话有多次结束时：上一次的每个模型都还在、且没有一项变小，就只记增长的部分（数字若是累计值则正好，若是每次运行的值则少算）；否则整份记为新的一次。所以只会少算，不会多算。
+- `session.shutdown`：会话结束；`modelMetrics` 里各模型的 `usage`（`inputTokens`、`outputTokens`，有则加 `cacheReadTokens`、`cacheWriteTokens`）合计为会话用量，记在这次结束的节点上（该节点不属于任何轮次；统计把它当作会话退出时刻的一条独立记录，用量记在退出那一刻、退出那一天，它不延长最后一轮的时长；新输入 = `inputTokens + cacheWriteTokens`，缓存读取 = `cacheReadTokens`，输出 = `outputTokens`；归类是推测的）。一个会话有多次结束时：上一次的每个模型都还在、且没有一项变小，就只记增长的部分（数字若是累计值则正好，若是每次运行的值则少算）；否则整份记为新的一次。所以只会少算，不会多算。
 - 其余已知但无需显示的类型（`assistant.turn_start`、`assistant.turn_end`、`assistant.intent`、`session.resume`、`session.info`、`session.idle`、`hook.*`、`permission.*`、`skill.invoked` 等）：忽略，不上报。清单之外的上报为未识别。
 
 **工具对照**：`bash`、`powershell`（执行，命令依次 `command`、`fullCommandText`）；`view`（读）；`create`（写）；`edit`、`apply_patch`（改）；`glob`、`grep`、`rg`（搜索）；`task`（子代理）。路径依次尝试 `path`、`file_path`、`filePath`、`fileName`。
@@ -180,7 +180,7 @@
 
 ## 6. 对现有功能的影响
 
-- **统计**：Copilot 只有会话总用量，没有按轮用量；按日、按模型的统计把总量记在会话结束那一刻。Gemini 的 `cached` 记为缓存读取，`thoughts` 计入输出。
+- **统计**：Copilot 只有会话总用量，没有按轮用量；统计把总量记在会话结束（`session.shutdown`）那一刻，按日统计时记在退出那一天。结束节点不属于任何轮次，也不拉长最后一轮（统计按“会话退出”节点单独计：主线程上 `system` 类、`systemSubtype` 为 `shutdown` 的节点，目前只有 Copilot 产生）。`session.resume` 之后没有新提示的步骤属于以这次恢复开头的单独一轮。没有按模型的统计。Gemini 的 `cached` 记为缓存读取，`thoughts` 计入输出。
 - **异常检测**：“消耗异常高”需要按轮用量，Copilot 的会话不参与（`COST_EXCLUDED_ORIGINS`），没有任何带用量节点的 Grok 会话不参与（`COST_USAGE_REQUIRED_ORIGINS`）；不参与的会话既不判也不进同项目同来源的基线。其余三类照常。
 - **通知**：照常，但没有钩子，“等待确认”类通知不会出现。
 - **导出与遮蔽、检索、按文件视图**：照常，不需要按来源改动。
@@ -188,9 +188,9 @@
 
 ## 7. 钩子串扰
 
-Grok Build 会读取 Claude Code 的 `.claude/settings.json` 和 Cursor 的 `.cursor/hooks.json` 里的钩子；Copilot CLI 会读取 `.claude/settings(.local).json` 里的钩子。它们因此可能调用我们为 Claude Code、Cursor 安装的钩子，但载荷不同。
+Grok Build 会读取 Claude Code 的 `.claude/settings.json` 和 Cursor 的 `.cursor/hooks.json` 里的钩子；Copilot CLI 会读取 `.claude/settings(.local).json` 里的钩子。它们因此可能调用我们为 Claude Code、Cursor 安装的钩子，但载荷不同。（依据公开资料；它们是否真的调用、载荷是什么形状，未经核对。Copilot 若发 Claude 式载荷，本校验认不出。）
 
-服务端在 `/hooks` 入口按来源校验载荷，不符合的直接丢弃（返回成功，不入库），并在诊断里计数“被丢弃的外来钩子调用”：
+服务端在 `/hooks` 入口按来源校验载荷，不符合的直接丢弃（返回成功，不入库），并在诊断里计数“被丢弃的外来钩子调用”（内存中计数，自服务启动以来，重启归零）：
 
 - 来源为 `claude` 或 `cursor` 时，满足以下任一条即丢弃：
   - 顶层有 `hookEventName`（Grok 的写法；Claude Code 和 Cursor 都用 `hook_event_name`）。
@@ -221,6 +221,10 @@ Grok Build 会读取 Claude Code 的 `.claude/settings.json` 和 Cursor 的 `.cu
 ### 9.1 真实数据核对
 
 **无法进行**，本机没有这三个工具的数据。实现完成后只能确认：真实服务启动时三个来源均未启用、现有数据不受影响。将来任一工具在本机产生会话后，以诊断页的未识别记录和第 5 节的“未定”清单为起点核对。
+
+终审（2026-11-16）的结果：在同样的自造输入上，现有三个来源的原始记录、推导结果、图、统计、异常、检索和导出与 `main` 逐字节一致（实时、追加、重建、重启后都是）；`main` 建的数据库经本分支打开后只多一个 `edge_to` 索引，之后 `main` 仍能打开并照常工作；没有这三个工具的目录时，启动的来源与 `main` 完全相同。
+
+没有真实数据就无法核对的：三个工具的每一种记录形状和字段名（第 5 节各“未定”）；Copilot 的 `agentId` 与派发的对应、`modelMetrics` 是累计值还是每次运行的值、`inputTokens` 是否已含缓存读取；Grok 的 `_x.ai` 扩展记录、`_meta` 的位置和 Windows 上目录名的编码；Gemini 真实会话的大小（内存约为文件的两倍）和 `.project_root` 的大小写；Grok、Copilot 是否真的调用我们为 Claude Code / Cursor 安装的 hook、发来什么；成千上万个真实会话目录下监听和全量扫描的开销。
 
 ## 10. 里程碑
 
