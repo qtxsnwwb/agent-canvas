@@ -29,7 +29,7 @@ import {
 } from '@agent-canvas/shared';
 import { CorruptBodyError, decodeBody, encodeBody, parseDetail } from './codec.js';
 import { STORAGE_META, type BodyTable, type ConvertResult } from './migrate-storage.js';
-import { DERIVED_TABLES, MIGRATIONS, SCHEMA_SQL } from './schema.js';
+import { DERIVED_TABLES, EDGE_TO_INDEX, EDGE_TO_INDEX_SQL, MIGRATIONS, SCHEMA_SQL } from './schema.js';
 import {
   DEFAULT_SEARCH_DETAIL,
   INDEXED_NODE_FIELDS,
@@ -569,6 +569,7 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   db.pragma(`journal_size_limit = ${options.walSizeLimitBytes ?? WAL_SIZE_LIMIT_BYTES}`);
   db.exec(SCHEMA_SQL);
   migrateSchema(db);
+  db.exec(EDGE_TO_INDEX_SQL);
   // Undecodable details met by the index (its build, a search's verification) count as unreadable too.
   const search = new SearchIndex(db, options.searchDetail ?? DEFAULT_SEARCH_DETAIL, (sessionId, nodeId) =>
     unreadableDetails.add(detailKey(sessionId, nodeId)),
@@ -701,8 +702,9 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   const deleteEdgeKey = db.prepare(`DELETE FROM edge WHERE session_id = ? AND from_id = ? AND to_id = ? AND tag = ?`);
   // Only for an id that is not of the from->to form (never written by the normalizers): scans the session's edges.
   const deleteEdgeByTag = db.prepare(`DELETE FROM edge WHERE session_id = ? AND tag = ?`);
-  // A removed node's edges, both ways (to_id: a scan of the session's edges, a prefix range of the primary key).
-  const deleteEdgesOfNode = db.prepare(`DELETE FROM edge WHERE session_id = ? AND (from_id = ? OR to_id = ?)`);
+  // A removed node's edges: outgoing through the primary key's (session_id, from_id) prefix, incoming through edge_to.
+  const deleteEdgesFromNode = db.prepare(`DELETE FROM edge WHERE session_id = ? AND from_id = ?`);
+  const deleteEdgesToNode = db.prepare(`DELETE FROM edge INDEXED BY ${EDGE_TO_INDEX} WHERE session_id = ? AND to_id = ?`);
   /** Removes the edge with this id (whichever of its possible keys it is stored under); true when one was removed. */
   const deleteEdgeById = (sessionId: string, id: string, oddToo = true): boolean => {
     let removed = false;
@@ -1029,7 +1031,8 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
         unreadableDetails.delete(key);
         deleteNode.run(c.sessionId, c.id);
         deleteDetail.run(c.sessionId, c.id);
-        deleteEdgesOfNode.run(c.sessionId, c.id, c.id);
+        deleteEdgesFromNode.run(c.sessionId, c.id);
+        deleteEdgesToNode.run(c.sessionId, c.id);
         break;
       }
     }

@@ -147,6 +147,8 @@ pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
 .view-switch[aria-label="来源"] button[aria-pressed="true"][data-origin="claude"] { background: var(--claude-soft); color: var(--claude-ink); }
 .view-switch[aria-label="来源"] button[aria-pressed="true"][data-origin="codex"] { background: var(--codex-soft); color: var(--codex-ink); }
 .view-switch[aria-label="来源"] button[aria-pressed="true"][data-origin="cursor"] { background: var(--cursor-soft); color: var(--cursor-ink); }
+/* Placeholder until the origins without a colour of their own get one: the neutral badge colours (.origin-other). */
+.view-switch[aria-label="来源"] button[aria-pressed="true"]:is([data-origin="gemini"], [data-origin="grok"], [data-origin="copilot"]) { background: var(--line); color: var(--ink-soft); }
 
 /* Session page: a one-line info bar, then the canvas filling the rest of the viewport. */
 .session-loading { padding: 12px 18px; }
