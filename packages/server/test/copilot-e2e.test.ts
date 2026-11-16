@@ -153,7 +153,7 @@ describe('GitHub Copilot CLI end to end', () => {
 
   test('Review Focus 4: a 5 MB events.jsonl is ingested with classify reading only the bounded first-line window', async () => {
     const lines: string[] = [startLine()];
-    const pad = 'z'.repeat(2000);
+    const pad = 'z'.repeat(60_000); // few, large events: the size is what is tested, not the event count
     for (let i = 0; lines.join('\n').length < 5 * 1024 * 1024 && i < 10_000; i++) {
       lines.push(ev('user.message', { content: `step ${i}` }, { at: '2026-11-12T08:00:01.000Z', id: `u${i}` }));
       lines.push(ev('tool.execution_start', { toolCallId: `c${i}`, toolName: 'view', arguments: { path: `/w/f${i}.ts` } }, { at: '2026-11-12T08:00:02.000Z', id: `s${i}` }));
@@ -174,6 +174,40 @@ describe('GitHub Copilot CLI end to end', () => {
     expect(store.getGraph(SID)!.nodes).toHaveLength(((lines.length - 1) / 3) * 2);
     expect(store.getSession(SID)).toMatchObject({ projectId: PROJECT });
   }, 60_000);
+
+  test('I-4: two shutdowns (100 then 250): stats total 250, one-shot = appended = rebuild', async () => {
+    const sd = (at: string, input: number, id: string) => ev('session.shutdown', { shutdownType: 'routine', modelMetrics: { m: { usage: { inputTokens: input, outputTokens: input / 10 } } } }, { at, id });
+    const lines = [
+      startLine(),
+      ev('user.message', { content: 'first run' }, { at: '2026-11-12T08:00:01.000Z', id: 'u1' }),
+      sd('2026-11-12T08:10:00.000Z', 100, 'sd1'),
+      ev('session.resume', { resumeTime: '2026-11-12T09:00:00.000Z', eventCount: 3 }, { at: '2026-11-12T09:00:00.000Z', id: 'r1' }),
+      ev('user.message', { content: 'second run' }, { at: '2026-11-12T09:00:01.000Z', id: 'u2' }),
+      sd('2026-11-12T09:10:00.000Z', 250, 'sd2'),
+    ];
+    const totalOf = (store: Store) => store.getGraph(SID)!.nodes.reduce((a, n) => a + (n.usage?.inputTokens ?? 0), 0);
+    await writeRel(EVENTS_REL, body(lines));
+    const s1 = open();
+    const p1 = newPipeline(s1);
+    await p1.scanAll();
+    await p1.idle();
+    const oneShot = view(s1, SID)!;
+    expect(totalOf(s1)).toBe(250);
+    await fs.rm(abs(EVENTS_REL));
+    const s2 = open();
+    const p2 = newPipeline(s2);
+    let text = '';
+    for (const line of lines) {
+      text += `${line}\n`;
+      await writeRel(EVENTS_REL, text);
+      await p2.ingestFile(abs(EVENTS_REL));
+    }
+    await p2.idle();
+    expect(view(s2, SID)).toEqual(oneShot);
+    p1.rebuild();
+    expect(view(s1, SID)).toEqual(oneShot);
+    expect(totalOf(s1)).toBe(250);
+  });
 
   test('title precedence: workspace name > summary > first prompt', async () => {
     await writeRel(EVENTS_REL, body(exampleLines()));

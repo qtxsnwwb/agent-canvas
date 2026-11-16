@@ -3,7 +3,7 @@ import type { Change, GraphNode, NodeDetail, Session, Usage } from '@agent-canva
 import { parseWorkspaceYaml, type CopilotWorkspace } from '../sources/copilot/workspace.js';
 import type { RawEvent } from '../store/store.js';
 import { promptTitle } from './codex.js';
-import { copilotTouches, filesFields, nodeFiles } from './files.js';
+import { copilotTouches, filesFields, nodeFiles, type NodeFiles } from './files.js';
 import { nodePatch } from './gemini.js';
 import { inputKeyFields, inputKeyOf } from './input-key.js';
 import { summarize } from './summary.js';
@@ -122,23 +122,61 @@ function agentFromArgs(args: unknown): string | null {
   return null;
 }
 
-/** Session usage from `session.shutdown.data.modelMetrics`: every model's usage summed (spec 5.3). */
-function shutdownUsage(metrics: unknown): Usage | null {
-  if (!isObject(metrics)) return null;
+/** One model's usage in a shutdown's `modelMetrics`, in the shared Usage categories. */
+interface ModelReading {
+  input: number;
+  cached: number;
+  output: number;
+}
+
+/**
+ * The per-model readings of `session.shutdown.data.modelMetrics` (models without a usage object left out). Usage
+ * categories (shared Usage): cache writes count as new input, cache reads as cached input.
+ */
+function modelReadings(metrics: unknown): Map<string, ModelReading> {
+  const out = new Map<string, ModelReading>();
+  if (!isObject(metrics)) return out;
+  for (const [model, m] of Object.entries(metrics)) {
+    if (!isObject(m) || !isObject(m.usage)) continue;
+    const u = m.usage;
+    out.set(model, { input: num(u.inputTokens) + num(u.cacheWriteTokens), cached: num(u.cacheReadTokens), output: num(u.outputTokens) });
+  }
+  return out;
+}
+
+/**
+ * The usage a shutdown adds to the session (spec 5.3: the models' usage summed). Whether a later shutdown's
+ * `modelMetrics` cover only its own run (since the last start / resume) or the whole session so far is not known
+ * (research notes). Rule, chosen so the session total can never exceed what either reading allows:
+ * - no earlier shutdown with usage: the whole reading;
+ * - every model of the previous reading is present again with every count at least as large (the readings could be
+ *   cumulative): only the growth since the previous reading. Exact if cumulative; if per-run it undercounts, never
+ *   overcounts. `sessionStartTime` does not decide it: whether it is the session's or the process's start is not
+ *   known, so equal and different values both allow either reading;
+ * - some count went down (impossible if cumulative): a new run, the whole reading.
+ */
+function shutdownUsage(readings: Map<string, ModelReading>, previous: Map<string, ModelReading> | null): Usage | null {
+  if (readings.size === 0) return null;
+  let grew = previous !== null;
+  if (previous !== null) {
+    for (const [model, p] of previous) {
+      const c = readings.get(model);
+      if (c === undefined || c.input < p.input || c.cached < p.cached || c.output < p.output) {
+        grew = false;
+        break;
+      }
+    }
+  }
   let input = 0;
   let cached = 0;
   let output = 0;
-  let any = false;
-  for (const m of Object.values(metrics)) {
-    if (!isObject(m) || !isObject(m.usage)) continue;
-    const u = m.usage;
-    any = true;
-    // Usage categories (shared Usage): cache writes count as new input, cache reads as cached input.
-    input += num(u.inputTokens) + num(u.cacheWriteTokens);
-    cached += num(u.cacheReadTokens);
-    output += num(u.outputTokens);
+  for (const [model, c] of readings) {
+    const p = grew ? previous!.get(model) : undefined;
+    input += c.input - (p?.input ?? 0);
+    cached += c.cached - (p?.cached ?? 0);
+    output += c.output - (p?.output ?? 0);
   }
-  return any ? { inputTokens: input, cachedInputTokens: cached, outputTokens: output } : null;
+  return { inputTokens: input, cachedInputTokens: cached, outputTokens: output };
 }
 
 interface Thread {
@@ -156,13 +194,24 @@ interface Thread {
   seen: boolean;
 }
 
+/**
+ * A tool call's state. Bounded: the arguments and the output are never kept (they go out in the node's detail when an
+ * event brings them; the store merges detail fields); only what later events still need is: the fields derived from
+ * the latest arguments (files, input key, summary, agent name; each capped) and flags.
+ */
 interface Call {
   key: string;
   nodeId: string;
   toolCallId: string | null;
   toolName: string | null;
-  args: unknown;
+  /** Arguments were read (from a tool request or a start). */
   hasArgs: boolean;
+  files: NodeFiles;
+  inputKey: string | undefined;
+  argSummary: string;
+  argAgent: string | null;
+  /** An output was emitted (a subagent.failed error does not replace a tool's output). */
+  hasOutput: boolean;
   messageId: string | null;
   timestamp: string;
   status: 'running' | 'succeeded' | 'failed';
@@ -176,7 +225,6 @@ interface Call {
   agentTitle: string | null;
   agentDescription: string | null;
   childAgentId: string | null;
-  detailSig: string;
 }
 
 interface SessionState {
@@ -200,8 +248,13 @@ interface SessionState {
   threads: Map<string, Thread>;
   nodes: Map<string, GraphNode>;
   calls: Map<string, Call>;
-  /** toolCallIds of subagent.started events not yet claimed by an agent thread, oldest first. */
-  pendingStarts: string[];
+  /**
+   * toolCallIds of subagent.started whose call is still open and not claimed by an agent thread. Linking step 3 uses
+   * one only while it is the only one (with several open, which new agent belongs to which start is not known).
+   */
+  pendingStarts: Set<string>;
+  /** The latest shutdown's per-model usage readings (see shutdownUsage). */
+  lastReadings: Map<string, ModelReading> | null;
   /** toolCallId -> the agent thread linked to it (first one wins). */
   agentOfCall: Map<string, string>;
   /** Call key -> agent threads linked to it (their dispatch node may not exist yet). */
@@ -311,7 +364,8 @@ export class CopilotNormalizer implements AgentNormalizer {
         threads: new Map(),
         nodes: new Map(),
         calls: new Map(),
-        pendingStarts: [],
+        pendingStarts: new Set(),
+        lastReadings: null,
         agentOfCall: new Map(),
         linkedThreads: new Map(),
         seen: new Set(),
@@ -415,11 +469,8 @@ export class CopilotNormalizer implements AgentNormalizer {
             if (!isObject(req)) return;
             const call = this.ensureCall(state, t, nonEmpty(req.toolCallId), `${eventKey}:req#${i}`, ts, changes, messageId);
             if (call.toolName === null) call.toolName = nonEmpty(req.name);
-            if (!call.hasArgs && req.arguments !== undefined) {
-              call.args = parseArgs(req.arguments);
-              call.hasArgs = true;
-            }
-            this.refreshCall(state, call, changes);
+            const detail = !call.hasArgs && req.arguments !== undefined ? this.setArgs(state, call, req.arguments) : undefined;
+            this.refreshCall(state, call, changes, detail);
           });
         }
         break;
@@ -427,11 +478,8 @@ export class CopilotNormalizer implements AgentNormalizer {
       case 'tool.execution_start': {
         const call = this.ensureCall(state, t, nonEmpty(data.toolCallId), `${eventKey}:call`, ts, changes, null);
         call.toolName = nonEmpty(data.toolName) ?? call.toolName;
-        if (data.arguments !== undefined) {
-          call.args = parseArgs(data.arguments);
-          call.hasArgs = true;
-        }
-        this.refreshCall(state, call, changes);
+        const detail = data.arguments !== undefined ? this.setArgs(state, call, data.arguments) : undefined;
+        this.refreshCall(state, call, changes, detail);
         break;
       }
       case 'tool.execution_complete': {
@@ -441,11 +489,12 @@ export class CopilotNormalizer implements AgentNormalizer {
         call.status = data.success === true ? 'succeeded' : 'failed';
         call.completed = true;
         call.endedAt ??= ts ?? call.timestamp;
+        state.pendingStarts.delete(key);
         const result = isObject(data.result) ? str(data.result.content) : null;
         const error = isObject(data.error) ? str(data.error.message) : null;
         const output = result ?? error;
-        if (output !== null) call.output = output;
-        this.refreshCall(state, call, changes);
+        if (output !== null) call.hasOutput = true;
+        this.refreshCall(state, call, changes, output !== null ? { output } : undefined);
         break;
       }
       case 'subagent.started':
@@ -456,18 +505,26 @@ export class CopilotNormalizer implements AgentNormalizer {
         const call = this.ensureCall(state, t, key, key, ts, changes, null);
         call.subagent = true;
         call.agentTitle = nonEmpty(data.agentDisplayName) ?? nonEmpty(data.agentName) ?? call.agentTitle;
+        let detail: Partial<NodeDetail> | undefined;
         if (type === 'subagent.started') {
-          call.agentDescription = nonEmpty(data.agentDescription) ?? call.agentDescription;
-          if (!state.agentOfCall.has(key) && !state.pendingStarts.includes(key)) state.pendingStarts.push(key);
-        } else if (!call.completed && call.status === 'running') {
-          call.status = type === 'subagent.failed' || data.cancelled === true ? 'failed' : 'succeeded';
-          call.endedAt ??= ts ?? call.timestamp;
-          if (type === 'subagent.failed' && call.output === undefined) {
-            const error = str(data.error);
-            if (error !== null) call.output = error;
+          const description = nonEmpty(data.agentDescription);
+          if (description !== null) call.agentDescription = summarize(description);
+          // A start can be claimed (step 3) only while its call is open and no thread has it.
+          if (!state.agentOfCall.has(key) && call.status === 'running') state.pendingStarts.add(key);
+        } else {
+          // Finished: no longer a candidate for a new agent thread, whatever its status says.
+          state.pendingStarts.delete(key);
+          if (!call.completed && call.status === 'running') {
+            call.status = type === 'subagent.failed' || data.cancelled === true ? 'failed' : 'succeeded';
+            call.endedAt ??= ts ?? call.timestamp;
+            const error = type === 'subagent.failed' && !call.hasOutput ? str(data.error) : null;
+            if (error !== null) {
+              call.hasOutput = true;
+              detail = { output: error };
+            }
           }
         }
-        this.refreshCall(state, call, changes);
+        this.refreshCall(state, call, changes, detail);
         break;
       }
       case 'session.compaction_complete': {
@@ -492,7 +549,9 @@ export class CopilotNormalizer implements AgentNormalizer {
       }
       case 'session.shutdown': {
         state.ended = true;
-        const usage = shutdownUsage(data.modelMetrics);
+        const readings = modelReadings(data.modelMetrics);
+        const usage = shutdownUsage(readings, state.lastReadings);
+        if (readings.size > 0) state.lastReadings = readings;
         const raw = { shutdownType: data.shutdownType ?? null, modelMetrics: data.modelMetrics ?? null, codeChanges: data.codeChanges ?? null, currentModel: data.currentModel ?? null };
         this.addNode(
           state,
@@ -582,8 +641,12 @@ export class CopilotNormalizer implements AgentNormalizer {
       nodeId,
       toolCallId,
       toolName: null,
-      args: undefined,
       hasArgs: false,
+      files: {},
+      inputKey: undefined,
+      argSummary: '',
+      argAgent: null,
+      hasOutput: false,
       messageId,
       timestamp,
       status: 'running',
@@ -594,12 +657,9 @@ export class CopilotNormalizer implements AgentNormalizer {
       agentTitle: null,
       agentDescription: null,
       childAgentId: null,
-      detailSig: '',
     };
     state.calls.set(key, call);
-    const detail = callDetail(call);
-    call.detailSig = JSON.stringify(detail) ?? '';
-    this.addNode(state, t, { id: nodeId, kind: 'tool', title: 'unknown', summary: '', timestamp, messageId, detail }, changes);
+    this.addNode(state, t, { id: nodeId, kind: 'tool', title: 'unknown', summary: '', timestamp, messageId, detail: { input: null } }, changes);
     if (toolCallId === null) return call;
     // Agent threads seen before their dispatch: linked to it by a parentToolCallId already, or (step 2) named like it.
     const agent = state.agentOfCall.get(key);
@@ -613,38 +673,47 @@ export class CopilotNormalizer implements AgentNormalizer {
     return call;
   }
 
-  /** Emits what differs between the call's node and its current state. */
-  private refreshCall(state: SessionState, call: Call, changes: Change[]): void {
+  /**
+   * Takes a call's arguments: derives what the node shows from them (with the tool name known now) and returns the
+   * detail field to emit. The arguments themselves are not kept.
+   */
+  private setArgs(state: SessionState, call: Call, raw: unknown): Partial<NodeDetail> {
+    const args = parseArgs(raw);
+    call.hasArgs = true;
+    call.files = nodeFiles(copilotTouches(call.toolName, args), state.startCwd);
+    call.inputKey = inputKeyOf(call.toolName, args);
+    call.argSummary = toolSummary(args);
+    const agent = agentFromArgs(args);
+    call.argAgent = agent === null ? null : summarize(agent);
+    return { input: args ?? null };
+  }
+
+  /** Emits what differs between the call's node and its current state, and `detail` (merged into the stored one). */
+  private refreshCall(state: SessionState, call: Call, changes: Change[], detail?: Partial<NodeDetail>): void {
     const old = state.nodes.get(call.nodeId);
     if (old === undefined) return;
     const subagent = call.subagent || call.childAgentId !== null || (call.toolName !== null && SUBAGENT_TOOLS.has(call.toolName));
-    const args = call.hasArgs ? call.args : undefined;
-    const files = nodeFiles(copilotTouches(call.toolName, args), state.startCwd);
     const durationMs = call.endedAt === null ? null : Math.max(0, Date.parse(call.endedAt) - Date.parse(old.timestamp)) || 0;
     const next: GraphNode = {
       ...old,
       files: undefined,
       filesTruncated: undefined,
       kind: subagent ? 'subagent' : 'tool',
-      title: subagent ? (call.agentTitle ?? agentFromArgs(args) ?? call.toolName ?? 'task') : (call.toolName ?? 'unknown'),
-      summary: toolSummary(args) || summarize(call.agentDescription ?? ''),
+      title: subagent ? (call.agentTitle ?? call.argAgent ?? call.toolName ?? 'task') : (call.toolName ?? 'unknown'),
+      summary: call.argSummary || (call.agentDescription ?? ''),
       status: call.status,
       toolName: call.toolName,
       toolUseId: call.toolCallId,
       childAgentId: call.childAgentId,
       endedAt: call.endedAt,
       durationMs,
-      ...filesFields(files),
-      ...inputKeyFields(call.hasArgs ? inputKeyOf(call.toolName, args) : undefined),
+      ...filesFields(call.files),
+      ...inputKeyFields(call.inputKey),
     };
     const patch = nodePatch(old, next);
-    const detail = callDetail(call);
-    const sig = JSON.stringify(detail) ?? '';
-    const detailChanged = sig !== call.detailSig;
-    if (Object.keys(patch).length === 0 && !detailChanged) return;
+    if (Object.keys(patch).length === 0 && detail === undefined) return;
     state.nodes.set(call.nodeId, { ...old, ...patch });
-    call.detailSig = sig;
-    changes.push({ type: 'node_updated', sessionId: state.session.id, id: call.nodeId, patch, ...(detailChanged ? { detail } : {}) });
+    changes.push({ type: 'node_updated', sessionId: state.session.id, id: call.nodeId, patch, ...(detail !== undefined ? { detail } : {}) });
   }
 
   // ---- agent threads ----
@@ -658,8 +727,8 @@ export class CopilotNormalizer implements AgentNormalizer {
     if (named !== null && named !== t.agentId) return this.link(state, t, named, changes);
     if (!first) return; // steps 2 and 3 apply at the thread's first event only
     if (t.agentId !== null && state.calls.has(t.agentId) && !this.threadOwnsCall(state, t, t.agentId)) return this.link(state, t, t.agentId, changes);
-    const start = state.pendingStarts.shift();
-    if (start !== undefined) this.link(state, t, start, changes);
+    // Step 3 only while exactly one start is open: with several, a guess could hang the thread off the wrong dispatch.
+    if (state.pendingStarts.size === 1) this.link(state, t, state.pendingStarts.values().next().value!, changes);
   }
 
   private threadOwnsCall(state: SessionState, t: Thread, key: string): boolean {
@@ -674,8 +743,7 @@ export class CopilotNormalizer implements AgentNormalizer {
     const linked = state.linkedThreads.get(key);
     if (linked === undefined) state.linkedThreads.set(key, [t]);
     else linked.push(t);
-    const at = state.pendingStarts.indexOf(key);
-    if (at !== -1) state.pendingStarts.splice(at, 1);
+    state.pendingStarts.delete(key);
     if (!state.agentOfCall.has(key)) state.agentOfCall.set(key, t.agentId);
     const call = state.calls.get(key);
     if (call !== undefined && call.childAgentId === null && state.agentOfCall.get(key) === t.agentId) {
@@ -765,6 +833,3 @@ function isoOrNull(v: unknown): string | null {
   return ms === null ? null : isoOfMs(ms);
 }
 
-function callDetail(call: Call): Partial<NodeDetail> {
-  return { input: call.hasArgs ? (call.args ?? null) : null, ...(call.output !== undefined ? { output: call.output } : {}) };
-}

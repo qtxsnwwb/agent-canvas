@@ -183,6 +183,13 @@ describe('CopilotFileSource: classify', () => {
     expect(s.mainSessionOf(`copilot:${SID}.jsonl`)).toBe(SID);
     await writeRel(EVENTS_REL, body([startLine()]));
     expect(s.mainSessionOf(`copilot:${SID}.jsonl`)).toBeNull();
+    expect(s.mainSessionOf(EVENTS_KEY)).toBeNull(); // both present: neither speaks
+    // Review M-7: the directory form removed, the legacy file left: only the legacy file speaks (present).
+    await fs.rm(abs(SID), { recursive: true });
+    expect(s.mainSessionOf(`copilot:${SID}.jsonl`)).toBe(SID);
+    expect(s.mainSessionOf(EVENTS_KEY)).toBeNull();
+    await fs.rm(abs(`${SID}.jsonl`));
+    expect(s.mainSessionOf(`copilot:${SID}.jsonl`)).toBe(SID);
     expect(s.mainSessionOf(EVENTS_KEY)).toBe(SID);
   });
 

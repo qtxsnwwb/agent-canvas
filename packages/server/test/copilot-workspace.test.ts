@@ -37,6 +37,14 @@ describe('parseWorkspaceYaml', () => {
     expect(parseWorkspaceYaml(undefined as unknown as string)).toEqual({});
   });
 
+  test('review M-3: null spellings are no value; plain comments cut; single-quote doubling; a lone CR ends a line', () => {
+    expect(parseWorkspaceYaml('name: ~\ncwd: null\nsummary: NULL\n')).toEqual({});
+    expect(parseWorkspaceYaml('name: x # a comment\ncwd: "/a #b"\n')).toEqual({ name: 'x', cwd: '/a #b' });
+    expect(parseWorkspaceYaml("name: 'it''s'\n")).toEqual({ name: "it's" });
+    expect(parseWorkspaceYaml('name: a\rcwd: /b\r')).toEqual({ name: 'a', cwd: '/b' });
+    expect(parseWorkspaceYaml('name: issue#12\n')).toEqual({ name: 'issue#12' });
+  });
+
   test('the first occurrence of a key wins', () => {
     expect(parseWorkspaceYaml('name: one\nname: two\n')).toEqual({ name: 'one' });
   });

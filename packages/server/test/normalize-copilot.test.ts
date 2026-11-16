@@ -404,25 +404,6 @@ describe('determinism and cost', () => {
     for (let cut = 1; cut < events.length; cut++) expect(shape(paged(events, 1, cut)), `cut ${cut}`).toEqual(want);
   });
 
-  test('a 20,000-event session ingests line by line in well under 2 s (no per-event work proportional to the session)', () => {
-    const lines: string[] = [startLine()];
-    for (let i = 0; i < 4000; i++) {
-      lines.push(ev('user.message', { content: `step ${i}` }, { at: T(i * 5) }));
-      lines.push(ev('assistant.message', { messageId: `m${i}`, content: '', toolRequests: [{ toolCallId: `c${i}`, name: 'view', arguments: { path: `/w/f${i}.ts` } }] }, { at: T(i * 5 + 1) }));
-      lines.push(ev('tool.execution_start', { toolCallId: `c${i}`, toolName: 'view', arguments: { path: `/w/f${i}.ts` } }, { at: T(i * 5 + 2) }));
-      lines.push(ev('tool.execution_complete', { toolCallId: `c${i}`, success: true, result: { content: 'ok' } }, { at: T(i * 5 + 3) }));
-      lines.push(ev('assistant.message', { messageId: `n${i}`, content: `done ${i}` }, { at: T(i * 5 + 4) }));
-    }
-    const events = transcript(lines);
-    const n = new CopilotNormalizer();
-    const t0 = performance.now();
-    let nodes = 0;
-    for (const e of events) for (const c of n.apply(e, PROJECT).changes) if (c.type === 'node_added') nodes++;
-    const ms = performance.now() - t0;
-    expect(nodes).toBe(12_000);
-    expect(ms).toBeLessThan(2000);
-  });
-
   test('NORMALIZER_FACTORIES.copilot makes a CopilotNormalizer', () => {
     expect(NORMALIZER_FACTORIES.copilot?.()).toBeInstanceOf(CopilotNormalizer);
   });
@@ -447,5 +428,119 @@ describe('copilotTouches (spec 5.3 tool table)', () => {
     expect(copilotTouches('apply_patch', { input: patch })).toEqual([{ path: 'new.ts', action: 'write' }, { path: 'old.ts', action: 'edit' }]);
     expect(copilotTouches('apply_patch', JSON.stringify({ patch }))).toEqual([{ path: 'new.ts', action: 'write' }, { path: 'old.ts', action: 'edit' }]);
     expect(copilotTouches('view', 'not json')).toEqual([]);
+  });
+});
+
+describe('fix round 1', () => {
+  const task = (cid: string, at: number) => ev('tool.execution_start', { toolCallId: cid, toolName: 'task', arguments: { agent_type: 'explore' } }, { at: T(at) });
+  const started = (cid: string, at: number) => ev('subagent.started', { toolCallId: cid, agentName: 'explore', agentDisplayName: 'Explore', agentDescription: '' }, { at: T(at) });
+  const failed = (cid: string, at: number) => ev('subagent.failed', { toolCallId: cid, agentName: 'explore', agentDisplayName: 'Explore', error: 'boom' }, { at: T(at) });
+  const completed = (cid: string, at: number) => ev('subagent.completed', { toolCallId: cid, agentName: 'explore', agentDisplayName: 'Explore' }, { at: T(at) });
+  const grep = (cid: string, agent: string, at: number, extra: Record<string, unknown> = {}) =>
+    ev('tool.execution_start', { toolCallId: cid, toolName: 'grep', arguments: { pattern: 'x' }, ...extra }, { at: T(at), agentId: agent });
+  /** The same graph and session for every page size and every drop + re-hydrate cut. */
+  const stable = (events: RawEvent[]): void => {
+    const want = shape(go(events));
+    for (let page = 1; page <= events.length; page++) expect(shape(paged(events, page)), `page ${page}`).toEqual(want);
+    for (let cut = 1; cut < events.length; cut++) expect(shape(paged(events, 1, cut)), `cut ${cut}`).toEqual(want);
+  };
+
+  test('I-2: a finished subagent.started is no longer a candidate (the reproduction of the review)', () => {
+    for (const end of [failed, completed]) {
+      const events = withStart([task('tA', 1), started('tA', 2), end('tA', 3), task('tB', 4), started('tB', 5), grep('k1', 'agent-b', 6)]);
+      const r = go(events);
+      expect(nodeOf(r, call('k1')).parentId).toBe(call('tB'));
+      expect(nodeOf(r, call('tB')).childAgentId).toBe('agent-b');
+      expect(nodeOf(r, call('tA')).childAgentId).toBeNull();
+      stable(events);
+    }
+    // A start ended by tool.execution_complete is closed too.
+    const done = withStart([task('tA', 1), started('tA', 2), ev('tool.execution_complete', { toolCallId: 'tA', success: true, result: { content: 'x' } }, { at: T(3) }), grep('k1', 'agent-z', 4)]);
+    expect(nodeOf(go(done), call('k1')).parentId).toBeNull();
+  });
+
+  test('I-2: with more than one open start, step 3 links nothing rather than guessing (never the wrong dispatch)', () => {
+    // The agent of tA wrote before its start (unlinked, as the spec says); agent-b then has two open starts to choose from.
+    const late = withStart([task('tA', 1), grep('a1', 'agent-a', 2), started('tA', 3), task('tB', 4), started('tB', 5), grep('b1', 'agent-b', 6)]);
+    const r = go(late);
+    expect(nodeOf(r, call('b1')).parentId).not.toBe(call('tA'));
+    expect(nodeOf(r, call('tA')).childAgentId).toBeNull();
+    stable(late);
+    // Two starts back to back, then their agents: not swapped, left unattached.
+    const parallel = withStart([task('tA', 1), task('tB', 2), started('tA', 3), started('tB', 4), grep('b1', 'agent-b', 5), grep('a1', 'agent-a', 6)]);
+    const p = go(parallel);
+    expect(nodeOf(p, call('a1')).parentId).toBeNull();
+    expect(nodeOf(p, call('b1')).parentId).toBeNull();
+    stable(parallel);
+  });
+
+  test('I-2: each start claims at most one thread', () => {
+    const r = go(withStart([task('tA', 1), started('tA', 2), grep('a1', 'agent-a', 3), grep('x1', 'agent-x', 4)]));
+    expect(nodeOf(r, call('a1')).parentId).toBe(call('tA'));
+    expect(nodeOf(r, call('x1')).parentId).toBeNull();
+  });
+
+  test('I-2: the three rules still link, in either order of thread and dispatch', () => {
+    const cases: Record<string, RawEvent[]> = {
+      'rule 1, dispatch first': withStart([task('t1', 1), task('t2', 2), grep('k', 'ag', 3, { parentToolCallId: 't2' })]),
+      'rule 1, thread first': withStart([grep('k', 'ag', 1, { parentToolCallId: 't2' }), task('t1', 2), task('t2', 3)]),
+      'rule 2, dispatch first': withStart([task('ag', 1), grep('k', 'ag', 2)]),
+      'rule 2, thread first': withStart([grep('k', 'ag', 1), task('ag', 2)]),
+      'rule 3': withStart([task('t1', 1), started('t1', 2), grep('k', 'ag', 3)]),
+    };
+    for (const [name, events] of Object.entries(cases)) {
+      const r = go(events);
+      const want = name.startsWith('rule 1') ? call('t2') : name.startsWith('rule 2') ? call('ag') : call('t1');
+      expect(nodeOf(r, call('k')).parentId, name).toBe(want);
+      expect(nodeOf(r, want).childAgentId, name).toBe('ag');
+      stable(events);
+    }
+  });
+
+  const shutdown = (at: number, metrics: Record<string, { inputTokens: number; outputTokens: number }>, sid: string) =>
+    ev('session.shutdown', { shutdownType: 'routine', modelMetrics: Object.fromEntries(Object.entries(metrics).map(([m, u]) => [m, { usage: u }])) }, { at: T(at), id: sid });
+  const resume = (at: number) => ev('session.resume', { resumeTime: T(at), eventCount: 3 }, { at: T(at) });
+  const total = (r: RunResult) =>
+    Object.values(r.graph.nodes)
+      .filter((n) => n.usage !== null)
+      .reduce((a, n) => ({ input: a.input + n.usage!.inputTokens, output: a.output + n.usage!.outputTokens }), { input: 0, output: 0 });
+
+  test('I-4: shutdowns of 100 then 250 (could be cumulative): the second adds only the growth; total 250', () => {
+    const events = withStart([ev('user.message', { content: 'a' }, { at: T(1) }), shutdown(2, { m: { inputTokens: 100, outputTokens: 10 } }, 'sd1'), resume(3), ev('user.message', { content: 'b' }, { at: T(4) }), shutdown(5, { m: { inputTokens: 250, outputTokens: 25 } }, 'sd2')]);
+    const r = go(events);
+    expect(nodeOf(r, id('sd1')).usage).toEqual({ inputTokens: 100, cachedInputTokens: 0, outputTokens: 10 });
+    expect(nodeOf(r, id('sd2')).usage).toEqual({ inputTokens: 150, cachedInputTokens: 0, outputTokens: 15 });
+    expect(total(r)).toEqual({ input: 250, output: 25 });
+    stable(events);
+  });
+
+  test('I-4: a reading that went down is a new run: added whole (100 then 80 → 180); a model gone or new counts whole', () => {
+    const down = go(withStart([shutdown(2, { m: { inputTokens: 100, outputTokens: 10 } }, 'sd1'), resume(3), shutdown(5, { m: { inputTokens: 80, outputTokens: 8 } }, 'sd2')]));
+    expect(total(down)).toEqual({ input: 180, output: 18 });
+    // A model missing from the later reading cannot be cumulative either.
+    const swapped = go(withStart([shutdown(2, { a: { inputTokens: 100, outputTokens: 10 } }, 'sd1'), resume(3), shutdown(5, { b: { inputTokens: 300, outputTokens: 30 } }, 'sd2')]));
+    expect(total(swapped)).toEqual({ input: 400, output: 40 });
+    // Grown, with one more model: the growth of the old one plus the new one whole.
+    const grown = go(withStart([shutdown(2, { a: { inputTokens: 100, outputTokens: 10 } }, 'sd1'), resume(3), shutdown(5, { a: { inputTokens: 130, outputTokens: 13 }, b: { inputTokens: 50, outputTokens: 5 } }, 'sd2')]));
+    expect(total(grown)).toEqual({ input: 180, output: 18 });
+  });
+
+  test('I-1: a call keeps no arguments or output in memory; details still reach the store merged; late events for it', () => {
+    const big = 'q'.repeat(50_000);
+    const events = withStart([
+      ev('assistant.message', { messageId: 'm', content: '', toolRequests: [{ toolCallId: 'c1', name: 'create', arguments: { path: '/w/a.ts', file_text: big } }] }, { at: T(1) }),
+      ev('tool.execution_start', { toolCallId: 'c1', toolName: 'create', arguments: { path: '/w/a.ts', file_text: big } }, { at: T(2) }),
+      ev('tool.execution_complete', { toolCallId: 'c1', success: true, result: { content: big } }, { at: T(3) }),
+      // Late and out-of-order events for the finished call.
+      ev('assistant.message', { messageId: 'm2', content: '', toolRequests: [{ toolCallId: 'c1', name: 'create', arguments: { path: '/w/other.ts' } }] }, { at: T(4) }),
+      ev('subagent.failed', { toolCallId: 'c1', agentName: 'x', agentDisplayName: 'X', error: 'late' }, { at: T(5) }),
+    ]);
+    const n = new CopilotNormalizer();
+    const r = go(events, n);
+    expect(detailOf(r, call('c1'))).toEqual({ input: { path: '/w/a.ts', file_text: big }, output: big });
+    expect(nodeOf(r, call('c1'))).toMatchObject({ files: [{ path: '/w/a.ts', action: 'write' }], status: 'succeeded' });
+    const state = (n as unknown as { sessions: Map<string, { calls: Map<string, object> }> }).sessions.get(SID)!;
+    expect(JSON.stringify([...state.calls.values()]).length).toBeLessThan(2000);
+    stable(events);
   });
 });

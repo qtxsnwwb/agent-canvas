@@ -231,14 +231,16 @@ export class CopilotFileSource implements FileSource {
   }
 
   /**
-   * The session of an event log. A legacy `<id>.jsonl` next to a `<id>/events.jsonl` is not the session's main file (so
-   * its removal does not mark the session "source deleted" while the new log is there).
+   * The session of an event log. When a session has both forms (legacy `<id>.jsonl` and `<id>/events.jsonl`), a log
+   * is its main file only while the other one is gone: both present → neither speaks (present); one removed → only the
+   * one left speaks (present); both removed → both speak (deleted). So the "source deleted" flag never depends on the
+   * order the keys are checked in.
    */
   mainSessionOf(key: string): string | null {
     const shape = shapeOf(key);
     if (shape === null || shape.kind === 'workspace') return null;
-    if (shape.kind === 'legacy' && fs.existsSync(path.join(this.rootDir, shape.sessionId, EVENTS))) return null;
-    return shape.sessionId;
+    const other = shape.kind === 'legacy' ? path.join(this.rootDir, shape.sessionId, EVENTS) : path.join(this.rootDir, `${shape.sessionId}.jsonl`);
+    return fs.existsSync(other) ? null : shape.sessionId;
   }
 
   // ---------------------------------------------------------------- internals
