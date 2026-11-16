@@ -40,7 +40,8 @@ test('命令：当前 node 的绝对路径 + 本安装的 cli.js + hook-forward 
   const c = codexForwardCommands({ nodePath: NODE, cliPath: CLI, port: 4400 });
   expect(c.command).toBe("'/usr/local/bin/node' '/opt/agent canvas/packages/server/dist/cli.js' hook-forward --origin codex --port 4400");
   const w = codexForwardCommands({ nodePath: 'C:\\Program Files\\nodejs\\node.exe', cliPath: 'D:\\My Tools\\agent-canvas\\packages\\server\\dist\\cli.js', port: 4317 });
-  expect(w.commandWindows).toBe('"C:\\Program Files\\nodejs\\node.exe" "D:\\My Tools\\agent-canvas\\packages\\server\\dist\\cli.js" hook-forward --origin codex --port 4317');
+  // No short-path lookup given: paths with spaces cannot be written plain, so the PowerShell call form (form E).
+  expect(w.commandWindows).toBe('& "C:\\Program Files\\nodejs\\node.exe" "D:\\My Tools\\agent-canvas\\packages\\server\\dist\\cli.js" hook-forward --origin codex --port 4317');
   expect(w.command).toBe("'C:\\Program Files\\nodejs\\node.exe' 'D:\\My Tools\\agent-canvas\\packages\\server\\dist\\cli.js' hook-forward --origin codex --port 4317");
 });
 
@@ -152,7 +153,8 @@ test('我们的条目但 node 路径变了（升级 node 之后）：报告为�
   const { command } = codexForwardCommands({ nodePath: NODE, cliPath: CLI, port: 4317 });
   expect((p.next.hooks as any).SessionEnd).toEqual((fresh.hooks as any).SessionEnd);
   expect((p.next.hooks as any).Stop).toEqual([{ hooks: [{ type: 'command', command: 'keep me' }] }, ...(fresh.hooks as any).Stop]);
-  expect((p.next.hooks as any).PreToolUse).toEqual([{ hooks: [{ type: 'command', command: 'neighbour' }] }, ...(fresh.hooks as any).PreToolUse]);
+  // Replaced in place (same group, same handler index): Codex keys trust by position.
+  expect((p.next.hooks as any).PreToolUse).toEqual([{ hooks: [(fresh.hooks as any).PreToolUse[0].hooks[0], { type: 'command', command: 'neighbour' }] }]);
   expect(JSON.stringify(p.next)).not.toContain('/old/node');
   expect((p.next.hooks as any).Stop[1].hooks[0].command).toBe(command);
   // Installing again is now a no-op; uninstall removes the outdated entries just like current ones.

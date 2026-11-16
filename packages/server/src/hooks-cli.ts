@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import {
+  HookCommandError,
   SettingsShapeError,
   claudeHookTarget,
   codexForwardCommands,
@@ -14,10 +15,12 @@ import {
   planCursorUninstall,
   planInstallFor,
   planUninstallFor,
+  type CodexForwardSpec,
   type HookTarget,
   type InstallPlan,
   type UninstallPlan,
 } from './hooks-config.js';
+import { sameExistingFile, windowsShortPath } from './win-short-path.js';
 
 export interface HooksCliIo {
   out(line: string): void;
@@ -62,6 +65,12 @@ export interface CodexHooksCliOptions extends HooksCliOptions {
   nodePath: string;
   /** This installation's cli.js. */
   cliPath: string;
+  /** Codex: decides how the Windows command is written and compared. Default: process.platform. */
+  platform?: NodeJS.Platform;
+  /** Codex on Windows: the 8.3 short form of a path, or null. Default: windowsShortPath (asks cmd.exe). */
+  shortPath?: (longPath: string) => string | null;
+  /** Codex on Windows: whether a word names the same existing file as a path. Default: sameExistingFile. */
+  sameFile?: (word: string, longPath: string) => boolean;
 }
 
 /** Cursor's hooks file: `AGENT_CANVAS_CURSOR_HOOKS_FILE`, else `~/.cursor/hooks.json`. */
@@ -75,13 +84,22 @@ export interface CursorHooksCliOptions extends CodexHooksCliOptions {
   platform?: NodeJS.Platform;
 }
 
+/** Remembers each answer, so a path is looked up once per run. */
+function memoize(fn: (p: string) => string | null): (p: string) => string | null {
+  const seen = new Map<string, string | null>();
+  return (p) => {
+    if (!seen.has(p)) seen.set(p, fn(p));
+    return seen.get(p)!;
+  };
+}
+
 /** What differs between installing into Claude Code's settings.json and into Codex's hooks.json. */
 interface HooksProfile {
   target: HookTarget;
   /** Refuses (message) when the target file's directory must already exist and does not; null = go on. */
   precheck(file: string, mode: Mode): string | null;
   /** Lines describing what the hooks are, printed with the plan. */
-  describe(file: string): string[];
+  describe(file: string, mode: Mode): string[];
   /** Printed when there is nothing to remove. */
   nothingToRemove: string;
   /** Printed when the file does not exist yet and will be created. */
@@ -90,6 +108,12 @@ interface HooksProfile {
   after(mode: Mode): string[];
   /** The node binary the hook commands run (named when outdated handlers are replaced). */
   nodePath?: string;
+  /** Why installed handlers count as outdated (printed when some are replaced). Default: the node path changed. */
+  outdatedReason?: string;
+  /** Printed when outdated handlers are replaced. */
+  replacedNote?: string;
+  /** Printed (with the events) when someone else's hook changes position (Codex keys trust by position). */
+  shiftedNote?(events: string[]): string;
   /** Planning for a file whose format differs from the shared one (Cursor's `version`). Default: the shared planners. */
   planInstall?(settings: unknown): InstallPlan;
   planUninstall?(settings: unknown): UninstallPlan;
@@ -116,20 +140,42 @@ function isDirectory(p: string): boolean {
 }
 
 function codexProfile(opts: CodexHooksCliOptions): HooksProfile {
-  const spec = { nodePath: opts.nodePath, cliPath: opts.cliPath, port: opts.port };
-  const { command, commandWindows } = codexForwardCommands(spec);
+  const platform = opts.platform ?? process.platform;
+  const win = platform === 'win32';
+  const spec: CodexForwardSpec = {
+    nodePath: opts.nodePath,
+    cliPath: opts.cliPath,
+    port: opts.port,
+    platform,
+    ...(win ? { shortPath: memoize(opts.shortPath ?? ((p) => windowsShortPath(p))), sameFile: opts.sameFile ?? sameExistingFile } : {}),
+  };
+  let forward: ReturnType<typeof codexForwardCommands> | null = null;
+  let refused: string | null = null;
+  try {
+    forward = codexForwardCommands(spec);
+  } catch (err) {
+    if (!(err instanceof HookCommandError)) throw err;
+    refused = err.message;
+  }
   return {
     target: codexHookTarget(spec),
     nodePath: opts.nodePath,
+    outdatedReason: `命令和现在要写的不一致：node 路径不是当前的 ${opts.nodePath}，或 Windows 命令是旧版本的写法（旧版本写的 PowerShell 无法运行）或另一种写法`,
+    replacedNote: '替换后的 hooks 内容变了，Codex 只有在你重新确认信任后才会运行它们（设置 → Hooks，或 CLI 里的 /hooks）；原位替换，其他 hooks 的位置不变',
+    shiftedNote: (events) =>
+      `${events.join(', ')} 里排在 agent-canvas 之后的其他 hooks 会因为删掉我们的条目而前移；Codex 按位置记录信任，它们需要在 Codex 里重新确认`,
     // ~/.codex is Codex's own directory: never created here.
-    precheck: (file, mode) =>
-      mode === 'install' && !isDirectory(path.dirname(file))
-        ? `目录 ${path.dirname(file)} 不存在，Codex 似乎没有安装，未做任何改动`
-        : null,
-    describe: (file) => [
+    precheck: (file, mode) => {
+      if (mode !== 'install') return null;
+      if (!isDirectory(path.dirname(file))) return `目录 ${path.dirname(file)} 不存在，Codex 似乎没有安装，未做任何改动`;
+      return refused !== null ? `${refused}。未做任何改动` : null;
+    },
+    describe: (file, mode) => [
       `Codex hooks 文件：${file}`,
-      `hook 命令（macOS / Linux）：${command}`,
-      `hook 命令（Windows）：${commandWindows}`,
+      ...(forward !== null ? [`hook 命令（macOS / Linux）：${forward.command}`, `hook 命令（Windows）：${forward.commandWindows}`] : []),
+      ...(mode === 'install' && win && forward?.windowsForm === 'call'
+        ? ['注意：node 或 cli.js 的路径没法写成不带引号的形式（没有 8.3 短路径或含特殊字符），Windows 命令用了 PowerShell 的调用形式（& "…"）；Codex 退回用 cmd 执行 hook 时这种形式不能运行']
+        : []),
       `转发到：${hookUrl(opts.port)}?origin=codex`,
     ],
     nothingToRemove: `没有找到本安装（${opts.cliPath}，端口 ${opts.port}）的 Codex hooks`,
@@ -452,6 +498,7 @@ async function run(mode: Mode, opts: HooksCliOptions, io: HooksCliIo, profile: H
   let loaded: Loaded;
   let events: string[];
   let replaced: string[] = [];
+  let shifted: string[] = [];
   let next: Record<string, unknown>;
   try {
     loaded = loadSettings(file);
@@ -459,10 +506,12 @@ async function run(mode: Mode, opts: HooksCliOptions, io: HooksCliIo, profile: H
       const plan = profile.planInstall ? profile.planInstall(loaded.settings) : planInstallFor(profile.target, loaded.settings);
       events = plan.added;
       replaced = plan.replaced;
+      shifted = plan.shifted ?? [];
       next = plan.next;
     } else {
       const plan = profile.planUninstall ? profile.planUninstall(loaded.settings) : planUninstallFor(profile.target, loaded.settings);
       events = plan.removed;
+      shifted = plan.shifted ?? [];
       next = plan.next;
     }
   } catch (err) {
@@ -484,12 +533,14 @@ async function run(mode: Mode, opts: HooksCliOptions, io: HooksCliIo, profile: H
   if (isSymlink(opts.settingsFile)) {
     io.out(`（${opts.settingsFile} 是符号链接，实际写入 ${file}）`);
   }
-  for (const line of profile.describe(file)) io.out(line);
+  for (const line of profile.describe(file, mode)) io.out(line);
   if (events.length > 0) io.out(`将${mode === 'install' ? '添加' : '移除'}的事件（${events.length}）：${events.join(', ')}`);
   if (replaced.length > 0) {
-    io.out(`已安装但已过期的 hooks（命令里的 node 路径不是当前的 ${profile.nodePath ?? 'node'}）`);
+    io.out(`已安装但已过期的 hooks（${profile.outdatedReason ?? `命令里的 node 路径不是当前的 ${profile.nodePath ?? 'node'}`}）`);
     io.out(`将替换的事件（${replaced.length}）：${replaced.join(', ')}`);
+    if (profile.replacedNote !== undefined) io.out(profile.replacedNote);
   }
+  if (shifted.length > 0 && profile.shiftedNote !== undefined) io.out(profile.shiftedNote(shifted));
   io.out('不会改动已有的其他内容');
   const creating = loaded.exists ? null : profile.willCreate(file);
   if (creating !== null) io.out(creating);

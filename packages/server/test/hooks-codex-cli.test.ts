@@ -4,7 +4,9 @@ import path from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test, vi } from 'vitest';
 import { main } from '../src/cli.js';
 import { defaultCodexHooksFile, runCodexHooksInstall, runCodexHooksUninstall, type HooksCliIo } from '../src/hooks-cli.js';
-import { CODEX_HOOK_EVENTS, codexForwardCommands } from '../src/hooks-config.js';
+import { defaultCliPath } from '../src/cli-commands.js';
+import { CODEX_HOOK_EVENTS, codexForwardCommands, posixQuote, windowsQuote } from '../src/hooks-config.js';
+import { windowsShortPath } from '../src/win-short-path.js';
 
 // Every test works inside a fresh temp directory: the real ~/.codex/hooks.json is never read or written. The guard at
 // the bottom records every path the fs functions used by the install code were called with during this file.
@@ -223,7 +225,10 @@ test('cli：hooks install / uninstall --codex 经 --settings 走通；命令指�
   const hook = readJson().hooks.Interrupt[0].hooks[0];
   expect(hook.command).toContain(process.execPath.includes("'") ? 'node' : `'${process.execPath}'`);
   expect(hook.command).toContain('hook-forward --origin codex --port 4400');
-  expect(hook.commandWindows).toContain(`"${process.execPath}"`);
+  // The Windows form (plain short paths, or the PowerShell call form): exactly what the installer computes for this node.
+  expect(hook.commandWindows).toBe(
+    codexForwardCommands({ nodePath: process.execPath, cliPath: defaultCliPath(), port: 4400, ...(process.platform === 'win32' ? { shortPath: windowsShortPath } : {}) }).commandWindows,
+  );
   expect(hook.command).toMatch(/cli\.js' hook-forward/);
   expect(await main(['hooks', 'uninstall', '--codex', '--yes', '--port', '4400', '--settings', file], { hooksIo: fakeIo() })).toBe(0);
   expect(readJson()).toEqual({});
@@ -237,6 +242,104 @@ test('cli：AGENT_CANVAS_CODEX_HOOKS_FILE 指定的路径被使用（假 env）�
   expect(fs.existsSync(claudeFile)).toBe(false);
   expect(await main(['hooks', 'install', '--yes'], { hooksIo: fakeIo(), env })).toBe(0);
   expect(readJson(claudeFile).hooks.Stop[0].hooks[0].url).toBe('http://127.0.0.1:4317/hooks');
+});
+
+// ------------------------------------------------ Windows command form (all with a fake short-path lookup)
+
+const WNODE = 'C:\\Program Files\\nodejs\\node.exe';
+const WCLI = 'D:\\My Tools\\agent-canvas\\dist\\cli.js';
+const SHORTS: Record<string, string> = { [WNODE]: 'C:\\PROGRA~1\\nodejs\\node.exe', [WCLI]: 'D:\\MYTOOL~1\\agent-canvas\\dist\\cli.js' };
+const winOpts = (extra: Record<string, unknown> = {}) => ({
+  ...opts(), nodePath: WNODE, cliPath: WCLI, platform: 'win32' as const, shortPath: (p: string) => SHORTS[p] ?? null, ...extra,
+});
+/** What versions before this fix wrote for one event (form D), with someone else's hooks before and after it. */
+function legacyHooksJson(): any {
+  const hooks: Record<string, unknown> = {};
+  for (const e of CODEX_HOOK_EVENTS) {
+    const old = {
+      type: 'command',
+      command: `${posixQuote(WNODE)} ${posixQuote(WCLI)} hook-forward --origin codex --port 4317`,
+      commandWindows: `${windowsQuote(WNODE)} ${windowsQuote(WCLI)} hook-forward --origin codex --port 4317`,
+      async: true,
+      timeout: e === 'SessionEnd' || e === 'Interrupt' ? 3 : 5,
+    };
+    hooks[e] = [{ hooks: [{ type: 'command', command: `before-${e}` }] }, { hooks: [old] }, { hooks: [{ type: 'command', command: `after-${e}` }] }];
+  }
+  return { hooks };
+}
+
+test('Windows：旧版本写的命令（带引号开头）全部 11 条原位换成短路径形式，并说明要重新确认信任', async () => {
+  seed(JSON.stringify(legacyHooksJson(), null, 2));
+  const io = fakeIo();
+  expect(await runCodexHooksInstall(winOpts(), io)).toBe(0);
+  const text = io.outs.join('\n');
+  expect(text).toContain(`将替换的事件（${CODEX_HOOK_EVENTS.length}）`);
+  expect(text).toContain('旧版本');
+  expect(text).toMatch(/替换后.*重新确认信任/);
+  expect(text).not.toContain('退回用 cmd');
+  const after = readJson().hooks;
+  for (const e of CODEX_HOOK_EVENTS) {
+    expect(after[e]).toHaveLength(3);
+    expect(after[e][0].hooks[0].command).toBe(`before-${e}`);
+    expect(after[e][1].hooks[0].commandWindows).toBe('C:\\PROGRA~1\\nodejs\\node.exe D:\\MYTOOL~1\\agent-canvas\\dist\\cli.js hook-forward --origin codex --port 4317');
+    expect(after[e][2].hooks[0].command).toBe(`after-${e}`);
+  }
+  const again = fakeIo();
+  expect(await runCodexHooksInstall(winOpts(), again)).toBe(0);
+  expect(again.outs.join('\n')).toContain('无需改动');
+});
+
+test('Windows：路径写不成不带引号的形式时用 PowerShell 调用形式，并说明 cmd 退回时不能运行', async () => {
+  const io = fakeIo();
+  expect(await runCodexHooksInstall(winOpts({ shortPath: () => null }), io)).toBe(0);
+  expect(readJson().hooks.Stop[0].hooks[0].commandWindows).toBe(`& "${WNODE}" "${WCLI}" hook-forward --origin codex --port 4317`);
+  const lines = io.outs.filter((l) => l.includes('退回用 cmd'));
+  expect(lines).toHaveLength(1);
+  expect(lines[0]).toContain('PowerShell');
+});
+
+test('Windows：短路径这次没查到，但已装的不带引号的条目指向同一个文件：不改写（不丢信任）', async () => {
+  expect(await runCodexHooksInstall(winOpts(), fakeIo())).toBe(0);
+  const before = fs.readFileSync(file, 'utf8');
+  const files: Record<string, string> = Object.fromEntries(Object.entries(SHORTS).map(([long, short]) => [short, long]));
+  const io = fakeIo();
+  expect(await runCodexHooksInstall(winOpts({ shortPath: () => null, sameFile: (w: string, long: string) => files[w] === long }), io)).toBe(0);
+  expect(io.outs.join('\n')).toContain('无需改动');
+  expect(fs.readFileSync(file, 'utf8')).toBe(before);
+});
+
+test('Windows：卸载时不打印 PowerShell 调用形式的提示', async () => {
+  expect(await runCodexHooksInstall(winOpts({ shortPath: () => null }), fakeIo())).toBe(0);
+  const io = fakeIo();
+  expect(await runCodexHooksUninstall(winOpts({ shortPath: () => null }), io)).toBe(0);
+  expect(io.outs.join('\n')).not.toContain('退回用 cmd');
+});
+
+test('Windows：路径含 $ 时拒绝安装（不写可能被 PowerShell 展开的命令）；卸载照常', async () => {
+  seed('{}');
+  const io = fakeIo();
+  expect(await runCodexHooksInstall(winOpts({ cliPath: 'D:\\a$b\\cli.js', shortPath: () => null }), io)).toBe(1);
+  expect(io.errs.join('\n')).toContain('D:\\a$b\\cli.js');
+  expect(fs.readFileSync(file, 'utf8')).toBe('{}');
+  expect(listDir()).toEqual(['hooks.json']);
+  expect(await runCodexHooksUninstall(winOpts({ cliPath: 'D:\\a$b\\cli.js', shortPath: () => null }), fakeIo())).toBe(0);
+});
+
+test('卸载：排在我们后面的别人的 hooks 位置前移时，说明它们要在 Codex 里重新确认信任', async () => {
+  seed(JSON.stringify(legacyHooksJson()));
+  expect(await runCodexHooksInstall(winOpts(), fakeIo())).toBe(0);
+  const io = fakeIo();
+  expect(await runCodexHooksUninstall(winOpts(), io)).toBe(0);
+  const lines = io.outs.filter((l) => l.includes('重新确认'));
+  expect(lines).toHaveLength(1);
+  expect(lines[0]).toContain('Stop');
+  expect(readJson().hooks.Stop).toEqual([{ hooks: [{ type: 'command', command: 'before-Stop' }] }, { hooks: [{ type: 'command', command: 'after-Stop' }] }]);
+  // Nothing after ours: no such line.
+  seed('{}');
+  await runCodexHooksInstall(winOpts(), fakeIo());
+  const quiet = fakeIo();
+  expect(await runCodexHooksUninstall(winOpts(), quiet)).toBe(0);
+  expect(quiet.outs.join('\n')).not.toContain('重新确认');
 });
 
 test('cli：用法里列出 --codex 和 hook-forward', async () => {
