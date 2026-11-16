@@ -127,6 +127,29 @@ export function cursorTouches(toolName: string | null, params: unknown): RawTouc
   return path === null ? [] : [{ path, action: spec.action }];
 }
 
+// ---- Gemini CLI ----
+
+/** Gemini CLI tools that read or change one named file (spec 5.1's table; search / shell / subagent tools touch none). */
+const GEMINI_TOOLS: Record<string, FileAction> = {
+  read_file: 'read',
+  read_many_files: 'read',
+  write_file: 'write',
+  replace: 'edit',
+};
+/** Path arguments, tried in this order (current and older argument names). */
+const GEMINI_PATH_KEYS = ['file_path', 'absolute_path', 'path', 'dir_path', 'directory'];
+
+/** The file a Gemini CLI tool call names: the first path argument present (GEMINI_PATH_KEYS order). */
+export function geminiTouches(toolName: string | null, args: unknown): RawTouch[] {
+  const action = toolName !== null && Object.hasOwn(GEMINI_TOOLS, toolName) ? GEMINI_TOOLS[toolName] : undefined;
+  if (action === undefined || !isObject(args)) return [];
+  for (const key of GEMINI_PATH_KEYS) {
+    const path = stringField(args, key);
+    if (path !== null) return [{ path, action }];
+  }
+  return [];
+}
+
 // ---- Codex ----
 
 const BEGIN = '*** Begin Patch';

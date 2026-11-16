@@ -1133,6 +1133,9 @@ export class Pipeline {
       // a file that was never recorded cannot have a stored copy, so skip the lookup.
       if (this.store.getOffset(file) > 0 && this.store.latestMeta(file) === content) return;
       const event: RawEvent = { source: 'meta', origin: source.origin, file, sessionId: cls.sessionId, agentId, payload: content };
+      // Stored only when the key does not name the project (Gemini's legacy `.json`), as for transcript lines, so a
+      // replay gives the normalizer the same project without reading anything. Claude Code's keys name it: unchanged.
+      if (source.projectOfKey(file) === null) event.projectId = cls.projectId;
       this.atomically(
         cls.sessionId,
         () => {

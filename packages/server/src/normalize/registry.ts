@@ -2,6 +2,7 @@ import { ORIGINS, type Origin } from '@agent-canvas/shared';
 import type { RawEvent } from '../store/store.js';
 import { CodexNormalizer } from './codex.js';
 import { CursorNormalizer } from './cursor.js';
+import { GeminiNormalizer } from './gemini.js';
 import { Normalizer } from './normalizer.js';
 import type { AgentNormalizer, BatchItem, BatchResult, NormalizeResult } from './types.js';
 
@@ -13,7 +14,7 @@ export const NORMALIZER_FACTORIES: NormalizerFactories = {
   claude: () => new Normalizer(),
   codex: () => new CodexNormalizer(),
   cursor: () => new CursorNormalizer(),
-  gemini: null,
+  gemini: () => new GeminiNormalizer(),
   grok: null,
   copilot: null,
 };

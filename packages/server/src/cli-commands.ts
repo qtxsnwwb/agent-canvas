@@ -29,6 +29,7 @@ import { storeLookup } from './sources/codex/lookup.js';
 import { CodexFileSource } from './sources/codex/source.js';
 import { CursorSource } from './sources/cursor/source.js';
 import { isExistingDir } from './sources/dirs.js';
+import { GeminiFileSource } from './sources/gemini/source.js';
 import type { PollSource } from './sources/poll.js';
 import type { FileSource } from './sources/source.js';
 import { startWatcher } from './sources/transcript/watcher.js';
@@ -142,6 +143,9 @@ export function fileSources(config: Config, store?: Store): FileSource[] {
   const sources: FileSource[] = [new ClaudeFileSource(config.projectsDir)];
   const codexDir = config.codexSessionsDir;
   if (isExistingDir(codexDir)) sources.push(new CodexFileSource(codexDir!, store ? storeLookup(store, config.projectsDir) : undefined));
+  // Gemini CLI: read only when its tmp directory exists at start (spec 4.2); nothing is ever created under it.
+  const geminiTmp = config.geminiDir === null || config.geminiDir === '' ? null : path.join(config.geminiDir, 'tmp');
+  if (isExistingDir(geminiTmp)) sources.push(new GeminiFileSource(geminiTmp!, store ? storeLookup(store, config.projectsDir) : undefined));
   return sources;
 }
 
