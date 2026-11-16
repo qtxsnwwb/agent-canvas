@@ -469,6 +469,15 @@ export function maskDiagnostics(d: Diagnostics, m: PageMasker): Diagnostics {
       ? { storage: { ...d.storage, lastError: t(d.storage.lastError), vacuumSkipReason: t(d.storage.vacuumSkipReason) } }
       : {}),
     ...(d.search !== undefined ? { search: { ...d.search, lastError: t(d.search.lastError) } } : {}),
+    ...(d.sources !== undefined
+      ? {
+        sources: {
+          gemini: { ...d.sources.gemini, dir: t(d.sources.gemini.dir) },
+          grok: { ...d.sources.grok, dir: t(d.sources.grok.dir) },
+          copilot: { ...d.sources.copilot, dir: t(d.sources.copilot.dir) },
+        },
+      }
+      : {}),
   };
 }
 

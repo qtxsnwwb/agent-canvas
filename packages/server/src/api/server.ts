@@ -10,6 +10,8 @@ import {
   type ClientMessage,
   type ContentSearchResponse,
   type Diagnostics,
+  type FileOnlyOrigin,
+  type FileSourceStatus,
   type NotificationSettingsResponse,
   type NotificationTestResponse,
   type Origin,
@@ -24,6 +26,7 @@ import { cursorHookConversationId, cursorHookWorkspaceRoot, sanitizeCursorHookPa
 import { NORMALIZER_VERSION } from '../normalize/version.js';
 import type { NotificationService } from '../notify/service.js';
 import type { Pipeline } from '../pipeline.js';
+import { isExistingDir, sourceDirOf } from '../sources/dirs.js';
 import { KEY_PREFIXES } from '../sources/source.js';
 import { storageStatus, type StorageDiagnostics } from '../store/migrate-storage.js';
 import { SAMPLE_MAX, type Store } from '../store/store.js';
@@ -152,6 +155,16 @@ function isFile(file: string | null): boolean {
   } catch {
     return false;
   }
+}
+
+/** Diagnostics.sources: each file-only origin's directory (stat only, never read) and its stored session count. */
+function fileOnlySources(config: Config, store: Store): Record<FileOnlyOrigin, FileSourceStatus> {
+  const counts = store.sessionCountsByOrigin();
+  const one = (origin: FileOnlyOrigin): FileSourceStatus => {
+    const dir = sourceDirOf(config, origin);
+    return { dir, present: isExistingDir(dir), sessionCount: counts[origin] ?? 0 };
+  };
+  return { gemini: one('gemini'), grok: one('grok'), copilot: one('copilot') };
 }
 
 /** Whether the path names an existing directory (only stat'ed, never read). */
@@ -441,6 +454,7 @@ export function buildServer(deps: {
         storage: deps.storage?.status() ?? storageStatus(store),
         search: deps.search?.status() ?? store.searchIndexStatus(),
         foreignHooksDropped,
+        sources: fileOnlySources(config, store),
       };
       if (req.query.mask !== '1') return d;
       reply.header('cache-control', 'no-store');

@@ -31,12 +31,26 @@
   --cursor-soft: #d9f5e0;
   --cursor-edge: #aee3bb;
   --cursor-ink: #1f7a3d;
+  /* Gemini CLI a soft sky, Grok a soft lavender, Copilot CLI a soft rose (badge families of their series colours). */
+  --gemini-soft: #e0f0ff;
+  --gemini-edge: #b5d4f5;
+  --gemini-ink: #1d4f91;
+  --grok-soft: #f2e1f7;
+  --grok-edge: #dcb8e8;
+  --grok-ink: #6b1a7d;
+  --copilot-soft: #ffe0ee;
+  --copilot-edge: #f5b8d2;
+  --copilot-ink: #a3195a;
   /* Origins as chart series (stats page): the badge families, stepped until the dataviz palette validator passes on
      the white card surface (lightness band, chroma, colour-blind separation over all pairs, 3:1 contrast). Marks only:
      text next to them stays in the ink colours. */
   --series-claude: #e3743f;
   --series-codex: #5f6bdc;
   --series-cursor: #136b3d;
+  /* The six together pass the validator over all pairs (CVD worst 10.8, normal-vision worst 17.2, all >= 3:1). */
+  --series-gemini: #3607e6;
+  --series-grok: #801895;
+  --series-copilot: #e62d83;
   --chart-grid: #f0ebf6;
   --chart-axis: #d6cde6;
   --font: "Microsoft YaHei UI", "PingFang SC", "Hiragino Sans GB", system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -136,7 +150,9 @@ pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
 .origin-claude { --origin-bg: var(--claude-soft); --origin-edge: var(--claude-edge); --origin-fg: var(--claude-ink); }
 .origin-codex { --origin-bg: var(--codex-soft); --origin-edge: var(--codex-edge); --origin-fg: var(--codex-ink); }
 .origin-cursor { --origin-bg: var(--cursor-soft); --origin-edge: var(--cursor-edge); --origin-fg: var(--cursor-ink); }
-.origin-other { --origin-bg: var(--line); --origin-edge: var(--edge-strong); --origin-fg: var(--ink-soft); }
+.origin-gemini { --origin-bg: var(--gemini-soft); --origin-edge: var(--gemini-edge); --origin-fg: var(--gemini-ink); }
+.origin-grok { --origin-bg: var(--grok-soft); --origin-edge: var(--grok-edge); --origin-fg: var(--grok-ink); }
+.origin-copilot { --origin-bg: var(--copilot-soft); --origin-edge: var(--copilot-edge); --origin-fg: var(--copilot-ink); }
 .origin-icon { flex: none; }
 .origin-badge-dot { padding: 0; width: 18px; height: 18px; justify-content: center; }
 .origin-dots { display: inline-flex; gap: 4px; }
@@ -147,8 +163,9 @@ pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
 .view-switch[aria-label="来源"] button[aria-pressed="true"][data-origin="claude"] { background: var(--claude-soft); color: var(--claude-ink); }
 .view-switch[aria-label="来源"] button[aria-pressed="true"][data-origin="codex"] { background: var(--codex-soft); color: var(--codex-ink); }
 .view-switch[aria-label="来源"] button[aria-pressed="true"][data-origin="cursor"] { background: var(--cursor-soft); color: var(--cursor-ink); }
-/* Placeholder until the origins without a colour of their own get one: the neutral badge colours (.origin-other). */
-.view-switch[aria-label="来源"] button[aria-pressed="true"]:is([data-origin="gemini"], [data-origin="grok"], [data-origin="copilot"]) { background: var(--line); color: var(--ink-soft); }
+.view-switch[aria-label="来源"] button[aria-pressed="true"][data-origin="gemini"] { background: var(--gemini-soft); color: var(--gemini-ink); }
+.view-switch[aria-label="来源"] button[aria-pressed="true"][data-origin="grok"] { background: var(--grok-soft); color: var(--grok-ink); }
+.view-switch[aria-label="来源"] button[aria-pressed="true"][data-origin="copilot"] { background: var(--copilot-soft); color: var(--copilot-ink); }
 
 /* Session page: a one-line info bar, then the canvas filling the rest of the viewport. */
 .session-loading { padding: 12px 18px; }

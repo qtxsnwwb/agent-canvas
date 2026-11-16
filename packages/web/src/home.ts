@@ -5,10 +5,9 @@ export const ORIGIN_LOOK: Record<Origin, { label: string; className: string }> =
   claude: { label: 'Claude Code', className: 'origin-claude' },
   codex: { label: 'Codex', className: 'origin-codex' },
   cursor: { label: 'Cursor', className: 'origin-cursor' },
-  // Placeholders until the page work for these origins (a neutral badge).
-  gemini: { label: 'Gemini CLI', className: 'origin-other' },
-  grok: { label: 'Grok', className: 'origin-other' },
-  copilot: { label: 'Copilot CLI', className: 'origin-other' },
+  gemini: { label: 'Gemini CLI', className: 'origin-gemini' },
+  grok: { label: 'Grok', className: 'origin-grok' },
+  copilot: { label: 'Copilot CLI', className: 'origin-copilot' },
 };
 
 export function originLook(origin: Origin): { label: string; className: string } {
@@ -29,7 +28,7 @@ export function parseOriginFilter(value: string | null): OriginFilter {
   return value === 'all' || (ORIGINS as readonly string[]).includes(value ?? '') ? (value as OriginFilter) : 'all';
 }
 
-/** The filter is offered only once some project has Codex or Cursor sessions (a Claude-only install looks as before). */
+/** The filter is offered only once some project has sessions of an origin other than Claude Code (a Claude-only install looks as before). */
 export function showOriginFilter(projects: readonly Project[]): boolean {
   return projects.some((p) => p.origins.some((o) => o !== 'claude'));
 }

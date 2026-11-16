@@ -175,6 +175,8 @@ export interface Store {
    * lexicographically smallest; null when none does.
    */
   listProjects(nowMs: number): Project[];
+  /** Stored sessions per origin (a session row from before origins counts as claude); an origin with none is absent. */
+  sessionCountsByOrigin(): Partial<Record<Origin, number>>;
   /** Ordered by lastActivityAt descending. */
   listSessions(projectId: string): Session[];
   getSession(sessionId: string): Session | null;
@@ -743,6 +745,9 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
      FROM session GROUP BY project_id, cwd, origin ORDER BY project_id`,
   );
   const selectSessions = db.prepare(`SELECT body FROM session WHERE project_id = ? ORDER BY last_activity_at DESC, id`);
+  const selectOriginCounts = db.prepare(
+    `SELECT COALESCE(json_extract(body, '$.origin'), 'claude') AS origin, COUNT(*) AS n FROM session GROUP BY origin`,
+  );
   const selectSession = db.prepare(`SELECT body FROM session WHERE id = ?`).pluck();
   const selectLiveSessions = db
     .prepare(`SELECT body FROM session WHERE status IN ('running', 'awaiting_permission') ORDER BY last_activity_at DESC, id`)
@@ -1207,6 +1212,11 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
         const origins = ORIGINS.filter((o) => project.origins.includes(o));
         return { ...project, cwd: best?.cwd ?? null, origins };
       });
+    },
+    sessionCountsByOrigin() {
+      const out: Partial<Record<Origin, number>> = {};
+      for (const r of selectOriginCounts.all() as { origin: Origin; n: number }[]) out[r.origin] = r.n;
+      return out;
     },
     listSessions(projectId) {
       return (selectSessions.all(projectId) as { body: string }[]).map((r) => JSON.parse(r.body) as Session);

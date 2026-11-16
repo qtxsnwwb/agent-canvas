@@ -28,7 +28,7 @@ import { ClaudeFileSource } from './sources/claude.js';
 import { storeLookup } from './sources/codex/lookup.js';
 import { CodexFileSource } from './sources/codex/source.js';
 import { CursorSource } from './sources/cursor/source.js';
-import { isExistingDir } from './sources/dirs.js';
+import { isExistingDir, sourceDirOf } from './sources/dirs.js';
 import { CopilotFileSource } from './sources/copilot/source.js';
 import { GeminiFileSource } from './sources/gemini/source.js';
 import { GrokFileSource } from './sources/grok/source.js';
@@ -147,13 +147,13 @@ export function fileSources(config: Config, store?: Store): FileSource[] {
   const codexDir = config.codexSessionsDir;
   if (isExistingDir(codexDir)) sources.push(new CodexFileSource(codexDir!, store ? storeLookup(store, config.projectsDir) : undefined));
   // Gemini CLI: read only when its tmp directory exists at start (spec 4.2); nothing is ever created under it.
-  const geminiTmp = config.geminiDir === null || config.geminiDir === '' ? null : path.join(config.geminiDir, 'tmp');
+  const geminiTmp = sourceDirOf(config, 'gemini');
   if (isExistingDir(geminiTmp)) sources.push(new GeminiFileSource(geminiTmp!, store ? storeLookup(store, config.projectsDir) : undefined));
   // GitHub Copilot CLI: likewise, only when <copilotDir>/session-state exists at start.
-  const copilotState = config.copilotDir === null || config.copilotDir === '' ? null : path.join(config.copilotDir, 'session-state');
+  const copilotState = sourceDirOf(config, 'copilot');
   if (isExistingDir(copilotState)) sources.push(new CopilotFileSource(copilotState!, store ? storeLookup(store, config.projectsDir) : undefined));
   // Grok Build: likewise, only when <grokDir>/sessions exists at start.
-  const grokSessions = config.grokDir === null || config.grokDir === '' ? null : path.join(config.grokDir, 'sessions');
+  const grokSessions = sourceDirOf(config, 'grok');
   if (isExistingDir(grokSessions)) sources.push(new GrokFileSource(grokSessions!, store ? storeLookup(store, config.projectsDir) : undefined));
   return sources;
 }
