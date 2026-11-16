@@ -831,8 +831,8 @@ function threadStatus(t: Thread): Session['status'] {
   return 'idle';
 }
 
-/** The fields of an emitted node that differ in `next`. */
-function nodePatch(old: GraphNode, next: GraphNode): Partial<GraphNode> {
+/** The fields of an emitted node that differ in `next` (also used by the Copilot normalizer). */
+export function nodePatch(old: GraphNode, next: GraphNode): Partial<GraphNode> {
   const patch: Partial<GraphNode> = {};
   const keys: (keyof GraphNode)[] = [
     'turnId',

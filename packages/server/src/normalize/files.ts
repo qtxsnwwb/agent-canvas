@@ -150,6 +150,52 @@ export function geminiTouches(toolName: string | null, args: unknown): RawTouch[
   return [];
 }
 
+// ---- GitHub Copilot CLI ----
+
+/** Copilot CLI tools that read or change a named file (spec 5.3's table; shell / search / subagent tools touch none). */
+const COPILOT_TOOLS: Record<string, FileAction> = {
+  view: 'read',
+  create: 'write',
+  edit: 'edit',
+  apply_patch: 'edit',
+};
+/** Path arguments, tried in this order (spec 5.3). */
+const COPILOT_PATH_KEYS = ['path', 'file_path', 'filePath', 'fileName'];
+/** Where an `apply_patch` call may carry its patch text when it names no path (argument name unverified). */
+const COPILOT_PATCH_KEYS = ['input', 'patch'];
+
+/**
+ * The file a Copilot CLI tool call names: the first path argument present (COPILOT_PATH_KEYS order). `args` given as a
+ * JSON string is parsed first. An `apply_patch` call without a path argument: the files of its patch text (the
+ * arguments themselves when they are a string that is not JSON, else an `input` / `patch` argument).
+ */
+export function copilotTouches(toolName: string | null, args: unknown): RawTouch[] {
+  const action = toolName !== null && Object.hasOwn(COPILOT_TOOLS, toolName) ? COPILOT_TOOLS[toolName] : undefined;
+  if (action === undefined) return [];
+  let parsed: unknown = args;
+  if (typeof args === 'string') {
+    try {
+      parsed = JSON.parse(args);
+    } catch {
+      parsed = args;
+    }
+  }
+  if (isObject(parsed)) {
+    for (const key of COPILOT_PATH_KEYS) {
+      const path = stringField(parsed, key);
+      if (path !== null) return [{ path, action }];
+    }
+  }
+  if (toolName !== 'apply_patch') return [];
+  if (typeof parsed === 'string') return applyPatchTouches(parsed);
+  if (!isObject(parsed)) return [];
+  for (const key of COPILOT_PATCH_KEYS) {
+    const v = parsed[key];
+    if (typeof v === 'string') return applyPatchTouches(v);
+  }
+  return [];
+}
+
 // ---- Codex ----
 
 const BEGIN = '*** Begin Patch';
