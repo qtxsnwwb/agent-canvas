@@ -7,3 +7,5 @@ export * from './stats.js';
 export * from './paths.js';
 export * from './files.js';
 export * from './anomalies.js';
+export * from './masking.js';
+export * from './export.js';

@@ -45,3 +45,16 @@ export function detailNote(detail: NodeDetail, sectionCount: number): string | n
   if (detail.unreadable === true) return DETAIL_UNREADABLE_NOTE;
   return sectionCount === 0 ? '无内容' : null;
 }
+
+/** An exported file without a detail entry for the step (it had none stored). */
+export const DETAIL_NO_STORED_NOTE = '这一步没有保存详情';
+
+/** detailNote for a StepDetail's detail, which is null when there is no stored detail. */
+export function stepDetailNote(detail: NodeDetail | null, sectionCount: number): string | null {
+  return detail === null ? DETAIL_NO_STORED_NOTE : detailNote(detail, sectionCount);
+}
+
+/** Under the output of a step whose output was cut at export time: its original size, in KB rounded up. */
+export function exportCutNote(originalBytes: number | null): string | null {
+  return originalBytes === null ? null : `（导出时已截断，原始 ${Math.max(1, Math.ceil(originalBytes / 1024))} KB）`;
+}

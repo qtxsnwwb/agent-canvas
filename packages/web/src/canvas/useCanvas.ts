@@ -3,7 +3,8 @@ import type { Graph, UsageTotal } from '@agent-canvas/shared';
 import type { LiveSession } from '../client';
 import { createThrottle } from '../throttle';
 import { groupInput, placeAgentGroups, wrapTurns, turnInput, type Box, type TurnLayout } from './layout';
-import { createBrowserLayoutWorker, createLayoutClient, type LayoutClient } from './layoutClient';
+import type { LayoutClient } from './layoutClient';
+import type { SessionSource } from '../sessionSource';
 import { clampToRange, graphAt, replayRange, turnMarks, usageTotal, type ReplayRange } from './replay';
 import { createCompactor, type CompactResult } from './compact';
 import { containerSize } from './sizes';
@@ -600,23 +601,23 @@ function readCompactPreference(): boolean {
   try { return window.localStorage.getItem(COMPACT_KEY) !== '0'; } catch { return true; }
 }
 
-/** One model and one layout worker per live session; both are disposed when the page unmounts. */
+/** One model and one layout client per session source; both are disposed when the page unmounts. */
 export type UseCanvasResult = CanvasSnapshot
   & Pick<CanvasModel, 'toggleTurn' | 'expandTurn' | 'showFullTurn' | 'setAutoFold' | 'setKeepVisible' | 'reveal' | 'toggleAgent' | 'setMode' | 'setReplayTime' | 'setCompact' | 'expandRun'>
   & { /** False until the model exists (the snapshot is then an empty placeholder). */ ready: boolean };
 
-export function useCanvas(live: LiveSession): UseCanvasResult {
+export function useCanvas(source: Pick<SessionSource, 'getGraph' | 'subscribe' | 'createLayoutClient'>): UseCanvasResult {
   const [model, setModel] = useState<CanvasModel | null>(null);
   useEffect(() => {
-    const client = createLayoutClient(createBrowserLayoutWorker);
-    const m = createCanvasModel(live, client, { compact: readCompactPreference(), mode: 'outline' });
+    const client = source.createLayoutClient();
+    const m = createCanvasModel(source, client, { compact: readCompactPreference(), mode: 'outline' });
     setModel(m);
     return () => {
       m.dispose();
       client.dispose();
       setModel((cur) => (cur === m ? null : cur));
     };
-  }, [live]);
+  }, [source]);
 
   const subscribe = useCallback((fn: () => void) => (model ? model.subscribe(fn) : () => {}), [model]);
   const getSnapshot = useCallback(() => (model ? model.getSnapshot() : EMPTY_SNAPSHOT), [model]);

@@ -15,6 +15,7 @@ import {
   STALE_AFTER_MS,
   type Change,
   type Diagnostics,
+  type GraphEdge,
   type GraphNode,
   type GraphSnapshot,
   type NodeDetail,
@@ -203,6 +204,8 @@ export interface Store {
    * range read, nothing held open after the call (safe to page across event-loop turns).
    */
   nodePage(sessionId: string, afterId: string | null, limit: number): { rowid: number; node: GraphNode }[];
+  /** A session's edges in snapshot order (the edges of getGraph, without reading any node). */
+  sessionEdges(sessionId: string): GraphEdge[];
   /** The last assigned change seq (the `seq` a snapshot taken now would carry); 0 before any change. */
   lastSeq(): number;
   getNodeDetail(sessionId: string, nodeId: string): NodeDetail | null;
@@ -330,7 +333,8 @@ export interface Store {
   close(): void;
 }
 
-const SAMPLE_MAX = 500;
+/** Unknown-record samples are cut to this many characters (Diagnostics.unknownRecords). */
+export const SAMPLE_MAX = 500;
 
 /** edge.kind codes (index = stored value). */
 const EDGE_KINDS = ['sequence', 'fork', 'spawn'] as const;
@@ -1233,6 +1237,9 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
         body: string;
       }[];
       return rows.map((r) => ({ rowid: r.rowid, node: JSON.parse(r.body) as GraphNode }));
+    },
+    sessionEdges(sessionId) {
+      return edgeJsons(sessionId).map((json) => JSON.parse(json) as GraphEdge);
     },
     lastSeq,
     getNodeDetail(sessionId, nodeId) {

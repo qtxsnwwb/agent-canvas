@@ -64,6 +64,8 @@ export interface CanvasProps {
   rightCovered?: boolean;
   /** Anomaly markers on turn cards and subagent cards (see anomalies.ts cardMarks). Pass a stable object. */
   anomalyMarks?: CardMarks;
+  /** React Flow's attribution link (default shown). The exported file hides it: nothing there navigates away. */
+  attribution?: boolean;
 }
 
 /**
@@ -72,6 +74,8 @@ export interface CanvasProps {
  */
 export interface CanvasFocus { seq: number; id?: string; turnKey?: string }
 const FOCUS_WAIT_MS = 5_000;
+const SHOW_ATTRIBUTION = { hideAttribution: false };
+const HIDE_ATTRIBUTION = { hideAttribution: true };
 const FOCUS_SETTLE_MS = 1_500;
 /** The drawer's width (canvas.css `--cc-drawer-width`), at most half the window. */
 function coveredWidth(): number {
@@ -492,7 +496,7 @@ function useDeferredFocus(): (selector: string) => void {
 
 function CanvasInner({
   snapshot, selectedId, chain, onSelect, onToggleTurn, onShowFullTurn, onToggleAgent, onFollowingChange, stopFollowingSignal,
-  progressing = ALL_PROGRESSING, focus = null, rightCovered = false, anomalyMarks = NO_CARD_MARKS,
+  progressing = ALL_PROGRESSING, focus = null, rightCovered = false, anomalyMarks = NO_CARD_MARKS, attribution = true,
 }: CanvasProps) {
   const nodes = useFlowNodes(snapshot, selectedId, chain, progressing, anomalyMarks);
   const edges = useFlowEdges(snapshot, chain, progressing);
@@ -653,7 +657,7 @@ function CanvasInner({
         minZoom={0.05}
         maxZoom={2}
         deleteKeyCode={null}
-        proOptions={{ hideAttribution: false }}
+        proOptions={attribution ? SHOW_ATTRIBUTION : HIDE_ATTRIBUTION}
       >
         <Background variant={BackgroundVariant.Dots} gap={24} size={2} color="#e9dff5" />
         <Controls showInteractive={false} />

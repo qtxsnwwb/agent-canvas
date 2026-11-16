@@ -96,6 +96,11 @@ export interface ContentHit {
   at: string;
   agentId: string | null;
   snippet: { before: string; match: string; after: string; clippedStart: boolean; clippedEnd: boolean };
+  /**
+   * The snippet was cut from the masked text (`?mask=1`): secrets masked unnumbered (`‹已遮蔽·<label>›`); when the match
+   * lay inside a masked value, `match` is that placeholder; never cut inside a placeholder.
+   */
+  masked?: true;
 }
 
 /**
@@ -114,7 +119,8 @@ export const CONTENT_SNIPPET_SIDE_CHARS = 40;
 
 export type SearchField = 'title' | 'id' | 'branch' | 'cwd' | 'prompt';
 /** nodeId is set only for `prompt` matches. */
-export interface SearchMatch { field: SearchField; nodeId: string | null; snippet: string }
+/** masked: the snippet was cut from the masked source (`?mask=1`), see ContentHit.masked. */
+export interface SearchMatch { field: SearchField; nodeId: string | null; snippet: string; masked?: true }
 /** At most 3 matches per session: session fields first (title, id, branch, cwd), then prompts in time order. */
 export interface SearchHit { session: Session; matches: SearchMatch[] }
 export const SEARCH_MIN_CHARS = 2;

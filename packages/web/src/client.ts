@@ -5,6 +5,11 @@ import {
   type ClientMessage,
   type ContentSearchResponse,
   type Diagnostics,
+  type ExportOptions,
+  type ExportPreview,
+  type ExportSettingsResponse,
+  type LearnedValue,
+  type MaskCategory,
   type Graph,
   type GraphSnapshot,
   type NodeDetail,
@@ -62,15 +67,17 @@ export const api = {
   graph: (sessionId: string) => getJson<GraphSnapshot>(`/api/sessions/${enc(sessionId)}/graph`),
   nodeDetail: (sessionId: string, nodeId: string) =>
     getJson<NodeDetail>(`/api/sessions/${enc(sessionId)}/nodes/${enc(nodeId)}`),
-  diagnostics: () => getJson<Diagnostics>('/api/diagnostics'),
+  /** `mask` true: unknown-record samples masked by the server (`?mask=1`). */
+  diagnostics: (mask?: true) => getJson<Diagnostics>(mask === true ? '/api/diagnostics?mask=1' : '/api/diagnostics'),
   notificationSettings: () => getJson<NotificationSettingsResponse>('/api/notifications/settings'),
   saveNotificationSettings: (settings: NotificationSettings) =>
     sendJson<NotificationSettingsResponse>('PUT', '/api/notifications/settings', settings),
   testNotification: () => sendJson<NotificationTestResponse>('POST', '/api/notifications/test'),
-  search: (q: string) => getJson<SearchHit[]>(`/api/search?q=${enc(q)}`),
+  /** `mask` true: snippets cut from the masked text (`mask=1`, each match `masked: true`). */
+  search: (q: string, mask?: true) => getJson<SearchHit[]>(`/api/search?q=${enc(q)}${mask === true ? '&mask=1' : ''}`),
   /** Content hits inside sessions (GET /api/search/content). */
-  searchContent: (q: string, origin: Origin | null = null) =>
-    getJson<ContentSearchResponse>(`/api/search/content?q=${enc(q)}${origin === null ? '' : `&origin=${enc(origin)}`}`),
+  searchContent: (q: string, origin: Origin | null = null, mask?: true) =>
+    getJson<ContentSearchResponse>(`/api/search/content?q=${enc(q)}${origin === null ? '' : `&origin=${enc(origin)}`}${mask === true ? '&mask=1' : ''}`),
   /** `query` is built by stats.ts `statsQueryString`. */
   stats: (query: string) => getJson<StatsResponse>(`/api/stats?${query}`),
   sessionFiles: (sessionId: string) => getJson<SessionFilesResponse>(`/api/sessions/${enc(sessionId)}/files`),
@@ -80,7 +87,54 @@ export const api = {
   /** `query` is built by anomalies.ts `anomaliesQueryString`. */
   anomalies: (query: string) => getJson<AnomalyListResponse>(`/api/anomalies?${query}`),
   anomalyCounts: () => getJson<AnomalyCountsResponse>('/api/anomalies/counts'),
+  exportSettings: () => getJson<ExportSettingsResponse>('/api/export/settings'),
+  /**
+   * POST /api/sessions/:id/mask/learned: the secret values the server learned from the whole session, for the page's
+   * masker (memory only; never logged or stored).
+   */
+  maskLearned: async (sessionId: string, categories: readonly MaskCategory[], signal?: AbortSignal): Promise<{ values: LearnedValue[]; capped: boolean }> =>
+    (await postJson(`/api/sessions/${enc(sessionId)}/mask/learned`, { categories }, signal)).json() as Promise<{ values: LearnedValue[]; capped: boolean }>,
+  saveExportSettings: (customTerms: string[]) =>
+    sendJson<ExportSettingsResponse>('PUT', '/api/export/settings', { customTerms }),
+  /** POST /api/sessions/:id/export/preview; a failure throws an HttpError (its text is not the server's). */
+  exportPreview: async (sessionId: string, options: ExportOptions, signal?: AbortSignal): Promise<ExportPreview> =>
+    (await postExport(`/api/sessions/${enc(sessionId)}/export/preview`, options, signal)).json() as Promise<ExportPreview>,
+  /** POST /api/sessions/:id/export: the file as a Blob and the Content-Disposition header (the file name). */
+  exportFile: async (sessionId: string, options: ExportOptions, signal?: AbortSignal): Promise<{ blob: Blob; disposition: string | null }> => {
+    const res = await postExport(`/api/sessions/${enc(sessionId)}/export`, options, signal);
+    return { blob: await res.blob(), disposition: res.headers.get('content-disposition') };
+  },
 };
+
+/**
+ * The export routes: same-origin POST (the browser sends Origin, which the server checks) with a JSON body. A non-2xx
+ * answer throws an HttpError whose message names the status only: the dialog shows its own text per status, never the
+ * server's.
+ */
+async function postExport(path: string, options: ExportOptions, signal: AbortSignal | undefined): Promise<Response> {
+  return postJson(path, options, signal);
+}
+
+async function postJson(path: string, body: unknown, signal: AbortSignal | undefined): Promise<Response> {
+  const res = await fetch(path, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal, credentials: 'same-origin',
+  });
+  if (!res.ok) {
+    void res.body?.cancel().catch(() => {});
+    throw Object.assign(new Error(`HTTP ${res.status}`), { status: res.status }) as HttpError;
+  }
+  return res;
+}
+
+/** What a failed request was: an HTTP status, aborted by the page, or no answer at all. */
+export function failureOf(e: unknown): number | 'abort' | 'network' {
+  if (typeof e === 'object' && e !== null) {
+    const status = (e as { status?: unknown }).status;
+    if (typeof status === 'number') return status;
+    if ((e as { name?: unknown }).name === 'AbortError') return 'abort';
+  }
+  return 'network';
+}
 
 export interface WebSocketLike {
   send(data: string): void;

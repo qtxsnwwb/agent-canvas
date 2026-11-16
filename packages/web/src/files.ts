@@ -6,6 +6,7 @@ import {
   type SessionFileTouch,
 } from '@agent-canvas/shared';
 import { pickProject } from './home';
+import { sameMaskedValue } from './masking';
 
 /** The four actions as the pages name them. */
 export const ACTION_LABEL: Record<FileAction, string> = { read: '读', edit: '改', write: '写入', delete: '删除' };
@@ -116,9 +117,14 @@ export function readOnlyNote(files: readonly SessionFile[]): string {
     : `只读过 ${files.length} 个文件。`;
 }
 
-/** The file of the list that is the same file as `path` (spelling, separators and, on Windows, case aside). */
+/**
+ * The file of the list that is the same file as `path` (spelling, separators and, on Windows, case aside). With the
+ * masking switch on, both are masked and may be numbered differently (a link from the files page carries the path
+ * masked without numbers): compared without the placeholders' numbers last.
+ */
 export function findSessionFile<T extends { path: string }>(files: readonly T[], path: string): T | undefined {
-  return files.find((f) => f.path === path) ?? files.find((f) => samePath(f.path, path));
+  return files.find((f) => f.path === path) ?? files.find((f) => samePath(f.path, path))
+    ?? (path.includes('‹已遮蔽·') ? files.find((f) => sameMaskedValue(f.path, path)) : undefined);
 }
 
 /** One step of a file: one node, with every action it did on the file. */

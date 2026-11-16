@@ -118,6 +118,16 @@ export function waterfallClock(session: Pick<Session, 'status' | 'lastActivityAt
   return { nowMs: ticking ? nowMs : last, ticking, backgroundNowMs: backgroundTicking ? nowMs : last, backgroundTicking };
 }
 
+/**
+ * The clock of a snapshot (an exported file, SessionSource.live false): nothing is in progress whatever the recorded
+ * status, and open steps end at the session's last activity (0 when that is not a time).
+ */
+export function snapshotClock(session: Pick<Session, 'status' | 'lastActivityAt'>): WaterfallClock {
+  const parsed = Date.parse(session.lastActivityAt);
+  const last = Number.isNaN(parsed) ? 0 : parsed;
+  return { nowMs: last, ticking: false, backgroundNowMs: last, backgroundTicking: false };
+}
+
 /** A subagent's step, or the node that dispatched a subagent: background work in the sense of waterfallClock. */
 export function isBackgroundStep(node: Pick<GraphNode, 'agentId' | 'kind'>): boolean {
   return node.agentId !== null || node.kind === 'subagent';

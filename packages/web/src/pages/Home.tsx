@@ -7,11 +7,15 @@ import { api, openLiveSessions } from '../client';
 import { sessionStatusView } from '../labels';
 import {
   effectiveOriginFilter, filterEmptyMessage, heroTotals, matchesOrigin, ORIGIN_FILTER_KEY, ORIGIN_FILTER_OPTIONS, originLook, parseOriginFilter,
-  projectCountsExact, projectLook, projectName, projectTitle, relativeTime, shownProjectId, showOriginFilter, stripProjects,
+  projectCountsExact, projectLook, projectName, relativeTime, shownProjectId, showOriginFilter, stripProjects,
   type OriginFilter,
 } from '../home';
+import { useMask } from '../MaskContext';
+import { linkId, maskProject, maskSessionFields, resolveMaskedId, type PageMasker } from '../masking';
 import { OriginBadge } from '../OriginBadge';
-import { contentOrigin, contentView, createSearcher, highlightParts, type ContentResult, type SearchResult, type SnippetPart } from '../search';
+import {
+  SEARCH_UNMASKED_TEXT, contentOrigin, contentView, createSearcher, highlightParts, sessionResultState, type ContentResult, type SearchResult, type SnippetPart,
+} from '../search';
 import { createThrottle } from '../throttle';
 import { useNow } from '../useNow';
 
@@ -40,10 +44,12 @@ function AnomalyMark({ count }: { count: AnomalySessionCount | undefined }) {
   );
 }
 
+/** A session-search snippet with q marked. With the switch on the snippet came masked by the server (`mask=1`) and is shown as it is. */
 function Highlighted({ text, q }: { text: string; q: string }) {
+  const parts = highlightParts(text, q);
   return (
     <>
-      {highlightParts(text, q).map((p, i) => (p.match ? <mark key={i}>{p.text}</mark> : <span key={i}>{p.text}</span>))}
+      {parts.map((p, i) => (p.match ? <mark key={i}>{p.text}</mark> : <span key={i}>{p.text}</span>))}
     </>
   );
 }
@@ -67,11 +73,15 @@ function OriginFilterSwitch({ value, onChange }: { value: OriginFilter; onChange
   );
 }
 
-function SessionResults({ result, q, now, filter, counts }: {
-  result: SearchResult | null; q: string; now: number; filter: OriginFilter; counts: AnomalyCountsResponse['counts'] | undefined;
+function SessionResults({ result, q, now, filter, counts, m }: {
+  result: SearchResult | null; q: string; now: number; filter: OriginFilter; counts: AnomalyCountsResponse['counts'] | undefined; m: PageMasker;
 }) {
   if (result === null || result.q !== q) return <p className="muted search-note">搜索中…</p>;
-  if (result.error !== null) return <p className="error">搜索失败：{result.error}</p>;
+  // With the switch on: an answer for the other position is stale; one whose snippets did not come masked is not shown.
+  const state = sessionResultState(result, m.on);
+  if (state === 'loading') return <p className="muted search-note">搜索中…</p>;
+  if (result.error !== null) return <p className="error">搜索失败：{m.text(result.error)}</p>;
+  if (state === 'unmasked') return <p className="error">{SEARCH_UNMASKED_TEXT}</p>;
   const all: SearchHit[] = result.hits ?? [];
   const hits = all.filter((h) => matchesOrigin(filter, h.session.origin));
   if (hits.length === 0) {
@@ -83,7 +93,8 @@ function SessionResults({ result, q, now, filter, counts }: {
   }
   return (
     <ul className="search-results">
-      {hits.map(({ session: s, matches }) => {
+      {hits.map(({ session: raw, matches }) => {
+        const s = maskSessionFields(raw, m);
         const status = sessionStatusView(s, now);
         return (
           <li key={s.id}>
@@ -96,10 +107,10 @@ function SessionResults({ result, q, now, filter, counts }: {
                 <span className="muted" title={formatTime(s.lastActivityAt)}>{relativeTime(s.lastActivityAt, now)}</span>
                 <AnomalyMark count={counts?.[s.id]} />
               </div>
-              {matches.map((m, i) => (
+              {matches.map((match, i) => (
                 <div key={i} className="search-match">
-                  <span className="search-field">{FIELD_LABEL[m.field]}</span>
-                  <Highlighted text={m.snippet} q={q} />
+                  <span className="search-field">{FIELD_LABEL[match.field]}</span>
+                  <Highlighted text={match.snippet} q={q} />
                 </div>
               ))}
             </a>
@@ -115,10 +126,10 @@ function SnippetText({ parts }: { parts: SnippetPart[] }) {
   return <>{parts.map((p, i) => (p.match ? <mark key={i}>{p.text}</mark> : <span key={i}>{p.text}</span>))}</>;
 }
 
-function ContentResults({ result, q, now, filter }: { result: ContentResult | null; q: string; now: number; filter: OriginFilter }) {
-  const view = contentView(result, q, filter);
+function ContentResults({ result, q, now, filter, m }: { result: ContentResult | null; q: string; now: number; filter: OriginFilter; m: PageMasker }) {
+  const view = contentView(result, q, filter, m);
   if (view.state === 'loading') return <p className="muted search-note">搜索中…</p>;
-  if (view.state === 'error') return <p className="error search-group-error">{view.message}</p>;
+  if (view.state === 'error') return <p className="error search-group-error">{m.text(view.message)}</p>;
   if (view.state === 'short') return <p className="muted search-note">{view.message}</p>;
   const notes = view.notes.length > 0 && (
     <ul className="content-notes">{view.notes.map((n) => <li key={n}>{n}</li>)}</ul>
@@ -157,26 +168,29 @@ function ContentResults({ result, q, now, filter }: { result: ContentResult | nu
 }
 
 /** Search results in two groups: sessions (title, branch, directory, prompt starts) and content inside sessions. */
-function SearchResults({ result, content, q, now, filter, counts }: {
+function SearchResults({ result, content, q, now, filter, counts, m }: {
   result: SearchResult | null; content: ContentResult | null; q: string; now: number; filter: OriginFilter;
-  counts: AnomalyCountsResponse['counts'] | undefined;
+  counts: AnomalyCountsResponse['counts'] | undefined; m: PageMasker;
 }) {
   return (
     <div className="search-groups">
       <section className="search-group" aria-labelledby="search-group-sessions">
         <h2 id="search-group-sessions">会话</h2>
-        <SessionResults result={result} q={q} now={now} filter={filter} counts={counts} />
+        <SessionResults result={result} q={q} now={now} filter={filter} counts={counts} m={m} />
       </section>
       <section className="search-group" aria-labelledby="search-group-content">
         <h2 id="search-group-content">内容</h2>
-        <ContentResults result={content} q={q} now={now} filter={filter} />
+        <ContentResults result={content} q={q} now={now} filter={filter} m={m} />
       </section>
     </div>
   );
 }
 
-export function Home({ projectId }: { projectId: string | null }) {
+export function Home({ projectId: addressed }: { projectId: string | null }) {
+  const { list: m } = useMask();
   const [projects, setProjects] = useState<Project[]>([]);
+  // With the switch on, project links carry the id masked (it is the encoded working directory).
+  const projectId = resolveMaskedId(addressed, projects.map((p) => p.id), m);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [error, setError] = useState<string | null>(null);
   // Anomaly counts of every session: null until the first answer; a failed refresh keeps the last one.
@@ -282,6 +296,8 @@ export function Home({ projectId }: { projectId: string | null }) {
   // The content group is filtered by the server (its caps apply after the filter): a filter change re-requests it.
   const searchOrigin = contentOrigin(filter);
   useEffect(() => { searcher.current?.setContentOrigin(searchOrigin); }, [searchOrigin]);
+  // The switch: both groups are asked again (with `mask=1` while on); answers for the other position are ignored.
+  useEffect(() => { searcher.current?.setMask(m.on); }, [m.on]);
   const onQuery = (value: string): void => {
     setQuery(value);
     searcher.current?.query(value);
@@ -321,23 +337,24 @@ export function Home({ projectId }: { projectId: string | null }) {
       </div>
     </div>
     {searching ? (
-      <SearchResults result={result} content={content} q={q} now={now} filter={filter} counts={anomalyCounts?.counts} />
+      <SearchResults result={result} content={content} q={q} now={now} filter={filter} counts={anomalyCounts?.counts} m={m} />
     ) : (
     <div className="home">
-      {error !== null && <p className="error">加载失败：{error}</p>}
+      {error !== null && <p className="error">加载失败：{m.text(error)}</p>}
       {showOriginFilter(projects) && <OriginFilterSwitch value={chosenFilter} onChange={chooseFilter} />}
       <nav className="project-strip" aria-label="项目">
         {projects.length === 0 && <p className="muted">还没有项目。在任意目录里用一次 Claude Code、Codex 或 Cursor，它就会出现在这里。</p>}
         {filterEmptyMessage(projects, filter) !== null && <p className="muted">{filterEmptyMessage(projects, filter)}</p>}
         {strip.map((p) => {
           const look = projectLook(p.id);
-          const path = p.cwd ?? p.id;
+          const shownProject = maskProject(p, m);
+          const path = shownProject.displayPath;
           return (
-            <a key={p.id} className={`project-tile${p.id === shownId ? ' selected' : ''}`} href={`#/p/${encodeURIComponent(p.id)}`}
+            <a key={p.id} className={`project-tile${p.id === shownId ? ' selected' : ''}`} href={`#/p/${encodeURIComponent(linkId(p.id, m))}`}
               aria-current={p.id === shownId ? 'true' : undefined} style={{ ['--hue' as string]: look.hue } as CSSProperties}>
               <span className="project-avatar" aria-hidden="true">{look.emoji}</span>
               <span className="project-text">
-                <span className="project-name">{projectTitle(p)}</span>
+                <span className="project-name">{shownProject.title}</span>
                 <span className="project-path" title={path}>{path}</span>
               </span>
               <span className="project-counts">
@@ -356,15 +373,16 @@ export function Home({ projectId }: { projectId: string | null }) {
         })}
       </nav>
       <section className="sessions">
-        <h2>{shown !== undefined ? `${projectTitle(shown)} 的会话` : '会话'}</h2>
+        <h2>{shown !== undefined ? `${maskProject(shown, m).title} 的会话` : '会话'}</h2>
         {shownId !== null && sessions.length === 0 && <p className="muted">这个项目还没有会话</p>}
-        {anomalyCounts === null && anomalyError !== null && <p className="muted anomaly-home-note">异常标记暂时加载不出来（{anomalyError}），稍后会自动重试。</p>}
+        {anomalyCounts === null && anomalyError !== null && <p className="muted anomaly-home-note">异常标记暂时加载不出来（{m.text(anomalyError)}），稍后会自动重试。</p>}
         {anomalyCounts?.computing === true && <p className="muted anomaly-home-note">异常还在计算，标记可能不全。</p>}
         {sessions.length > 0 && shownSessions.length === 0 && filter !== 'all' && (
           <p className="muted">这个项目没有 {originLook(filter).label} 会话</p>
         )}
         <ul className="session-grid">
-          {shownSessions.map((s) => {
+          {shownSessions.map((raw) => {
+            const s = maskSessionFields(raw, m);
             const status = sessionStatusView(s, now);
             return (
             <li key={s.id}>

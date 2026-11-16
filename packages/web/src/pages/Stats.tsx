@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode, type RefObject } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode, type RefObject } from 'react';
 import type { Origin, Project, StatsBucket, StatsDay, StatsResponse, StatsTokens, StatsTool } from '@agent-canvas/shared';
 import { api } from '../client';
-import { ORIGIN_LOOK, projectTitle, stripProjects } from '../home';
+import { ORIGIN_LOOK, stripProjects } from '../home';
+import { useMask } from '../MaskContext';
+import { linkId, maskProject, maskStats, projectFromOptionValue, projectOptionValue, type PageMasker } from '../masking';
 import { sessionNodeHash } from '../route';
 import {
   DEFAULT_STATS_FILTER, STATS_FILTER_KEY, STATS_RANGE_OPTIONS, availableOrigins, bucketLabel, bucketLong, columnLayout,
@@ -70,14 +72,15 @@ function useWidth<T extends HTMLElement>(): [RefObject<T>, number] {
 
 // ---- filters ----
 
-function FilterRow({ filter, projects, onChange }: {
-  filter: StatsFilter; projects: Project[] | null; onChange: (f: StatsFilter) => void;
+function FilterRow({ filter, projects, m, onChange }: {
+  filter: StatsFilter; projects: Project[] | null; m: PageMasker; onChange: (f: StatsFilter) => void;
 }) {
   const origins = projects === null ? [] : availableOrigins(projects);
   const originOptions: { value: StatsOriginFilter; label: string }[] = [
     { value: 'all', label: '全部' }, ...origins.map((o) => ({ value: o, label: originName(o) })),
   ];
   const projectOptions = projects === null ? [] : stripProjects(projects, filter.origin, filter.projectId);
+  const projectIds = projectOptions.map((p) => p.id);
   return (
     <div className="stats-filters">
       <div className="view-switch" role="group" aria-label="时间范围">
@@ -100,9 +103,9 @@ function FilterRow({ filter, projects, onChange }: {
       {projects !== null && projects.length > 0 && (
         <label className="stats-project">
           <span className="visually-hidden">项目</span>
-          <select value={filter.projectId ?? ''} onChange={(e) => onChange({ ...filter, projectId: e.target.value === '' ? null : e.target.value })}>
+          <select value={projectOptionValue(filter.projectId, projectIds, m)} onChange={(e) => onChange({ ...filter, projectId: projectFromOptionValue(e.target.value, projectIds, m) })}>
             <option value="">全部项目</option>
-            {projectOptions.map((p) => <option key={p.id} value={p.id}>{projectTitle(p)}</option>)}
+            {projectOptions.map((p) => <option key={p.id} value={projectOptionValue(p.id, projectIds, m)}>{maskProject(p, m).title}</option>)}
           </select>
         </label>
       )}
@@ -433,7 +436,7 @@ function formatWhen(iso: string): string {
   return d.toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
-function Slowest({ data, projectNames }: { data: StatsResponse; projectNames: Map<string, string> }) {
+function Slowest({ data, projectNames, m }: { data: StatsResponse; projectNames: Map<string, string>; m: PageMasker }) {
   const multi = data.byOrigin.length > 1;
   return (
     <section aria-labelledby="stats-slow-h">
@@ -448,7 +451,7 @@ function Slowest({ data, projectNames }: { data: StatsResponse; projectNames: Ma
                 <tr key={`${c.sessionId}:${c.nodeId}`}>
                   <td><a href={sessionNodeHash(c.sessionId, c.nodeId)} title="打开这个会话，并定位到这一步"><ToolName origin={c.origin} name={c.toolName} multi={multi} /></a></td>
                   <td className="num">{formatSpan(c.durationMs)}</td>
-                  <td className="wrap">{projectNames.get(c.projectId) ?? c.projectId}</td>
+                  <td className="wrap">{projectNames.get(c.projectId) ?? m.text(c.projectId)}</td>
                   <td>{formatWhen(c.startedAt)}</td>
                 </tr>
               ))}
@@ -487,7 +490,7 @@ function MostFailing({ data }: { data: StatsResponse }) {
   );
 }
 
-function ByProject({ data }: { data: StatsResponse }) {
+function ByProject({ data, m }: { data: StatsResponse; m: PageMasker }) {
   return (
     <section aria-labelledby="stats-proj-h">
       <SectionHead id="stats-proj-h" title="按项目"
@@ -504,7 +507,7 @@ function ByProject({ data }: { data: StatsResponse }) {
           <tbody>
             {data.byProject.map((p) => (
               <tr key={p.projectId ?? '\u0000other'}>
-                <td className="wrap">{p.projectId === null ? projectRowName(p) : <a href={`#/p/${encodeURIComponent(p.projectId)}`}>{projectRowName(p)}</a>}</td>
+                <td className="wrap">{p.projectId === null ? projectRowName(p) : <a href={`#/p/${encodeURIComponent(linkId(p.projectId, m))}`}>{projectRowName(p)}</a>}</td>
                 <td className="num">{formatCount(p.sessions)}</td>
                 <td className="num">{formatCount(p.turns)}</td>
                 <td className="num">{formatSpan(p.activeMs)}</td>
@@ -522,7 +525,7 @@ function ByProject({ data }: { data: StatsResponse }) {
 
 // ---- the page ----
 
-function StatsBody({ data, projectNames }: { data: StatsResponse; projectNames: Map<string, string> }) {
+function StatsBody({ data, projectNames, m }: { data: StatsResponse; projectNames: Map<string, string>; m: PageMasker }) {
   if (isEmptyStats(data)) {
     return (
       <section className="stats-empty">
@@ -547,10 +550,10 @@ function StatsBody({ data, projectNames }: { data: StatsResponse; projectNames: 
       {data.byOrigin.length > 1 && <OriginTable data={data} />}
       <ToolBars data={data} />
       <div className="stats-pair">
-        <Slowest data={data} projectNames={projectNames} />
+        <Slowest data={data} projectNames={projectNames} m={m} />
         <MostFailing data={data} />
       </div>
-      <ByProject data={data} />
+      <ByProject data={data} m={m} />
     </>
   );
 }
@@ -593,9 +596,14 @@ export function Stats() {
     setChosen(f);
   };
 
+  // With the masking switch on, the answer's tool and project names are masked once per answer.
+  const { list: m } = useMask();
+  const rawData = load.data;
+  const data = useMemo(() => (rawData === null ? null : maskStats(rawData, m)), [rawData, m]);
+  const loadError = load.error === null ? null : m.text(load.error);
   const projectNames = new Map<string, string>();
-  for (const p of projects ?? []) projectNames.set(p.id, projectTitle(p));
-  for (const p of load.data?.byProject ?? []) if (p.projectId !== null && !projectNames.has(p.projectId)) projectNames.set(p.projectId, p.name);
+  for (const p of projects ?? []) projectNames.set(p.id, maskProject(p, m).title);
+  for (const p of data?.byProject ?? []) if (p.projectId !== null && !projectNames.has(p.projectId)) projectNames.set(p.projectId, p.name);
 
   const retry = <button type="button" className="notify-btn stats-retry" onClick={() => setAttempt((x) => x + 1)}>再试一次</button>;
 
@@ -607,17 +615,17 @@ export function Stats() {
           {load.data !== null ? `${rangeLabel(load.data.range)} · ` : ''}所有会话合在一起看：时间花在哪、哪些调用最慢、哪些最常失败。
         </p>
       </div>
-      <FilterRow filter={filter} projects={projects} onChange={change} />
-      {load.data === null ? (
-        load.error !== null
-          ? <p className="error stats-state">加载失败：{load.error} {retry}</p>
+      <FilterRow filter={filter} projects={projects} m={m} onChange={change} />
+      {data === null ? (
+        loadError !== null
+          ? <p className="error stats-state">加载失败：{loadError} {retry}</p>
           : <p className="muted stats-state">加载中…</p>
       ) : (
         <>
-          {load.error !== null && <p className="error stats-state">刷新失败：{load.error}。下面是上一次的结果。{retry}</p>}
-          {coverageNotes(load.data).map((line) => <p key={line} className="stats-note stats-coverage">{line}</p>)}
+          {loadError !== null && <p className="error stats-state">刷新失败：{loadError}。下面是上一次的结果。{retry}</p>}
+          {coverageNotes(data).map((line) => <p key={line} className="stats-note stats-coverage">{line}</p>)}
           <div className={`stats-body${load.loading ? ' is-loading' : ''}`} aria-busy={load.loading}>
-            <StatsBody data={load.data} projectNames={projectNames} />
+            <StatsBody data={data} projectNames={projectNames} m={m} />
           </div>
         </>
       )}

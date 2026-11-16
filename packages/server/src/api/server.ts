@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import Fastify, { type FastifyInstance } from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import fastifyStatic from '@fastify/static';
 import fastifyWebsocket from '@fastify/websocket';
 import {
@@ -25,8 +25,11 @@ import type { NotificationService } from '../notify/service.js';
 import type { Pipeline } from '../pipeline.js';
 import { KEY_PREFIXES } from '../sources/source.js';
 import { storageStatus, type StorageDiagnostics } from '../store/migrate-storage.js';
-import type { Store } from '../store/store.js';
+import { SAMPLE_MAX, type Store } from '../store/store.js';
 import { AnomaliesService, parseAnomalyListQuery } from '../anomalies/service.js';
+import { ExportService, type ExportAnswer } from '../export/service.js';
+import { LearnedValuesService, parseLearnedBody } from '../export/learned.js';
+import { maskedContentSnippet, maskedDiagnostics, maskedSessionMatch, snippetMasker } from '../export/masked-search.js';
 import { FilesService, parseFilesQuery } from '../files/service.js';
 import { parseStatsQuery, StatsService, storeStatsSource } from '../stats/service.js';
 
@@ -113,6 +116,29 @@ export function isAllowedRequest(headers: {
   return true;
 }
 
+/**
+ * The export routes (and the export settings' PUT) send a session's whole text, or change what masking does: on top of
+ * isAllowedRequest they require an `Origin` that is this very service (an http loopback origin whose host:port is the
+ * request's Host), so a request without Origin (another program, a link) or from another page is refused.
+ */
+export function isSameOriginRequest(headers: { host?: string | undefined; origin?: string | undefined }): boolean {
+  const { host, origin } = headers;
+  if (typeof host !== 'string' || typeof origin !== 'string') return false;
+  let u: URL;
+  try {
+    u = new URL(origin);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== 'http:' || !LOOPBACK_HOSTNAMES.has(u.hostname.toLowerCase())) return false;
+  return u.host.toLowerCase() === host.toLowerCase();
+}
+
+/** `Content-Type: application/json` (parameters such as charset allowed). */
+export function isJsonContentType(type: string | undefined): boolean {
+  return typeof type === 'string' && /^application\/json\s*(;|$)/i.test(type);
+}
+
 /** Whether the path names an existing file (only stat'ed, never opened). */
 function isFile(file: string | null): boolean {
   if (file === null || file === '') return false;
@@ -176,6 +202,8 @@ export function buildServer(deps: {
   storage?: { status(): StorageDiagnostics };
   /** The search index build (start(), when the index was incomplete): Diagnostics.search with its lastError. */
   search?: { status(): SearchIndexStatus };
+  /** Export and its settings (default: one reading `store`, settings in config.dataDir). */
+  exports?: ExportService;
 }): FastifyInstance {
   const { store, pipeline, config, notifications } = deps;
   const stats = deps.stats ?? new StatsService(storeStatsSource(store));
@@ -185,6 +213,8 @@ export function buildServer(deps: {
   // put three summaries of a large session in one synchronous stretch (measured: 450 ms instead of 250 ms for a
   // 100,000-node session) and make every background recompute of a running session rebuild its stats too.
   files.shareReadsWith(stats);
+  const exports = deps.exports ?? new ExportService({ store, dataDir: config.dataDir });
+  const learned = new LearnedValuesService(store);
   const app = Fastify();
   const connections = new Set<Connection>();
 
@@ -233,12 +263,15 @@ export function buildServer(deps: {
   const unsubscribeFiles = pipeline.onChanges((changes) => files.noteChanges(changes));
   // Likewise the anomaly summaries (running sessions may be recomputed at once for the notifications, see the service).
   const unsubscribeAnomalies = pipeline.onChanges((changes) => anomalies.noteChanges(changes));
+  // Learned values of a changed session are computed again on the next request.
+  const unsubscribeLearned = pipeline.onChanges((changes) => learned.noteChanges(changes));
   app.addHook('onClose', async () => {
     unsubscribe();
     unsubscribeResync();
     unsubscribeStats();
     unsubscribeFiles();
     unsubscribeAnomalies();
+    unsubscribeLearned();
     if (deps.files === undefined) files.close(); // the default one is ours
     if (deps.anomalies === undefined) anomalies.close();
     connections.clear();
@@ -292,16 +325,23 @@ export function buildServer(deps: {
 
   app.get('/api/projects', async () => store.listProjects(Date.now()));
   app.get<{ Params: { id: string } }>('/api/projects/:id/sessions', async (req) => store.listSessions(req.params.id));
-  app.get<{ Querystring: { q?: unknown; limit?: unknown } }>('/api/search', async (req): Promise<SearchHit[]> => {
+  // `mask=1` (the page's masking switch): every snippet is cut from the masked full source (masked-search.ts), with
+  // `masked: true` on each match; without it the answer is unchanged.
+  app.get<{ Querystring: { q?: unknown; limit?: unknown; mask?: unknown } }>('/api/search', async (req, reply): Promise<SearchHit[]> => {
     const { q, limit } = req.query;
     if (typeof q !== 'string') return [];
     // An unparseable limit falls back to the default; an out-of-range one is clamped.
     const parsed = typeof limit === 'string' && /^\s*-?\d+\s*$/.test(limit) ? Number(limit) : SEARCH_DEFAULT_LIMIT;
-    return store.searchSessions(q, Math.min(SEARCH_MAX_LIMIT, Math.max(1, parsed)));
+    const hits = store.searchSessions(q, Math.min(SEARCH_MAX_LIMIT, Math.max(1, parsed)));
+    if (req.query.mask !== '1') return hits;
+    reply.header('cache-control', 'no-store');
+    const masker = snippetMasker(config.dataDir);
+    return hits.map((hit) => ({ ...hit, matches: hit.matches.map((m) => maskedSessionMatch(masker, store, hit, m, q)) }));
   });
   // Search inside sessions: conversation text by design (the snippets). `q` other than one string: no hits. 400 for an
   // unknown origin. indexing: the index is still being built (results may be incomplete).
-  app.get<{ Querystring: { q?: unknown; origin?: unknown; projectId?: unknown } }>(
+  // `mask=1`: snippets cut from the masked part holding the match, `masked: true` on each hit.
+  app.get<{ Querystring: { q?: unknown; origin?: unknown; projectId?: unknown; mask?: unknown } }>(
     '/api/search/content',
     async (req, reply): Promise<ContentSearchResponse | undefined> => {
       const { q, origin, projectId } = req.query;
@@ -311,9 +351,13 @@ export function buildServer(deps: {
       if (projectId !== undefined && typeof projectId !== 'string') return reply.code(400).send({ error: 'bad projectId' });
       const indexing = store.searchIndexStatus().indexing;
       if (typeof q !== 'string') return { hits: [], truncated: false, shortQuery: false, indexing };
+      const masked = req.query.mask === '1';
+      const masker = masked ? snippetMasker(config.dataDir) : null;
+      if (masked) reply.header('cache-control', 'no-store');
       const result = store.searchContent(q, {
         origin: (origin as Origin | undefined) ?? null,
         projectId: projectId === undefined || projectId === '' ? null : projectId,
+        ...(masked ? { snippet: (it, at, length, part) => maskedContentSnippet(masker, it, at, length, part) } : {}),
       });
       return { ...result, indexing };
     },
@@ -365,11 +409,12 @@ export function buildServer(deps: {
     return anomalies.list(query);
   });
   app.get('/api/anomalies/counts', async () => anomalies.counts());
-  app.get(
+  // `mask=1`: unknown-record samples (cut raw records) masked.
+  app.get<{ Querystring: { mask?: unknown } }>(
     '/api/diagnostics',
-    async (): Promise<Diagnostics> => {
+    async (req, reply): Promise<Diagnostics> => {
       const cursorPoll = pipeline.pollStatus('cursor');
-      return {
+      const d: Diagnostics = {
         ...store.diagnostics(),
         hookEvents: store.allHookEventStats(),
         lastHookAt: pipeline.lastHookAt(),
@@ -389,8 +434,48 @@ export function buildServer(deps: {
         storage: deps.storage?.status() ?? storageStatus(store),
         search: deps.search?.status() ?? store.searchIndexStatus(),
       };
+      if (req.query.mask !== '1') return d;
+      reply.header('cache-control', 'no-store');
+      return maskedDiagnostics(snippetMasker(config.dataDir), d, SAMPLE_MAX);
     },
   );
+
+  // ---- export (spec 2026-11-13-export-and-masking-design.md 4.2): POST with a JSON body from this service's own page.
+  const sameOriginJson = async (req: FastifyRequest, reply: FastifyReply): Promise<FastifyReply | undefined> => {
+    if (isSameOriginRequest(req.headers) && isJsonContentType(req.headers['content-type'])) return undefined;
+    return reply.code(403).header('cache-control', 'no-store').send({ error: '只接受来自本页面的 JSON 请求' });
+  };
+  const answer = (reply: FastifyReply, a: ExportAnswer): FastifyReply => {
+    reply.header('cache-control', 'no-store');
+    if ('file' in a) return reply.code(200).headers(a.headers).send(a.file);
+    return reply.code(a.status).send(a.json);
+  };
+  /** True once the client has gone away before the answer was sent. */
+  const goneFlag = (reply: FastifyReply): (() => boolean) => {
+    let gone = false;
+    reply.raw.once('close', () => {
+      if (!reply.raw.writableFinished) gone = true;
+    });
+    return () => gone || reply.raw.destroyed;
+  };
+  app.post<{ Params: { id: string } }>('/api/sessions/:id/export/preview', { onRequest: sameOriginJson }, async (req, reply) =>
+    answer(reply, await exports.preview(req.params.id, req.body, goneFlag(reply))),
+  );
+  app.post<{ Params: { id: string } }>('/api/sessions/:id/export', { onRequest: sameOriginJson }, async (req, reply) =>
+    answer(reply, await exports.export(req.params.id, req.body, goneFlag(reply))),
+  );
+  app.get('/api/export/settings', async (_req, reply) => reply.header('cache-control', 'no-store').send(exports.getSettings()));
+  app.put('/api/export/settings', { onRequest: sameOriginJson }, async (req, reply) => answer(reply, exports.putSettings(req.body)));
+  // The session's learned secret values for the page's masking switch (export/learned.ts explains why it exists).
+  // Guarded like the export routes; secret values: no-store, never logged. 200 { values, capped }, 400, 403, 404.
+  app.post<{ Params: { id: string } }>('/api/sessions/:id/mask/learned', { onRequest: sameOriginJson }, async (req, reply) => {
+    reply.header('cache-control', 'no-store');
+    const body = parseLearnedBody(req.body);
+    if (!body.ok) return reply.code(400).send({ error: body.error });
+    const result = await learned.get(req.params.id, body.categories);
+    if (result === null) return reply.code(404).send({ error: 'session not found' });
+    return result;
+  });
 
   if (notifications !== undefined) {
     app.get('/api/notifications/settings', async (): Promise<NotificationSettingsResponse> => notifications.getSettings());

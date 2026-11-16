@@ -4,6 +4,7 @@ import {
 } from '@agent-canvas/shared';
 import { originLook, type OriginFilter } from './home';
 import { KIND_LABEL } from './labels';
+import { IDENTITY_MASKER, type PageMasker } from './masking';
 import { sessionNodeHash } from './route';
 
 export const SEARCH_DEBOUNCE_MS = 250;
@@ -16,26 +17,50 @@ const asciiLower = (s: string): string => s.replace(/[A-Z]/g, (c) => c.toLowerCa
  * 只有 ASCII 字母不区分大小写，按字面查找（不用正则、不做 Unicode 大小写折叠）。q 为空或未出现时返回单段。
  */
 export function highlightParts(snippet: string, q: string): { text: string; match: boolean }[] {
-  const needle = asciiLower(Array.from(q.trim()).slice(0, SEARCH_MAX_CHARS).join('').trim());
-  if (needle === '') return [{ text: snippet, match: false }];
-  const hay = asciiLower(snippet);
+  const ranges = highlightRanges(snippet, q);
+  if (ranges.length === 0) return [{ text: snippet, match: false }];
   const parts: { text: string; match: boolean }[] = [];
   let last = 0;
-  for (let at = hay.indexOf(needle); at >= 0; at = hay.indexOf(needle, last)) {
+  for (const [at, end] of ranges) {
     if (at > last) parts.push({ text: snippet.slice(last, at), match: false });
-    parts.push({ text: snippet.slice(at, at + needle.length), match: true });
-    last = at + needle.length;
+    parts.push({ text: snippet.slice(at, end), match: true });
+    last = end;
   }
   if (last < snippet.length) parts.push({ text: snippet.slice(last), match: false });
-  return parts.length === 0 ? [{ text: snippet, match: false }] : parts;
+  return parts;
 }
 
-export interface SearchResult { q: string; hits: SearchHit[] | null; error: string | null }
+/** Where q occurs in the snippet (highlightParts' rule), as [start, end) ranges in order. */
+export function highlightRanges(snippet: string, q: string): [number, number][] {
+  const needle = asciiLower(Array.from(q.trim()).slice(0, SEARCH_MAX_CHARS).join('').trim());
+  if (needle === '') return [];
+  const hay = asciiLower(snippet);
+  const out: [number, number][] = [];
+  for (let at = hay.indexOf(needle); at >= 0; at = hay.indexOf(needle, at + needle.length)) out.push([at, at + needle.length]);
+  return out;
+}
+
+/** `mask: true`: requested with `mask=1` (the server masked the snippets); absent: plain. */
+export interface SearchResult { q: string; hits: SearchHit[] | null; error: string | null; mask?: true }
 /**
  * The content group's answer for q under an origin filter (null: all origins; the server filters, so its caps apply
  * after the filter): response null when q is too short or the request failed (error set).
  */
-export interface ContentResult { q: string; origin: Origin | null; response: ContentSearchResponse | null; error: string | null }
+export interface ContentResult { q: string; origin: Origin | null; response: ContentSearchResponse | null; error: string | null; mask?: true }
+
+/** Shown instead of results that should have come masked (switch on) but did not: nothing of them is rendered. */
+export const SEARCH_UNMASKED_TEXT = '检索结果暂时无法遮蔽显示';
+
+/**
+ * The session group's state for the switch: 'loading' while the answer is for the other switch position (stale),
+ * 'unmasked' when the switch is on and a match did not come masked by the server (fail closed: render none of it),
+ * else 'ok'.
+ */
+export function sessionResultState(result: SearchResult, maskOn: boolean): 'loading' | 'unmasked' | 'ok' {
+  if ((result.mask === true) !== maskOn) return 'loading';
+  if (maskOn && (result.hits ?? []).some((h) => h.matches.some((m) => m.masked !== true))) return 'unmasked';
+  return 'ok';
+}
 
 const errorText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
@@ -45,12 +70,13 @@ const errorText = (e: unknown): string => (e instanceof Error ? e.message : Stri
  * 内容请求带着来源筛选（setContentOrigin）；筛选变了只重发内容请求，旧筛选的结果晚到同样被丢弃。
  */
 export function createSearcher(deps: {
-  search(q: string): Promise<SearchHit[]>;
+  /** `mask` true: ask for server-masked snippets (`mask=1`); the argument is passed only when true. */
+  search(q: string, mask?: true): Promise<SearchHit[]>;
   onResult(r: SearchResult): void;
-  searchContent?(q: string, origin: Origin | null): Promise<ContentSearchResponse>;
+  searchContent?(q: string, origin: Origin | null, mask?: true): Promise<ContentSearchResponse>;
   onContent?(r: ContentResult): void;
   delayMs?: number;
-}): { query(q: string): void; setContentOrigin(origin: Origin | null): void; dispose(): void } {
+}): { query(q: string): void; setContentOrigin(origin: Origin | null): void; setMask(on: boolean): void; dispose(): void } {
   const delayMs = deps.delayMs ?? SEARCH_DEBOUNCE_MS;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let latest = 0;
@@ -59,6 +85,9 @@ export function createSearcher(deps: {
   let origin: Origin | null = null;
   /** The query whose requests were sent (null: too short, or nothing sent yet). */
   let sentQ: string | null = null;
+  /** The masking switch: requests carry `mask=1` and results `mask: true` while on. */
+  let mask = false;
+  const tag = <T extends object>(r: T, on: boolean): T & { mask?: true } => (on ? { ...r, mask: true as const } : r);
 
   const runContent = (q: string): void => {
     const { searchContent, onContent } = deps;
@@ -66,10 +95,22 @@ export function createSearcher(deps: {
     latestContent += 1;
     const mine = latestContent;
     const o = origin;
+    const on = mask;
     const current = (): boolean => !disposed && mine === latestContent;
-    searchContent(q, o).then(
-      (response) => { if (current()) onContent({ q, origin: o, response, error: null }); },
-      (e: unknown) => { if (current()) onContent({ q, origin: o, response: null, error: errorText(e) }); },
+    (on ? searchContent(q, o, true) : searchContent(q, o)).then(
+      (response) => { if (current()) onContent(tag({ q, origin: o, response, error: null }, on)); },
+      (e: unknown) => { if (current()) onContent(tag({ q, origin: o, response: null, error: errorText(e) }, on)); },
+    );
+  };
+
+  const runSessions = (q: string): void => {
+    latest += 1;
+    const mine = latest;
+    const on = mask;
+    const current = (): boolean => !disposed && mine === latest;
+    (on ? deps.search(q, true) : deps.search(q)).then(
+      (hits) => { if (current()) deps.onResult(tag({ q, hits, error: null }, on)); },
+      (e: unknown) => { if (current()) deps.onResult(tag({ q, hits: null, error: errorText(e) }, on)); },
     );
   };
 
@@ -80,8 +121,6 @@ export function createSearcher(deps: {
       latest += 1;
       latestContent += 1;
       sentQ = null;
-      const mine = latest;
-      const current = (): boolean => !disposed && mine === latest;
       if (timer !== null) clearTimeout(timer);
       timer = null;
       if (Array.from(q).length < SEARCH_MIN_CHARS) {
@@ -92,10 +131,7 @@ export function createSearcher(deps: {
       timer = setTimeout(() => {
         timer = null;
         sentQ = q;
-        deps.search(q).then(
-          (hits) => { if (current()) deps.onResult({ q, hits, error: null }); },
-          (e: unknown) => { if (current()) deps.onResult({ q, hits: null, error: errorText(e) }); },
-        );
+        runSessions(q);
         runContent(q);
       }, delayMs);
     },
@@ -104,6 +140,15 @@ export function createSearcher(deps: {
       origin = next;
       // A pending (debounced) query picks the new filter up when it fires.
       if (sentQ !== null) runContent(sentQ);
+    },
+    setMask(on) {
+      if (disposed || on === mask) return;
+      mask = on;
+      // Both groups are asked again; the answers for the other position are dropped (and ignored by the views).
+      if (sentQ !== null) {
+        runSessions(sentQ);
+        runContent(sentQ);
+      }
     },
     dispose() {
       disposed = true;
@@ -145,20 +190,24 @@ export interface ContentRow {
 /** One session's hits under one heading (title and origin shown once). */
 export interface ContentSessionGroup { key: string; sessionId: string; origin: Origin; title: string; rows: ContentRow[] }
 
-/** Groups consecutive hits of the same session (the server sends them grouped), keeping the server's order. */
-export function groupContentHits(hits: readonly ContentHit[]): ContentSessionGroup[] {
+/**
+ * Groups consecutive hits of the same session (the server sends them grouped), keeping the server's order. With the
+ * masking switch on (`m`), the session title (isCutTitle) and tool name are masked here; the snippet was masked by the
+ * server (`mask=1`) and is shown as it came (its match may be a placeholder, which is then the marked part).
+ */
+export function groupContentHits(hits: readonly ContentHit[], m: PageMasker = IDENTITY_MASKER): ContentSessionGroup[] {
   const groups: ContentSessionGroup[] = [];
   for (const h of hits) {
     let g = groups.at(-1);
     if (g === undefined || g.sessionId !== h.sessionId) {
-      g = { key: `${groups.length}:${h.sessionId}`, sessionId: h.sessionId, origin: h.origin, title: h.sessionTitle ?? h.sessionId.slice(0, 8), rows: [] };
+      g = { key: `${groups.length}:${h.sessionId}`, sessionId: h.sessionId, origin: h.origin, title: h.sessionTitle !== null ? m.title(h.sessionTitle) : h.sessionId.slice(0, 8), rows: [] };
       groups.push(g);
     }
     g.rows.push({
       key: `${g.key}:${g.rows.length}:${h.nodeId}`,
       href: sessionNodeHash(h.sessionId, h.nodeId),
       kindLabel: KIND_LABEL[h.kind] ?? h.kind,
-      toolName: h.toolName,
+      toolName: h.toolName === null ? null : m.text(h.toolName),
       at: h.at,
       inSubagent: h.agentId !== null,
       parts: snippetParts(h.snippet),
@@ -178,11 +227,15 @@ export type ContentView =
  * What the content group shows for the trimmed query q under the page's origin filter. The server applies the filter
  * (contentOrigin); an answer for another query or another filter counts as still loading.
  */
-export function contentView(result: ContentResult | null, q: string, filter: OriginFilter): ContentView {
+export function contentView(result: ContentResult | null, q: string, filter: OriginFilter, m: PageMasker = IDENTITY_MASKER): ContentView {
   if (Array.from(q).length < SEARCH_MIN_CHARS) return { state: 'short', message: `至少输入 ${SEARCH_MIN_CHARS} 个字才搜内容` };
   if (result === null || result.q !== q || result.origin !== contentOrigin(filter)) return { state: 'loading' };
+  // An answer for the other switch position is stale.
+  if ((result.mask === true) !== m.on) return { state: 'loading' };
   if (result.response === null) return result.error !== null ? { state: 'error', message: `内容搜索失败：${result.error}` } : { state: 'loading' };
   const r = result.response;
+  // Fail closed: with the switch on, a hit that did not come masked by the server is not rendered at all.
+  if (m.on && r.hits.some((h) => h.masked !== true)) return { state: 'error', message: SEARCH_UNMASKED_TEXT };
   const notes: string[] = [];
   if (r.indexing) notes.push(CONTENT_NOTE_INDEXING);
   if (r.shortQuery) notes.push(CONTENT_NOTE_SHORT_QUERY);
@@ -190,7 +243,7 @@ export function contentView(result: ContentResult | null, q: string, filter: Ori
   if (r.hits.length === 0) {
     return { state: 'empty', message: filter === 'all' ? '没有匹配的内容' : `没有匹配的 ${originLook(filter).label} 内容`, notes };
   }
-  return { state: 'hits', groups: groupContentHits(r.hits), notes };
+  return { state: 'hits', groups: groupContentHits(r.hits, m), notes };
 }
 
 /** The origin the content request carries for the page's filter (null: no filter). */

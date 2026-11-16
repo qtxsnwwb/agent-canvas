@@ -6,7 +6,8 @@
 //   release/dist/vacuum-child.js, release/dist/checkpointer.js
 //                          the scripts the store starts as a child process / worker thread; the store looks for them
 //                          next to its own code (the chunks in dist/), by these names
-//   release/web/           the built web app
+//   release/web/           the built web app, with viewer-template.html (the exported HTML file's template; the
+//                          server looks for it in web/ next to dist/, see packages/server/src/export/html.ts)
 //   release/README.md, release/LICENSE
 import fs from 'node:fs';
 import path from 'node:path';
@@ -27,6 +28,7 @@ for (const [what, p] of [
   ['server build', entry],
   ...Object.values(helperEntries).map((p) => ['server build', path.join(root, p)]),
   ['web build', path.join(webDist, 'index.html')],
+  ['viewer template (the second web build)', path.join(webDist, 'viewer-template.html')],
 ]) {
   if (!fs.existsSync(p)) {
     console.error(`pack: missing ${what} (${path.relative(root, p)}); run "pnpm build" first`);
@@ -62,6 +64,10 @@ for (const name of ['cli', ...Object.keys(helperEntries)]) {
 }
 
 fs.cpSync(webDist, path.join(out, 'web'), { recursive: true });
+if (!fs.existsSync(path.join(out, 'web', 'viewer-template.html'))) {
+  console.error('pack: web/viewer-template.html is missing from the package');
+  process.exit(1);
+}
 fs.copyFileSync(path.join(root, 'README.md'), path.join(out, 'README.md'));
 fs.copyFileSync(path.join(root, 'LICENSE'), path.join(out, 'LICENSE'));
 

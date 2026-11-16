@@ -1,10 +1,12 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { Diagnostics as DiagnosticsData, Origin } from '@agent-canvas/shared';
 import { api } from '../client';
 import {
   codexDirLine, createPoller, cursorBlockVisible, cursorDbLine, cursorHooks, cursorPollLine, cursorUnknownRecords, fileOrigin, formatAge, hookState, hooksByOrigin, summarizeDiagnostics, truncateSample, FILES_BEHIND_MAX,
   type OriginHooks,
 } from '../diagnostics';
+import { useMask } from '../MaskContext';
+import { maskDiagnostics } from '../masking';
 import { diagnosticsNotificationLines } from '../notifications';
 import { OriginBadge } from '../OriginBadge';
 import { searchIndexLines, storageLines, type DiagLine } from '../storageDiagnostics';
@@ -148,12 +150,21 @@ function CursorSection({ data }: { data: DiagnosticsData }) {
 }
 
 export function Diagnostics() {
-  const [data, setData] = useState<DiagnosticsData | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  /** The last answer and whether it was asked for with `mask=1`. */
+  const [loaded, setData] = useState<{ d: DiagnosticsData; masked: boolean } | null>(null);
+  const [rawError, setError] = useState<string | null>(null);
+  // With the masking switch on: the unknown-record samples (conversation text) come masked by the server (`?mask=1`,
+  // cut text in truncated mode); file keys, errors and paths are masked here (the samples once more, harmlessly). An
+  // answer asked for without `mask=1` is not shown while the switch is on (fail closed: 加载中 until the masked one).
+  const { list: m } = useMask();
+  const rawData = loaded !== null && loaded.masked === m.on ? loaded.d : null;
+  const data = useMemo(() => (rawData === null ? null : maskDiagnostics(rawData, m)), [rawData, m]);
+  const error = rawError === null ? null : m.text(rawError);
 
+  const maskOn = m.on;
   useEffect(() => {
     const poller = createPoller({
-      load: api.diagnostics,
+      load: () => (maskOn ? api.diagnostics(true) : api.diagnostics()).then((d) => ({ d, masked: maskOn })),
       onResult: (r) => {
         if (r.ok) { setData(r.value); setError(null); } else setError(r.error);
       },
@@ -161,7 +172,7 @@ export function Diagnostics() {
     });
     poller.start();
     return () => poller.stop();
-  }, []);
+  }, [maskOn]);
 
   if (data === null) {
     return (

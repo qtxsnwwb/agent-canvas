@@ -5,6 +5,7 @@ import {
   type GraphNode,
   type NodeDetail,
   type Session,
+  SESSION_TITLE_CHARS,
 } from '@agent-canvas/shared';
 import type { RawEvent } from '../store/store.js';
 import { parseCodexHook, type CodexHook } from './codex-hooks.js';
@@ -23,7 +24,8 @@ const EPOCH = '1970-01-01T00:00:00.000Z';
 /** Title sources, highest priority first: the session index (`thread_name`), then the first root-thread prompt. */
 const TITLE_PRIORITY = ['index', 'prompt'] as const;
 type TitleSource = (typeof TITLE_PRIORITY)[number];
-const PROMPT_TITLE_CHARS = 60;
+/** The cut point of prompt-derived titles, shared with the masking of cut titles (isCutTitle). */
+const PROMPT_TITLE_CHARS = SESSION_TITLE_CHARS;
 
 /** Prompt text as a title: trimmed, whitespace collapsed, first 60 code points; null when nothing is left. */
 export function promptTitle(text: string): string | null {
