@@ -63,7 +63,7 @@ test('旧库一次启动：重建、压缩迁移、VACUUM、建索引都做完�
   // The reference: this build from the same raw rows.
   const ref = openStore(path.join(tmp, 'ref.db'));
   for (const r of rows) ref.insertRaw({ source: 'transcript', file: r.file, offset: r.offset, line: r.line, recordType: r.type, sessionId: r.sessionId, agentId: null });
-  new Pipeline(ref, loadConfig({}, { projectsDir, dataDir: path.join(tmp, 'refdata'), cursorDbPath: null, codexSessionsDir: null })).rebuild();
+  new Pipeline(ref, loadConfig({}, { geminiDir: null, grokDir: null, copilotDir: null, projectsDir, dataDir: path.join(tmp, 'refdata'), cursorDbPath: null, codexSessionsDir: null })).rebuild();
   const refNodes = ref.allSessionIdsInRaw().reduce((n, id) => n + (ref.getGraph(id)?.nodes.length ?? 0), 0);
   ref.close();
   expect(refNodes).toBe(240);

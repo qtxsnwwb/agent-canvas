@@ -19,7 +19,7 @@ const LONG = 'a long prompt that is stored compressed '.repeat(20);
 
 beforeEach(async () => {
   tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-pipeline-corrupt-'));
-  config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), cursorDbPath: null });
+  config = loadConfig({}, { geminiDir: null, grokDir: null, copilotDir: null, projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), cursorDbPath: null });
   await fs.mkdir(path.join(config.projectsDir, 'proj'), { recursive: true });
   dbFile = path.join(tmp, 'data.db');
   store = openStore(dbFile);

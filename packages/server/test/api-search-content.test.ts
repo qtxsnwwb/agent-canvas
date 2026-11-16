@@ -36,7 +36,7 @@ describe('GET /api/search/content', () => {
 
   beforeEach(async () => {
     tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-api-search-'));
-    config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), cursorDbPath: null });
+    config = loadConfig({}, { geminiDir: null, grokDir: null, copilotDir: null, projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), cursorDbPath: null });
     await fs.mkdir(path.join(config.projectsDir, 'proj'), { recursive: true });
     store = openStore(':memory:');
     pipeline = new Pipeline(store, config);

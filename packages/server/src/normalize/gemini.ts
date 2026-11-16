@@ -173,11 +173,22 @@ interface Thread {
   dirtyFrom: number;
   /** A JSONL line of this thread was read: a legacy `.json` of it is not read any more (spec 5.1). */
   sawJsonl: boolean;
+  /** Earliest / latest time read in this thread's records. */
+  minMs: number | null;
+  maxMs: number | null;
+  /** A legacy `.json` was applied to this thread (its messages go when the first `.jsonl` line arrives). */
+  legacyApplied: boolean;
+  /**
+   * Message id -> call id -> the call's `timestamp` on the first record that showed it in a terminal status
+   * (GraphNode.endedAt: later corrections keep it). Kept with the records, in record order, so every batching, page
+   * boundary, hydration and rebuild gives the same value.
+   */
+  firstEnded: Map<string, Map<string, string>>;
 }
 
 interface SessionState {
   session: Session;
-  /** A transcript or legacy record was applied: the session exists. */
+  /** A message was read (any thread): the session exists. Metadata or `$set` alone make none (spec: empty launches). */
   started: boolean;
   /** The session row was emitted at least once. */
   sessionEmitted: boolean;
@@ -189,10 +200,10 @@ interface SessionState {
   detailSigs: Map<string, string>;
   /** Node id -> the edge into it, as emitted. */
   edgeInto: Map<string, { id: string; from: string; kind: 'sequence' | 'spawn' }>;
+  /** Node id -> the nodes whose edge (edgeInto) comes from it (reverse index of edgeInto). */
+  edgesFrom: Map<string, Set<string>>;
   /** Agent id -> the dispatch node it hangs off, as last derived. */
   links: Map<string, string>;
-  minMs: number | null;
-  maxMs: number | null;
 }
 
 const minOf = (a: number | null, b: number | null): number | null => (a === null ? b : b === null ? a : Math.min(a, b));
@@ -293,9 +304,8 @@ export class GeminiNormalizer implements AgentNormalizer {
         nodes: new Map(),
         detailSigs: new Map(),
         edgeInto: new Map(),
+        edgesFrom: new Map(),
         links: new Map(),
-        minMs: null,
-        maxMs: null,
       };
       this.sessions.set(sessionId, state);
     }
@@ -306,7 +316,7 @@ export class GeminiNormalizer implements AgentNormalizer {
     const key = agentId ?? MAIN;
     let t = state.threads.get(key);
     if (t === undefined) {
-      t = { agentId, st: emptyGeminiState(), built: new Map(), emitted: new Map(), dispatches: new Map(), chain: [], dirtyFrom: 0, sawJsonl: false };
+      t = { agentId, st: emptyGeminiState(), built: new Map(), emitted: new Map(), dispatches: new Map(), chain: [], dirtyFrom: 0, sawJsonl: false, legacyApplied: false, minMs: null, maxMs: null, firstEnded: new Map() };
       state.threads.set(key, t);
     }
     return t;
@@ -333,11 +343,20 @@ export class GeminiNormalizer implements AgentNormalizer {
     if (event.source === 'meta') {
       if (thread.sawJsonl) return undefined; // the .jsonl of this session is read instead
       ops = reduceGeminiLegacy(event.payload);
+      if (ops.some((o) => o.op === 'replaceAll')) thread.legacyApplied = true;
     } else {
+      if (!thread.sawJsonl && thread.legacyApplied) {
+        // Only the .jsonl is read (spec 5.1): what a legacy .json seen first left goes, whatever the .jsonl lacks.
+        this.applyOps(state, thread, [{ op: 'replaceAll', messages: [] }], changes);
+        thread.st.meta = {};
+        thread.minMs = null;
+        thread.maxMs = null;
+        thread.firstEnded.clear();
+      }
       thread.sawJsonl = true;
       ops = reduceGemini(thread.st, event.line);
     }
-    state.started = true;
+    if (ops.some((o) => o.op === 'upsertMessage' || (o.op === 'replaceAll' && o.messages.length > 0))) state.started = true;
     return this.applyOps(state, thread, ops, changes);
   }
 
@@ -353,11 +372,14 @@ export class GeminiNormalizer implements AgentNormalizer {
           note(o.type);
           break;
         case 'setMeta':
-          this.time(state, o.meta.lastUpdated);
-          this.time(state, o.meta.startTime);
+          this.time(thread, o.meta.lastUpdated);
+          this.time(thread, o.meta.startTime);
+          // The fallback time of untimed leading nodes.
+          if ('startTime' in o.meta && o.meta.startTime !== thread.st.meta.startTime) thread.dirtyFrom = 0;
           break;
         case 'upsertMessage': {
-          note(this.inspect(state, o.message));
+          note(this.inspect(thread, o.message));
+          this.noteEnded(thread, o.id, o.message);
           const at = thread.st.messages.has(o.id) ? thread.st.order.lastIndexOf(o.id) : thread.st.order.length;
           thread.dirtyFrom = Math.min(thread.dirtyFrom, at);
           this.noteDispatches(thread, o.id, o.message);
@@ -373,7 +395,8 @@ export class GeminiNormalizer implements AgentNormalizer {
         case 'replaceAll': {
           const keep = new Set<string>();
           for (const m of o.messages) {
-            note(this.inspect(state, m));
+            note(this.inspect(thread, m));
+            this.noteEnded(thread, m.id as string, m);
             keep.add(m.id as string);
           }
           for (const id of thread.st.order) if (!keep.has(id)) this.removeMessage(state, thread, id, changes);
@@ -389,24 +412,28 @@ export class GeminiNormalizer implements AgentNormalizer {
   }
 
   /** Session times from a message, and the unknown label of its type or of a content part, if any. */
-  private inspect(state: SessionState, m: Obj): string | undefined {
-    this.time(state, m.timestamp);
-    if (Array.isArray(m.thoughts)) for (const t of m.thoughts) if (isObject(t)) this.time(state, t.timestamp);
-    if (Array.isArray(m.toolCalls)) for (const c of m.toolCalls) if (isObject(c)) this.time(state, c.timestamp);
+  private inspect(thread: Thread, m: Obj): string | undefined {
+    this.time(thread, m.timestamp);
+    if (Array.isArray(m.thoughts)) for (const t of m.thoughts) if (isObject(t)) this.time(thread, t.timestamp);
+    if (Array.isArray(m.toolCalls)) for (const c of m.toolCalls) if (isObject(c)) this.time(thread, c.timestamp);
     if (typeof m.type !== 'string' || !KNOWN_TYPES.has(m.type)) return unknownTypeName('gemini', m.type);
     for (const p of partsOf(m.content)) {
       if (!isObject(p)) continue;
       const k = Object.keys(p).find((key) => KNOWN_PARTS.has(key));
-      if (k === undefined) return unknownTypeName('gemini', `part.${Object.keys(p)[0] ?? ''}`);
+      if (k === undefined) {
+        // A part's key is data the format does not control: named only when it looks like a schema key.
+        const first = Object.keys(p)[0] ?? '';
+        return unknownTypeName('gemini', /^[a-z][A-Za-z]{0,40}$/.test(first) ? `part.${first}` : 'part');
+      }
     }
     return undefined;
   }
 
-  private time(state: SessionState, v: unknown): void {
+  private time(thread: Thread, v: unknown): void {
     const ms = msOf(v);
     if (ms === null) return;
-    state.minMs = minOf(state.minMs, ms);
-    state.maxMs = maxOf(state.maxMs, ms);
+    thread.minMs = minOf(thread.minMs, ms);
+    thread.maxMs = maxOf(thread.maxMs, ms);
   }
 
   private noteDispatches(thread: Thread, id: string, m: Obj): void {
@@ -416,8 +443,22 @@ export class GeminiNormalizer implements AgentNormalizer {
     else thread.dispatches.delete(id);
   }
 
+  /** Records the first terminal time of each call of a message record (see Thread.firstEnded). */
+  private noteEnded(thread: Thread, id: string, m: Obj): void {
+    if (!Array.isArray(m.toolCalls)) return;
+    for (const c of m.toolCalls) {
+      if (!isObject(c) || typeof c.id !== 'string' || callStatus(c.status) === 'running') continue;
+      const at = isoOf(c.timestamp) ?? isoOf(m.timestamp);
+      if (at === null) continue;
+      let calls = thread.firstEnded.get(id);
+      if (calls === undefined) thread.firstEnded.set(id, (calls = new Map()));
+      if (!calls.has(c.id)) calls.set(c.id, at);
+    }
+  }
+
   /** A message leaves the thread: every node of it is removed (with the edges into and out of them). */
   private removeMessage(state: SessionState, thread: Thread, id: string, changes: Change[]): void {
+    thread.firstEnded.delete(id);
     for (const nodeId of thread.emitted.get(id) ?? []) this.removeNode(state, nodeId, changes);
     thread.emitted.delete(id);
     thread.built.delete(id);
@@ -429,8 +470,30 @@ export class GeminiNormalizer implements AgentNormalizer {
     state.detailSigs.delete(nodeId);
     changes.push({ type: 'node_removed', sessionId: state.session.id, id: nodeId });
     // The store dropped every edge from or to it.
-    state.edgeInto.delete(nodeId);
-    for (const [to, e] of state.edgeInto) if (e.from === nodeId) state.edgeInto.delete(to);
+    this.dropEdgeInto(state, nodeId);
+    const out = state.edgesFrom.get(nodeId);
+    if (out !== undefined) for (const to of [...out]) this.dropEdgeInto(state, to);
+    state.edgesFrom.delete(nodeId);
+  }
+
+  /** Forgets the edge into `to` (both indexes). */
+  private dropEdgeInto(state: SessionState, to: string): void {
+    const e = state.edgeInto.get(to);
+    if (e === undefined) return;
+    state.edgeInto.delete(to);
+    const set = state.edgesFrom.get(e.from);
+    if (set === undefined) return;
+    set.delete(to);
+    if (set.size === 0) state.edgesFrom.delete(e.from);
+  }
+
+  /** Records the edge into `to` (both indexes). */
+  private setEdgeInto(state: SessionState, to: string, e: { id: string; from: string; kind: 'sequence' | 'spawn' }): void {
+    this.dropEdgeInto(state, to);
+    state.edgeInto.set(to, e);
+    let set = state.edgesFrom.get(e.from);
+    if (set === undefined) state.edgesFrom.set(e.from, (set = new Set()));
+    set.add(to);
   }
 
   // ---- derive ----
@@ -513,7 +576,8 @@ export class GeminiNormalizer implements AgentNormalizer {
           if (chain.firstTitle === undefined) chain.firstTitle = part.promptTitle;
         }
         const parentId = chain.prev ?? dispatch;
-        const timestamp = part.timestamp ?? chain.prevTs ?? state.session.startedAt;
+        // Untimed leading nodes: the thread's metadata startTime (read before any message), never a batch-dependent time.
+        const timestamp = part.timestamp ?? chain.prevTs ?? isoOf(t.st.meta.startTime) ?? EPOCH;
         this.emitNode(state, t, part, parentId, chain.prev === null ? 'spawn' : 'sequence', chain.turn, timestamp, changes);
         ids.push(part.id);
         chain.prev = part.id;
@@ -620,7 +684,8 @@ export class GeminiNormalizer implements AgentNormalizer {
         const p = base(part, isDispatch ? 'subagent' : 'tool', isDispatch ? agentTitle(name, args) : name);
         p.summary = toolSummary(args);
         p.status = status;
-        p.endedAt = status === 'running' ? null : (isoOf(c.timestamp) ?? ts);
+        const first = typeof c.id === 'string' ? t.firstEnded.get(msgId)?.get(c.id) : undefined;
+        p.endedAt = status === 'running' ? null : (first ?? isoOf(c.timestamp) ?? ts);
         p.toolName = name;
         p.toolUseId = str(c.id);
         p.childAgentId = linked ? agent : null;
@@ -652,8 +717,7 @@ export class GeminiNormalizer implements AgentNormalizer {
   ): void {
     const sid = state.session.id;
     const old = state.nodes.get(part.id);
-    // endedAt: the time the call first reached a terminal status (later corrections keep it).
-    const endedAt = part.endedAt !== null && old?.endedAt != null ? old.endedAt : part.endedAt;
+    const endedAt = part.endedAt;
     const durationMs = endedAt === null ? null : Math.max(0, Date.parse(endedAt) - Date.parse(timestamp)) || 0;
     const node: GraphNode = {
       id: part.id,
@@ -694,11 +758,11 @@ export class GeminiNormalizer implements AgentNormalizer {
     const edge = state.edgeInto.get(node.id);
     const want = parentId === null ? null : { id: `${parentId}->${node.id}`, from: parentId, kind: edgeKind };
     if (edge !== undefined && (want === null || edge.id !== want.id || edge.kind !== want.kind)) {
-      state.edgeInto.delete(node.id);
+      this.dropEdgeInto(state, node.id);
       changes.push({ type: 'edge_removed', sessionId: sid, id: edge.id });
     }
     if (want !== null && (edge === undefined || edge.id !== want.id || edge.kind !== want.kind)) {
-      state.edgeInto.set(node.id, want);
+      this.setEdgeInto(state, node.id, want);
       changes.push({ type: 'edge_added', edge: { id: want.id, sessionId: sid, from: want.from, to: node.id, kind: want.kind } });
     }
   }
@@ -714,9 +778,15 @@ export class GeminiNormalizer implements AgentNormalizer {
     const summary = str(main?.st.meta.summary);
     const lastChain = main === undefined || main.chain.length === 0 ? undefined : main.chain[main.chain.length - 1];
     const title = summary !== null && summary.trim() !== '' ? summary : (lastChain?.firstTitle ?? null);
-    const startedAt = isoOf(main?.st.meta.startTime) ?? (state.minMs === null ? EPOCH : new Date(state.minMs).toISOString());
+    let minMs: number | null = null;
+    let maxMs: number | null = null;
+    for (const t of state.threads.values()) {
+      minMs = minOf(minMs, t.minMs);
+      maxMs = maxOf(maxMs, t.maxMs);
+    }
+    const startedAt = isoOf(main?.st.meta.startTime) ?? (minMs === null ? EPOCH : new Date(minMs).toISOString());
     const startedMs = Date.parse(startedAt);
-    const lastMs = maxOf(state.maxMs, startedMs);
+    const lastMs = maxOf(maxMs, startedMs);
     const next: Session = {
       ...state.session,
       projectId: state.entry?.projectId ?? state.projectId,

@@ -53,7 +53,7 @@ describe('pipeline', () => {
 
   beforeEach(async () => {
     tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-pipeline-'));
-    config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), rescanMs: 200, cursorDbPath: null });
+    config = loadConfig({}, { geminiDir: null, grokDir: null, copilotDir: null, projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), rescanMs: 200, cursorDbPath: null });
     await fs.mkdir(config.projectsDir, { recursive: true });
     store = openStore(':memory:');
     pipeline = new Pipeline(store, config);
@@ -65,10 +65,10 @@ describe('pipeline', () => {
   });
 
   test('loadConfig applies defaults, env and overrides', () => {
-    const d = loadConfig({});
+    const d = loadConfig({}, { geminiDir: null, grokDir: null, copilotDir: null });
     expect(d).toMatchObject({ host: '127.0.0.1', port: 4317, rescanMs: 3000, webDist: null });
     expect(d.dbPath).toBe(path.join(d.dataDir, 'data.db'));
-    const e = loadConfig({ AGENT_CANVAS_DATA_DIR: '/d', AGENT_CANVAS_PROJECTS_DIR: '/p' }, { projectsDir: '/o' });
+    const e = loadConfig({ AGENT_CANVAS_DATA_DIR: '/d', AGENT_CANVAS_PROJECTS_DIR: '/p' }, { projectsDir: '/o', geminiDir: null, grokDir: null, copilotDir: null });
     expect(e.projectsDir).toBe('/o');
     expect(e.dataDir).toBe('/d');
     expect(e.dbPath).toBe(path.join('/d', 'data.db'));
@@ -704,7 +704,7 @@ describe('pipeline', () => {
   });
 
   test('fullScanMs 默认 60 秒；watcher 按两种节奏扫描', async () => {
-    expect(loadConfig({}).fullScanMs).toBe(60_000);
+    expect(loadConfig({}, { geminiDir: null, grokDir: null, copilotDir: null }).fullScanMs).toBe(60_000);
     const scans = vi.spyOn(pipeline, 'scanAll');
     const rescans = vi.spyOn(pipeline, 'rescan');
     const w = startWatcher(pipeline, { ...config, rescanMs: 50, fullScanMs: 300 });
@@ -1059,7 +1059,7 @@ describe('pipeline 与 Codex 文件源', () => {
   beforeEach(async () => {
     tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-pipeline-codex-'));
     codexDir = path.join(tmp, 'codex', 'sessions');
-    config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: codexDir, cursorDbPath: null });
+    config = loadConfig({}, { geminiDir: null, grokDir: null, copilotDir: null, projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: codexDir, cursorDbPath: null });
     await fs.mkdir(config.projectsDir, { recursive: true });
     await fs.mkdir(codexDir, { recursive: true });
     store = openStore(':memory:');

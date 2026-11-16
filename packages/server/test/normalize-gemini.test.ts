@@ -329,3 +329,98 @@ describe('batching and the registry', () => {
     expect(NORMALIZER_FACTORIES.gemini?.()).toBeInstanceOf(GeminiNormalizer);
   });
 });
+
+describe('fix round 1', () => {
+  /** A session of `n` messages: users, and gemini messages with 8 calls each, every gemini message re-appended 3×. */
+  function bigSession(n: number): { lines: string[]; ids: string[] } {
+    const out = [metaLine()];
+    const ids: string[] = [];
+    for (let i = 0; i < n; i++) {
+      const mid = `big-${i}`;
+      ids.push(mid);
+      if (i % 2 === 0) {
+        out.push(JSON.stringify(userMsg(mid, `prompt ${i}`)));
+        continue;
+      }
+      const calls = (status: string) => Array.from({ length: 8 }, (_, k) => ({ id: `c${i}-${k}`, name: 'read_file', args: { file_path: `/home/dev/demo-app/f${k}.ts` }, status, timestamp: '2026-11-16T09:41:30.000Z' }));
+      const base = { id: mid, timestamp: '2026-11-16T09:41:29.000Z', type: 'gemini', content: `reply ${i}` };
+      out.push(JSON.stringify(base), JSON.stringify({ ...base, toolCalls: calls('scheduled') }), JSON.stringify({ ...base, toolCalls: calls('success') }));
+    }
+    return { lines: out, ids };
+  }
+  const loaded = (lines: string[]): GeminiNormalizer => {
+    const n = new GeminiNormalizer();
+    n.applyBatch(transcript(lines).map((event) => ({ event, projectId: PROJECT })));
+    return n;
+  };
+
+  test('I2: removing every node of a 5,000-message session, and 1,250 messages by removeIds, each well under 1 s', () => {
+    const { lines, ids } = bigSession(5000);
+    const all = loaded(lines);
+    let t = performance.now();
+    const out = all.apply(transcript([JSON.stringify({ $rewindTo: 'unknown-id' })], { startOffset: 1e9 })[0]!, PROJECT);
+    const rewindMs = performance.now() - t;
+    expect(out.changes.filter((c) => c.type === 'node_removed').length).toBe(2500 + 2500 * 9);
+    const some = loaded(lines);
+    t = performance.now();
+    const out2 = some.apply(transcript([JSON.stringify({ $patch: { removeIds: ids.filter((_, i) => i % 4 === 1) } })], { startOffset: 1e9 })[0]!, PROJECT);
+    const patchMs = performance.now() - t;
+    expect(out2.changes.filter((c) => c.type === 'node_removed').length).toBe(1250 * 9);
+    expect(rewindMs).toBeLessThan(1000);
+    expect(patchMs).toBeLessThan(1000);
+  });
+
+  test('I3: endedAt is the first terminal time, the same line by line, in one batch, at every page boundary and after a re-hydrate', () => {
+    const call = (status: string, ts: string) => ({ id: 'cx', name: 'run_shell_command', args: { command: 'make' }, status, timestamp: ts });
+    const g = (status: string, ts: string) => JSON.stringify({ id: 'G', timestamp: '2026-11-16T10:00:00.000Z', type: 'gemini', content: '', toolCalls: [call(status, ts)] });
+    const events = transcript([metaLine(), JSON.stringify(userMsg('U', 'go')), g('scheduled', '2026-11-16T10:00:01.000Z'), g('error', '2026-11-16T10:00:10.000Z'), g('success', '2026-11-16T10:00:20.000Z'), JSON.stringify(m5)]);
+    const node = (graph: RunResult['graph']) => graph.nodes[id('G', 'call:cx')]!;
+    const lineByLine = node(go(events).graph);
+    expect(lineByLine).toMatchObject({ status: 'succeeded', endedAt: '2026-11-16T10:00:10.000Z', durationMs: 10_000 });
+    for (let page = 1; page <= events.length; page++) {
+      const n = new GeminiNormalizer();
+      const changes: Change[] = [];
+      for (let i = 0; i < events.length; i += page) changes.push(...n.applyBatch(events.slice(i, i + page).map((event) => ({ event, projectId: PROJECT }))).changes);
+      expect(node(applyChanges(emptyGraph(), changes)), `page ${page}`).toEqual(lineByLine);
+    }
+    for (let cut = 1; cut < events.length; cut++) {
+      const n = new GeminiNormalizer();
+      const first = n.applyBatch(events.slice(0, cut).map((event) => ({ event, projectId: PROJECT }))).changes;
+      n.dropSession(SID);
+      n.applyBatch(events.slice(0, cut).map((event) => ({ event, projectId: PROJECT }))); // hydration (changes already stored)
+      const rest = n.applyBatch(events.slice(cut).map((event) => ({ event, projectId: PROJECT }))).changes;
+      expect(node(applyChanges(emptyGraph(), [...first, ...rest])), `cut ${cut}`).toEqual(lineByLine);
+    }
+  });
+
+  test('I4: metadata and $set alone make no session; the first message does (start time from the metadata)', () => {
+    const n = new GeminiNormalizer();
+    const r = run(n, transcript(lines([metaLine(), { $set: { lastUpdated: '2026-11-16T09:41:08.000Z' } }])));
+    expect(r.changes).toEqual([]);
+    const next = n.apply(transcript([JSON.stringify(userMsg(M1, 'hello'))], { startOffset: 5000 })[0]!, PROJECT);
+    expect(next.changes.find((c) => c.type === 'session_upserted')).toMatchObject({ session: { id: SID, startedAt: '2026-11-16T09:41:07.120Z', title: 'hello' } });
+    // A legacy .json with no messages makes none either.
+    expect(go([meta('gemini:demo-app/chats/session-x.json', legacyJson([]))]).sessions.size).toBe(0);
+  });
+
+  test('M1: an untimed first message gets the metadata startTime, line by line and in one batch', () => {
+    const events = transcript(lines([metaLine(), { id: 'X1', content: [{ text: 'no ts' }], type: 'user' }]));
+    const oneByOne = go(events).graph.nodes[id('X1', 'prompt')]!.timestamp;
+    const batch = applyChanges(emptyGraph(), new GeminiNormalizer().applyBatch(events.map((event) => ({ event, projectId: PROJECT }))).changes).nodes[id('X1', 'prompt')]!.timestamp;
+    expect(oneByOne).toBe('2026-11-16T09:41:07.120Z');
+    expect(batch).toBe(oneByOne);
+  });
+
+  test('M2: a legacy .json seen before its .jsonl leaves nothing the .jsonl lacks', () => {
+    const legacy = meta('gemini:demo-app/chats/session-2026-11-16T09-41-3f9c2a1b.json', legacyJson([userMsg(M1, 'a'), userMsg('OLDONLY', 'old')]));
+    const jsonl = transcript(lines([metaLine(), userMsg(M1, 'a')]));
+    const r = go([legacy, ...jsonl]);
+    expect(Object.keys(r.graph.nodes)).toEqual([id(M1, 'prompt')]);
+    expect(shape(r)).toEqual(shape(go(jsonl)));
+  });
+
+  test('M5: an unknown part key is named only when it looks like a schema key', () => {
+    const r = go(transcript(lines([metaLine(), { id: 'p1', type: 'user', content: [{ 'sk-live-SECRET123 my password': 1 }] }, { id: 'p2', type: 'user', content: [{ newPartKind: 1 }] }])));
+    expect(r.unknown).toEqual(['gemini:part', 'gemini:part.newPartKind']);
+  });
+});

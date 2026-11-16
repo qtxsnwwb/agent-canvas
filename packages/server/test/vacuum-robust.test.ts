@@ -43,7 +43,7 @@ beforeEach(async () => {
   db.close();
   store = openStore(file);
   migrateAll(store);
-  config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), cursorDbPath: null });
+  config = loadConfig({}, { geminiDir: null, grokDir: null, copilotDir: null, projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), cursorDbPath: null });
   await fs.mkdir(config.projectsDir, { recursive: true });
   pipeline = new Pipeline(store, config);
 });

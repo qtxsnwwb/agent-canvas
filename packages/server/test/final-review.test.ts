@@ -28,7 +28,7 @@ let app: FastifyInstance;
 
 beforeEach(async () => {
   tmp = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'cc-final-review-'));
-  config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), cursorDbPath: null, codexSessionsDir: null });
+  config = loadConfig({}, { geminiDir: null, grokDir: null, copilotDir: null, projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), cursorDbPath: null, codexSessionsDir: null });
   await fs.promises.mkdir(config.projectsDir, { recursive: true });
   store = openStore(':memory:');
   const pipeline = new Pipeline(store, config);

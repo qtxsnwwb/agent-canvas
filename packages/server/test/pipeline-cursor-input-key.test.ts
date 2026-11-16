@@ -54,7 +54,7 @@ async function newPipeline(): Promise<{ store: Store; pipeline: Pipeline; sink: 
   const name = `p${n++}`;
   const projectsDir = path.join(tmp, 'projects');
   await fs.mkdir(projectsDir, { recursive: true });
-  const config = loadConfig({}, { projectsDir, dataDir: path.join(tmp, name), codexSessionsDir: null, cursorDbPath: null });
+  const config = loadConfig({}, { geminiDir: null, grokDir: null, copilotDir: null, projectsDir, dataDir: path.join(tmp, name), codexSessionsDir: null, cursorDbPath: null });
   const store = openStore(path.join(tmp, `${name}.db`));
   const fake = new FakePollSource();
   const pipeline = new Pipeline(store, config, { sources: [new ClaudeFileSource(projectsDir)], pollSources: [fake] });

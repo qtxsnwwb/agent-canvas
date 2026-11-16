@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
+import { ProjectIdResolver } from '../project-ids.js';
 import { KEY_PREFIXES, type FileClass, type FileSource, type IndexEntry, type MaybePromise } from '../source.js';
 import { GEMINI_PROJECT_ENTRY_PREFIX, geminiProject } from './project.js';
 
@@ -75,12 +76,19 @@ export class GeminiFileSource implements FileSource {
   /** Session id -> project directory (slug) it was seen in, in order of first sight. */
   private readonly sessions = new Map<string, string>();
   private readonly slugs = new Set<string>();
+  /** Project ids in use, reused (Windows) when a cwd differs only in letter case. */
+  private readonly projects: ProjectIdResolver;
 
   constructor(
     readonly rootDir: string,
     private readonly lookup: GeminiLookup = NO_LOOKUP,
   ) {
     this.projectsPath = path.join(path.dirname(path.resolve(rootDir)), PROJECTS_JSON);
+    this.projects = new ProjectIdResolver(() => this.lookup.knownProjectIds());
+  }
+
+  private project(slug: string): { projectId: string; cwd: string | null } {
+    return geminiProject(this.rootDir, slug, () => this.lookup.knownProjectIds(), process.platform, this.projects);
   }
 
   /** projects.json, and the `.project_root` of every project directory a session was seen in (grows as they appear). */
@@ -88,20 +96,44 @@ export class GeminiFileSource implements FileSource {
     return [this.projectsPath, ...[...this.slugs].sort().map((s) => path.join(this.rootDir, s, PROJECT_ROOT))];
   }
 
+  /** Only `<slug>/.project_root` and `<slug>/chats/**` are listed (not logs, checkpoints, tool outputs), plus projects.json. */
   async listFiles(): Promise<string[]> {
-    let entries: string[];
+    let slugs: string[];
     try {
-      entries = await fsp.readdir(this.rootDir, { recursive: true });
+      slugs = (await fsp.readdir(this.rootDir, { withFileTypes: true })).filter((d) => d.isDirectory()).map((d) => d.name);
     } catch {
       return [];
     }
-    const files = entries.map((rel) => path.join(this.rootDir, rel)).filter((abs) => this.keyOf(abs) !== null);
+    const files: string[] = [];
+    for (const slug of slugs) {
+      files.push(path.join(this.rootDir, slug, PROJECT_ROOT));
+      const chats = path.join(this.rootDir, slug, 'chats');
+      let entries: string[];
+      try {
+        entries = await fsp.readdir(chats, { recursive: true });
+      } catch {
+        continue;
+      }
+      for (const rel of entries) files.push(path.join(chats, rel));
+    }
+    const out: string[] = [];
+    for (const abs of files) {
+      if (this.keyOf(abs) === null) continue;
+      if (abs.endsWith(PROJECT_ROOT)) {
+        try {
+          if (!(await fsp.stat(abs)).isFile()) continue;
+        } catch {
+          continue;
+        }
+      }
+      out.push(abs);
+    }
     try {
-      if ((await fsp.stat(this.projectsPath)).isFile()) files.push(this.projectsPath);
+      if ((await fsp.stat(this.projectsPath)).isFile()) out.push(this.projectsPath);
     } catch {
       // no registry
     }
-    return files.sort();
+    return out.sort();
   }
 
   keyOf(absPath: string): string | null {
@@ -159,9 +191,11 @@ export class GeminiFileSource implements FileSource {
     const shape = shapeOf(key);
     if (shape === null || (shape.kind !== 'projects' && shape.kind !== 'root')) return [];
     const out: IndexEntry[] = [];
+    const bySlug = new Map<string, { projectId: string; cwd: string | null }>();
     for (const [sessionId, slug] of this.sessions) {
       if (shape.kind === 'root' && slug !== shape.slug) continue;
-      const project = geminiProject(this.rootDir, slug, () => this.lookup.knownProjectIds());
+      let project = bySlug.get(slug);
+      if (project === undefined) bySlug.set(slug, (project = this.project(slug)));
       if (project.cwd === null) continue;
       out.push({ key: GEMINI_PROJECT_ENTRY_PREFIX + sessionId, sessionId, agentId: null, projectId: project.projectId, payload: JSON.stringify({ cwd: project.cwd }) });
     }
@@ -196,7 +230,7 @@ export class GeminiFileSource implements FileSource {
   private remember(key: string, slug: string, sessionId: string, agentId: string | null): Known {
     const existing = this.files.get(key);
     if (existing !== undefined) return existing;
-    const { projectId } = geminiProject(this.rootDir, slug, () => this.lookup.knownProjectIds());
+    const { projectId } = this.project(slug);
     return this.note(key, { sessionId, agentId, projectId, slug });
   }
 

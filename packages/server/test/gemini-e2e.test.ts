@@ -11,7 +11,7 @@ import { Pipeline } from '../src/pipeline.js';
 import { GeminiFileSource } from '../src/sources/gemini/source.js';
 import { storeStatsSource } from '../src/stats/service.js';
 import { openStore, type Store } from '../src/store/store.js';
-import { CALL_READ, dispatchMsg, exampleLines, legacyJson, M1, M2, m2, m3, m4, m5, MAIN_REL, SID, SUB_ID, SUB_REL, subagentLines, userMsg } from './gemini-fixtures.js';
+import { CALL_READ, dispatchMsg, exampleLines, legacyJson, M1, M2, m2, m3, m4, m5, MAIN_REL, metaLine, SID, SUB_ID, SUB_REL, subagentLines, userMsg } from './gemini-fixtures.js';
 
 // Pipeline + store on temp directories: a Gemini CLI root with one project directory (`.project_root` naming its
 // working directory), a main session with a subagent, and a legacy `.json` session.
@@ -52,7 +52,7 @@ beforeEach(async () => {
   const geminiDir = path.join(tmp, '.gemini');
   gemTmp = path.join(geminiDir, 'tmp');
   await fs.mkdir(gemTmp, { recursive: true });
-  config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, geminiDir });
+  config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, grokDir: null, copilotDir: null, geminiDir });
   await writeRel('demo-app/.project_root', CWD);
 });
 afterEach(async () => {
@@ -65,14 +65,14 @@ describe('Gemini CLI end to end', () => {
     expect(fileSources(config).some((s) => s instanceof GeminiFileSource)).toBe(true);
     const noTmp = path.join(tmp, 'empty-gemini');
     await fs.mkdir(noTmp);
-    const c2 = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, geminiDir: noTmp });
+    const c2 = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, grokDir: null, copilotDir: null, geminiDir: noTmp });
     const store = open();
     const p = new Pipeline(store, c2, { sources: fileSources(c2, store) });
     expect(p.fileSources().map((s) => s.origin)).toEqual(['claude']);
     await p.scanAll();
     await p.idle();
     expect(await fs.readdir(noTmp)).toEqual([]);
-    const c3 = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, geminiDir: null });
+    const c3 = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, grokDir: null, copilotDir: null, geminiDir: null });
     expect(fileSources(c3).map((s) => s.origin)).toEqual(['claude']);
   });
 
@@ -164,6 +164,32 @@ describe('Gemini CLI end to end', () => {
     for (const v of before) expect(v!.session).toMatchObject({ projectId: 'gemini:hashdir', cwd: null });
     p.rebuild();
     expect([view(store, SID), view(store, LEGACY_SID)]).toEqual(before);
+  });
+
+  test('I4: a launch that writes only metadata and deletes its file again leaves no session behind', async () => {
+    await writeRel(MAIN_REL, body([metaLine(), JSON.stringify({ $set: { lastUpdated: '2026-11-16T09:41:08.000Z' } })]));
+    const store = open();
+    const p = newPipeline(store);
+    await p.scanAll();
+    await p.idle();
+    expect(store.getSession(SID)).toBeNull();
+    await fs.rm(abs(MAIN_REL));
+    await p.scanAll();
+    await p.idle();
+    expect(store.getSession(SID)).toBeNull();
+    expect(store.listProjects(Date.now())).toEqual([]);
+    p.rebuild();
+    expect(store.getSession(SID)).toBeNull();
+    // In a file that stays, the first message appended makes the session.
+    const other = 'demo-app/chats/session-2026-11-16T11-00-3f9c2a1b.jsonl';
+    await writeRel(other, body([metaLine()]));
+    await p.scanAll();
+    await p.idle();
+    expect(store.getSession(SID)).toBeNull();
+    await fs.appendFile(abs(other), `${JSON.stringify(userMsg(M1, 'now'))}\n`);
+    await p.ingestFile(abs(other));
+    await p.idle();
+    expect(store.getSession(SID)).toMatchObject({ startedAt: '2026-11-16T09:41:07.120Z', title: 'now' });
   });
 
   test('a rewind removes the node from the graph, the content search and the by-file view (live and after rebuild)', async () => {

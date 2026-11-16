@@ -95,7 +95,7 @@ function makePipeline(normalizers?: NormalizerFactories): Pipeline {
 beforeEach(async () => {
   tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-pipeline-cursor-'));
   await fs.mkdir(path.join(tmp, 'projects'), { recursive: true });
-  config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, cursorDbPath: null });
+  config = loadConfig({}, { geminiDir: null, grokDir: null, copilotDir: null, projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, cursorDbPath: null });
   store = openStore(path.join(tmp, 'data.db'));
   fake = new FakePollSource();
   pipeline = makePipeline();

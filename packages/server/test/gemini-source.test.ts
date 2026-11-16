@@ -2,7 +2,8 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
-import { geminiProject, GEMINI_PROJECT_ENTRY_PREFIX } from '../src/sources/gemini/project.js';
+import * as projectModule from '../src/sources/gemini/project.js';
+import { geminiProject, GEMINI_PROJECT_ENTRY_PREFIX, PROJECT_ROOT_MAX_BYTES } from '../src/sources/gemini/project.js';
 import { GEMINI_PROJECTS_KEY, GeminiFileSource, type GeminiLookup } from '../src/sources/gemini/source.js';
 import { isPromise, originOfKey, type FileClass } from '../src/sources/source.js';
 import { exampleLines, legacyJson, MAIN_KEY, MAIN_REL, metaLine, SID, SUB_ID, SUB_KEY, SUB_REL, subagentLines, userMsg, M1 } from './gemini-fixtures.js';
@@ -193,5 +194,39 @@ describe('geminiProject and project entries', () => {
     // 'other' has no directory anywhere: no entry.
     expect(s.indexEntries(GEMINI_PROJECTS_KEY, '{}').map((e) => e.sessionId)).toEqual([SID]);
     expect(s.indexEntries('gemini:other/.project_root', '')).toEqual([]);
+  });
+});
+
+describe('fix round 1: sidecars', () => {
+  test('M4: a .project_root that is not one absolute path (relative, multi-line, control characters) counts as missing', async () => {
+    await fs.writeFile(path.join(root, 'projects.json'), JSON.stringify({ projects: { '/home/dev/demo-app': 'demo-app', 'relative/x': 'rel' } }));
+    for (const bad of ['\u0000\u0001garbage not a path', 'relative/path', '/home/dev/a\n/home/dev/b', 'C:\\work\u0007x', '  ']) {
+      await writeRel('demo-app/.project_root', bad);
+      expect(geminiProject(dir, 'demo-app', () => [], 'linux'), JSON.stringify(bad)).toEqual({ projectId: '-home-dev-demo-app', cwd: '/home/dev/demo-app' });
+    }
+    expect(geminiProject(dir, 'rel', () => [], 'linux')).toEqual({ projectId: 'gemini:rel', cwd: null });
+    for (const good of ['/home/dev/demo-app\n', 'C:\\work\\demo', 'c:/work/demo', '\\\\server\\share\\demo']) {
+      await writeRel('demo-app/.project_root', good);
+      expect(geminiProject(dir, 'demo-app', () => [], 'linux').cwd, good).not.toBeNull();
+    }
+  });
+
+  test('I5: an oversized .project_root is not read (treated as missing); 1,000 sessions read each sidecar once per change', async () => {
+    await writeRel('demo-app/.project_root', `/home/dev/${'x'.repeat(PROJECT_ROOT_MAX_BYTES + 10)}`);
+    const before = projectModule.sidecarReads;
+    expect(geminiProject(dir, 'demo-app', () => [], 'linux')).toEqual({ projectId: 'gemini:demo-app', cwd: null });
+    expect(projectModule.sidecarReads).toBe(before);
+
+    await writeRel('demo-app/.project_root', '/home/dev/demo-app');
+    await fs.writeFile(path.join(root, 'projects.json'), JSON.stringify({ projects: { '/home/dev/demo-app': 'demo-app' } }));
+    const s = new GeminiFileSource(dir);
+    const start = projectModule.sidecarReads;
+    for (let i = 0; i < 1000; i++) await classify(s, `gemini:demo-app/chats/${`s${i}`.padStart(8, '0')}/a.jsonl`);
+    expect(s.indexEntries('gemini:demo-app/.project_root', '')).toHaveLength(1000);
+    expect(s.indexEntries(GEMINI_PROJECTS_KEY, '')).toHaveLength(1000);
+    expect(projectModule.sidecarReads - start).toBeLessThanOrEqual(2);
+    const again = projectModule.sidecarReads;
+    s.indexEntries('gemini:demo-app/.project_root', '');
+    expect(projectModule.sidecarReads).toBe(again);
   });
 });
