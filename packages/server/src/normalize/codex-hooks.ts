@@ -1,11 +1,12 @@
 import { parseHookPayload } from './hooks.js';
 
 /*
- * Codex hook payloads (spec 2.3, from the official documentation; to be checked against real payloads at acceptance).
- * All events: session_id, transcript_path, cwd, hook_event_name, model. Turn-scoped events: turn_id. Tool events:
- * tool_name, tool_use_id, tool_input, and (PostToolUse) tool_response. Subagent events: agent_id, agent_type, with the
- * PARENT's session_id. The base payload is the same as Claude Code's (parseHookPayload); the events and their meaning
- * differ, so Claude's parser is left as it is.
+ * Codex hook payloads (spec 2.3; checked against Codex's source, codex-rs at 75fc67e, hooks/schema/generated — not yet
+ * against a live run). All events: session_id, transcript_path, cwd, hook_event_name; model on all but SessionEnd.
+ * turn_id on every event except SessionStart and SessionEnd. Tool events: tool_name, tool_input, tool_use_id (not on
+ * PermissionRequest), and (PostToolUse) tool_response. Subagent (spawned thread) hooks: agent_id = the subagent's own
+ * thread id, agent_type, with the ROOT session's session_id (not the parent's). The base payload is the same as Claude
+ * Code's (parseHookPayload); the events and their meaning differ, so Claude's parser is left as it is.
  *
  * Hooks v1 never create, confirm or settle nodes (the transcript alone makes the graph): what a hook carries for the
  * normalizer is only which session / turn it is about. The marks it leaves are interpreted in codex.ts.
