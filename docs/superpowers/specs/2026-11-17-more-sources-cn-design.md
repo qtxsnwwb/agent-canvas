@@ -1,6 +1,6 @@
 # 再接四个来源：DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作
 
-状态：待评审
+状态：已实现（分支 feat/more-sources-cn，0.2.0；未经真实数据核对）
 日期：2026-11-17
 
 ## 1. 目的与范围

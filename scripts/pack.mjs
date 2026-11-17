@@ -74,7 +74,7 @@ fs.copyFileSync(path.join(root, 'LICENSE'), path.join(out, 'LICENSE'));
 const pkg = {
   name: '@qtxsnwwb/agent-canvas',
   version: rootPkg.version,
-  description: 'See what your coding agents are doing: Claude Code, Codex and Cursor sessions drawn as a live canvas. Runs locally; your data stays on your machine.',
+  description: 'See what your coding agents are doing: Claude Code, Codex and Cursor sessions (also Gemini CLI, Grok, Copilot CLI, DeepSeek Harness, WorkBuddy, CodeBuddy Code and Doubao Work) drawn as a live canvas. Runs locally; your data stays on your machine.',
   license: 'MIT',
   type: 'module',
   bin: { 'agent-canvas': 'dist/cli.js' },
@@ -84,7 +84,7 @@ const pkg = {
   repository: { type: 'git', url: 'git+https://github.com/qtxsnwwb/agent-canvas.git' },
   homepage: 'https://github.com/qtxsnwwb/agent-canvas#readme',
   bugs: { url: 'https://github.com/qtxsnwwb/agent-canvas/issues' },
-  keywords: ['claude-code', 'codex', 'cursor', 'ai-agents', 'coding-agent', 'visualization', 'observability', 'developer-tools'],
+  keywords: ['claude-code', 'codex', 'cursor', 'gemini-cli', 'grok', 'copilot-cli', 'deepseek', 'workbuddy', 'codebuddy', 'doubao', 'ai-agents', 'coding-agent', 'visualization', 'observability', 'developer-tools'],
   publishConfig: { access: 'public' },
 };
 fs.writeFileSync(path.join(out, 'package.json'), JSON.stringify(pkg, null, 2) + '\n');
