@@ -2,7 +2,9 @@ name: Release
 
 # Publishes @qtxsnwwb/agent-canvas to npm when a version tag is pushed (v0.2.0 for package.json version 0.2.0).
 # Authentication is npm trusted publishing (OIDC): no token is stored in this repository. The package's settings on
-# npmjs.com must name this repository and this workflow file (release.yml) as its trusted publisher.
+# npmjs.com must name this repository and this workflow file (release.yml) as its trusted publisher, with
+# "Allow npm publish" ticked under Allowed actions: a trusted publisher created after 2026-09-03 may only stage
+# (`npm stage publish`) by default, and `npm publish` then fails with "OIDC permission denied for this action".
 
 on:
   push:
