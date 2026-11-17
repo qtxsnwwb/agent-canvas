@@ -28,8 +28,10 @@ import { ClaudeFileSource } from './sources/claude.js';
 import { storeLookup } from './sources/codex/lookup.js';
 import { CodexFileSource } from './sources/codex/source.js';
 import { CursorSource } from './sources/cursor/source.js';
-import { isExistingDir, sourceDirOf } from './sources/dirs.js';
+import { isExistingDir, sourceDirOf, sourceDirsOf } from './sources/dirs.js';
 import { CopilotFileSource } from './sources/copilot/source.js';
+import { DeepSeekFileSource } from './sources/deepseek/source.js';
+import { zstdAvailable } from './sources/deepseek/zstd-frames.js';
 import { GeminiFileSource } from './sources/gemini/source.js';
 import { GrokFileSource } from './sources/grok/source.js';
 import type { PollSource } from './sources/poll.js';
@@ -139,10 +141,11 @@ export const PACKAGE_NAME = '@qtxsnwwb/agent-canvas';
 /**
  * The session-file directories read for this configuration: Claude Code's projects directory, and Codex's sessions
  * directory, Gemini CLI's `tmp`, Copilot CLI's `session-state` and Grok Build's `sessions` when they name an existing directory (otherwise that
- * origin is skipped silently). `store` lets the
+ * origin is skipped silently), and DeepSeek Harness's `sessions` likewise when this Node has zstd (`caps.zstd`, default
+ * zstdAvailable(); without it the source is not created and diagnostics say why). `store` lets the
  * Codex source place files from their stored raw events (files that are gone, restarts) without reading them.
  */
-export function fileSources(config: Config, store?: Store): FileSource[] {
+export function fileSources(config: Config, store?: Store, caps: { zstd: boolean } = { zstd: zstdAvailable() }): FileSource[] {
   const sources: FileSource[] = [new ClaudeFileSource(config.projectsDir)];
   const codexDir = config.codexSessionsDir;
   if (isExistingDir(codexDir)) sources.push(new CodexFileSource(codexDir!, store ? storeLookup(store, config.projectsDir) : undefined));
@@ -155,6 +158,9 @@ export function fileSources(config: Config, store?: Store): FileSource[] {
   // Grok Build: likewise, only when <grokDir>/sessions exists at start.
   const grokSessions = sourceDirOf(config, 'grok');
   if (isExistingDir(grokSessions)) sources.push(new GrokFileSource(grokSessions!, store ? storeLookup(store, config.projectsDir) : undefined));
+  // DeepSeek Harness: only when <deepseekDir>/sessions exists at start and node:zlib has zstd (Node >= 22.15).
+  const dshSessions = sourceDirsOf(config, 'deepseek')[0] ?? null;
+  if (caps.zstd && isExistingDir(dshSessions)) sources.push(new DeepSeekFileSource(config.deepseekDir!, store ? storeLookup(store, config.projectsDir) : undefined));
   return sources;
 }
 

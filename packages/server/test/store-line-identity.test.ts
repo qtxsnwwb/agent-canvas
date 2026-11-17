@@ -58,23 +58,26 @@ describe('store dedupe hash', () => {
   }
 });
 
-test('only the Grok source identifies lines by offset', async () => {
+test('only the Grok and DeepSeek sources identify lines by offset', async () => {
   const dirs = { codex: path.join(tmp, 'codex'), gemini: path.join(tmp, 'gemini'), grok: path.join(tmp, 'grok'), copilot: path.join(tmp, 'copilot') };
   await fs.mkdir(dirs.codex, { recursive: true });
   await fs.mkdir(path.join(dirs.gemini, 'tmp'), { recursive: true });
   await fs.mkdir(path.join(dirs.grok, 'sessions'), { recursive: true });
   await fs.mkdir(path.join(dirs.copilot, 'session-state'), { recursive: true });
+  await fs.mkdir(path.join(tmp, 'dsh', 'sessions'), { recursive: true });
   const config = loadConfig(
     {},
     { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: dirs.codex, deepseekDir: path.join(tmp, 'dsh'), workbuddyDirs: [path.join(tmp, 'workbuddy')], codebuddyDir: path.join(tmp, 'codebuddy'), doubaoDirs: [path.join(tmp, 'doubao')], geminiDir: dirs.gemini, grokDir: dirs.grok, copilotDir: dirs.copilot, cursorDbPath: path.join(tmp, 'state.vscdb') },
   );
-  const sources = fileSources(config);
+  // zstd: true so the DeepSeek source exists whatever this Node has (it reads nothing here).
+  const sources = fileSources(config, undefined, { zstd: true });
   expect(sources.map((s) => [s.origin, s.lineIdentity ?? 'content'])).toEqual([
     ['claude', 'content'],
     ['codex', 'content'],
     ['gemini', 'content'],
     ['copilot', 'content'],
     ['grok', 'offset'],
+    ['deepseek', 'offset'],
   ]);
   // Cursor is polled: its records go through the content-only hash (no file offsets at all).
   expect(pollSources(config).map((s) => 'lineIdentity' in s)).toEqual([false]);

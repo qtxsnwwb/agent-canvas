@@ -28,6 +28,7 @@ import { NORMALIZER_VERSION } from '../normalize/version.js';
 import type { NotificationService } from '../notify/service.js';
 import type { Pipeline } from '../pipeline.js';
 import { isExistingDir, sourceDirsOf } from '../sources/dirs.js';
+import { DSH_UNAVAILABLE, zstdAvailable } from '../sources/deepseek/zstd-frames.js';
 import { KEY_PREFIXES } from '../sources/source.js';
 import { storageStatus, type StorageDiagnostics } from '../store/migrate-storage.js';
 import { SAMPLE_MAX, type Store } from '../store/store.js';
@@ -178,6 +179,8 @@ function fileOnlySources(config: Config, store: Store, pipeline: Pipeline): Reco
       sessionCount: counts[origin] ?? 0,
       ...(dirs.length > 1 ? { dirs } : {}),
       ...(source?.status?.() ?? {}),
+      // DeepSeek on a Node without zstd: the directory is there but the source was not created (fileSources).
+      ...(origin === 'deepseek' && source === undefined && dirs.some((d) => d.present) && !zstdAvailable() ? { unavailable: DSH_UNAVAILABLE } : {}),
     };
   }
   return out;
