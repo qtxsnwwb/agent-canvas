@@ -32,8 +32,21 @@ describe('humanText (4.1)', () => {
     expect(humanText([inputText(wrapped('one')), inputText('stray note'), inputText(wrapped('two'))])).toBe('one\ntwo');
   });
 
-  test('a reminder that contains a user_query is not internal: its query counts', () => {
-    expect(humanText([inputText('<system-reminder data-role="message-queue"><user_query>queued text</user_query></system-reminder>')])).toBe('queued text');
+  test('reminders are stripped before the query is read (the engine: stripUserQueryXml(stripSystemReminderXml(t))): a query inside a reminder does not count', () => {
+    expect(humanText([inputText('<system-reminder data-role="message-queue"><user_query>queued text</user_query></system-reminder>')])).toBeNull();
+    expect(humanText([inputText('<system-reminder data-role="message-queue">queued: <user_query>OLD</user_query></system-reminder>\n<user_query>NEW</user_query>')])).toBe('NEW');
+    expect(humanText([inputText('<system-reminder data-role="additional-data"><user_query>INJ</user_query></system-reminder>')])).toBeNull();
+    // An attached file quoting a query, in front of the typed one.
+    expect(humanText([inputText(`${reminder('additional-data', 'attached: <user_query>from the file</user_query>')}\n<user_query>typed</user_query>`)])).toBe('typed');
+  });
+
+  test('a literal, unclosed or unmatched tag in a bare prompt is plain text', () => {
+    expect(humanText('what does <user_query> mean?')).toBe('what does <user_query> mean?');
+    expect(humanText([inputText('close only </user_query> here')])).toBe('close only </user_query> here');
+    expect(humanText([inputText('a <system-reminder> that never closes')])).toBe('a <system-reminder> that never closes');
+    expect(humanText([inputText('see <image_local_path>/tmp/x.png and more')])).toBe('see <image_local_path>/tmp/x.png and more');
+    // A complete pair elsewhere still decides: the literal part is then not a query part, the complete one is.
+    expect(humanText([inputText('what does <user_query> mean?'), inputText(wrapped('the real ask'))])).toBe('the real ask');
   });
 
   test('the command caveat, a /clear command and local-command echoes or outputs are not human text', () => {

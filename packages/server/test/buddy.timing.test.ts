@@ -2,7 +2,9 @@ import v8 from 'node:v8';
 import vm from 'node:vm';
 import { describe, expect, test } from 'vitest';
 import { BuddyNormalizer } from '../src/normalize/buddy.js';
-import { buddyEvents, Chain, openaiUsage, PROJECT, SID } from './buddy-fixtures.js';
+import { humanText } from '../src/normalize/buddy-prompt.js';
+import type { RawEvent } from '../src/store/store.js';
+import { buddyEvents, Chain, CWD, inputText, openaiUsage, PROJECT, resendForkNotice, SID } from './buddy-fixtures.js';
 
 // Timing- and memory-sensitive: 200,000 Buddy lines with a rewind every 20,000 are applied in pages (as the pipeline
 // does); appending is O(1) per line, the branch walk runs only at the tombstones, and no text is held.
@@ -85,11 +87,11 @@ describe('Buddy normalizer: a 200,000-line session', () => {
     // Linear: the last pages are not slower than the first (appending never re-walks the file).
     expect(tail).toBeLessThan(head * 3 + gapBound(100));
     expect(total).toBeLessThan(gapBound(15_000));
-    // A page with a tombstone walks the whole file once: still short.
-    expect(Math.max(...pageMs)).toBeLessThan(gapBound(500));
+    // A page holding a tombstone stays within the project's ingest gap bound (pipeline.timing.test.ts).
+    expect(Math.max(...pageMs)).toBeLessThan(gapBound(250));
     // Held: per-line facts and the shown nodes' small fields (summaries are capped), not the lines.
     expect(held / LINES).toBeLessThan(2_500);
-  });
+  }, 60_000);
 
   test('tool outputs are not held: 4 KB outputs hold no more than 16-byte ones', () => {
     const gc = gcFn();
@@ -118,5 +120,79 @@ describe('Buddy normalizer: a 200,000-line session', () => {
     const extra = 10_000 * 4080; // characters more in the large run (10,000 results)
     console.log(`[buddy timing] held with 16 B outputs ${(small / 1e6).toFixed(1)} MB, with 4 KB outputs ${(large / 1e6).toFixed(1)} MB (${(extra / 1e6).toFixed(0)} MB more output read)`);
     expect(large - small).toBeLessThan(extra / 10);
+  }, 60_000);
+
+  /** A 200,000-line session (prompt, call, result, reply per request) and the prompt ids; `marked`: one tombstone early on. */
+  function bigSession(marked: boolean): { c: Chain; prompts: string[]; events: RawEvent[] } {
+    const c = new Chain();
+    const prompts: string[] = [];
+    for (let k = 0; c.lines.length < LINES; k++) {
+      if (marked && k === 10) c.rewind(prompts[9]!); // a branch is in force from here on
+      prompts.push(c.peekId());
+      c.prompt(`step ${k}`);
+      c.call('Read', `call_${k}`, { file_path: `src/f${k % 97}.ts` }, `m${k}`, { usage: openaiUsage(1000 + k, 20, 500) });
+      c.result('Read', `call_${k}`, 'ok', `m${k}`);
+      c.reply(`done ${k}`, `m${k}b`, { usage: openaiUsage(1200 + k, 30, 600) });
+    }
+    return { c, prompts, events: buddyEvents(c.lines) };
+  }
+
+  /** Applies a session in pages, then times one tombstone line that rewinds to `head`. */
+  function timeTombstone(s: { c: Chain; events: RawEvent[] }, head: string): { ms: number; removed: number } {
+    const n = new BuddyNormalizer('codebuddy');
+    for (let i = 0; i < s.events.length; i += PAGE) n.applyBatch(s.events.slice(i, i + PAGE).map((event) => ({ event, projectId: PROJECT })));
+    const last = s.events[s.events.length - 1]!;
+    const offset = last.source === 'transcript' ? last.offset + last.line.length + 1 : 0;
+    const line = resendForkNotice({ parentId: head, timestamp: s.c.now(), sessionId: SID, cwd: CWD });
+    const ev = buddyEvents([line], { startOffset: offset })[0]!;
+    const t0 = performance.now();
+    const r = n.apply(ev, PROJECT);
+    const ms = performance.now() - t0;
+    expect(r.unknownRecordType).toBeUndefined();
+    return { ms, removed: r.changes.filter((c) => c.type === 'node_removed').length };
+  }
+
+  test('one tombstone at 200,000 lines that drops a few hundred lines: a short synchronous step', () => {
+    const walked = bigSession(true);
+    const back = walked.prompts[walked.prompts.length - 75]!; // 75 requests: 300 lines
+    const a = timeTombstone(walked, back);
+    const first = bigSession(false); // the file's first marker: the walk runs from the tip to the root once
+    const b = timeTombstone(first, first.prompts[first.prompts.length - 75]!);
+    console.log(`[buddy timing] tombstone at 200k lines dropping 300 lines: ${a.ms.toFixed(1)} ms (branch in force), ${b.ms.toFixed(1)} ms (first marker of the file); removed ${a.removed} / ${b.removed} nodes`);
+    expect(a.removed).toBe(74 * 3 + 2); // the head prompt stays; its call and reply, and 74 whole requests go
+    expect(b.removed).toBe(74 * 3 + 2);
+    expect(a.ms).toBeLessThan(gapBound(50));
+    expect(b.ms).toBeLessThan(gapBound(50));
+  }, 60_000);
+
+  test('one tombstone that abandons half of a 200,000-line file: measured (the removals are inherent)', () => {
+    const s = bigSession(true);
+    const r = timeTombstone(s, s.prompts[Math.floor(s.prompts.length / 2)]!);
+    console.log(`[buddy timing] tombstone abandoning half of 200k lines: ${r.ms.toFixed(1)} ms, ${r.removed} nodes removed`);
+    expect(r.removed).toBeGreaterThan(70_000);
+    // ~130 ms measured on the development machine for 75,000 removals (one change each: inherent).
+    expect(r.ms).toBeLessThan(gapBound(500));
+  }, 60_000);
+});
+
+describe('Buddy prompt extraction: adversarial input is linear', () => {
+  test('5 MB of unclosed openers of every tag: each well within the gap bound', () => {
+    const MB5 = 5 * 1024 * 1024;
+    const fill = (unit: string): string => unit.repeat(Math.ceil(MB5 / unit.length)).slice(0, MB5);
+    const inputs: Record<string, string> = {
+      reminder: `x${fill('<system-reminder data-role="a">')}`,
+      query: fill('<user_query>a'),
+      image: fill('<image_local_path>a'),
+      channel: `<channel a>${fill('<channel ')}`,
+      mixed: fill('<system-reminder><user_query><image_local_path></system-reminder'),
+      wrapped: `${fill('<system-reminder>x</system-reminder>')}<user_query>ask</user_query>`,
+    };
+    for (const [name, text] of Object.entries(inputs)) {
+      const t0 = performance.now();
+      humanText([inputText(text)]);
+      const ms = performance.now() - t0;
+      console.log(`[buddy timing] humanText 5 MB ${name}: ${ms.toFixed(1)} ms`);
+      expect(ms).toBeLessThan(gapBound(250));
+    }
   });
 });

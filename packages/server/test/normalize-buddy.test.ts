@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import { applyChanges, emptyGraph, type Change, type Graph, type GraphNode, type Session } from '@agent-canvas/shared';
 import { activeBranch, type BranchLine } from '../src/normalize/buddy-branch.js';
-import { BuddyNormalizer, buddyNodeId } from '../src/normalize/buddy.js';
+import { BuddyNormalizer, buddyNodeId, DETAIL_CACHE_CHARS } from '../src/normalize/buddy.js';
 import { buddyTouches } from '../src/normalize/files.js';
 import { NORMALIZER_FACTORIES } from '../src/normalize/registry.js';
 import type { RawEvent } from '../src/store/store.js';
@@ -27,6 +27,7 @@ import {
   record,
   resendForkNotice,
   SID,
+  T0,
   topicRecord,
   userMessage,
   userMessageString,
@@ -196,10 +197,14 @@ describe('the example session', () => {
     expect(r.changes.find((c) => c.type === 'session_upserted')).toMatchObject({ session: { origin: 'workbuddy' } });
   });
 
-  test('holds no tool input', () => {
+  test('tool inputs are held only in the bounded detail cache', () => {
     const n = new BuddyNormalizer('codebuddy');
     go(ev, n);
-    expect(n.toolInputCount(SID)).toBe(0);
+    expect(n.toolInputCount(SID)).toBe(3); // Bash, Read, Task: recent details, well under DETAIL_CACHE_CHARS
+    const big = new Chain({ t0: T0 + 900_000 });
+    for (let k = 0; k < 3; k++) big.reply('x'.repeat(DETAIL_CACHE_CHARS / 2), `big-${k}`);
+    go(buddyEvents(big.lines, { startOffset: 10_000_000 }), n);
+    expect(n.toolInputCount(SID)).toBe(0); // pushed out, oldest first
     expect(n.hasSession(SID)).toBe(true);
     expect(n.sessionCount()).toBe(1);
   });
@@ -722,6 +727,76 @@ describe('restarts (the file was rewritten)', () => {
   });
 });
 
+describe('nodes returning to the branch (detail cache) and dangling parents', () => {
+  /** Folds the changes of the first `k` events applied one by one. */
+  const upTo = (events: RawEvent[], k: number): Folded => go(events.slice(0, k));
+
+  test('rewind to empty after the first prompt, then a new root: the first prompt comes back with its detail, then goes', () => {
+    // Engine-shaped: u1 (no parent), a tombstone with no parent (pending head: empty), u2 (no parent: no line has a
+    // parentId, so the file is shown as is and u1 returns), a2 (parent u2: the walk from a2 ends at the root u2).
+    const c = new Chain();
+    c.prompt('first ask', { parentId: null }); // 0
+    c.rewind(null); // 1
+    c.prompt('second ask', { parentId: null }); // 2
+    c.reply('answer', 'r1'); // 3
+    const ev = buddyEvents(c.lines);
+    expect(Object.keys(upTo(ev, 2).graph.nodes)).toEqual([]);
+    const third = upTo(ev, 3);
+    expect(Object.keys(third.graph.nodes)).toEqual([nodeAt(ev, 0), nodeAt(ev, 2)]);
+    expect(third.details.get(nodeAt(ev, 0))).toEqual({ text: 'first ask' }); // from the cache, not empty
+    const f = go(ev);
+    expect(Object.keys(f.graph.nodes)).toEqual([nodeAt(ev, 2), nodeAt(ev, 3)]);
+    // One by one = one batch = pages = a rebuild at every cut: the same final state.
+    for (const g of [paged(ev, ev.length), paged(ev, 1), paged(ev, 2, 1), paged(ev, 2, 2), paged(ev, 1, 3)]) expect(comparable(g)).toEqual(comparable(f));
+  });
+
+  test('a returning node whose detail was pushed out of the cache comes back unreadable (in every mode)', () => {
+    const c = new Chain();
+    c.prompt('first ask', { parentId: null }); // 0: oldest in the cache
+    c.reply('x'.repeat(150_000), 'r1', { parentId: null }); // 1
+    c.reply('y'.repeat(150_000), 'r2', { parentId: null }); // 2: pushes 0 and 1 out (300,000 > 262,144 characters)
+    c.rewind(null); // 3: everything goes
+    c.prompt('second ask', { parentId: null }); // 4: no line has a parentId: everything comes back
+    const ev = buddyEvents(c.lines);
+    const expectReturn = (f: Folded): void => {
+      expect(Object.keys(f.graph.nodes)).toEqual([0, 1, 2, 4].map((i) => nodeAt(ev, i)));
+      expect(f.details.get(nodeAt(ev, 0))).toEqual({ unreadable: true });
+      expect(f.details.get(nodeAt(ev, 1))).toEqual({ unreadable: true });
+      expect(f.details.get(nodeAt(ev, 2))?.text).toBe('y'.repeat(150_000));
+      expect(nodeOf(f, nodeAt(ev, 0))).toMatchObject({ kind: 'prompt', summary: 'first ask' }); // the node itself is whole
+    };
+    // One by one, in one batch, in pages, and re-hydrated at any cut before the return: the same.
+    const one = go(ev);
+    expectReturn(one);
+    for (const g of [paged(ev, ev.length), paged(ev, 2), paged(ev, 2, 2), paged(ev, 1, 4)]) {
+      expectReturn(g);
+      expect(comparable(g)).toEqual(comparable(one));
+    }
+  });
+
+  test('a dangling parent met by the walk: everything shown, counted once per thread; a walk that avoids it selects again', () => {
+    const c = new Chain();
+    const a = c.peekId();
+    c.prompt('one'); // 0
+    c.reply('two', 'r1', { parentId: 'gone' }); // 1: its parent exists nowhere
+    c.reply('three', 'r2'); // 2 (→1)
+    c.rewind(c.tip); // 3: tip 2 → 1 → gone: dangling
+    c.reply('four', 'r3'); // 4: extends: still dangling, not counted again
+    c.rewind(c.tip); // 5: dangling again, not counted again
+    const dangling = buddyEvents(c.lines);
+    const f = go(dangling);
+    expect(f.unknown).toEqual(['codebuddy:dangling-parent']);
+    expect(Object.keys(f.graph.nodes)).toEqual([0, 1, 2, 4].map((i) => nodeAt(dangling, i)));
+    c.rewind(a); // 6: tip 0, a root: selection works again
+    const ev = buddyEvents(c.lines);
+    const g = go(ev);
+    expect(g.unknown).toEqual(['codebuddy:dangling-parent']);
+    expect(Object.keys(g.graph.nodes)).toEqual([nodeAt(ev, 0)]);
+    expect(comparable(paged(ev, 3))).toEqual(comparable(g));
+    expect(comparable(paged(ev, 2, 4))).toEqual(comparable(g));
+  });
+});
+
 describe('determinism against the branch walk (randomised)', () => {
   /** A small seeded PRNG (mulberry32). */
   const rng = (seed: number) => () => {
@@ -748,7 +823,7 @@ describe('determinism against the branch walk (randomised)', () => {
     };
   };
 
-  for (const seed of [1, 2, 3, 4, 5, 6, 7, 8]) {
+  for (const seed of Array.from({ length: 24 }, (_, k) => k + 1)) {
     test(`seed ${seed}: the nodes shown are the walk's lines, chained in file order; one by one = pages = rebuild`, () => {
       const next = rng(seed);
       const c = new Chain();
@@ -791,6 +866,17 @@ describe('determinism against the branch walk (randomised)', () => {
       }
       expect(comparable(paged(ev, 7))).toEqual(comparable(f));
       expect(comparable(paged(ev, 5, Math.floor(ev.length / 2)))).toEqual(comparable(f));
+      // The incremental state equals a fresh walk: a tombstone that keeps the current branch changes no node.
+      if (set !== null && c.tip !== null) {
+        const n = new BuddyNormalizer('codebuddy');
+        go(ev, n);
+        const notice = resendForkNotice({ parentId: c.tip, timestamp: c.now(), sessionId: SID, cwd: CWD });
+        const noop = buddyEvents([...c.lines, notice]);
+        const r = n.apply(noop[noop.length - 1]!, PROJECT);
+        if (activeBranch([...c.lines, notice].map(branchLine)) !== null) {
+          expect(r.changes.filter((x) => x.type !== 'session_upserted' && !(x.type === 'node_updated' && Object.keys(x.patch).length === 0 && x.detail === undefined))).toEqual([]);
+        }
+      }
     });
   }
 });

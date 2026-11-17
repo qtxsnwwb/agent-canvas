@@ -110,9 +110,20 @@ describe('activeBranch', () => {
     expect(sorted(activeBranch(lines))).toEqual([0, 1, 2, 3, 4]);
   });
 
-  test('a parent that is not found ends the walk', () => {
-    // 0 a, 1 b(missing), 2 c(b), 3 N(→c). Tip c: 2 → 1 → E = missing: not found, stop.
-    expect(sorted(activeBranch([L('a', null), L('b', 'missing'), L('c', 'b'), notice('c')]))).toEqual([1, 2, 3]);
+  test('a dangling parent (an id no earlier entry has) is an anomaly: no branch selection, everything shown', () => {
+    // 0 a, 1 b(missing), 2 c(b), 3 N(→c). Tip c: 2 → 1 → E = missing: not found → null.
+    expect(activeBranch([L('a', null), L('b', 'missing'), L('c', 'b'), notice('c')])).toBeNull();
+    // A tombstone whose parent does not exist: the same.
+    expect(activeBranch([L('a', null), L('b', 'a'), notice('missing')])).toBeNull();
+    // A logicalParentId that does not exist (in a file with compaction): the same.
+    expect(activeBranch([L('a', null), L('B', null, { logicalParentId: 'gone' }), L('c', 'B'), notice('c')])).toBeNull();
+    // A walk that does not pass the dangling entry still selects: 0 a, 1 x(missing), 2 b(a), 3 N(→b) → b(2) → a(0).
+    expect(sorted(activeBranch([L('a', null), L('x', 'missing'), L('b', 'a'), notice('b')]))).toEqual([0, 2, 3]);
+  });
+
+  test('an absent parentId is a legitimate root: the walk ends there', () => {
+    // 0 a, 1 r (no parent: a new root), 2 c(r), 3 N(→c). Tip c: 2 → 1 → no parent, end. {1,2} + N.
+    expect(sorted(activeBranch([L('a', null), L('r', null), L('c', 'r'), notice('c')]))).toEqual([1, 2, 3]);
   });
 
   test('the tip is the last entry that has an id; with none after the tombstone, the tombstone parent', () => {

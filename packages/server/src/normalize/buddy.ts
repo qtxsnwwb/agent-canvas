@@ -1,7 +1,7 @@
 import type { Change, GraphNode, NodeDetail, Session, Usage } from '@agent-canvas/shared';
 import { normaliseCwd } from '../sources/cursor/project.js';
 import type { RawEvent } from '../store/store.js';
-import { addFlags, emptyFlags, nextParent, showsAll, walkBranch, type BranchFlags, type BranchLine, type BranchWalk } from './buddy-branch.js';
+import { addFlags, emptyFlags, indexId, isEntry, latestIn, nextParent, showsAll, walk, type BranchFlags, type BranchIndex, type BranchLine, type BranchWalk } from './buddy-branch.js';
 import { classifyUserMessage, humanText, isCompactAgent } from './buddy-prompt.js';
 import { buddyUsage } from './buddy-usage.js';
 import { promptTitle } from './codex.js';
@@ -21,16 +21,20 @@ import { unknownTypeName } from './unknown-type.js';
  * `providerData.toolResult.subAgent.sessionId`).
  *
  * Each line is applied once, in order, to its thread and emits the changes it causes. A thread keeps small per-line
- * facts (ids, parent ids, flags, the node a line made, usage counts) and the emitted nodes; nothing of a line's text
- * (prompt, reply, tool input or output) is kept once the line was applied.
+ * facts (ids, parent ids, flags, the node a line made, usage counts), an id index, and the emitted nodes. Of the text
+ * (prompt, reply, tool input or output) it keeps only the details of its most recently emitted nodes, at most
+ * DETAIL_CACHE_CHARS per thread, so that a node returning to the branch gets its detail back.
  *
  * The active branch (format reference 7, buddy-branch.ts): without a fork marker every line is shown and nothing is
  * walked. Once a marker (a `resend-fork-notice` or a content-filter notice) is in the file, the shown lines are the
- * walk's. Appending a conversation entry that extends the branch tip is O(1); the walk is redone (O(lines)) when a
- * marker arrives, or when an entry does not extend the tip (a fork without a marker). After a walk the thread is
- * reconciled: nodes whose line left the branch are removed (`node_removed`; kept as a skeleton without detail), nodes
- * whose line joined again are added back from their skeleton (with an empty detail: the text is not kept), and the
- * parents, turns, call results and usage of the shown nodes are re-derived from the per-line facts.
+ * walk's. Appending a conversation entry that extends the branch tip is O(1); the walk is redone when a marker arrives,
+ * or when an entry does not extend the tip (a fork without a marker). The walk follows the id index and stops at the
+ * first entry of the previous branch (the fork point), and the reconcile then touches only the lines from the first
+ * one whose membership changed: nodes whose line left the branch are removed (`node_removed`, the GraphNode kept as a
+ * skeleton), nodes whose line joined again are added back (their detail from the cache, else `unreadable: true`), and
+ * the parents, turns, call results and usage after the fork point are re-derived from the per-line facts. A walk that
+ * meets a dangling parent (an id no earlier entry has) selects nothing: the thread is shown as it is, counted once as
+ * `<origin>:dangling-parent`.
  *
  * Node ids: `buddy:<session id>[/<agent id>]:@<offset>` (one node per line at most). A line at or before the last
  * offset read of its thread means the file is read again from its start (rewritten or cut by a failed append): what the
@@ -71,6 +75,8 @@ const ID_MAX = 200;
 const PATH_MAX_CHARS = 4096;
 const MAX_TOUCHES = 64;
 const AUTO = 'auto';
+/** Characters of node details kept per thread (oldest dropped first) for nodes that return to the branch: 256 KiB. */
+export const DETAIL_CACHE_CHARS = 256 * 1024;
 
 type Obj = Record<string, unknown>;
 const isObject = (v: unknown): v is Obj => typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -184,14 +190,32 @@ const addUsage = (a: Usage | null, b: Usage | null): Usage | null => {
   return { inputTokens: a.inputTokens + b.inputTokens, cachedInputTokens: (a.cachedInputTokens ?? 0) + (b.cachedInputTokens ?? 0), outputTokens: a.outputTokens + b.outputTokens };
 };
 
+/** The size of a detail for the cache: characters of its strings, of the JSON of its other values. */
+function detailChars(detail: Partial<NodeDetail>): number {
+  let size = 0;
+  for (const v of Object.values(detail)) {
+    if (typeof v === 'string') size += v.length;
+    else if (v === null || v === undefined || typeof v !== 'object') size += 8;
+    else {
+      try {
+        size += JSON.stringify(v)?.length ?? 0;
+      } catch {
+        return Number.POSITIVE_INFINITY;
+      }
+    }
+  }
+  return size;
+}
+
 const sameUsage = (a: Usage | null, b: Usage | null): boolean =>
   a === b || (a !== null && b !== null && a.inputTokens === b.inputTokens && a.outputTokens === b.outputTokens && (a.cachedInputTokens ?? 0) === (b.cachedInputTokens ?? 0));
 
 interface Turn {
   /** conversationRequestId (null: a turn a prompt without one opened, until an output names one). */
   c: string | null;
-  /** The turn's first shown node (its turnId). */
+  /** The turn's first shown node (its turnId) and that node's line (-1: none). */
   first: string | null;
+  firstLine: number;
 }
 
 /** One model response (a messageId), or one usage record / node without a messageId (`own`). */
@@ -217,11 +241,15 @@ interface ResultFacts {
   endedAt: string;
   childId: string | null;
   label: string | null;
+  /** The call it is paired with. */
+  call: Call | null;
 }
 
 /** A tool call's state: never its arguments or output (they go out in the node's detail). */
 interface Call {
   nodeId: string;
+  /** The line of the call. */
+  line: number;
   callId: string;
   thread: Thread;
   name: string | null;
@@ -245,6 +273,8 @@ interface Call {
 }
 
 interface Line extends BranchLine {
+  /** The conversation entry before this line (-1: none). */
+  prevEntry: number;
   /** Shown (on the active branch, or everything is shown). */
   active: boolean;
   /** The node this line made (null: none, or the line was never shown). */
@@ -264,10 +294,23 @@ interface Thread {
   /** A walk is in force (false: everything shown); the line the walk started at. */
   walked: boolean;
   tipIdx: number;
-  /** Count of shown entries per id (while a walk is in force). */
-  activeIds: Map<string, number>;
-  /** model-usage lines waiting for an entry with their parentId to be shown. */
+  /**
+   * Nothing walked yet and every entry so far continues the previous one (`tipIdx` follows the last): the file is one
+   * chain, so a first walk can stop where it meets it, as it stops at a previous branch.
+   */
+  linear: boolean;
+  /** The last walk met a dangling parent: everything shown (reported once per thread). */
+  dangling: boolean;
+  danglingReported: boolean;
+  /** Entry lines by id (a single line, or an ascending list), and the index the walk uses. */
+  ids: Map<string, number | number[]>;
+  index: BranchIndex;
+  /** model-usage lines (their shown flag is re-derived after a walk), and those waiting for their parent entry. */
+  usageLines: number[];
   waiting: Map<string, number[]>;
+  /** Details of recently emitted nodes, oldest first, and their total size (DETAIL_CACHE_CHARS at most). */
+  details: Map<string, { detail: Partial<NodeDetail>; size: number }>;
+  detailChars: number;
   /** Last shown node (the next one hangs off it), its line and time. */
   prev: string | null;
   prevLine: number;
@@ -404,8 +447,11 @@ export class BuddyNormalizer implements AgentNormalizer {
     return this.sessions.size;
   }
 
-  toolInputCount(_sessionId: string): number {
-    return 0;
+  /** Tool inputs held: only in the bounded detail cache (DETAIL_CACHE_CHARS per thread). */
+  toolInputCount(sessionId: string): number {
+    let count = 0;
+    for (const t of this.sessions.get(sessionId)?.threads.values() ?? []) for (const e of t.details.values()) if (e.detail.input !== undefined) count += 1;
+    return count;
   }
 
   // ---- state ----
@@ -444,15 +490,24 @@ export class BuddyNormalizer implements AgentNormalizer {
   }
 
   private blankThread(agentId: string | null): Thread {
+    const lines: Line[] = [];
+    const ids = new Map<string, number | number[]>();
     return {
       agentId,
       lastOffset: -1,
-      lines: [],
+      lines,
       flags: emptyFlags(),
       walked: false,
       tipIdx: -1,
-      activeIds: new Map(),
+      linear: true,
+      dangling: false,
+      danglingReported: false,
+      ids,
+      index: { prevEntry: (i) => lines[i]!.prevEntry, latestBefore: (id, before) => latestIn(ids.get(id), before) },
+      usageLines: [],
       waiting: new Map(),
+      details: new Map(),
+      detailChars: 0,
       prev: null,
       prevLine: -1,
       prevTs: null,
@@ -525,6 +580,7 @@ export class BuddyNormalizer implements AgentNormalizer {
       isCompactAgent: isCompactAgent(pd.agent),
       contentFilterNotice: type === 'message' && Boolean(pd.contentFilterNotice),
       resendForkNotice: type === 'resend-fork-notice',
+      prevEntry: -1,
       active: false,
       node: null,
       turn: null,
@@ -533,134 +589,251 @@ export class BuddyNormalizer implements AgentNormalizer {
       resp: null,
     };
     const i = t.lines.length;
+    line.prevEntry = t.flags.lastEntry;
     t.lines.push(line);
-    const prevEntry = t.flags.lastEntry;
+    if (isEntry(line) && line.id !== null) indexId(t.ids, line.id, i);
     const compactBefore = t.flags.compact;
     addFlags(t.flags, line, i);
-    this.branch(state, t, line, i, prevEntry, compactBefore, changes);
+    const anomaly = this.branch(state, t, line, i, compactBefore, changes);
     let unknown: string | undefined;
     if (!known || UNHANDLED_ITEMS.has(type)) unknown = unknownTypeName(this.origin, type);
     else if (custom) this.fact(state, t, line, i, rec, pd, changes);
     else if (line.active) unknown = this.item(state, t, line, i, rec, pd, ts, changes);
     if (ts !== null) t.lastTs = ts;
     this.flushConcrete(state, changes);
-    return unknown;
+    if (anomaly !== undefined && unknown !== undefined) t.danglingReported = false; // one count per line: reported later
+    return unknown ?? anomaly;
   }
 
   // ---- the active branch ----
 
-  /** Where line `i` (just added) stands on the branch: O(1) when it extends the tip; else the walk and a reconcile. */
-  private branch(state: SessionState, t: Thread, line: Line, i: number, prevEntry: number, compactBefore: boolean, changes: Change[]): void {
+  /**
+   * Where line `i` (just added) stands on the branch: O(1) when it extends the tip (or a fact arrives); else the walk
+   * and a reconcile of what changed. Returns `<origin>:dangling-parent` the first time a walk of the thread meets one.
+   */
+  private branch(state: SessionState, t: Thread, line: Line, i: number, compactBefore: boolean, changes: Change[]): string | undefined {
     const f = t.flags;
     const marker = line.resendForkNotice || line.contentFilterNotice;
     const all = showsAll(f);
-    if (!marker && f.compact === compactBefore) {
-      if (all && !t.walked) {
+    const compactSame = f.compact === compactBefore;
+    const selecting = t.walked || t.dangling;
+    if (!marker && compactSame) {
+      if (all && !selecting) {
         line.active = true;
-        return;
-      }
-      if (!all && t.walked) {
-        if (line.custom) {
-          line.active = this.factActive(t, line, prevEntry);
-          if (!line.active && line.parentId !== null && line.type === 'model-usage') pushTo(t.waiting, line.parentId, i);
-          return;
+        if (!line.custom && t.linear) {
+          if (this.continuesChain(t, line, i)) t.tipIdx = i;
+          else {
+            t.linear = false;
+            t.tipIdx = -1;
+          }
         }
-        if (this.extendsTip(t, line, i, prevEntry)) {
+        return undefined;
+      }
+      if (!all && selecting) {
+        if (line.custom) {
+          line.active = !t.walked || this.factActive(t, line);
+          if (!line.active && line.parentId !== null && line.type === 'model-usage') pushTo(t.waiting, line.parentId, i);
+          return undefined;
+        }
+        // The walk from it passes the previous walk's start: the set grows by it (a dangling walk stays dangling).
+        if (this.extendsTip(t, line, i)) {
           line.active = true;
           t.tipIdx = i;
-          const id = line.id!;
-          t.activeIds.set(id, (t.activeIds.get(id) ?? 0) + 1);
-          const waiting = t.waiting.get(id);
+          const waiting = t.walked ? t.waiting.get(line.id!) : undefined;
           if (waiting !== undefined) {
-            t.waiting.delete(id);
+            t.waiting.delete(line.id!);
             for (const j of waiting) {
               t.lines[j]!.active = true;
               this.activateFact(state, t, j, changes);
             }
           }
-          return;
+          return undefined;
         }
       }
     }
-    this.reconcile(state, t, walkBranch(t.lines, f), changes);
+    // A previous walk is reused from the fork point on when the walk rule did not change (compact flag).
+    const early = (t.walked || (t.linear && !t.dangling)) && compactSame;
+    const lines = t.lines;
+    const w = walk(lines, f, t.index, early ? (k) => lines[k]!.active : null);
+    return this.applyWalk(state, t, w, early, changes);
   }
 
   /**
    * The new entry `line` at `i` continues the branch: the walk from it reaches the line the current walk started at
    * (format reference 7: its run of one id, else its parent), so the shown set only grows by `line`.
    */
-  private extendsTip(t: Thread, line: Line, i: number, prevEntry: number): boolean {
+  private extendsTip(t: Thread, line: Line, i: number): boolean {
     if (line.id === null || t.tipIdx < 0) return false;
-    if (prevEntry >= 0 && t.lines[prevEntry]!.id === line.id) return prevEntry === t.tipIdx;
+    const prev = line.prevEntry;
+    if (prev >= 0 && t.lines[prev]!.id === line.id) return prev === t.tipIdx;
     const parent = nextParent(line, i, t.flags);
     return parent !== null && parent === t.lines[t.tipIdx]!.id;
   }
 
+  /** While nothing is walked: the new entry continues the one chain the file is so far (its first entry: a root). */
+  private continuesChain(t: Thread, line: Line, i: number): boolean {
+    if (line.id === null) return false;
+    if (t.tipIdx < 0) return line.prevEntry < 0 && nextParent(line, i, t.flags) === null;
+    return this.extendsTip(t, line, i);
+  }
+
+  /** Some shown entry has id `id`. */
+  private idShown(t: Thread, id: string): boolean {
+    const at = t.ids.get(id);
+    if (at === undefined) return false;
+    if (typeof at === 'number') return t.lines[at]!.active;
+    return at.some((k) => t.lines[k]!.active);
+  }
+
   /** A fact is shown when its parentId is a shown entry's id; one without a parentId when the entry before it is shown. */
-  private factActive(t: Thread, line: Line, prevEntry: number): boolean {
-    if (!t.walked) return true;
-    if (line.parentId !== null) return (t.activeIds.get(line.parentId) ?? 0) > 0;
-    return prevEntry < 0 || t.lines[prevEntry]!.active;
+  private factActive(t: Thread, line: Line): boolean {
+    if (line.parentId !== null) return this.idShown(t, line.parentId);
+    return line.prevEntry < 0 || t.lines[line.prevEntry]!.active;
   }
 
   /**
-   * Re-derives what thread `t` shows from the walk (null: everything): removes the nodes whose line left, adds back
-   * those whose line joined (from their skeleton, with an empty detail), and re-derives parents, turns, call results and
-   * usage of the shown nodes from the per-line facts. Only differences are emitted.
+   * Applies a walk (null: everything shown; dangling: everything shown, reported once): sets the shown flag of the
+   * entries — after the fork point only, when the walk stopped at the previous branch — and of the model-usage facts,
+   * then reconciles from the first line whose flag changed.
    */
-  private reconcile(state: SessionState, t: Thread, walk: BranchWalk | null, changes: Change[]): void {
+  private applyWalk(state: SessionState, t: Thread, w: BranchWalk | null, early: boolean, changes: Change[]): string | undefined {
+    const lines = t.lines;
+    const n = lines.length;
+    let from = n;
+    const set = (j: number, shown: boolean): void => {
+      const l = lines[j]!;
+      if (l.active === shown) return;
+      l.active = shown;
+      if (j < from) from = j;
+    };
+    let report: string | undefined;
+    t.linear = false;
+    if (w === null || w.dangling) {
+      t.walked = false;
+      t.dangling = w !== null;
+      t.tipIdx = w?.tip ?? -1;
+      if (t.dangling && !t.danglingReported) {
+        t.danglingReported = true;
+        report = `${this.origin}:dangling-parent`;
+      }
+      for (let j = 0; j < n; j++) if (isEntry(lines[j]!)) set(j, true);
+    } else {
+      t.walked = true;
+      t.dangling = false;
+      t.tipIdx = w.tip;
+      const visited = w.visited; // descending
+      if (early && w.stoppedAt >= 0) {
+        let v = 0;
+        for (let j = n - 1; j > w.stoppedAt; j--) {
+          if (!isEntry(lines[j]!)) continue;
+          const on = v < visited.length && visited[v] === j;
+          if (on) v += 1;
+          set(j, on);
+        }
+      } else {
+        const mark = new Uint8Array(n);
+        for (const j of visited) mark[j] = 1;
+        for (let j = 0; j < n; j++) if (isEntry(lines[j]!)) set(j, mark[j] === 1);
+      }
+    }
+    // model-usage facts follow the entries they hang off.
+    const usage: Resp[] = [];
+    t.waiting.clear();
+    for (const j of t.usageLines) {
+      const l = lines[j]!;
+      const shown = !t.walked || this.factActive(t, l);
+      if (shown !== l.active) {
+        l.active = shown;
+        if (l.resp !== null) usage.push(l.resp);
+      }
+      if (t.walked && !shown && l.parentId !== null) pushTo(t.waiting, l.parentId, j);
+    }
+    this.reconcileFrom(state, t, from, usage, changes);
+    return report;
+  }
+
+  /**
+   * Re-derives thread `t` from line `from` on (every line before it kept its shown flag, so what was derived before it
+   * stands): removes the nodes whose line left, adds back those whose line joined (their detail from the cache, else
+   * `unreadable: true`), and re-derives parents, turns, call results, subagent links and usage after `from`, plus the
+   * nodes before `from` whose usage or call result depended on lines after it. Only differences are emitted.
+   */
+  private reconcileFrom(state: SessionState, t: Thread, from: number, usageResps: Resp[], changes: Change[]): void {
     const sid = state.session.id;
     const lines = t.lines;
     const n = lines.length;
-    // Which lines are shown.
-    t.walked = walk !== null;
-    t.tipIdx = walk === null ? -1 : walk.tip;
-    t.activeIds.clear();
-    t.waiting.clear();
-    let lastEntry = -1;
-    for (let j = 0; j < n; j++) {
-      const l = lines[j]!;
-      if (walk === null) l.active = true;
-      else if (!l.custom) l.active = walk.set.has(j);
-      else l.active = walk.set.has(j) || (l.parentId === null && (lastEntry < 0 || lines[lastEntry]!.active));
-      if (!l.custom) {
-        lastEntry = j;
-        if (walk !== null && l.active && l.id !== null) t.activeIds.set(l.id, (t.activeIds.get(l.id) ?? 0) + 1);
-      } else if (walk !== null && !l.active && l.parentId !== null && l.type === 'model-usage') {
-        pushTo(t.waiting, l.parentId, j);
-      }
-    }
-    // Nodes whose line left.
     const affected = new Set<Thread>();
-    for (const l of lines) if (l.node !== null && !l.active && state.nodes.has(l.node)) this.removeNode(state, t, l.node, affected, changes);
-    // Calls, results and turns, in line order.
-    for (const l of lines) {
-      if (l.call === null) continue;
-      l.call.before = l.call.result;
-      l.call.result = -1;
-      l.call.facts = null;
+    // Nodes whose line left.
+    for (let j = from; j < n; j++) {
+      const l = lines[j]!;
+      if (l.node !== null && !l.active && state.nodes.has(l.node)) this.removeNode(state, t, l.node, affected, changes);
     }
-    for (const turn of t.turns) turn.first = null;
-    t.open.clear();
-    /** The line of the last shown node before each line's own node (-1: none). */
-    const prevAt = new Int32Array(n).fill(-1);
+    // The last shown node and the running turn before `from`.
     let prev = -1;
     let cur: Turn | null = null;
-    for (let j = 0; j < n; j++) {
+    for (let j = from - 1; j >= 0 && (prev < 0 || cur === null); j--) {
       const l = lines[j]!;
       if (!l.active) continue;
-      prevAt[j] = prev;
+      if (prev < 0 && l.node !== null) prev = j;
+      if (cur === null && l.turn !== null) cur = l.turn;
+    }
+    // Turns whose first node may be after `from`.
+    for (let j = from; j < n; j++) {
+      const turn = lines[j]!.turn;
+      if (turn !== null && (turn.firstLine < 0 || turn.firstLine >= from)) {
+        turn.first = null;
+        turn.firstLine = -1;
+      }
+    }
+    // Calls after `from`, and calls before it whose result was after it, are paired again.
+    const touched: Call[] = [];
+    for (let j = from; j < n; j++) {
+      const l = lines[j]!;
+      if (l.call !== null) touched.push(l.call);
+      if (l.result !== null) {
+        if (l.result.call !== null && l.result.call.line < from) touched.push(l.result.call);
+        l.result.call = null;
+      }
+    }
+    /** callId -> the calls before `from` that lost their result after it. */
+    const reopened = new Map<string, Call[]>();
+    for (const c of touched) {
+      c.before = c.result;
+      c.result = -1;
+      c.facts = null;
+      if (c.callId === '') continue;
+      if (c.line < from) {
+        if (lines[c.line]!.active) pushTo(reopened, c.callId, c);
+      } else if (!reopened.has(c.callId)) reopened.set(c.callId, []);
+    }
+    for (const [key, earlier] of reopened) {
+      const list = (t.open.get(key) ?? []).filter((c) => c.line < from);
+      for (const c of earlier) list.push(c);
+      list.sort((a, b) => a.line - b.line);
+      if (list.length === 0) t.open.delete(key);
+      else t.open.set(key, list);
+    }
+    /** The line of the last shown node before each line's own node (-1: none), for lines from `from`. */
+    const prevAt = new Int32Array(n - from);
+    for (let j = from; j < n; j++) {
+      const l = lines[j]!;
+      prevAt[j - from] = prev;
+      if (!l.active) continue;
       if (l.turn !== null) cur = l.turn;
       if (l.node !== null) {
         prev = j;
-        if (l.turn !== null && l.turn.first === null) l.turn.first = l.node;
+        if (l.turn !== null && l.turn.first === null) {
+          l.turn.first = l.node;
+          l.turn.firstLine = j;
+        }
       }
       if (l.call !== null && l.call.callId !== '') pushTo(t.open, l.call.callId, l.call);
       if (l.result !== null) {
-        const call = t.open.get(l.result.callId)?.pop() ?? null;
+        const call = this.popOpen(t, l.result.callId);
         if (call !== null) {
           call.result = j;
           call.facts = l.result;
+          l.result.call = call;
         }
       }
     }
@@ -669,32 +842,45 @@ export class BuddyNormalizer implements AgentNormalizer {
     t.prevTs = t.prev === null ? null : ((state.nodes.get(t.prev) ?? t.hidden.get(t.prev))?.timestamp ?? null);
     t.cur = cur;
     // Subagent names follow the results.
-    for (const l of lines) {
-      const call = l.call;
-      if (call === null || call.result === call.before) continue;
+    for (const call of touched) {
+      if (call.result === call.before) continue;
       const childId = call.facts?.childId ?? null;
       if (childId === call.childId) continue;
       if (call.childId !== null) this.unnameChild(state, call, affected);
       if (childId !== null) this.nameChild(state, call, childId, affected);
     }
-    // Usage.
-    t.contrib.clear();
-    for (const r of t.resps.values()) {
+    // Usage of the responses with a line after `from` (and of the model-usage facts that changed).
+    const resps = new Set<Resp>(usageResps);
+    for (let j = from; j < n; j++) {
+      const r = lines[j]!.resp;
+      if (r !== null) resps.add(r);
+    }
+    const dirty = new Set<number>();
+    for (const r of resps) {
+      if (r.target >= 0) {
+        dirty.add(r.target);
+        this.unplace(t, r);
+      }
+    }
+    for (const r of resps) {
       this.bestOf(t, r);
       r.firstCand = -1;
       for (const c of r.cands) if (lines[c.line]!.active && (r.firstCand < 0 || c.line < r.firstCand)) r.firstCand = c.line;
-      r.attachBase = r.firstCand < 0 ? -1 : prevAt[r.firstCand]!;
-      r.target = -1;
+      r.attachBase = r.firstCand < 0 ? -1 : r.firstCand >= from ? prevAt[r.firstCand - from]! : this.shownBefore(t, r.firstCand, true);
     }
-    for (const r of t.resps.values()) this.place(t, r);
-    // Emit the shown nodes as derived (a node that does not change costs no allocation).
+    for (const r of resps) {
+      this.place(t, r);
+      if (r.target >= 0) dirty.add(r.target);
+    }
+    // Emit the shown nodes from `from` as derived (a node that does not change costs no allocation).
     const link = t.linkedTo !== null && state.nodes.has(t.linkedTo.nodeId) ? t.linkedTo.nodeId : null;
-    for (let j = 0; j < n; j++) {
+    for (let j = from; j < n; j++) {
       const l = lines[j]!;
       if (!l.active || l.node === null) continue;
+      dirty.delete(j);
       const id = l.node;
-      const p = prevAt[j]!;
-      const from = p < 0 ? link : lines[p]!.node;
+      const p = prevAt[j - from]!;
+      const parent = p < 0 ? link : lines[p]!.node;
       const kind = p < 0 ? 'spawn' : 'sequence';
       const turnId = l.turn?.first ?? null;
       const usage = this.usageOn(t, j);
@@ -704,27 +890,47 @@ export class BuddyNormalizer implements AgentNormalizer {
       if (live === undefined) {
         const base = t.hidden.get(id);
         if (base === undefined) continue;
-        let next: GraphNode = { ...base, parentId: from, turnId, usage };
+        let next: GraphNode = { ...base, parentId: parent, turnId, usage };
         if (call !== null) next = this.callNode(state, call, next);
         t.hidden.delete(id);
         state.nodes.set(id, next);
-        changes.push({ type: 'node_added', node: next, detail: {} });
-        if (from !== null) changes.push({ type: 'edge_added', edge: { id: `${from}->${id}`, sessionId: sid, from, to: id, kind } });
+        const cached = t.details.get(id);
+        changes.push({ type: 'node_added', node: next, detail: cached !== undefined ? { ...cached.detail } : { unreadable: true } });
+        if (parent !== null) changes.push({ type: 'edge_added', edge: { id: `${parent}->${id}`, sessionId: sid, from: parent, to: id, kind } });
         if (call !== null && call.childId !== null) this.childThread(state, call.childId, affected);
         continue;
       }
-      if (live.parentId === from && live.turnId === turnId && sameUsage(live.usage, usage) && !callChanged) continue;
-      let next: GraphNode = { ...live, parentId: from, turnId, usage };
+      if (live.parentId === parent && live.turnId === turnId && sameUsage(live.usage, usage) && !callChanged) continue;
+      let next: GraphNode = { ...live, parentId: parent, turnId, usage };
       if (callChanged) next = this.callNode(state, call, next);
-      const detail: Partial<NodeDetail> | undefined = callChanged && call.result < 0 ? { output: null } : undefined;
       const oldParent = live.parentId;
-      this.update(state, next, changes, detail);
-      if (oldParent !== from) {
+      this.update(state, next, changes, callChanged && call.result < 0 ? { output: null } : undefined);
+      if (oldParent !== parent) {
         if (oldParent !== null && state.nodes.has(oldParent)) changes.push({ type: 'edge_removed', sessionId: sid, id: `${oldParent}->${id}` });
-        if (from !== null) changes.push({ type: 'edge_added', edge: { id: `${from}->${id}`, sessionId: sid, from, to: id, kind } });
+        if (parent !== null) changes.push({ type: 'edge_added', edge: { id: `${parent}->${id}`, sessionId: sid, from: parent, to: id, kind } });
       }
     }
+    // Nodes before `from`: usage placed on or taken off them, calls whose result was after `from`.
+    for (const j of dirty) {
+      const id = lines[j]!.node;
+      const node = id === null ? undefined : state.nodes.get(id);
+      if (node !== undefined) this.update(state, { ...node, usage: this.usageOn(t, j) }, changes);
+    }
+    for (const call of touched) {
+      if (call.line >= from || call.result === call.before) continue;
+      const node = state.nodes.get(call.nodeId);
+      if (node !== undefined) this.update(state, this.callNode(state, call, node), changes, call.result < 0 ? { output: null } : undefined);
+    }
     for (const child of affected) if (child !== t) this.relink(state, child, changes);
+  }
+
+  /** The last shown call of `callId` without a result, taken off the open list. */
+  private popOpen(t: Thread, callId: string): Call | null {
+    const list = t.open.get(callId);
+    if (list === undefined) return null;
+    const call = list.pop() ?? null;
+    if (list.length === 0) t.open.delete(callId);
+    return call;
   }
 
   // ---- facts (custom records) ----
@@ -752,6 +958,7 @@ export class BuddyNormalizer implements AgentNormalizer {
         const r = this.resp(t, idOf(pd.messageId), i);
         line.resp = r;
         r.cands.push({ line: i, usage: cand.usage, total: cand.total });
+        t.usageLines.push(i);
         if (line.active) this.activateFact(state, t, i, changes);
         return;
       }
@@ -764,14 +971,14 @@ export class BuddyNormalizer implements AgentNormalizer {
     if (r === null) return;
     if (r.firstCand < 0 || i < r.firstCand) {
       r.firstCand = i;
-      r.attachBase = this.shownBefore(t, i);
+      r.attachBase = this.shownBefore(t, i, i !== t.lines.length - 1);
     }
     this.refreshResp(state, t, r, changes);
   }
 
-  /** The line of the last shown node before line `i` (the last line: the thread's last node), or -1. */
-  private shownBefore(t: Thread, i: number): number {
-    if (i === t.lines.length - 1) return t.prevLine;
+  /** The line of the last shown node before line `i` (`scan` false: `i` is the last line, the thread's last node), or -1. */
+  private shownBefore(t: Thread, i: number, scan: boolean): number {
+    if (!scan) return t.prevLine;
     for (let j = i - 1; j >= 0; j--) {
       const l = t.lines[j]!;
       if (l.active && l.node !== null) return j;
@@ -872,7 +1079,9 @@ export class BuddyNormalizer implements AgentNormalizer {
     for (const [id, shown] of state.autoNodes) {
       if (shown === want || !state.nodes.has(id)) continue;
       state.autoNodes.set(id, want);
-      changes.push({ type: 'node_updated', sessionId: state.session.id, id, patch: {}, detail: { raw: { model: want } } });
+      const detail = { raw: { model: want } };
+      changes.push({ type: 'node_updated', sessionId: state.session.id, id, patch: {}, detail });
+      this.cacheMerge(state, state.nodes.get(id)!, detail);
     }
   }
 
@@ -898,7 +1107,7 @@ export class BuddyNormalizer implements AgentNormalizer {
   // ---- turns ----
 
   private newTurn(t: Thread, c: string | null): Turn {
-    const turn: Turn = { c, first: null };
+    const turn: Turn = { c, first: null, firstLine: -1 };
     t.turns.push(turn);
     if (c !== null && !t.turnsByC.has(c)) t.turnsByC.set(c, turn);
     t.cur = turn;
@@ -948,7 +1157,10 @@ export class BuddyNormalizer implements AgentNormalizer {
     this.start(state, changes);
     const id = spec.id;
     const turn = line.turn;
-    if (turn !== null && turn.first === null) turn.first = id;
+    if (turn !== null && turn.first === null) {
+      turn.first = id;
+      turn.firstLine = t.lines.length - 1;
+    }
     const link = t.prev === null && t.linkedTo !== null && state.nodes.has(t.linkedTo.nodeId) ? t.linkedTo.nodeId : null;
     const from = t.prev ?? link;
     const timestamp = ts ?? t.prevTs ?? t.lastTs ?? EPOCH;
@@ -956,6 +1168,7 @@ export class BuddyNormalizer implements AgentNormalizer {
     state.nodes.set(id, full);
     line.node = id;
     changes.push({ type: 'node_added', node: full, detail });
+    this.cachePut(t, id, detail);
     if (from !== null) changes.push({ type: 'edge_added', edge: { id: `${from}->${id}`, sessionId: state.session.id, from, to: id, kind: t.prev === null ? 'spawn' : 'sequence' } });
     t.prev = id;
     t.prevLine = t.lines.length - 1;
@@ -970,6 +1183,44 @@ export class BuddyNormalizer implements AgentNormalizer {
     if (Object.keys(patch).length === 0 && detail === undefined) return;
     state.nodes.set(next.id, { ...old, ...patch });
     changes.push({ type: 'node_updated', sessionId: state.session.id, id: next.id, patch, ...(detail !== undefined ? { detail } : {}) });
+    if (detail !== undefined) this.cacheMerge(state, old, detail);
+  }
+
+  // ---- the detail cache (nodes returning to the branch) ----
+
+  /** Remembers the detail a node was added with (dropped when larger than the cache; oldest entries dropped first). */
+  private cachePut(t: Thread, id: string, detail: Partial<NodeDetail>): void {
+    const size = detailChars(detail);
+    if (size > DETAIL_CACHE_CHARS) return;
+    t.details.set(id, { detail, size });
+    t.detailChars += size;
+    this.evict(t);
+  }
+
+  /** Merges a detail patch into a cached detail (the store merges it the same way). */
+  private cacheMerge(state: SessionState, node: GraphNode, patch: Partial<NodeDetail>): void {
+    const t = state.threads.get(node.agentId ?? MAIN);
+    const entry = t?.details.get(node.id);
+    if (t === undefined || entry === undefined) return;
+    const detail = { ...entry.detail, ...patch };
+    const size = detailChars(detail);
+    t.detailChars -= entry.size;
+    if (size > DETAIL_CACHE_CHARS) {
+      t.details.delete(node.id);
+      return;
+    }
+    entry.detail = detail;
+    entry.size = size;
+    t.detailChars += size;
+    this.evict(t);
+  }
+
+  private evict(t: Thread): void {
+    for (const [id, e] of t.details) {
+      if (t.detailChars <= DETAIL_CACHE_CHARS) return;
+      t.details.delete(id);
+      t.detailChars -= e.size;
+    }
   }
 
   // ---- usage ----
@@ -1038,14 +1289,7 @@ export class BuddyNormalizer implements AgentNormalizer {
   private refreshResp(state: SessionState, t: Thread, r: Resp, changes: Change[]): void {
     const oldTarget = r.target;
     this.bestOf(t, r);
-    if (oldTarget >= 0) {
-      const list = t.contrib.get(oldTarget);
-      if (list !== undefined) {
-        const rest = list.filter((x) => x !== r);
-        if (rest.length === 0) t.contrib.delete(oldTarget);
-        else t.contrib.set(oldTarget, rest);
-      }
-    }
+    if (oldTarget >= 0) this.unplace(t, r);
     this.place(t, r);
     for (const j of oldTarget === r.target ? [oldTarget] : [oldTarget, r.target]) {
       if (j < 0) continue;
@@ -1053,6 +1297,17 @@ export class BuddyNormalizer implements AgentNormalizer {
       const node = id === null ? undefined : state.nodes.get(id);
       if (node !== undefined) this.update(state, { ...node, usage: this.usageOn(t, j) }, changes);
     }
+  }
+
+  /** Takes a response's usage off the node it was on. */
+  private unplace(t: Thread, r: Resp): void {
+    const list = t.contrib.get(r.target);
+    if (list !== undefined) {
+      const rest = list.filter((x) => x !== r);
+      if (rest.length === 0) t.contrib.delete(r.target);
+      else t.contrib.set(r.target, rest);
+    }
+    r.target = -1;
   }
 
   // ---- tool calls ----
@@ -1072,6 +1327,7 @@ export class BuddyNormalizer implements AgentNormalizer {
     const label = isObject(input) ? nonEmpty(input.subagent_type) : null;
     const call: Call = {
       nodeId,
+      line: t.lines.length - 1,
       callId: idOf(rec.callId) ?? '',
       thread: t,
       name: toolName,
@@ -1124,12 +1380,14 @@ export class BuddyNormalizer implements AgentNormalizer {
       endedAt: ts ?? t.lastTs ?? EPOCH,
       childId: sub === null ? null : idOf(sub.sessionId),
       label: label === null ? null : brief(label),
+      call: null,
     };
     line.result = facts;
-    const call = t.open.get(callId)?.pop() ?? null;
+    const call = this.popOpen(t, callId);
     if (call === null) return `${this.origin}:orphan-result`;
     call.result = i;
     call.facts = facts;
+    facts.call = call;
     const affected = new Set<Thread>();
     if (facts.childId !== null && facts.childId !== call.childId) {
       if (call.childId !== null) this.unnameChild(state, call, affected);
