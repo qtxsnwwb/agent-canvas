@@ -588,7 +588,8 @@ export class DeepSeekNormalizer implements AgentNormalizer {
   private userMessage(state: SessionState, t: Thread, data: Obj, ts: string | null, offset: number, changes: Change[]): void {
     const kind = isObject(data.source) ? data.source.kind : undefined;
     if (kind !== 'user' && kind !== 'compact-checkpoint') return;
-    const text = contentText(data.content, '');
+    // Blocks are separate paragraphs (Task 4 review m3): joined with a newline, not run together.
+    const text = contentText(data.content, '\n');
     const id = deepseekNodeId(state.session.id, t.agentId, `@${offset}`);
     if (kind === 'compact-checkpoint') {
       this.addNode(state, t, t.turn, { ...blankNode(id, 'system', 'Compact', brief(text)), systemSubtype: 'compact' }, ts, { text }, changes);
@@ -639,6 +640,10 @@ export class DeepSeekNormalizer implements AgentNormalizer {
     const provider = nonEmpty(source.provider);
     const model = nonEmpty(source.model);
     const raw = provider !== null || model !== null ? { raw: { provider, model } } : {};
+    if (holder === undefined) {
+      if (usage !== null) this.carryUsage(state, t, usage, changes);
+      return;
+    }
     for (const p of parts) {
       const holds = p === holder;
       if (p.kind === 'call') {
@@ -658,6 +663,29 @@ export class DeepSeekNormalizer implements AgentNormalizer {
       const id = deepseekNodeId(state.session.id, t.agentId, `@${offset}.${p.index}`);
       const spec = p.kind === 'text' ? blankNode(id, 'text', 'Text', brief(p.text)) : blankNode(id, 'thinking', 'Thinking', brief(p.text));
       this.addNode(state, t, t.turn, { ...spec, messageId, usage: holds ? usage : null }, ts, { text: p.text, ...(holds ? raw : {}) }, changes);
+    }
+  }
+
+  /**
+   * The usage of an assistant message that makes no node (image only, or empty after an interruption; Task 4 review
+   * m1), added to the nearest preceding node of thread `t` that may carry it, so session totals keep it: a node that
+   * already has usage, or one without a message id. A node of another message that has no usage is passed over (that
+   * message's usage is on a sibling node, and the totals count only the first node of a message id that has usage).
+   * Nowhere to put it (no such node yet in the thread): it is dropped.
+   */
+  private carryUsage(state: SessionState, t: Thread, usage: Usage, changes: Change[]): void {
+    for (let i = t.nodes.length - 1; i >= 0; i--) {
+      const node = state.nodes.get(t.nodes[i]!);
+      if (node === undefined) continue;
+      if (node.usage == null && node.messageId) continue;
+      const prev = node.usage ?? { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 };
+      const sum: Usage = {
+        inputTokens: prev.inputTokens + usage.inputTokens,
+        cachedInputTokens: (prev.cachedInputTokens ?? 0) + (usage.cachedInputTokens ?? 0),
+        outputTokens: prev.outputTokens + usage.outputTokens,
+      };
+      this.update(state, { ...node, usage: sum }, changes);
+      return;
     }
   }
 

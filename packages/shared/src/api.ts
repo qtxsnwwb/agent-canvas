@@ -92,7 +92,11 @@ export interface FileSourceStatus {
   present: boolean;
   reading: boolean;
   sessionCount: number;
-  /** Every configured root when a source has more than one (workbuddy, doubao). */
+  /**
+   * Every folder the source reads, when it has more than one (workbuddy, doubao): the folder actually read under each
+   * configured root (e.g. `<root>/projects` for WorkBuddy; the "User Data" directory itself for Doubao), with whether it
+   * exists now.
+   */
   dirs?: { dir: string; present: boolean }[];
   /** deepseek: session directories holding only files of an unsupported format version. */
   legacyFiles?: number;

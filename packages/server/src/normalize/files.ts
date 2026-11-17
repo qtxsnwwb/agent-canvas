@@ -343,9 +343,12 @@ export function deepseekTouches(toolName: string, input: unknown): RawTouch[] {
 // ---- WorkBuddy / CodeBuddy Code ----
 
 /**
- * File tools of the Buddy engine by name (spec section 10 item 16: no source evidences the tool names beyond `Bash` and
- * the Agent tool, so this is a conservative guess, unverified): the Claude-Code-style names the CodeBuddy Code CLI
- * documents, plus the snake_case names of the CodeBuddy IDE family.
+ * File tools of the Buddy engine by name (spec section 10 item 16). The format reference (docs/formats/buddy-family.md)
+ * evidences the tool name `Bash` (its example records) and an Agent tool whose name and argument keys it lists as open
+ * (section 10 item 4); it records no file tool and no path argument. This table is therefore a conservative guess,
+ * unverified on real transcripts: the Claude-Code-style names (`Read`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`
+ * with `file_path` / `notebook_path`: a code review found them in the engine package, but the format reference does not
+ * record them), plus the snake_case names of the CodeBuddy IDE family.
  */
 const BUDDY_TOOLS: Record<string, FileAction> = {
   Read: 'read',

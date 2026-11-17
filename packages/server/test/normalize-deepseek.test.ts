@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { applyChanges, emptyGraph, type Change, type Graph, type GraphNode, type Session } from '@agent-canvas/shared';
+import { applyChanges, emptyGraph, usageTotal, type Change, type Graph, type GraphNode, type Session } from '@agent-canvas/shared';
 import { deepseekNodeId, DeepSeekNormalizer } from '../src/normalize/deepseek.js';
 import { deepseekTouches } from '../src/normalize/files.js';
 import { NORMALIZER_FACTORIES } from '../src/normalize/registry.js';
@@ -260,6 +260,57 @@ describe('records', () => {
     expect(nodeOf(f, at(3, 0)).usage).toEqual({ inputTokens: 3, cachedInputTokens: 0, outputTokens: 4 });
     expect(nodeOf(f, at(4, 0)).usage).toBeNull();
     expect(nodeOf(f, at(4, 0)).messageId).toBe('m3');
+  });
+
+  test('a prompt\'s and a compaction checkpoint\'s text blocks are joined with a newline (Task 4 review m3)', () => {
+    const f = run((l) => {
+      l.turnStart(1);
+      l.add('user/message', { id: 'u', role: 'user', content: [textBlock('first line'), textBlock('second line')], source: { kind: 'user' } }); // 1
+      l.turnEnd(1); // 2
+      l.add('user/message', { id: 'k', role: 'user', content: [textBlock('## Summary'), textBlock('- point')], source: { kind: 'compact-checkpoint', compactionId: 'c1' } }); // 3
+    });
+    expect(f.details.get(at(1))).toEqual({ text: 'first line\nsecond line' });
+    expect(nodeOf(f, at(1)).summary).toBe('first line second line');
+    expect(f.details.get(at(3))).toEqual({ text: '## Summary\n- point' });
+    expect(f.session?.title).toBe('first line second line');
+  });
+
+  test('an assistant message that makes no node (image only, empty after an interruption) adds its usage to the nearest preceding node of its thread that may carry it (Task 4 review m1)', () => {
+    const build = (l: DshLog): void => {
+      l.turnStart(1); // 0
+      l.user('go'); // 1
+      // No node before it in the thread but the prompt: the prompt carries it (no message id, counted on its own).
+      l.assistant(1, 1, [{ type: 'image', attachment: { attachmentId: 'sha256:00' } }], { id: 'm0', usage: { inputTokens: 2, outputTokens: 1 } }); // 2
+      // m1: its usage on its text; the thinking after it shares the message id and has no usage.
+      l.assistant(1, 2, [textBlock('a'), reasoningBlock('b')], { id: 'm1', usage: { inputTokens: 10, outputTokens: 1, cacheReadTokens: 100 } }); // 3
+      l.assistant(1, 3, [{ type: 'image', attachment: { attachmentId: 'sha256:01' } }], { id: 'm2', usage: { inputTokens: 5, outputTokens: 2, cacheReadTokens: 3, cacheWriteTokens: 1 } }); // 4
+      l.assistant(1, 4, [textBlock('')], { id: 'm3', usage: { inputTokens: 1, outputTokens: 1 }, interrupted: true }); // 5
+      // A message without usage changes nothing.
+      l.assistant(1, 5, [textBlock('')], { id: 'm4', usage: null }); // 6
+    };
+    const l = new DshLog();
+    build(l);
+    const events = dshEvents(header, l.lines);
+    const f = go(events);
+    expect(Object.values(f.graph.nodes).map((n) => n.kind)).toEqual(['prompt', 'text', 'thinking']);
+    expect(nodeOf(f, at(1)).usage).toEqual({ inputTokens: 2, cachedInputTokens: 0, outputTokens: 1 });
+    // The thinking node (message m1, no usage) is passed over: m1's text holds m1 + m2 + m3.
+    expect(nodeOf(f, at(3, 1))).toMatchObject({ kind: 'thinking', messageId: 'm1', usage: null });
+    expect(nodeOf(f, at(3, 0)).usage).toEqual({ inputTokens: 10 + 6 + 1, cachedInputTokens: 100 + 3, outputTokens: 1 + 2 + 1 });
+    // Session totals lose nothing.
+    expect(usageTotal(Object.values(f.graph.nodes))).toEqual({ inputTokens: 2 + 10 + 6 + 1, cachedInputTokens: 103, outputTokens: 5 });
+    const want = comparable(f);
+    for (const page of [1, 2, 5]) expect(comparable(paged(events, page))).toEqual(want);
+    for (let cut = 1; cut < events.length; cut++) expect(comparable(paged(events, 2, cut))).toEqual(want);
+  });
+
+  test('a message that makes no node in a thread with no node yet: its usage has nowhere to go and nothing fails', () => {
+    const f = run((l) => {
+      l.turnStart(1);
+      l.assistant(1, 1, [{ type: 'image', attachment: { attachmentId: 'sha256:00' } }], { id: 'm0', usage: { inputTokens: 2, outputTokens: 1 } });
+    });
+    expect(f.unknown).toEqual([]);
+    expect(Object.keys(f.graph.nodes)).toEqual([]);
   });
 
   test('consecutive text blocks are one node; empty blocks, images and tool additions make none; reasoning after text is a node of its own', () => {

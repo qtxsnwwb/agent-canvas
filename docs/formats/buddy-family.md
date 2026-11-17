@@ -500,6 +500,11 @@ custom lines: keep those whose parentId points at an active line (or handle by t
 
 The engine deliberately does **not** walk when there is no fork marker, because duplicate ids make a blind walk lose messages [PKG history-utils.d.ts:40-42]. For a display tool: no marker → show everything; marker → hide lines not on the walk (or show them as an abandoned branch).
 
+Two further rules of **this project's reading** (Agent Canvas, `packages/server/src/normalize/buddy-branch.ts` and `buddy.ts`). They are choices made for display, not statements about what the product writes or does:
+
+- **No `parentId` anywhere.** A file in which no line has a `parentId` is shown as it is, even when it holds a fork marker (`resend-fork-notice` or a content-filter notice): there is no tree to walk.
+- **Dangling parent.** When the walk reaches a parent id that no earlier line of the file carries, branch selection is given up: every line of the thread is shown, as if there were no marker, and the case is counted once per thread as an unrecognised record of type `<origin>:dangling-parent` (`workbuddy:dangling-parent` or `codebuddy:dangling-parent` on the diagnostics page). The engine's own walk stops there and keeps the partial chain; showing everything instead is the safer default for a reader that cannot ask the engine.
+
 ---
 
 ## 8. Differences between the two products, and between versions
