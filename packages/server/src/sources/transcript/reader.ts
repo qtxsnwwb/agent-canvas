@@ -39,13 +39,15 @@ export async function readNewLines(
 
 /**
  * The line splitting of readNewLines on an open file of `size` bytes, from `start` (a line boundary): complete lines
- * up to the byte budget (the first line always in full), a trailing partial line left unread.
+ * up to the byte budget (the first line always in full), a trailing partial line left unread. `onConsumed`, when given,
+ * receives the bytes of [start, newOffset) in order, exactly as they were read (a view: copy what is kept).
  */
 export async function readLinesAt(
   handle: fs.FileHandle,
   size: number,
   start: number,
   maxBytes: number,
+  onConsumed?: (bytes: Buffer) => void,
 ): Promise<Pick<ReadResult, 'lines' | 'newOffset'>> {
   const lines: ReadResult['lines'] = [];
   let newOffset = start;
@@ -75,6 +77,7 @@ export async function readLinesAt(
       newOffset = lineEnd;
       from = nl + 1;
     }
+    if (onConsumed !== undefined && from > 0) onConsumed(pending.subarray(0, from));
     pending = pending.subarray(from);
   }
   return { lines, newOffset };

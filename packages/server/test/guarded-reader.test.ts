@@ -1,7 +1,8 @@
+import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, test } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { readGuardedLines } from '../src/sources/guarded-reader.js';
 import { readNewLines } from '../src/sources/transcript/reader.js';
 
@@ -127,6 +128,49 @@ describe('rewrites', () => {
     await fs.writeFile(f, '{"a":2}\n');
     const b = await readGuardedLines(f, a.newOffset, MAX, a.state ?? null);
     expect(b).toMatchObject({ truncated: true, lines: [{ offset: 0, text: '{"a":2}' }], newOffset: 8 });
+  });
+
+  test('a rewrite made while the new lines are being read is reported by the next call (the guard is the bytes read)', async () => {
+    const line1 = rec(1, 100);
+    await fs.writeFile(f, `${line1}\n`);
+    const a = await readGuardedLines(f, 0, MAX, null);
+    await fs.appendFile(f, `${rec(2, 100)}\n`);
+    const full = (await fs.readFile(f, 'utf8')).length;
+    // Same size, every byte of the head different: rewritten right after the read of the new lines starts.
+    const rewritten = `${rec(8, 100)}\n${rec(9, 100)}\n`;
+    expect(rewritten.length).toBe(full);
+    const realOpen = fs.open.bind(fs);
+    const spy = vi.spyOn(fs, 'open').mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+      const h = await realOpen(...args);
+      let fired = false;
+      return new Proxy(h, {
+        get(target, prop, receiver) {
+          if (prop !== 'read') {
+            const v = Reflect.get(target, prop, receiver);
+            return typeof v === 'function' ? v.bind(target) : v;
+          }
+          return async (buf: Buffer, off: number, len: number, pos: number) => {
+            const r = await target.read(buf, off, len, pos);
+            if (!fired && pos === a.newOffset) {
+              fired = true;
+              fsSync.writeFileSync(f, rewritten);
+            }
+            return r;
+          };
+        },
+      });
+    });
+    let b;
+    try {
+      b = await readGuardedLines(f, a.newOffset, MAX, a.state ?? null);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(b.truncated).toBe(false);
+    expect(b.lines.map((l) => JSON.parse(l.text).n)).toEqual([2]); // the old content, read before the rewrite landed
+    const c = await readGuardedLines(f, b.newOffset, MAX, b.state ?? null);
+    expect(c.truncated).toBe(true);
+    expect(c.lines.map((l) => JSON.parse(l.text).n)).toEqual([8, 9]);
   });
 
   test('after a detected rewrite, the next append reads on normally', async () => {

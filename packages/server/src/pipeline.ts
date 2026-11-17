@@ -545,7 +545,7 @@ export class Pipeline {
   private async fullScan(): Promise<void> {
     await this.touchDirty();
     const files = await this.listFiles();
-    const groups = new Map<string, { sessionId: string; files: string[] }>();
+    const groups = new Map<string, { sessionId: string; files: string[]; kinds: FileClass['kind'][] }>();
     const indexes: string[] = [];
     for (const file of files) {
       let cls: FileClass | null;
@@ -562,13 +562,19 @@ export class Pipeline {
       }
       this.registerFile(cls.sessionId, file);
       const key = `${cls.projectId}\u0000${cls.sessionId}`;
-      const g = groups.get(key) ?? { sessionId: cls.sessionId, files: [] };
+      const g = groups.get(key) ?? { sessionId: cls.sessionId, files: [], kinds: [] };
       g.files.push(file);
+      g.kinds.push(cls.kind);
       groups.set(key, g);
     }
-    for (const { sessionId, files: group } of groups.values()) {
-      for (const file of group) {
-        if (await this.unchanged(file)) continue;
+    // Files no source lists any more: forget the modification time last seen (FileSource.readLines files only).
+    if (this.readMtimes.size > 0) {
+      const listed = new Set(files.map((f) => this.rel(f)));
+      for (const key of [...this.readMtimes.keys()]) if (!listed.has(key)) this.readMtimes.delete(key);
+    }
+    for (const { sessionId, files: group, kinds } of groups.values()) {
+      for (const [i, file] of group.entries()) {
+        if (await this.unchanged(file, kinds[i])) continue;
         await this.safeIngest(file);
       }
       this.evictIfOld(sessionId);
@@ -834,11 +840,14 @@ export class Pipeline {
   }
 
   /**
-   * True when the file's size equals the stored size (nothing new can be complete), or when it is gone. For a source
-   * that reads its own lines (FileSource.readLines, which may detect a rewrite that kept the size), the modification
-   * time must also equal the one its last read saw in this process (none after a restart: read once more).
+   * True when the file's size equals the stored size (nothing new can be complete), or when it is gone. For a file
+   * tailed through FileSource.readLines (which may detect a rewrite that kept the size), the modification time must
+   * also equal the one its last read saw in this process (none after a restart: read once more). Which files those
+   * are: `kind` session/agent when the caller classified the file (full scan); otherwise (rescan) the files read so in
+   * this process. Every other file (all files of sources without readLines; title, agent_meta and index files) is
+   * compared by size only.
    */
-  private async unchanged(absPath: string): Promise<boolean> {
+  private async unchanged(absPath: string, kind?: FileClass['kind']): Promise<boolean> {
     const hit = this.locate(absPath);
     const key = hit?.key ?? absPath;
     const stored = this.sizeMap().get(key);
@@ -846,8 +855,11 @@ export class Pipeline {
     try {
       const st = await fsp.stat(absPath);
       if (hit?.source.readLines === undefined) return st.size === stored;
+      const tailed = kind === undefined ? this.readMtimes.has(key) : kind === 'session' || kind === 'agent';
+      if (!tailed) return st.size === stored;
       return st.size === stored && this.readMtimes.get(key) === st.mtimeMs;
     } catch {
+      this.readMtimes.delete(key);
       return true; // gone: the full scan's listing marks the session
     }
   }
@@ -1102,12 +1114,15 @@ export class Pipeline {
     // Stored with each line only when the key does not name the project, so replay never has to read the file.
     const projectId = source.projectOfKey(file) === null ? cls.projectId : null;
     this.registerFile(cls.sessionId, absPath);
+    // Sources with readLines: whether this call already restarted the file once (a reported truncation).
+    let restarted = false;
     for (;;) {
       let size: number;
       let mtimeMs: number;
       try {
         ({ size, mtimeMs } = await fsp.stat(absPath));
       } catch {
+        this.readMtimes.delete(file);
         return; // file is gone: keep the stored offset, scanAll marks the session
       }
       if (this.writeHold !== null) await this.writable();
@@ -1119,6 +1134,16 @@ export class Pipeline {
       const res: SourceRead =
         source.readLines === undefined ? await readNewLines(absPath, from, READ_BUDGET_BYTES) : await source.readLines(absPath, from, READ_BUDGET_BYTES, prevState);
       const newState = res.state !== undefined && res.state !== prevState ? res.state : undefined;
+      if (res.truncated && source.readLines !== undefined) {
+        // At most one restart per call: a file rewritten again while it is being re-read (a head that keeps changing)
+        // is left, read result discarded and nothing stored, for the next change event or scan (the mtime last seen is
+        // forgotten so the scans do come back), instead of storing another whole generation on every pass.
+        if (restarted) {
+          this.readMtimes.delete(file);
+          return;
+        }
+        restarted = true;
+      }
       if (this.writeHold !== null) await this.writable();
       // Lines identified by their place (FileSource.lineIdentity 'offset'): the file's generation, bumped when it was found
       // shorter than what was read (rewritten: every line of the new content is a new line).
@@ -1175,7 +1200,9 @@ export class Pipeline {
       }
       // Sources with readLines: the scans skip the file again only while its size and modification time stay as seen here.
       if (source.readLines !== undefined) this.readMtimes.set(file, mtimeMs);
-      if (res.newOffset === from) return;
+      // A truncated read goes on from its new position even when that equals the old offset (only possible with
+      // readLines: readNewLines' truncated reads always end below it).
+      if (res.newOffset === from && !res.truncated) return;
       await yieldToEventLoop();
     }
   }

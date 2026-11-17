@@ -61,12 +61,15 @@ class FakeSource implements FileSource {
   readLines?: (absPath: string, fromOffset: number, maxBytes: number, state: string | null) => Promise<SourceRead>;
   readonly calls: Call[] = [];
   private readonly prefix: string;
+  /** Records decoded per readLines call at most (a stand-in for the byte budget). */
+  private readonly perCall: number;
 
   constructor(
     readonly origin: Origin,
     private readonly roots: string[],
-    opts: { lineIdentity?: 'content' | 'offset'; container?: boolean; watchRoots?: boolean } = {},
+    opts: { lineIdentity?: 'content' | 'offset'; container?: boolean; watchRoots?: boolean; perCall?: number } = {},
   ) {
+    this.perCall = opts.perCall ?? Infinity;
     this.rootDir = roots[0]!;
     this.prefix = KEY_PREFIXES[origin];
     if (opts.lineIdentity !== undefined) this.lineIdentity = opts.lineIdentity;
@@ -87,7 +90,7 @@ class FakeSource implements FileSource {
     let pos = truncated ? 0 : from;
     let seq = truncated || st === null ? 0 : st.seq;
     const lines: SourceRead['lines'] = [];
-    for (;;) {
+    while (lines.length < this.perCall) {
       const end = buf.indexOf(RS, pos);
       if (end < 0) break;
       lines.push({ offset: seq, text: buf.toString('utf8', pos, end) });
@@ -119,9 +122,13 @@ class FakeSource implements FileSource {
     const root = this.roots[Number(i)];
     return root === undefined || name === undefined ? null : path.join(root, name);
   }
+  /** `<session>.title` is the title of session `<session>`, `<session>.meta` the agent_meta of its agent `ag`. */
   classify(key: string): FileClass | null {
     const p = this.pathOf(key);
-    return p === null ? null : { kind: 'session', projectId: 'p', sessionId: this.sessionOf(key) };
+    if (p === null) return null;
+    if (key.endsWith('.title')) return { kind: 'title', projectId: 'p', sessionId: this.sessionOf(key.slice(0, -'.title'.length)) };
+    if (key.endsWith('.meta')) return { kind: 'agent_meta', projectId: 'p', sessionId: this.sessionOf(key.slice(0, -'.meta'.length)), agentId: 'ag' };
+    return { kind: 'session', projectId: 'p', sessionId: this.sessionOf(key) };
   }
   sessionOf(key: string): string {
     return `${this.origin}-${key.slice(this.prefix.length).replace('/', '-')}`;
@@ -370,6 +377,126 @@ describe('readLines: lines decoded by the source', () => {
     await p.idle();
     expect(store.getMeta(key)).toBeNull();
     expect(store.getOffset('deepseek:0/a.zst')).toBe((await fs.stat(file)).size);
+  });
+});
+
+describe('readLines: review fix round 1', () => {
+  test('title and agent_meta files of a readLines source are judged by size only: unchanged scans read and write nothing', async () => {
+    const root = await mkroot('ds');
+    await fs.writeFile(path.join(root, 'a.zst'), records('{"type":"one"}'));
+    await fs.writeFile(path.join(root, 'a.zst.title'), '{"title":"T"}');
+    await fs.writeFile(path.join(root, 'a.zst.meta'), '{"agentType":"x"}');
+    const src = new FakeSource('deepseek', [root], { lineIdentity: 'offset', container: true });
+    const p = new Pipeline(store, config, { sources: [src], normalizers });
+    await p.scanAll();
+    await p.idle();
+    const sid = 'deepseek-0-a.zst';
+    expect(store.rawForSession(sid).map((e) => e.source)).toEqual(expect.arrayContaining(['transcript', 'meta', 'meta']));
+    const rows = rawRows().length;
+
+    const latestMeta = vi.spyOn(store, 'latestMeta');
+    const setOffset = vi.spyOn(store, 'setOffset');
+    const insertRaw = vi.spyOn(store, 'insertRaw');
+    const readFile = vi.spyOn(fs, 'readFile');
+    const calls = src.calls.length;
+    for (let i = 0; i < 3; i++) {
+      await p.scanAll();
+      await p.rescan();
+      await p.idle();
+    }
+    expect(latestMeta).not.toHaveBeenCalled();
+    expect(setOffset).not.toHaveBeenCalled();
+    expect(insertRaw).not.toHaveBeenCalled();
+    expect(readFile.mock.calls.filter(([f]) => String(f).endsWith('.title') || String(f).endsWith('.meta'))).toEqual([]);
+    expect(src.calls.length).toBe(calls);
+    expect(rawRows()).toHaveLength(rows);
+    readFile.mockRestore();
+    await p.close();
+  });
+
+  test('at most one restart per ingest: a second truncated read in the same call is discarded and left for the next scan', async () => {
+    const root = await mkroot('ds');
+    const file = path.join(root, 'a.zst');
+    await fs.writeFile(file, records('{"type":"one"}', '{"type":"two"}'));
+    const src = new FakeSource('deepseek', [root], { lineIdentity: 'offset', container: true });
+    const p = new Pipeline(store, config, { sources: [src], normalizers });
+    await p.scanAll();
+    await p.idle();
+    const key = 'deepseek:0/a.zst';
+
+    // A reader whose file keeps being rewritten: every read reports a truncation and returns one record from the start.
+    let n = 0;
+    const always: NonNullable<FakeSource['readLines']> = async () => {
+      n += 1;
+      return { lines: [{ offset: 0, text: `{"type":"r${n}"}` }], newOffset: 15, truncated: true, state: `s${n}` };
+    };
+    src.readLines = always;
+    await p.ingestFile(file);
+    await p.idle();
+    expect(n).toBe(2); // the second truncation ends the call
+    expect(store.getMeta(`${LINE_GENERATION_PREFIX}${key}`)).toBe('1');
+    expect(lineTexts('deepseek-0-a.zst').map(([, t]) => t)).toEqual(['{"type":"one"}', '{"type":"two"}', '{"type":"r1"}']);
+    expect(store.getMeta(`${READER_STATE_PREFIX}${key}`)).toBe('s1');
+    expect(store.getOffset(key)).toBe(15);
+
+    // The next scan comes back to the file (once more: one restart, then stop).
+    await p.scanAll();
+    await p.idle();
+    expect(n).toBe(4);
+    expect(store.getMeta(`${LINE_GENERATION_PREFIX}${key}`)).toBe('2');
+    expect(lineTexts('deepseek-0-a.zst').map(([, t]) => t)).toEqual(['{"type":"one"}', '{"type":"two"}', '{"type":"r1"}', '{"type":"r3"}']);
+    await p.close();
+  });
+
+  test('a truncated read that ends at the old offset goes on reading the rest of the file in the same call', async () => {
+    const root = await mkroot('ds');
+    const file = path.join(root, 'a.zst');
+    const first = records('{"type":"aaaa"}', '{"type":"bbbb"}');
+    await fs.writeFile(file, first);
+    const src = new FakeSource('deepseek', [root], { lineIdentity: 'offset', container: true, perCall: 2 });
+    const p = new Pipeline(store, config, { sources: [src], normalizers });
+    await p.ingestFile(file);
+    await p.idle();
+    const key = 'deepseek:0/a.zst';
+    expect(store.getOffset(key)).toBe(first.length);
+
+    // Rewritten: the first two records end exactly at the old offset, a third follows.
+    const head = records('{"type":"cccc"}', '{"type":"dddd"}');
+    expect(head.length).toBe(first.length);
+    await fs.writeFile(file, Buffer.concat([head, records('{"type":"eeee"}')]));
+    await p.ingestFile(file);
+    await p.idle();
+    expect(store.getMeta(`${LINE_GENERATION_PREFIX}${key}`)).toBe('1');
+    expect(lineTexts('deepseek-0-a.zst').slice(2)).toEqual([
+      [0, '{"type":"cccc"}'],
+      [1, '{"type":"dddd"}'],
+      [2, '{"type":"eeee"}'],
+    ]);
+    expect(store.getOffset(key)).toBe((await fs.stat(file)).size);
+    await p.close();
+  });
+
+  test('the modification time last seen is forgotten when the file is gone', async () => {
+    const root = await mkroot('ds');
+    const a = path.join(root, 'a.zst');
+    const b = path.join(root, 'b.zst');
+    await fs.writeFile(a, records('{"type":"one"}'));
+    await fs.writeFile(b, records('{"type":"one"}'));
+    const src = new FakeSource('deepseek', [root], { lineIdentity: 'offset', container: true });
+    const p = new Pipeline(store, config, { sources: [src], normalizers });
+    await p.scanAll();
+    await p.idle();
+    const mtimes = (p as unknown as { readMtimes: Map<string, number> }).readMtimes;
+    expect([...mtimes.keys()].sort()).toEqual(['deepseek:0/a.zst', 'deepseek:0/b.zst']);
+    await fs.rm(a);
+    await p.scanAll();
+    await p.idle();
+    expect([...mtimes.keys()]).toEqual(['deepseek:0/b.zst']);
+    await fs.rm(b);
+    await p.ingestFile(b);
+    await p.idle();
+    expect(mtimes.size).toBe(0);
+    await p.close();
   });
 });
 
