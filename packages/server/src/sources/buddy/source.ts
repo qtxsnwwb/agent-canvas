@@ -234,11 +234,18 @@ export class BuddyFileSource implements FileSource {
     return key === null ? null : (this.known(key)?.projectId ?? null);
   }
 
-  /** A session's main file (the winning copy); a subagent's file belongs to its root session's main file. */
+  /**
+   * A session's main file (the winning copy, or a copy whose file is gone when no other copy holds the session); a
+   * subagent's file belongs to its root session's main file.
+   */
   mainSessionOf(key: string): string | null {
     if (this.shapeOf(key)?.kind !== 'main') return null;
     const known = this.known(key);
-    return known?.kind === 'session' && this.claims.get(known.sessionId) === key ? known.sessionId : null;
+    if (known?.kind !== 'session') return null;
+    // The claim holder answers; so does a key when no copy holds the claim (its file is gone and no other copy took
+    // over), so a deleted session is flagged "source deleted" as for every other source.
+    const holder = this.claims.get(known.sessionId);
+    return holder === undefined || holder === key ? known.sessionId : null;
   }
 
   /** Sessions found again under another root and not read twice. (The configured roots are listed by the server.) */

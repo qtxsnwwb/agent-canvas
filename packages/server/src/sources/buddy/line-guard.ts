@@ -29,13 +29,16 @@ function format(guard: LineGuard | null, inner: string | null): string {
   return `${VERSION}:${guard === null ? -1 : guard.start}:${guard === null ? '-' : guard.hash}|${inner ?? ''}`;
 }
 
-/** SHA-1 of bytes [from, to) of the file; null when the file is shorter or cannot be read. */
-async function hashRange(file: string, from: number, to: number): Promise<string | null> {
+/** Marks a file that is not there (ENOENT): not a rewrite. */
+const GONE = Symbol('gone');
+
+/** SHA-1 of bytes [from, to) of the file; null when the file is shorter or cannot be read; GONE when it does not exist. */
+async function hashRange(file: string, from: number, to: number): Promise<string | null | typeof GONE> {
   let handle: fsp.FileHandle;
   try {
     handle = await fsp.open(file, 'r');
-  } catch {
-    return null;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'ENOENT' ? GONE : null;
   }
   try {
     const buf = Buffer.alloc(to - from);
@@ -62,6 +65,12 @@ export async function readBuddyLines(absPath: string, fromOffset: number, maxByt
   const prev = parse(state);
   if (fromOffset > 0 && prev.guard !== null && prev.guard.start < fromOffset) {
     const now = await hashRange(absPath, prev.guard.start, fromOffset);
+    if (now === GONE) {
+      // Vanished (between the pipeline's stat and this read): whatever the shared reader says of a missing file, and
+      // the stored state kept, so no generation is bumped and a file that comes back reads on.
+      const res = await readGuardedLines(absPath, fromOffset, maxBytes, prev.inner);
+      return res.lines.length === 0 && !res.truncated ? { ...res, state: undefined } : withGuard(res, absPath, prev, fromOffset);
+    }
     if (now !== prev.guard.hash) {
       const res = await readGuardedLines(absPath, 0, maxBytes, null);
       return withGuard({ ...res, truncated: true }, absPath, null, null);
@@ -90,7 +99,7 @@ async function withGuard(res: SourceRead, absPath: string, prev: { guard: LineGu
   }
   if (guard !== null && guard.hash === '') {
     const hash = guard.start < res.newOffset ? await hashRange(absPath, guard.start, res.newOffset) : null;
-    guard = hash === null ? null : { start: guard.start, hash };
+    guard = typeof hash === 'string' ? { start: guard.start, hash } : null;
   }
   return { ...res, state: format(guard, inner) };
 }

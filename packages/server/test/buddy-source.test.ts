@@ -734,3 +734,70 @@ describe('the Buddy line guard (a same-size rewrite that keeps the last 64 bytes
     expect(text).not.toContain('The reviewer agrees.');
   });
 });
+
+describe('source deleted (as for every other source)', () => {
+  test('one root: a deleted session is flagged in the same run', async () => {
+    await write(mainAt(cb, SID), body(exampleMain().lines));
+    await write(agentAt(cb, SID, CHILD), body(exampleChild().lines));
+    const { store, pipeline } = await ingestAll(cfg());
+    expect(store.getSession(SID)).toMatchObject({ sourceDeleted: false });
+    await fs.rm(path.join(cb, 'projects', PROJ, SID), { recursive: true });
+    await fs.rm(mainAt(cb, SID));
+    await pipeline.scanAll();
+    await pipeline.idle();
+    expect(store.getSession(SID)).toMatchObject({ sourceDeleted: true });
+    await pipeline.scanAll();
+    await pipeline.idle();
+    expect(store.getSession(SID)).toMatchObject({ sourceDeleted: true });
+    // Back again: the flag is cleared.
+    await write(mainAt(cb, SID), body(exampleMain().lines));
+    await pipeline.scanAll();
+    await pipeline.idle();
+    expect(store.getSession(SID)).toMatchObject({ sourceDeleted: false });
+  });
+
+  test('two roots: the winner deleted, the other copy takes over and the session is not flagged', async () => {
+    const main = exampleMain();
+    await write(mainAt(wb, SID), body(main.lines));
+    const store = open();
+    await ingestAll(cfg({ workbuddyDirs: [wb], codebuddyDir: null }), store);
+    await write(mainAt(wbAi, SID), body(main.lines));
+    const { pipeline } = await ingestAll(cfg({ codebuddyDir: null }), store);
+    const before = view(store, SID)!;
+    await fs.rm(mainAt(wb, SID));
+    await pipeline.scanAll();
+    await pipeline.idle();
+    expect(store.getSession(SID)).toMatchObject({ sourceDeleted: false });
+    expect(view(store, SID)!.nodes).toEqual(before.nodes);
+    expect(buddyOf(pipeline, 'workbuddy').status()).toEqual({ duplicateSessions: 0 });
+  });
+
+  test('two roots: both copies deleted, the session is flagged in the same run', async () => {
+    const main = exampleMain();
+    await write(mainAt(wb, SID), body(main.lines));
+    await write(mainAt(wbAi, SID), body(main.lines));
+    const { store, pipeline } = await ingestAll(cfg({ codebuddyDir: null }));
+    expect(buddyOf(pipeline, 'workbuddy').status()).toEqual({ duplicateSessions: 1 });
+    await fs.rm(mainAt(wb, SID));
+    await fs.rm(mainAt(wbAi, SID));
+    await pipeline.scanAll();
+    await pipeline.idle();
+    expect(store.getSession(SID)).toMatchObject({ sourceDeleted: true });
+  });
+});
+
+test('the line guard: a file that vanished is not a rewrite (what the shared reader says, stored state kept)', async () => {
+  const lines = exampleMain().lines;
+  const file = mainAt(cb, SID);
+  await write(file, body(lines));
+  const first = await readBuddyLines(file, 0, 1 << 20, null);
+  const size = first.newOffset;
+  await fs.rm(file);
+  const shared = await readGuardedLines(file, size, 1 << 20, null);
+  const gone = await readBuddyLines(file, size, 1 << 20, first.state ?? null);
+  expect(gone).toEqual({ ...shared, state: undefined });
+  expect(gone.truncated).toBe(false);
+  // It comes back unchanged: nothing to read, nothing rewritten.
+  await write(file, body(lines));
+  expect(await readBuddyLines(file, size, 1 << 20, first.state ?? null)).toEqual({ lines: [], newOffset: size, truncated: false, state: undefined });
+});
