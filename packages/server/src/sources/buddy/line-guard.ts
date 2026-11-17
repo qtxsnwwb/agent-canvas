@@ -32,13 +32,19 @@ function format(guard: LineGuard | null, inner: string | null): string {
 /** Marks a file that is not there (ENOENT): not a rewrite. */
 const GONE = Symbol('gone');
 
-/** SHA-1 of bytes [from, to) of the file; null when the file is shorter or cannot be read; GONE when it does not exist. */
+/**
+ * SHA-1 of bytes [from, to) of the file; null when the file is shorter; GONE when it does not exist. A file that cannot
+ * be opened or read right now (EBUSY, EPERM, EACCES, EMFILE, EIO, … — common on Windows while the tool writes) is not
+ * a rewrite: the error is thrown, as the shared reader throws it, so nothing is read or stored, the offset and the state
+ * stay as they are, and the pipeline records an ingest failure and reads the file again at the next scan.
+ */
 async function hashRange(file: string, from: number, to: number): Promise<string | null | typeof GONE> {
   let handle: fsp.FileHandle;
   try {
     handle = await fsp.open(file, 'r');
   } catch (err) {
-    return (err as NodeJS.ErrnoException).code === 'ENOENT' ? GONE : null;
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return GONE;
+    throw err;
   }
   try {
     const buf = Buffer.alloc(to - from);

@@ -1,8 +1,8 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, test } from 'vitest';
-import { readDshLines, scanZstdFrames, zstdAvailable } from '../src/sources/deepseek/zstd-frames.js';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import { DSH_FRAME_MAX_BYTES, readDshLines, scanZstdFrames, zstdAvailable } from '../src/sources/deepseek/zstd-frames.js';
 import { appendBatch, appendTorn, eventLine, events, fileBytes, frameOf, HAS_ZSTD, headerLine, NO_ZSTD_REASON, truncateTo, writeSession } from './deepseek-fixtures.js';
 
 // DeepSeek Harness container: concatenated zstd frames (format reference 2), read frame by frame from a byte offset.
@@ -291,6 +291,60 @@ describe.skipIf(!HAS_ZSTD)('readDshLines', () => {
     await writeSession(file, header, [big, batches[1]!]);
     const t = new Tail(1024);
     expect(texts(await t.read())).toEqual([header, ...big, ...batches[1]!]);
+  });
+
+  test('a frame that inflates beyond the cap is damage at its place: read up to it, stop there, no loop (final review M-1)', async () => {
+    expect(DSH_FRAME_MAX_BYTES).toBe(64 * 1024 * 1024);
+    // 200 KB of one repeated character: a frame of a few hundred bytes. The cap injected here is 64 KiB.
+    const bomb = [eventLine(0, 'tool/result', { text: 'z'.repeat(200_000) })];
+    expect(frameOf(bomb).length).toBeLessThan(2048);
+    await writeSession(file, header, [batches[0]!, bomb, batches[1]!]);
+    const cap = 64 * 1024;
+    let offset = 0;
+    let state: string | null = null;
+    const got: string[] = [];
+    let restarts = 0;
+    for (let i = 0; i < 20; i++) {
+      const res = await readDshLines(file, offset, 1 << 20, state, { maxFrameBytes: cap });
+      if (res.truncated) restarts++;
+      got.push(...res.lines.map((l) => l.text));
+      offset = res.newOffset;
+      if (res.state !== undefined) state = res.state;
+    }
+    expect(got).toEqual([header, ...batches[0]!]);
+    expect(restarts).toBe(0);
+    const bombAt = Buffer.byteLength(Buffer.concat([frameOf([header]), frameOf(batches[0]!)]));
+    expect(offset).toBe(bombAt);
+    // Under the default cap the same file reads whole.
+    expect(texts((await readDshLines(file, 0, 1 << 20, null)).lines)).toEqual([header, ...batches[0]!, ...bomb, ...batches[1]!]);
+  });
+
+  test('a file that cannot be opened or read right now is not a rewrite: the error is thrown, the next read goes on (final review I-2)', async () => {
+    await writeSession(file, header, [batches[0]!]);
+    const first = await readDshLines(file, 0, 1 << 20, null);
+    await appendBatch(file, batches[1]!);
+    const real = fs.open.bind(fs);
+    let calls = 0;
+    const spy = vi.spyOn(fs, 'open').mockImplementation((async (...args: Parameters<typeof fs.open>) => {
+      calls++;
+      if (calls === 1) throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' });
+      const handle = await real(...args);
+      if (calls === 2) {
+        (handle as { read: unknown }).read = (async () => {
+          throw Object.assign(new Error('EIO: i/o error'), { code: 'EIO' });
+        }) as unknown;
+      }
+      return handle;
+    }) as typeof fs.open);
+    try {
+      await expect(readDshLines(file, first.newOffset, 1 << 20, first.state!)).rejects.toMatchObject({ code: 'EBUSY' });
+      await expect(readDshLines(file, first.newOffset, 1 << 20, first.state!)).rejects.toMatchObject({ code: 'EIO' });
+    } finally {
+      spy.mockRestore();
+    }
+    const next = await readDshLines(file, first.newOffset, 1 << 20, first.state!);
+    expect(next.truncated).toBe(false);
+    expect(texts(next.lines)).toEqual(batches[1]);
   });
 
   test('blank lines and CR are not rows', async () => {

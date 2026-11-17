@@ -786,6 +786,100 @@ describe('source deleted (as for every other source)', () => {
   });
 });
 
+describe('the line guard: a file that cannot be opened or read right now is not a rewrite (final review I-2)', () => {
+  const busy = (code: string): NodeJS.ErrnoException => Object.assign(new Error(`${code}: resource busy or locked`), { code });
+  /** fs.open of `file` fails once with `code`; every other call goes through. */
+  function failOpenOnce(file: string, code: string): void {
+    const real = fs.open.bind(fs);
+    let failed = false;
+    vi.spyOn(fs, 'open').mockImplementation((async (...args: Parameters<typeof fs.open>) => {
+      if (!failed && path.resolve(String(args[0])) === path.resolve(file)) {
+        failed = true;
+        throw busy(code);
+      }
+      return real(...args);
+    }) as typeof fs.open);
+  }
+  /** The first read through a handle of `file` fails with EIO. */
+  function failReadOnce(file: string): void {
+    const real = fs.open.bind(fs);
+    let failed = false;
+    vi.spyOn(fs, 'open').mockImplementation((async (...args: Parameters<typeof fs.open>) => {
+      const handle = await real(...args);
+      if (!failed && path.resolve(String(args[0])) === path.resolve(file)) {
+        failed = true;
+        const read = handle.read.bind(handle);
+        let once = false;
+        (handle as { read: unknown }).read = (async (...a: unknown[]) => {
+          if (!once) {
+            once = true;
+            throw busy('EIO');
+          }
+          return (read as (...x: unknown[]) => unknown)(...a);
+        }) as unknown;
+      }
+      return handle;
+    }) as typeof fs.open);
+  }
+
+  for (const code of ['EBUSY', 'EPERM', 'EACCES']) {
+    test(`open fails once with ${code}: nothing read, nothing reported rewritten; the next read goes on from the offset`, async () => {
+      const lines = exampleMain().lines;
+      const file = mainAt(cb, SID);
+      await write(file, body(lines));
+      const first = await readBuddyLines(file, 0, 1 << 20, null);
+      const size = first.newOffset;
+      const turn = new Chain({ prefix: 'n' });
+      turn.prompt('more');
+      await fs.appendFile(file, body(turn.lines));
+      failOpenOnce(file, code);
+      await expect(readBuddyLines(file, size, 1 << 20, first.state ?? null)).rejects.toMatchObject({ code });
+      const next = await readBuddyLines(file, size, 1 << 20, first.state ?? null);
+      expect(next).toMatchObject({ truncated: false, lines: [{ offset: size, text: turn.lines[0] }] });
+    });
+  }
+
+  test('a read fails once (EIO): nothing read, nothing reported rewritten', async () => {
+    const lines = exampleMain().lines;
+    const file = mainAt(cb, SID);
+    await write(file, body(lines));
+    const first = await readBuddyLines(file, 0, 1 << 20, null);
+    const size = first.newOffset;
+    const turn = new Chain({ prefix: 'n' });
+    turn.prompt('more');
+    await fs.appendFile(file, body(turn.lines));
+    failReadOnce(file);
+    await expect(readBuddyLines(file, size, 1 << 20, first.state ?? null)).rejects.toMatchObject({ code: 'EIO' });
+    const next = await readBuddyLines(file, size, 1 << 20, first.state ?? null);
+    expect(next).toMatchObject({ truncated: false, lines: [{ offset: size, text: turn.lines[0] }] });
+  });
+
+  test('through the pipeline: no new generation, nothing stored again; the next scan reads the appended line', async () => {
+    const main = exampleMain();
+    const file = mainAt(cb, SID);
+    await write(file, body(main.lines));
+    const { store, pipeline } = await ingestAll(cfg());
+    const key = buddyOf(pipeline, 'codebuddy').keyOf(file)!;
+    const before = view(store, SID)!;
+    const turn = new Chain({ prefix: 'n' });
+    turn.prompt('more after a busy moment');
+    await fs.appendFile(file, body(turn.lines));
+    failOpenOnce(file, 'EBUSY');
+    await pipeline.scanAll();
+    await pipeline.idle();
+    expect(store.getMeta(`line-generation:${key}`) ?? '0').toBe('0');
+    expect(pipeline.ingestFailures().map((f) => f.error).join()).toContain('EBUSY');
+    expect(view(store, SID)!.nodes).toEqual(before.nodes);
+    await pipeline.rescan();
+    await pipeline.idle();
+    expect(pipeline.ingestFailures()).toEqual([]);
+    expect(store.getMeta(`line-generation:${key}`) ?? '0').toBe('0');
+    const after = view(store, SID)!;
+    expect(JSON.stringify(after)).toContain('more after a busy moment');
+    for (const [id, n] of Object.entries(before.nodes)) expect(after.nodes[id]).toEqual(n);
+  });
+});
+
 test('the line guard: a file that vanished is not a rewrite (what the shared reader says, stored state kept)', async () => {
   const lines = exampleMain().lines;
   const file = mainAt(cb, SID);

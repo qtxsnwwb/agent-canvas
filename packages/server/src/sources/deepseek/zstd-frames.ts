@@ -136,11 +136,26 @@ function parseState(state: string | null): DshState | null {
 const stateText = (s: DshState): string =>
   JSON.stringify({ head: s.head, tail: s.tail, lines: s.lines, ...(s.corrupt === true ? { corrupt: true } : {}), ...(s.restarted === true ? { restarted: true } : {}) });
 
-/** The lines of one decompressed frame, or null when it does not decode to whole lines (corrupt). */
-function frameLines(frame: Uint8Array): string[] | null {
+/**
+ * Most bytes one frame may inflate to (`maxOutputLength`). A frame that would inflate to more is treated as damage at
+ * its place (read up to it, stop there), so a damaged or hostile frame of a few KB cannot take hundreds of MB and
+ * seconds of synchronous time. dsh writes one append batch per frame: far below this.
+ */
+export const DSH_FRAME_MAX_BYTES = 64 * 1024 * 1024;
+
+/** Options of readDshLines (tests inject a lower cap). */
+export interface DshReadOptions {
+  /** Most bytes one frame may inflate to; default DSH_FRAME_MAX_BYTES. */
+  maxFrameBytes?: number;
+}
+
+/** The lines of one decompressed frame, or null when it does not decode to whole lines, or to more than `cap` bytes (corrupt). */
+function frameLines(frame: Uint8Array, cap: number = DSH_FRAME_MAX_BYTES): string[] | null {
   let text: string;
   try {
-    text = (zlib as unknown as { zstdDecompressSync(b: Uint8Array): Buffer }).zstdDecompressSync(frame).toString('utf8');
+    text = (zlib as unknown as { zstdDecompressSync(b: Uint8Array, o: { maxOutputLength: number }): Buffer })
+      .zstdDecompressSync(frame, { maxOutputLength: cap })
+      .toString('utf8');
   } catch {
     return null;
   }
@@ -161,13 +176,15 @@ function frameLines(frame: Uint8Array): string[] | null {
  * the file per call, or the one frame starting there when that frame alone is larger. A torn last frame is left for the
  * next call. A rewrite — the file is shorter than `fromOffset`, frame 1 changed, the tail fingerprint changed, the bytes
  * at `fromOffset` are not a frame start, or a non-zero offset comes without a state — restarts from 0 with
- * `truncated: true`. A complete frame that is not a frame or does not decode stops the read before it: the frames
+ * `truncated: true`. A complete frame that is not a frame, does not decode, or would inflate to more than
+ * `options.maxFrameBytes` (default DSH_FRAME_MAX_BYTES) stops the read before it: the frames
  * before it are kept and reading goes on once the bytes there are a valid frame. Damage costs at most one restart per
  * generation (the "not a frame start" rule spends it; damage met afterwards, at any offset, stops the read there), so a
  * damaged file is never re-stored over and over.
  * One open handle and one stat per call; the new fingerprints are taken from the bytes this call read.
  */
-export async function readDshLines(absPath: string, fromOffset: number, maxBytes: number, state: string | null): Promise<SourceRead> {
+export async function readDshLines(absPath: string, fromOffset: number, maxBytes: number, state: string | null, options: DshReadOptions = {}): Promise<SourceRead> {
+  const cap = options.maxFrameBytes ?? DSH_FRAME_MAX_BYTES;
   let handle: fs.FileHandle;
   try {
     handle = await fs.open(absPath, 'r');
@@ -195,7 +212,7 @@ export async function readDshLines(absPath: string, fromOffset: number, maxBytes
       const start = restart ? 0 : fromOffset;
       const base: DshState | null = restart || fromOffset === 0 ? null : prev;
       if (start === 0) before = Buffer.alloc(0);
-      const read = await readFrames(handle, size, start, maxBytes, base?.lines ?? 0);
+      const read = await readFrames(handle, size, start, maxBytes, base?.lines ?? 0, cap);
       // The bytes at the resume offset are not a frame: a rewrite (spec 10.6), unless this offset is already known to be
       // damaged or this generation already spent its restart on damage (then stop here and wait for the bytes to change).
       if (read.corruptAt === start && start > 0 && base !== null && base.corrupt !== true && base.restarted !== true && attempt === 0) {
@@ -275,7 +292,7 @@ interface FramesRead {
 }
 
 /** Complete frames from `start`: one slice of `maxBytes`, or the single frame there when it is larger. */
-async function readFrames(handle: fs.FileHandle, size: number, start: number, maxBytes: number, firstOrdinal: number): Promise<FramesRead> {
+async function readFrames(handle: fs.FileHandle, size: number, start: number, maxBytes: number, firstOrdinal: number, cap: number): Promise<FramesRead> {
   const none = (corruptAt: number | null): FramesRead => ({ lines: [], newOffset: start, bytes: Buffer.alloc(0), headFrame: null, corruptAt });
   if (start >= size) return none(null);
   let bytes = await bytesAt(handle, start, Math.min(size, start + Math.max(1, maxBytes)));
@@ -295,7 +312,7 @@ async function readFrames(handle: fs.FileHandle, size: number, start: number, ma
   let headFrame: Buffer | null = null;
   for (const f of scan.frames) {
     const frame = bytes.subarray(f.start, f.end);
-    const got = frameLines(frame);
+    const got = frameLines(frame, cap);
     if (got === null) return { lines, newOffset: start + done, bytes, headFrame, corruptAt: start + f.start };
     if (start + f.start === 0) headFrame = Buffer.from(frame);
     for (const text of got) lines.push({ offset: ordinal++, text });
