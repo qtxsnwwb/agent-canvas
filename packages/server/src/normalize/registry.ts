@@ -3,6 +3,7 @@ import type { RawEvent } from '../store/store.js';
 import { CodexNormalizer } from './codex.js';
 import { CopilotNormalizer } from './copilot.js';
 import { CursorNormalizer } from './cursor.js';
+import { DeepSeekNormalizer } from './deepseek.js';
 import { GeminiNormalizer } from './gemini.js';
 import { GrokNormalizer } from './grok.js';
 import { Normalizer } from './normalizer.js';
@@ -20,7 +21,7 @@ export const NORMALIZER_FACTORIES: NormalizerFactories = {
   grok: () => new GrokNormalizer(),
   copilot: () => new CopilotNormalizer(),
   // Filled by the tasks that add their normalizers (plan more-sources-cn).
-  deepseek: null,
+  deepseek: () => new DeepSeekNormalizer(),
   workbuddy: null,
   codebuddy: null,
   doubao: null,

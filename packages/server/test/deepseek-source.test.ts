@@ -291,7 +291,7 @@ describe('fileSources: the DeepSeek source', () => {
   });
 });
 
-describe.skipIf(!HAS_ZSTD)('through the pipeline (no DeepSeek normaliser yet: raw lines stored only)', () => {
+describe.skipIf(!HAS_ZSTD)('through the pipeline (raw lines as stored)', () => {
   test('lines stored by ordinal under the root session; appends go on; a rewrite stores a new generation', async () => {
     const config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, cursorDbPath: null, geminiDir: null, grokDir: null, copilotDir: null, deepseekDir: home, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [] });
     const store = openStore(':memory:');
