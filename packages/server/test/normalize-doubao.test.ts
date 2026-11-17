@@ -327,6 +327,19 @@ describe('rewrites and determinism', () => {
     expect(nodesOf(f).map((n) => n.id).sort()).toEqual([id('demand0'), id('@0'), id(`@${offsetOf(lines, 1)}`)].sort());
   });
 
+  test('a rewrite that removes the first user row remakes the assignment prompt with the full demand text, as a fresh read and a replay do', () => {
+    const long = `The first task: ${'details '.repeat(400)}end.`;
+    const text = assignment([{ at: T1, text: `${REMINDER}\n${long}` }, { at: T2, text: 'Now chart them' }]);
+    const v2 = [assistant('Started without a user row.'), assistant('More.')];
+    const events = [metaEvent(text), ...mainRows(), ...rowEvents(v2, { mtimeMs: MTIME + 1 })];
+    const f = go(events);
+    expect(f.details.get(id('demand0'))).toEqual({ text: long });
+    const fresh = go([metaEvent(text), ...rowEvents(v2, { mtimeMs: MTIME + 1 })]);
+    expect(shape(f).nodes).toEqual(shape(fresh).nodes);
+    expect(shape(f).details).toEqual(shape(fresh).details);
+    for (const cut of [1, 5, events.length - 1]) expect(shape(paged(events, 3, cut)), `cut ${cut}`).toEqual(shape(f));
+  });
+
   test('one-shot = row by row = in pages = dropped and re-hydrated midway', () => {
     const events = [...childRows(), metaEvent(main.assignment), ...mainRows(), metaEvent(child.assignment, { agent: ORG })];
     const one = paged(events, events.length);

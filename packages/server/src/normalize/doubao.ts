@@ -17,8 +17,8 @@ import { unknownTypeName } from './unknown-type.js';
  * directory). Rows are `{role, content, tool_calls?, tool_call_id?}` with no id, time, model, usage or directory: a row
  * is its byte offset in the file. The reader puts one synthetic line `{"__agentCanvas":"file","mtimeMs":n}` at offset
  * -1 whenever it reads a file from its start; each agent's `assignment.md` arrives whole as a meta event, as often as it
- * changed. Nothing of a row's content is kept after it was applied: a thread keeps ids, counters, demand times and the
- * short title / summary of its first demand.
+ * changed. Nothing of a row's content is kept after it was applied: a thread keeps ids, counters, demand times and its
+ * first demand (text at most 64 KiB, for the `demand0` node's detail).
  *
  * Node ids: `doubao:<session id>[/<agent id>]:<part>` — `@<offset>` for a prompt or a reply, `call:<tool call id>` for a
  * tool call, `demand0` for the prompt made from the first demand of assignment.md when the thread has no user row for
@@ -111,8 +111,14 @@ interface Call {
   removed: boolean;
 }
 
-/** The first demand of an assignment.md, as short strings (kept to make or remake the `demand0` node). */
+/**
+ * The first demand of an assignment.md, kept to make or remake the `demand0` node: its full text (at most
+ * DOUBAO_DEMAND_MAX_BYTES, the parser drops longer bodies) so the node's detail is the same in every arrival order and
+ * after a rewrite, and its summary, title and SHA-1.
+ */
 interface FirstDemand {
+  text: string;
+  hash: string;
   summary: string;
   title: string | null;
 }
@@ -130,7 +136,7 @@ interface Thread {
   first: FirstDemand | null;
   /** The `demand0` node is shown. */
   p0: boolean;
-  /** SHA-1 of the text the `demand0` node's detail carries; null when it carries the summary only (remade after a rewrite). */
+  /** SHA-1 of the text the `demand0` node's detail carries. */
   p0Hash: string | null;
   /** Whether the first meaningful row was not a prompt (null: none read yet). */
   implicit: boolean | null;
@@ -410,32 +416,31 @@ export class DoubaoNormalizer implements AgentNormalizer {
 
   /**
    * Shows the `demand0` node exactly when the thread has a first demand and its first meaningful row is not a prompt
-   * (or none was read yet). `demand` is the first demand of the assignment being applied (its full text for the
-   * detail); without it a remade node carries the kept summary until the next assignment.
+   * (or none was read yet), with the kept first demand's text as its detail.
    */
-  private syncP0(state: SessionState, t: Thread, demand: { text: string } | null, changes: Change[]): void {
+  private syncP0(state: SessionState, t: Thread, changes: Change[]): void {
     const want = t.first !== null && t.implicit !== false;
     if (want && !t.p0) {
-      this.insertP0(state, t, demand, changes);
-    } else if (want && t.p0 && demand !== null && sha1(demand.text) !== t.p0Hash) {
+      this.insertP0(state, t, changes);
+    } else if (want && t.p0 && t.first!.hash !== t.p0Hash) {
       const node = state.nodes.get(this.p0Id(state, t));
-      if (node !== undefined) this.update(state, { ...node, summary: t.first!.summary }, changes, { text: demand.text });
-      t.p0Hash = sha1(demand.text);
+      if (node !== undefined) this.update(state, { ...node, summary: t.first!.summary }, changes, { text: t.first!.text });
+      t.p0Hash = t.first!.hash;
     } else if (!want && t.p0) {
       this.removeP0(state, t, changes);
     }
   }
 
-  private insertP0(state: SessionState, t: Thread, demand: { text: string } | null, changes: Change[]): void {
+  private insertP0(state: SessionState, t: Thread, changes: Change[]): void {
     this.start(state, changes);
     const id = this.p0Id(state, t);
     const link = this.linkOf(t);
     const old = t.seq[0] !== undefined ? state.nodes.get(t.seq[0]) : undefined;
     t.p0 = true;
-    t.p0Hash = demand === null ? null : sha1(demand.text);
+    t.p0Hash = t.first!.hash;
     const full: GraphNode = { ...blankNode(id, 'prompt', 'Prompt', t.first!.summary), id, sessionId: state.session.id, turnId: id, agentId: t.agentId, parentId: link, timestamp: this.timeOf(t, 0), confirmed: true };
     state.nodes.set(id, full);
-    changes.push({ type: 'node_added', node: full, detail: { text: demand === null ? t.first!.summary : demand.text } });
+    changes.push({ type: 'node_added', node: full, detail: { text: t.first!.text } });
     if (link !== null) changes.push({ type: 'edge_added', edge: { id: `${link}->${id}`, sessionId: state.session.id, from: link, to: id, kind: 'spawn' } });
     if (old !== undefined) {
       // The thread's former first node now follows the demand.
@@ -470,8 +475,12 @@ export class DoubaoNormalizer implements AgentNormalizer {
     const demands = parseAssignment(event.payload);
     t.demands = demands.map((d) => d.at);
     const first = demands[0];
-    t.first = first === undefined ? null : { summary: brief(first.text), title: (() => { const x = promptTitle(head(first.text, PREFIX_MAX)); return x === null ? null : own(x); })() };
-    this.syncP0(state, t, first ?? null, changes);
+    if (first === undefined) t.first = null;
+    else {
+      const title = promptTitle(head(first.text, PREFIX_MAX));
+      t.first = { text: own(first.text), hash: sha1(first.text), summary: brief(first.text), title: title === null ? null : own(title) };
+    }
+    this.syncP0(state, t, changes);
     this.refreshThread(state, t, changes);
     return undefined;
   }
@@ -530,7 +539,7 @@ export class DoubaoNormalizer implements AgentNormalizer {
     if (t.implicit !== null) return;
     t.implicit = !isPrompt;
     if (t.implicit) t.turn = 0;
-    this.syncP0(state, t, null, changes);
+    this.syncP0(state, t, changes);
   }
 
   private prompt(state: SessionState, t: Thread, text: string, offset: number, changes: Change[]): void {

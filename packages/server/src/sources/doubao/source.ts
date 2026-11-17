@@ -253,6 +253,8 @@ export class DoubaoFileSource implements FileSource {
   mainSessionOf(key: string): string | null {
     const s = this.shapeOf(key);
     if (s === null || s.file !== TRAJECTORY) return null;
+    // Listed but no longer a single-main conversation: not read any more, but its files are there (not deleted).
+    if (this.unknown.has(s.loc)) return null;
     const known = this.known(key, s);
     if (known?.kind !== 'session') return null;
     const holder = this.claims.get(s.conv);
@@ -413,7 +415,7 @@ export const DOUBAO_FILE_LINE_OFFSET = -1;
 
 /**
  * readGuardedLines plus one synthetic first line `{"__agentCanvas":"file","mtimeMs":<n>}` at offset -1 whenever the
- * file is read from its start (first read with lines, or a rewrite): the modification time then, stored with the raw
+ * file is read from its start (the first read that advances, even over blank lines only, or a rewrite): the modification time then, stored with the raw
  * events so the fallback time (spec 5.3, 10.13) replays identically. A file that is not there is not a rewrite:
  * nothing read, nothing changed (a missing file never sends the offset back to 0). Otherwise the shared reader's
  * result as is (offsets, state, truncated).
@@ -430,7 +432,8 @@ export async function readDoubaoLines(absPath: string, fromOffset: number, maxBy
   // Vanished between the stat and the read: as above.
   if (!res.truncated && res.lines.length === 0 && res.newOffset === 0 && fromOffset > 0 && res.state === undefined) return { lines: [], newOffset: fromOffset, truncated: false };
   const fromStart = res.truncated || fromOffset === 0;
-  if (!fromStart || (res.lines.length === 0 && !res.truncated)) return res;
+  // Once per generation: the read that starts at 0 and gets anywhere (rows, or only blank lines), or a rewrite.
+  if (!fromStart || (res.lines.length === 0 && !res.truncated && res.newOffset <= fromOffset)) return res;
   return { ...res, lines: [{ offset: DOUBAO_FILE_LINE_OFFSET, text: doubaoFileLine(mtimeMs) }, ...res.lines] };
 }
 

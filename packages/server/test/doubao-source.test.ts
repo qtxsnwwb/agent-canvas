@@ -246,6 +246,25 @@ describe('discovery', () => {
     expect(await ghost.classify(`doubao:ghost/Default/.doubaowork/${CONV}/${MAIN}/trajectory.jsonl`)).toBeNull();
     await expect(fs.stat(path.join(tmp, 'ghost'))).rejects.toThrow();
   });
+
+  test('a stored conversation that later gains a second m_ directory is not read any more, counted, and not flagged deleted', async () => {
+    await writeExample(work);
+    const { store, pipeline } = await ingestAll(cfg([work]));
+    const before = view(store, CONV)!;
+    await write(agentFile(work, 'm_zz99', 'trajectory.jsonl'), body([user('another main')]));
+    await pipeline.scanAll();
+    await pipeline.idle();
+    const s = doubaoOf(pipeline);
+    expect(s.status()).toMatchObject({ unknownSessions: 1 });
+    expect(store.getSession(CONV)).toMatchObject({ sourceDeleted: false });
+    expect(view(store, CONV)!.nodes).toEqual(before.nodes);
+    expect(s.mainSessionOf(s.keyOf(agentFile(work, MAIN, 'trajectory.jsonl'))!)).toBeNull();
+    // Deleted for real afterwards: flagged.
+    await fs.rm(path.join(sessionsDir(work), CONV), { recursive: true });
+    await pipeline.scanAll();
+    await pipeline.idle();
+    expect(store.getSession(CONV)).toMatchObject({ sourceDeleted: true });
+  });
 });
 
 describe('the same conversation under another root or profile', () => {
@@ -377,6 +396,30 @@ describe('the reader: a synthetic first line carrying the modification time', ()
     }
     expect(texts.filter((x) => x.includes('__agentCanvas'))).toHaveLength(1);
     expect(texts.slice(1)).toEqual(exampleMain().lines);
+  });
+
+  test('a first read that meets only blank lines still carries the line (once); the fallback time is the modification time', async () => {
+    const file = agentFile(work, MAIN, 'trajectory.jsonl');
+    await write(file, '\n\n');
+    const t = new Date(MTIME);
+    await fs.utimes(file, t, t);
+    const first = await readDoubaoLines(file, 0, 1 << 20, null);
+    expect(first.lines).toEqual([{ offset: -1, text: fileLine(MTIME) }]);
+    expect(first.newOffset).toBe(2);
+    await fs.appendFile(file, body(exampleMain().lines.slice(0, 2)));
+    const next = await readDoubaoLines(file, first.newOffset, 1 << 20, first.state ?? null);
+    expect(next.lines.map((l) => l.text)).toEqual(exampleMain().lines.slice(0, 2));
+    // Through the pipeline, without an assignment.md: every node at the modification time, not the epoch.
+    await fs.rm(sessionsDir(work), { recursive: true });
+    await write(file, '\n\n');
+    await fs.utimes(file, t, t);
+    const { store, pipeline } = await ingestAll(cfg([work]));
+    await fs.appendFile(file, body(exampleMain().lines.slice(0, 2)));
+    await pipeline.ingestFile(file);
+    await pipeline.idle();
+    const nodes = Object.values(view(store, CONV)!.nodes);
+    expect(nodes.length).toBeGreaterThan(0);
+    for (const n of nodes) expect(n.timestamp).toBe(new Date(MTIME).toISOString());
   });
 
   test('a rewrite reads again from the start with a new synthetic line; a vanished file is not a rewrite', async () => {
