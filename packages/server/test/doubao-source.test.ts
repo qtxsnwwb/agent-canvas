@@ -357,7 +357,7 @@ describe('mtime fallbacks (diagnostics)', () => {
 });
 
 describe('the reader: a synthetic first line carrying the modification time', () => {
-  test('emitted once when a file is read from its start; offsets strictly increasing; appends read on without it', async () => {
+  test('at offset -1 when a file is read from its start; before the rows of every later read that delivers rows (final review I-5); offsets strictly increasing', async () => {
     const file = agentFile(work, MAIN, 'trajectory.jsonl');
     const lines = exampleMain().lines;
     await write(file, body(lines.slice(0, 3)));
@@ -374,28 +374,48 @@ describe('the reader: a synthetic first line carrying the modification time', ()
     // Nothing new: nothing, no state.
     expect(await readDoubaoLines(file, first.newOffset, 1 << 20, first.state ?? null)).toEqual({ lines: [], newOffset: first.newOffset, truncated: false });
     await fs.appendFile(file, body(lines.slice(3, 5)));
+    const t2 = MTIME + 30_000;
+    await fs.utimes(file, new Date(t2), new Date(t2));
+    const sharedNext = await readGuardedLines(file, first.newOffset, 1 << 20, first.state ?? null);
     const next = await readDoubaoLines(file, first.newOffset, 1 << 20, first.state ?? null);
-    expect(next.lines.map((l) => l.text)).toEqual(lines.slice(3, 5));
+    // The appended rows as the shared reader gives them, after a line with the modification time at this read, at the
+    // byte before them (the newline ending the last row read before).
+    expect(next.lines).toEqual([{ offset: first.newOffset - 1, text: fileLine(t2) }, ...sharedNext.lines]);
+    expect(next.lines.slice(1).map((l) => l.text)).toEqual(lines.slice(3, 5));
+    expect(next.lines[0]!.offset).toBeGreaterThan(first.lines[first.lines.length - 1]!.offset);
+    expect(next.newOffset).toBe(sharedNext.newOffset);
+    expect(next.state).toBe(sharedNext.state);
     expect(next.truncated).toBe(false);
   });
 
-  test('an empty file gives nothing (the line comes with the first rows); budget slices carry it only on the first', async () => {
+  test('an empty file gives nothing (the line comes with the first rows); budget slices: offset -1 on the first only, then one line before the rows of each later slice', async () => {
     const file = agentFile(work, MAIN, 'trajectory.jsonl');
     await write(file, '');
     expect(await readDoubaoLines(file, 0, 1 << 20, null)).toEqual({ lines: [], newOffset: 0, truncated: false });
     await fs.appendFile(file, body(exampleMain().lines));
-    const texts: string[] = [];
+    const all: { offset: number; text: string }[] = [];
     let from = 0;
     let state: string | null = null;
+    let delivering = 0;
     for (;;) {
       const r = await readDoubaoLines(file, from, 200, state);
-      texts.push(...r.lines.map((l) => l.text));
+      const rows = r.lines.filter((l) => !l.text.includes('__agentCanvas'));
+      if (rows.length > 0) {
+        delivering++;
+        // Each read that delivers rows starts with exactly one synthetic line: at -1 from the start, else at from - 1.
+        expect(r.lines[0]).toMatchObject({ offset: from === 0 ? -1 : from - 1 });
+        expect(r.lines.slice(1)).toEqual(rows);
+      }
+      all.push(...r.lines);
       if (r.state !== undefined) state = r.state;
       if (r.newOffset === from) break;
       from = r.newOffset;
     }
-    expect(texts.filter((x) => x.includes('__agentCanvas'))).toHaveLength(1);
-    expect(texts.slice(1)).toEqual(exampleMain().lines);
+    expect(delivering).toBeGreaterThan(1);
+    expect(all.filter((l) => l.text.includes('__agentCanvas'))).toHaveLength(delivering);
+    expect(all.filter((l) => l.offset === -1)).toHaveLength(1);
+    expect(all.filter((l) => !l.text.includes('__agentCanvas')).map((l) => l.text)).toEqual(exampleMain().lines);
+    for (let i = 1; i < all.length; i++) expect(all[i]!.offset).toBeGreaterThan(all[i - 1]!.offset);
   });
 
   test('a first read that meets only blank lines still carries the line (once); the fallback time is the modification time', async () => {
@@ -408,7 +428,8 @@ describe('the reader: a synthetic first line carrying the modification time', ()
     expect(first.newOffset).toBe(2);
     await fs.appendFile(file, body(exampleMain().lines.slice(0, 2)));
     const next = await readDoubaoLines(file, first.newOffset, 1 << 20, first.state ?? null);
-    expect(next.lines.map((l) => l.text)).toEqual(exampleMain().lines.slice(0, 2));
+    expect(next.lines[0]).toMatchObject({ offset: first.newOffset - 1 });
+    expect(next.lines.slice(1).map((l) => l.text)).toEqual(exampleMain().lines.slice(0, 2));
     // Through the pipeline, without an assignment.md: every node at the modification time, not the epoch.
     await fs.rm(sessionsDir(work), { recursive: true });
     await write(file, '\n\n');
@@ -446,9 +467,49 @@ describe('the reader: a synthetic first line carrying the modification time', ()
     const raw = store.rawForSession(CONV).filter((e) => e.source === 'transcript' && e.file === key);
     expect(raw.filter((e) => e.source === 'transcript' && e.offset === -1)).toHaveLength(1);
     expect(store.diagnostics().unknownRecords).toEqual([]);
+    const nodesBefore = Object.keys(view(store, CONV)!.nodes).length;
+    const size = (await fs.stat(agentFile(work, MAIN, 'trajectory.jsonl'))).size;
     await fs.appendFile(agentFile(work, MAIN, 'trajectory.jsonl'), body([user('one more')]));
+    const later = MTIME + 45 * 60_000;
+    await fs.utimes(agentFile(work, MAIN, 'trajectory.jsonl'), new Date(later), new Date(later));
     await pipeline.ingestFile(agentFile(work, MAIN, 'trajectory.jsonl'));
     await pipeline.idle();
     expect(store.rawForSession(CONV).filter((e) => e.source === 'transcript' && e.file === key && e.offset === -1)).toHaveLength(1);
+    // The append's read stored one more synthetic line, before its row (final review I-5): no node, not unknown; the
+    // session's last activity is its modification time, the node times stay the demands'.
+    const synthetic = store.rawForSession(CONV).filter((e) => e.source === 'transcript' && e.file === key && e.offset === size - 1);
+    expect(synthetic.map((e) => (e.source === 'transcript' ? e.line : ''))).toEqual([fileLine(later)]);
+    expect(store.diagnostics().unknownRecords).toEqual([]);
+    expect(Object.keys(view(store, CONV)!.nodes)).toHaveLength(nodesBefore + 1);
+    expect(store.getSession(CONV)?.lastActivityAt).toBe(new Date(later).toISOString());
+    for (const n of Object.values(view(store, CONV)!.nodes)) expect(n.timestamp).not.toBe(new Date(later).toISOString());
+  });
+
+  test('a file that cannot be opened or read right now is not a rewrite: the error is thrown, the next read goes on (final review I-2)', async () => {
+    const file = agentFile(work, MAIN, 'trajectory.jsonl');
+    const lines = exampleMain().lines;
+    await write(file, body(lines.slice(0, 3)));
+    const first = await readDoubaoLines(file, 0, 1 << 20, null);
+    await fs.appendFile(file, body(lines.slice(3, 5)));
+    const busy = (code: string) => Object.assign(new Error(`${code}: resource busy or locked`), { code });
+    const stat = vi.spyOn(fs, 'stat').mockRejectedValueOnce(busy('EPERM'));
+    await expect(readDoubaoLines(file, first.newOffset, 1 << 20, first.state ?? null)).rejects.toMatchObject({ code: 'EPERM' });
+    stat.mockRestore();
+    const open = vi.spyOn(fs, 'open').mockRejectedValueOnce(busy('EBUSY'));
+    await expect(readDoubaoLines(file, first.newOffset, 1 << 20, first.state ?? null)).rejects.toMatchObject({ code: 'EBUSY' });
+    open.mockRestore();
+    const real = fs.open.bind(fs);
+    const failing = vi.spyOn(fs, 'open').mockImplementationOnce((async (...args: Parameters<typeof fs.open>) => {
+      const handle = await real(...args);
+      (handle as { read: unknown }).read = (async () => {
+        throw busy('EIO');
+      }) as unknown;
+      return handle;
+    }) as typeof fs.open);
+    await expect(readDoubaoLines(file, first.newOffset, 1 << 20, first.state ?? null)).rejects.toMatchObject({ code: 'EIO' });
+    failing.mockRestore();
+    const next = await readDoubaoLines(file, first.newOffset, 1 << 20, first.state ?? null);
+    expect(next.truncated).toBe(false);
+    expect(next.lines.slice(1).map((l) => l.text)).toEqual(lines.slice(3, 5));
   });
 });

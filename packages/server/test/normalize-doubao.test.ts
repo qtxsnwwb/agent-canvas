@@ -204,9 +204,53 @@ describe('times (spec 5.3): the nth prompt takes the nth demand', () => {
         expect(n.timestamp, n.id).toBe(at(second ? T2 : T1));
       }
       expect(f.graph.nodes[id('call:call_a1')]).toMatchObject({ endedAt: at(T1) });
-      expect(f.session).toMatchObject({ startedAt: at(T1), lastActivityAt: at(T2) });
+      // Last activity: the later of the latest node time and the file's modification time (MTIME is after T2).
+      expect(Date.parse(T2)).toBeLessThan(MTIME);
+      expect(f.session).toMatchObject({ startedAt: at(T1), lastActivityAt: new Date(MTIME).toISOString() });
     }
     expect(shape(go([metaEvent(main.assignment), ...mainRows()]))).toEqual(shape(go([...mainRows(), metaEvent(main.assignment)])));
+    // A modification time before the last demand: the last demand's time.
+    const early = Date.parse(T1) + 60_000;
+    expect(go([metaEvent(main.assignment), ...mainRows({ mtimeMs: early })]).session).toMatchObject({ startedAt: at(T1), lastActivityAt: at(T2) });
+  });
+
+  test('a demand over 64 KiB keeps its place: later turns keep their own times; as the missing first prompt its text is cut (final review M-3)', () => {
+    const huge = `Summarise ${'z'.repeat(70 * 1024)}`;
+    const p2 = id(`@${offsetOf(main.lines, 7)}`);
+    // Main thread: the first demand is huge, the second turn still takes the second demand's time.
+    const f = go([metaEvent(assignment([{ at: T1, text: huge }, { at: T2, text: 'Now chart them' }])), ...mainRows()]);
+    for (const n of nodesOf(f)) expect(n.timestamp, n.id).toBe(n.turnId === p2 ? at(T2) : at(T1));
+    // The organizer (no user row): its first demand makes the prompt node, with the cut text.
+    const c = go([metaEvent(assignment([{ at: T3, text: huge }]), { agent: ORG }), ...childRows()]);
+    const p0 = c.graph.nodes[id('demand0', ORG)];
+    expect(p0).toMatchObject({ kind: 'prompt', timestamp: at(T3) });
+    const detailText = String(c.details.get(id('demand0', ORG))?.text ?? '');
+    expect(detailText.startsWith('Summarise zzz')).toBe(true);
+    expect(Buffer.byteLength(detailText)).toBeLessThanOrEqual(64 * 1024 + 8);
+    expect(detailText.endsWith('…')).toBe(true);
+  });
+
+  test('the synthetic line before a later read (final review I-5): no node, not unknown; the session\'s last activity follows it, node times stay the demands\'', () => {
+    const L = main.lines;
+    const cut = 7; // the second prompt starts the second read
+    const rows = mainRows();
+    const head = rows.slice(0, 1 + cut);
+    const tail = rows.slice(1 + cut);
+    const later = MTIME + 40 * 60_000; // after the first read's modification time and every demand
+    const synthetic: RawEvent = { ...(rows[1] as Extract<RawEvent, { source: 'transcript' }>), offset: offsetOf(L, cut) - 1, line: JSON.stringify({ __agentCanvas: 'file', mtimeMs: later }) };
+    const withLine = [metaEvent(main.assignment), ...head, synthetic, ...tail];
+    const f = go(withLine);
+    expect(f.unknown).toEqual([]);
+    const plain = go([metaEvent(main.assignment), ...rows]);
+    expect(f.graph.nodes).toEqual(plain.graph.nodes);
+    expect(f.details).toEqual(plain.details);
+    expect(f.session).toMatchObject({ title: plain.session!.title, startedAt: at(T1), lastActivityAt: new Date(later).toISOString() });
+    // The same events in pages, dropped and re-hydrated midway: the same.
+    for (const page of [1, 3, withLine.length]) expect(shape(paged(withLine, page))).toEqual(shape(f));
+    for (const cutAt of [2, 8, 10]) expect(shape(paged(withLine, 4, cutAt)), `cut ${cutAt}`).toEqual(shape(f));
+    // A rewrite (the file read again from its start) forgets the old reads' times.
+    const again = go([...withLine, ...mainRows({ mtimeMs: MTIME })]);
+    expect(again.session).toMatchObject({ lastActivityAt: new Date(MTIME).toISOString() });
   });
 
   test('fallback to the file modification time: no assignment, a time that does not parse, more prompts than demands', () => {

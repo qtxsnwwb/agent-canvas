@@ -87,8 +87,12 @@ function rootsOf(dirs: readonly string[]): { label: string; dir: string }[] {
  * `.sessions/<conversationId>` directory is a session; under its `agents/<agentId>/system/`, `trajectory.jsonl` is a
  * thread (tailed, lines told apart by offset) and `assignment.md` its demands (read whole: `title` for the main agent,
  * `agent_meta` for the others, up to DOUBAO_ASSIGNMENT_MAX_BYTES). The main agent is the single `m_…` agent directory
- * (none or several: the conversation is not read, status().unknownSessions); the others are subagent threads. Nothing
- * else (board.md, memory, attachments, skills, snapshots, logs, the browser profile) is listed, opened or watched.
+ * (none or several: the conversation is not read, status().unknownSessions); the others are subagent threads. Only
+ * those two files are ever opened. The scans list only the profile, namespace, conversation, agent and `system`
+ * directories on that path. The watcher is wider: each `.sessions` directory is handed to chokidar at watchDepth (4)
+ * without a filter, so chokidar lists and stats everything up to four levels below it (a conversation's `board.md`,
+ * `memory/`, `attachments/` and any other files there included), though it opens none of them; nothing outside the
+ * `.sessions` directories (`.skills`, `coding/snapshot`, logs, the browser profile) is listed or watched.
  * Keys: `doubao:<root label>/<profile>/<ns>/<conversation>/<agent>/<file>`. Every session is in DOUBAO_PROJECT.
  *
  * The same conversation id under another root, profile or namespace: the copy already stored, else the first one
@@ -414,11 +418,16 @@ export function doubaoFileLine(mtimeMs: number): string {
 export const DOUBAO_FILE_LINE_OFFSET = -1;
 
 /**
- * readGuardedLines plus one synthetic first line `{"__agentCanvas":"file","mtimeMs":<n>}` at offset -1 whenever the
- * file is read from its start (the first read that advances, even over blank lines only, or a rewrite): the modification time then, stored with the raw
- * events so the fallback time (spec 5.3, 10.13) replays identically. A file that is not there is not a rewrite:
- * nothing read, nothing changed (a missing file never sends the offset back to 0). Otherwise the shared reader's
- * result as is (offsets, state, truncated).
+ * readGuardedLines plus a synthetic line `{"__agentCanvas":"file","mtimeMs":<n>}` carrying the file's modification
+ * time at this read, stored with the raw events so what it feeds replays identically:
+ * - at offset -1 whenever the file is read from its start (the first read that advances, even over blank lines only,
+ *   or a rewrite): the node times' fallback (spec 5.3, 10.13) and the thread's last activity;
+ * - at offset `fromOffset - 1` before the rows of every later read that delivers rows: the thread's last activity only
+ *   (rows have no time; a turn writes rows long after its demand's time). That byte is the newline ending the row
+ *   before, so offsets stay strictly increasing within the generation and no row has it.
+ * A file that is not there is not a rewrite: nothing read, nothing changed (a missing file never sends the offset back
+ * to 0). A file that cannot be opened or read right now is not a rewrite either: the error is thrown (nothing read or
+ * stored, the next scan retries). Otherwise the shared reader's result as is (offsets, state, truncated).
  */
 export async function readDoubaoLines(absPath: string, fromOffset: number, maxBytes: number, state: string | null): Promise<SourceRead> {
   let mtimeMs: number;
@@ -432,8 +441,13 @@ export async function readDoubaoLines(absPath: string, fromOffset: number, maxBy
   // Vanished between the stat and the read: as above.
   if (!res.truncated && res.lines.length === 0 && res.newOffset === 0 && fromOffset > 0 && res.state === undefined) return { lines: [], newOffset: fromOffset, truncated: false };
   const fromStart = res.truncated || fromOffset === 0;
-  // Once per generation: the read that starts at 0 and gets anywhere (rows, or only blank lines), or a rewrite.
-  if (!fromStart || (res.lines.length === 0 && !res.truncated && res.newOffset <= fromOffset)) return res;
+  if (!fromStart) {
+    // A later read: the line goes before its rows, when it delivered any.
+    if (res.lines.length === 0) return res;
+    return { ...res, lines: [{ offset: fromOffset - 1, text: doubaoFileLine(mtimeMs) }, ...res.lines] };
+  }
+  // Once per generation from the start: the read that starts at 0 and gets anywhere (rows, or only blank lines), or a rewrite.
+  if (res.lines.length === 0 && !res.truncated && res.newOffset <= fromOffset) return res;
   return { ...res, lines: [{ offset: DOUBAO_FILE_LINE_OFFSET, text: doubaoFileLine(mtimeMs) }, ...res.lines] };
 }
 

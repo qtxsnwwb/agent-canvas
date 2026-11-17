@@ -16,7 +16,9 @@ import { unknownTypeName } from './unknown-type.js';
  * main agent's `trajectory.jsonl` is the main thread, every other agent's an agent thread (agentId = the agent's
  * directory). Rows are `{role, content, tool_calls?, tool_call_id?}` with no id, time, model, usage or directory: a row
  * is its byte offset in the file. The reader puts one synthetic line `{"__agentCanvas":"file","mtimeMs":n}` at offset
- * -1 whenever it reads a file from its start; each agent's `assignment.md` arrives whole as a meta event, as often as it
+ * -1 whenever it reads a file from its start, and one at the byte before the first row of every later read that
+ * delivers rows (the file's modification time then: the session's last activity, never a node time); each agent's
+ * `assignment.md` arrives whole as a meta event, as often as it
  * changed. Nothing of a row's content is kept after it was applied: a thread keeps ids, counters, demand times and its
  * first demand (text at most 64 KiB, for the `demand0` node's detail).
  *
@@ -66,6 +68,12 @@ const ownId = (s: string): string => own(s.slice(0, ID_MAX));
 const brief = (v: unknown): string => own(summarize(typeof v === 'string' ? head(v, PREFIX_MAX) : v));
 const sha1 = (s: string): string => createHash('sha1').update(s).digest('hex');
 
+/** A synthetic line of the reader, `{"__agentCanvas":"file","mtimeMs":n}` (a row always has a `role`). */
+const isFileLine = (rec: unknown): rec is Obj => isObject(rec) && rec.__agentCanvas === 'file' && !('role' in rec);
+/** The modification time a synthetic line carries, or null when it is not one or the time is unusable. */
+const fileLineMs = (rec: unknown): number | null =>
+  isFileLine(rec) && typeof rec.mtimeMs === 'number' && Number.isFinite(rec.mtimeMs) && Math.abs(rec.mtimeMs) <= MAX_MS ? Math.floor(rec.mtimeMs) : null;
+
 /** The id of a Doubao node: `doubao:<session id>[/<agent id>]:<part>`. */
 export function doubaoNodeId(sessionId: string, agentId: string | null, part: string): string {
   return `doubao:${sessionId}${agentId === null ? '' : `/${agentId}`}:${part}`;
@@ -113,7 +121,7 @@ interface Call {
 
 /**
  * The first demand of an assignment.md, kept to make or remake the `demand0` node: its full text (at most
- * DOUBAO_DEMAND_MAX_BYTES, the parser drops longer bodies) so the node's detail is the same in every arrival order and
+ * DOUBAO_DEMAND_MAX_BYTES and a cut mark, the parser cuts longer ones) so the node's detail is the same in every arrival order and
  * after a rewrite, and its summary, title and SHA-1.
  */
 interface FirstDemand {
@@ -129,8 +137,13 @@ interface Thread {
   dirId: string | null;
   /** Offset of the latest row read (one at or before it: the file is read again from its start). */
   lastOffset: number;
-  /** The file's modification time from the synthetic line. */
+  /** The file's modification time from the synthetic line read with the file's start (offset -1): node times' fallback. */
   mtimeMs: number | null;
+  /**
+   * The latest modification time of every synthetic line of this generation (the reader puts one before each read
+   * that delivers rows): the thread's last activity. Never a node time.
+   */
+  fileMs: number | null;
   /** The demand times of the latest assignment.md (null: not parseable); null when none was read. */
   demands: (number | null)[] | null;
   first: FirstDemand | null;
@@ -301,6 +314,7 @@ export class DoubaoNormalizer implements AgentNormalizer {
         dirId: dirOfKey(file),
         lastOffset: Number.NEGATIVE_INFINITY,
         mtimeMs: null,
+        fileMs: null,
         demands: null,
         first: null,
         p0: false,
@@ -498,11 +512,20 @@ export class DoubaoNormalizer implements AgentNormalizer {
       return event.offset < 0 ? undefined : `${ORIGIN}:invalid-json`;
     }
     if (event.offset < 0) {
-      // The reader's synthetic line: the file's modification time when its start was read.
-      if (isObject(rec) && rec.__agentCanvas === 'file' && typeof rec.mtimeMs === 'number' && Number.isFinite(rec.mtimeMs)) {
-        t.mtimeMs = Math.floor(rec.mtimeMs);
+      // The reader's synthetic line read with the file's start: the modification time then, the node times' fallback.
+      const ms = fileLineMs(rec);
+      if (ms !== null) {
+        t.mtimeMs = ms;
+        this.noteFileMs(t, ms);
         this.refreshThread(state, t, changes);
       }
+      return undefined;
+    }
+    // The reader's synthetic line before a later read that delivered rows (at the byte before them): the modification
+    // time then, the thread's last activity only. Not a row: no node, not unknown.
+    if (isFileLine(rec)) {
+      const ms = fileLineMs(rec);
+      if (ms !== null) this.noteFileMs(t, ms);
       return undefined;
     }
     if (!isObject(rec)) return `${ORIGIN}:not-an-object`;
@@ -532,6 +555,11 @@ export class DoubaoNormalizer implements AgentNormalizer {
       default:
         return typeof role === 'string' ? unknownTypeName(ORIGIN, `role/${role}`) : `${ORIGIN}:role/?`;
     }
+  }
+
+  /** A synthetic line's modification time: the thread's last activity is the latest one. */
+  private noteFileMs(t: Thread, ms: number): void {
+    t.fileMs = t.fileMs === null ? ms : Math.max(t.fileMs, ms);
   }
 
   /** The thread's first meaningful row decides whether its first turn is the first demand's (no user row for it). */
@@ -679,6 +707,7 @@ export class DoubaoNormalizer implements AgentNormalizer {
     t.firstPromptTitle = null;
     t.calls.clear();
     t.mtimeMs = null;
+    t.fileMs = null;
     t.timesDirty = true;
     for (const child of affected) if (child !== t) this.relink(state, child, changes);
     if (p0 !== null) this.refreshThread(state, t, changes);
@@ -725,8 +754,10 @@ export class DoubaoNormalizer implements AgentNormalizer {
 
   /**
    * The session as a function of what was read: title = the main thread's first prompt (the first demand when it had
-   * no user row); no cwd, branch or model; started / last activity = the earliest / latest known node time; status
-   * running (the display turns a quiet session idle).
+   * no user row); no cwd, branch or model; started = the earliest known node time; last activity = the latest known
+   * node time or the latest modification time of a synthetic line (the reader puts one before each read that delivers
+   * rows), whichever is later, so a turn that keeps writing rows long after its demand's time is not seen as quiet;
+   * status running (the display turns a quiet session idle).
    */
   private commitSession(state: SessionState, changes: Change[]): void {
     const main = state.threads.get(MAIN);
@@ -736,6 +767,8 @@ export class DoubaoNormalizer implements AgentNormalizer {
       const { min, max } = this.threadTimes(th);
       if (min !== null) minMs = minMs === null ? min : Math.min(minMs, min);
       if (max !== null) maxMs = maxMs === null ? max : Math.max(maxMs, max);
+      // Only threads that show something: a file of blank lines alone does not make the session active.
+      if (th.fileMs !== null && th.seq.length > 0) maxMs = maxMs === null ? th.fileMs : Math.max(maxMs, th.fileMs);
     }
     const startedAt = minMs === null ? EPOCH : isoOfMs(minMs);
     const lastActivityAt = maxMs === null ? startedAt : isoOfMs(maxMs);

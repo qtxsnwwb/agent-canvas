@@ -8,10 +8,12 @@ import { describe, expect, test } from 'vitest';
 import { DEFAULT_NOTIFICATION_SETTINGS, type NotificationKind, type Origin } from '@agent-canvas/shared';
 import { BuddyNormalizer } from '../src/normalize/buddy.js';
 import { DeepSeekNormalizer } from '../src/normalize/deepseek.js';
+import { DoubaoNormalizer } from '../src/normalize/doubao.js';
 import { NotificationEngine } from '../src/notify/engine.js';
 import type { RawEvent } from '../src/store/store.js';
 import { buddyEvents, Chain, CHILD as BUDDY_CHILD, record, T0 as BUDDY_T0, type Envelope } from './buddy-fixtures.js';
 import { CHILD, DshLog, dshEvents, headerLine, PROJECT, T0, textBlock } from './deepseek-fixtures.js';
+import * as doubao from './doubao-fixtures.js';
 
 const DAY = 24 * 3600_000;
 
@@ -154,6 +156,59 @@ describe('DeepSeek Harness', () => {
     turn(c, 1);
     const kinds = feed(new DeepSeekNormalizer(), [...dshEvents(header, m.lines), ...dshEvents(headerLine({ id: CHILD, parent: undefined }), [], { agentId: CHILD }).slice(0, 0), ...dshEvents(header, c.lines, { agentId: CHILD }).slice(1)]);
     expect(kinds).toEqual(['finished']);
+  });
+});
+
+describe('豆包工作 (final review I-5)', () => {
+  /** The synthetic line the reader puts before each read that delivers rows (at offset -1 when it reads from the start). */
+  const file = doubao.keyOf(doubao.MAIN, 'trajectory.jsonl');
+  const ev = (offset: number, line: string): RawEvent => ({ source: 'transcript', origin: 'doubao', file, offset, line, recordType: '', sessionId: doubao.CONV, agentId: null, projectId: null });
+
+  test('rows keep arriving for 20 minutes after the demand: no 卡住了 while they do; 卡住了 once they stop for longer than the threshold', () => {
+    const demandAt = Date.parse(doubao.T1);
+    const n = new DoubaoNormalizer();
+    let now = demandAt;
+    const engine = new NotificationEngine({
+      now: () => now,
+      settings: () => ({ ...DEFAULT_NOTIFICATION_SETTINGS, enabled: true, finishedMinSeconds: 0 }),
+      suppressed: () => false,
+      projectName: () => 'p',
+      sessionUrl: (id) => id,
+    });
+    const kinds: NotificationKind[] = [];
+    const take = (events: RawEvent[]): void => {
+      kinds.push(...engine.handleChanges(n.applyBatch(events.map((event) => ({ event, projectId: doubao.DOUBAO_PROJECT_ID }))).changes).map((x) => x.kind));
+    };
+    // The demand (assignment.md), then the first read of the trajectory a few seconds later.
+    now = demandAt + 2_000;
+    take([doubao.metaEvent(doubao.assignment([{ at: doubao.T1, text: 'Summarise the reports' }]))]);
+    const first = doubao.user('Summarise the reports');
+    take([ev(-1, doubao.fileLine(demandAt + 1_000)), ev(0, first)]);
+    let offset = Buffer.byteLength(first) + 1;
+    // Two rows every 30 seconds for 20 minutes, each read carrying the file's modification time; the periodic check
+    // runs between the reads.
+    let last = now;
+    for (let i = 1; i <= 40; i++) {
+      const at = demandAt + 1_000 + i * 30_000;
+      const rows = [doubao.assistant(`step ${i}`, [doubao.call(`call_${i}`, 'Read', { file_path: `f${i}.md` })]), doubao.tool(`call_${i}`, `content ${i}`)];
+      now = at + 500;
+      const batch = [ev(offset - 1, doubao.fileLine(at))];
+      for (const r of rows) {
+        batch.push(ev(offset, r));
+        offset += Buffer.byteLength(r) + 1;
+      }
+      take(batch);
+      now = at + 15_000;
+      kinds.push(...engine.tick().map((x) => x.kind));
+      last = at;
+    }
+    expect(kinds).toEqual([]);
+    // Quiet for longer than the threshold after the last rows: 卡住了, once (as for every hook-less source).
+    now = last + DEFAULT_NOTIFICATION_SETTINGS.stuckMinutes * 60_000 + 30_000;
+    kinds.push(...engine.tick().map((x) => x.kind));
+    now += 60_000;
+    kinds.push(...engine.tick().map((x) => x.kind));
+    expect(kinds).toEqual(['stuck']);
   });
 });
 
