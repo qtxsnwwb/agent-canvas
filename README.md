@@ -274,6 +274,10 @@ pnpm release                            # 在 release/ 里生成要发布到 npm
 
 项目是一个 pnpm workspace：`packages/server`（Fastify + better-sqlite3）、`packages/web`（React + React Flow）、`packages/shared`（共用的图模型）。发布到 npm 的是把三者合成的一个包 `@qtxsnwwb/agent-canvas`。
 
+每个 PR 和 `main` 上的每次推送都会在 Linux 和 Windows 上自动运行类型检查、构建、全套测试和发布包检查（`.github/workflows/ci.yml`）。
+
+发版：把根目录 `package.json` 的 `version` 改成新版本号并合并到 `main`，然后推送同名标签（版本 `0.2.0` 对应标签 `v0.2.0`）。`.github/workflows/release.yml` 会核对标签与版本号、重跑全部检查、发布到 npm，并在 GitHub 上建一个 Release。发布用的是 npm 的可信发布（OIDC），仓库里不保存任何 npm 令牌。
+
 ## 📄 许可证
 
 [MIT](./LICENSE)
