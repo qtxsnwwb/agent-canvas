@@ -318,8 +318,10 @@ describe('windowsShortPath', () => {
 
   test.skipIf(process.platform !== 'win32')('Windows, for real: the node binary resolves to a plain name of the same file, or null', () => {
     const s = windowsShortPath(process.execPath);
-    if (isPlainToken(process.execPath)) expect(s === null || s === process.execPath).toBe(true);
-    else if (s !== null) {
+    // Null (no short name, or the short form is the path itself), or another spelling of the same file: a path that is
+    // already plain may still have a different 8.3 form (C:\hostedtoolcache\… -> C:\HOSTED~1\…).
+    if (s !== null) {
+      expect(s).not.toBe(process.execPath);
       expect(isPlainToken(s)).toBe(true);
       expect(fs.statSync(s, { bigint: true }).ino).toBe(fs.statSync(process.execPath, { bigint: true }).ino);
     }

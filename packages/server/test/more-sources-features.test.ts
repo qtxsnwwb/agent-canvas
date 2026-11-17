@@ -321,7 +321,10 @@ describe('one directory, one project (final review M-6)', () => {
       fx.put({ id: 'cur-1', name: 'c', status: 'completed', dataFsPath: cwd, createdAt: CURSOR_T0, lastUpdatedAt: CURSOR_T0 + 1000, bubbles: [userBubble('u1', 'hello', CURSOR_T0)] });
       const d = dirs();
       // Gemini: lower-cased with a trailing separator (as .project_root may be); Grok: forward slashes and a trailing one.
-      await writeNewSources(d, { gemini: `${cwd.toLowerCase()}\\`, grok: `${posix}/`, copilot: `${cwd}\\` });
+      // The Gemini source folds letter case on Windows only (geminiProject): elsewhere a path differing in case is
+      // another directory, so there the path keeps its case.
+      const geminiCwd = process.platform === 'win32' ? cwd.toLowerCase() : cwd;
+      await writeNewSources(d, { gemini: `${geminiCwd}\\`, grok: `${posix}/`, copilot: `${cwd}\\` });
       const state = path.join(d.copilotDir, 'session-state');
       const copilotSession = async (id: string, dir: string): Promise<void> =>
         write(path.join(state, id, 'events.jsonl'), body([copilot.startLine(dir), copilot.ev('user.message', { content: 'hello' }, { at: '2026-11-12T08:00:01.000Z' })]));
