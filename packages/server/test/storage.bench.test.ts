@@ -209,7 +209,7 @@ describe.skipIf(!BENCH)('storage benchmark', () => {
     const root = fs.mkdtempSync(path.join(process.env.AGENT_CANVAS_BENCH_TMP ?? os.tmpdir(), 'cc-storage-bench-'));
     try {
       const projectsDir = path.join(root, 'projects');
-      const config = loadConfig({}, { geminiDir: null, grokDir: null, copilotDir: null, projectsDir, dataDir: path.join(root, 'data'), cursorDbPath: null, codexSessionsDir: null });
+      const config = loadConfig({}, { deepseekDir: null, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [], geminiDir: null, grokDir: null, copilotDir: null, projectsDir, dataDir: path.join(root, 'data'), cursorDbPath: null, codexSessionsDir: null });
       const gen = writeTranscripts(projectsDir, ROWS);
       console.log(`raw rows ${gen.rows}, ${MB(gen.bytes)} MB of JSONL, ${(gen.bytes / gen.rows / 1024).toFixed(2)} KB per row`);
 
@@ -307,7 +307,7 @@ describe.skipIf(!BENCH)('storage benchmark', () => {
     const root = fs.mkdtempSync(path.join(process.env.AGENT_CANVAS_BENCH_TMP ?? os.tmpdir(), 'cc-search-cost-'));
     try {
       const projectsDir = path.join(root, 'projects');
-      const config = loadConfig({}, { geminiDir: null, grokDir: null, copilotDir: null, projectsDir, dataDir: path.join(root, 'data'), cursorDbPath: null, codexSessionsDir: null });
+      const config = loadConfig({}, { deepseekDir: null, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [], geminiDir: null, grokDir: null, copilotDir: null, projectsDir, dataDir: path.join(root, 'data'), cursorDbPath: null, codexSessionsDir: null });
       const gen = writeTranscripts(projectsDir, ROWS);
       mode.plain = false;
       const results: { detail: 'off' | 'none'; ingestMs: number; rebuildMs: number; nodes: number }[] = [];

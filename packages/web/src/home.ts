@@ -8,6 +8,11 @@ export const ORIGIN_LOOK: Record<Origin, { label: string; className: string }> =
   gemini: { label: 'Gemini CLI', className: 'origin-gemini' },
   grok: { label: 'Grok', className: 'origin-grok' },
   copilot: { label: 'Copilot CLI', className: 'origin-copilot' },
+  // Placeholder colours (styles.css) until their own are chosen (plan more-sources-cn, Task 8).
+  deepseek: { label: 'DeepSeek', className: 'origin-deepseek' },
+  workbuddy: { label: 'WorkBuddy', className: 'origin-workbuddy' },
+  codebuddy: { label: 'CodeBuddy', className: 'origin-codebuddy' },
+  doubao: { label: '豆包', className: 'origin-doubao' },
 };
 
 export function originLook(origin: Origin): { label: string; className: string } {

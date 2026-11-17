@@ -15,6 +15,11 @@ const LETTER_MARKS = {
   gemini: `${TILE}M17 6v2H9v8h6v-3h-3v-2h5v7H7V6z`,
   grok: `${TILE}M7 6h2.5v5L14 6h3l-5.2 6L17 18h-3l-4.5-5v5H7z`,
   copilot: `${TILE}M17 6v2.5H9.5v7H17V18H7V6z`,
+  // Placeholders until their own marks are drawn (plan more-sources-cn, Task 8): D, W, B and a ring.
+  deepseek: `${TILE}M7 6h6a4 4 0 0 1 4 4v4a4 4 0 0 1-4 4H7zM9.5 8.5v7H13a1.5 1.5 0 0 0 1.5-1.5v-4A1.5 1.5 0 0 0 13 8.5z`,
+  workbuddy: `${TILE}M5.5 6h2.4l1.3 7.6L10.9 6h2.2l1.7 7.6L16.1 6h2.4L16 18h-2.3L12 10.9 10.3 18H8z`,
+  codebuddy: `${TILE}M7 6h6a3 3 0 0 1 2.2 5A3.2 3.2 0 0 1 13.6 18H7zM9.5 8.3V11h3a1.35 1.35 0 0 0 0-2.7zM9.5 13.2v2.5H13a1.25 1.25 0 0 0 0-2.5z`,
+  doubao: `${TILE}M12 6.5a5.5 5.5 0 1 0 0 11a5.5 5.5 0 1 0 0-11zM12 9a3 3 0 1 1 0 6a3 3 0 1 1 0-6z`,
 } as const;
 
 /**
@@ -30,6 +35,10 @@ export const ORIGIN_MARKS: Readonly<Record<Origin, { viewBox: string; path: stri
   gemini: { viewBox: '0 0 24 24', path: LETTER_MARKS.gemini, fillRule: 'evenodd' },
   grok: { viewBox: '0 0 24 24', path: LETTER_MARKS.grok, fillRule: 'evenodd' },
   copilot: { viewBox: '0 0 24 24', path: LETTER_MARKS.copilot, fillRule: 'evenodd' },
+  deepseek: { viewBox: '0 0 24 24', path: LETTER_MARKS.deepseek, fillRule: 'evenodd' },
+  workbuddy: { viewBox: '0 0 24 24', path: LETTER_MARKS.workbuddy, fillRule: 'evenodd' },
+  codebuddy: { viewBox: '0 0 24 24', path: LETTER_MARKS.codebuddy, fillRule: 'evenodd' },
+  doubao: { viewBox: '0 0 24 24', path: LETTER_MARKS.doubao, fillRule: 'evenodd' },
 };
 
 function OriginIcon({ origin }: { origin: Origin }) {

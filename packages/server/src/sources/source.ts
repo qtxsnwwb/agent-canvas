@@ -1,4 +1,4 @@
-import { ORIGINS, type Origin } from '@agent-canvas/shared';
+import { ORIGINS, type FileSourceStatus, type Origin } from '@agent-canvas/shared';
 
 /**
  * What a file is to the pipeline. `session` / `agent`: an appended JSONL of the session's main thread / of one of its
@@ -41,6 +41,10 @@ export const KEY_PREFIXES: Readonly<Record<Origin, string>> = {
   gemini: 'gemini:',
   grok: 'grok:',
   copilot: 'copilot:',
+  deepseek: 'deepseek:',
+  workbuddy: 'workbuddy:',
+  codebuddy: 'codebuddy:',
+  doubao: 'doubao:',
 };
 
 /** The origin a store key belongs to: the one whose prefix is the longest that matches. */
@@ -121,6 +125,11 @@ export interface FileSource {
    * new root thread was seen); the pipeline then re-reads the index files even when their size did not change.
    */
   indexVersion?(): number;
+  /**
+   * Optional. What the source adds to its Diagnostics.sources entry (e.g. legacy files skipped, duplicate sessions,
+   * why it cannot run here); merged over the entry the server assembles. Never reads anything that blocks.
+   */
+  status?(): Partial<FileSourceStatus>;
 }
 
 export function isPromise<T>(v: MaybePromise<T>): v is Promise<T> {

@@ -25,6 +25,10 @@ const ORIGIN_LABELS: Record<Origin, string> = {
   gemini: 'Gemini CLI',
   grok: 'Grok',
   copilot: 'Copilot CLI',
+  deepseek: 'DeepSeek',
+  workbuddy: 'WorkBuddy',
+  codebuddy: 'CodeBuddy',
+  doubao: '豆包',
 };
 const STATUS_LABELS: Record<NodeStatus, string> = {
   running: '运行中',

@@ -329,7 +329,7 @@ describe.skipIf(!BENCH)('cursor import benchmark', () => {
         try {
           const cursor = makeCursorDb(path.join(tmp, 'cursor'), n);
           fs.mkdirSync(path.join(tmp, 'projects'), { recursive: true });
-          const config = loadConfig({}, { geminiDir: null, grokDir: null, copilotDir: null, projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, cursorDbPath: null });
+          const config = loadConfig({}, { deepseekDir: null, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [], geminiDir: null, grokDir: null, copilotDir: null, projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, cursorDbPath: null });
           fs.mkdirSync(config.dataDir, { recursive: true });
 
           const prof = process.env.AGENT_CANVAS_BENCH_PROF;

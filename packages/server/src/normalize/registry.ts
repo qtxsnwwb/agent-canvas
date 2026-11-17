@@ -19,6 +19,11 @@ export const NORMALIZER_FACTORIES: NormalizerFactories = {
   gemini: () => new GeminiNormalizer(),
   grok: () => new GrokNormalizer(),
   copilot: () => new CopilotNormalizer(),
+  // Filled by the tasks that add their normalizers (plan more-sources-cn).
+  deepseek: null,
+  workbuddy: null,
+  codebuddy: null,
+  doubao: null,
 };
 
 const originOf = (event: RawEvent): Origin => event.origin ?? 'claude';

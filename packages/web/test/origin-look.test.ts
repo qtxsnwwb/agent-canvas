@@ -18,6 +18,7 @@ test('每个来源都有自己的名字和颜色类（不再用中性占位）',
   expect(labels.size).toBe(ORIGINS.length);
   expect(classes.size).toBe(ORIGINS.length);
   expect([ORIGIN_LOOK.gemini.label, ORIGIN_LOOK.grok.label, ORIGIN_LOOK.copilot.label]).toEqual(['Gemini CLI', 'Grok', 'Copilot CLI']);
+  expect([ORIGIN_LOOK.deepseek.label, ORIGIN_LOOK.workbuddy.label, ORIGIN_LOOK.codebuddy.label, ORIGIN_LOOK.doubao.label]).toEqual(['DeepSeek', 'WorkBuddy', 'CodeBuddy', '豆包']);
 });
 
 test('样式表给每个来源定义了徽章颜色、筛选按下的颜色和统计图的系列颜色', () => {
@@ -39,7 +40,7 @@ test('新来源的标志：自造的简单图形（圆角方块里一个字母�
   expect(new Set(['gemini', 'grok', 'copilot'].map((o) => ORIGIN_MARKS[o as 'gemini'].path)).size).toBe(3);
 });
 
-test('来源筛选列出全部六个来源（加“全部”）', () => {
-  expect(ORIGIN_FILTER_OPTIONS.map((o) => o.value)).toEqual(['all', 'claude', 'codex', 'cursor', 'gemini', 'grok', 'copilot']);
+test('来源筛选列出全部十个来源（加“全部”）', () => {
+  expect(ORIGIN_FILTER_OPTIONS.map((o) => o.value)).toEqual(['all', 'claude', 'codex', 'cursor', 'gemini', 'grok', 'copilot', 'deepseek', 'workbuddy', 'codebuddy', 'doubao']);
   for (const origin of ORIGINS) expect(parseOriginFilter(origin)).toBe(origin);
 });

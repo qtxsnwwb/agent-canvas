@@ -41,6 +41,20 @@
   --copilot-soft: #ffe0ee;
   --copilot-edge: #f5b8d2;
   --copilot-ink: #a3195a;
+  /* DeepSeek, WorkBuddy, CodeBuddy and 豆包: a neutral placeholder (the page's own lavender grey) until their colours
+     are chosen (plan more-sources-cn, Task 8). */
+  --deepseek-soft: #f5ecff;
+  --deepseek-edge: #e2d9f1;
+  --deepseek-ink: #3f3a5a;
+  --workbuddy-soft: #f5ecff;
+  --workbuddy-edge: #e2d9f1;
+  --workbuddy-ink: #3f3a5a;
+  --codebuddy-soft: #f5ecff;
+  --codebuddy-edge: #e2d9f1;
+  --codebuddy-ink: #3f3a5a;
+  --doubao-soft: #f5ecff;
+  --doubao-edge: #e2d9f1;
+  --doubao-ink: #3f3a5a;
   /* Origins as chart series (stats page): the badge families, stepped until the dataviz palette validator passes on
      the white card surface (lightness band, chroma, colour-blind separation over all pairs, 3:1 contrast). Marks only:
      text next to them stays in the ink colours. */
@@ -52,6 +66,11 @@
   --series-gemini: #00a0c8;
   --series-grok: #801895;
   --series-copilot: #e62d83;
+  /* Placeholders (Task 8 of plan more-sources-cn): the page's soft ink. */
+  --series-deepseek: #7b7694;
+  --series-workbuddy: #7b7694;
+  --series-codebuddy: #7b7694;
+  --series-doubao: #7b7694;
   --chart-grid: #f0ebf6;
   --chart-axis: #d6cde6;
   --font: "Microsoft YaHei UI", "PingFang SC", "Hiragino Sans GB", system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -154,6 +173,10 @@ pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
 .origin-gemini { --origin-bg: var(--gemini-soft); --origin-edge: var(--gemini-edge); --origin-fg: var(--gemini-ink); }
 .origin-grok { --origin-bg: var(--grok-soft); --origin-edge: var(--grok-edge); --origin-fg: var(--grok-ink); }
 .origin-copilot { --origin-bg: var(--copilot-soft); --origin-edge: var(--copilot-edge); --origin-fg: var(--copilot-ink); }
+.origin-deepseek { --origin-bg: var(--deepseek-soft); --origin-edge: var(--deepseek-edge); --origin-fg: var(--deepseek-ink); }
+.origin-workbuddy { --origin-bg: var(--workbuddy-soft); --origin-edge: var(--workbuddy-edge); --origin-fg: var(--workbuddy-ink); }
+.origin-codebuddy { --origin-bg: var(--codebuddy-soft); --origin-edge: var(--codebuddy-edge); --origin-fg: var(--codebuddy-ink); }
+.origin-doubao { --origin-bg: var(--doubao-soft); --origin-edge: var(--doubao-edge); --origin-fg: var(--doubao-ink); }
 .origin-icon { flex: none; }
 .origin-badge-dot { padding: 0; width: 18px; height: 18px; justify-content: center; }
 .origin-dots { display: inline-flex; gap: 4px; }
@@ -167,6 +190,10 @@ pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
 .view-switch[aria-label="来源"] button[aria-pressed="true"][data-origin="gemini"] { background: var(--gemini-soft); color: var(--gemini-ink); }
 .view-switch[aria-label="来源"] button[aria-pressed="true"][data-origin="grok"] { background: var(--grok-soft); color: var(--grok-ink); }
 .view-switch[aria-label="来源"] button[aria-pressed="true"][data-origin="copilot"] { background: var(--copilot-soft); color: var(--copilot-ink); }
+.view-switch[aria-label="来源"] button[aria-pressed="true"][data-origin="deepseek"] { background: var(--deepseek-soft); color: var(--deepseek-ink); }
+.view-switch[aria-label="来源"] button[aria-pressed="true"][data-origin="workbuddy"] { background: var(--workbuddy-soft); color: var(--workbuddy-ink); }
+.view-switch[aria-label="来源"] button[aria-pressed="true"][data-origin="codebuddy"] { background: var(--codebuddy-soft); color: var(--codebuddy-ink); }
+.view-switch[aria-label="来源"] button[aria-pressed="true"][data-origin="doubao"] { background: var(--doubao-soft); color: var(--doubao-ink); }
 
 /* Session page: a one-line info bar, then the canvas filling the rest of the viewport. */
 .session-loading { padding: 12px 18px; }

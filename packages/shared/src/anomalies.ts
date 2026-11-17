@@ -488,10 +488,10 @@ export const COST_NO_TOKEN_ORIGINS: readonly Origin[] = ['cursor'];
 
 /**
  * Origins never judged for `cost` at all, on either basis (more-sources spec section 6: Copilot CLI records usage only
- * once per run, at its shutdown, so it has no per-turn cost). Baselines are per (project, origin), so leaving these
- * groups out changes no other origin's results.
+ * once per run, at its shutdown, so it has no per-turn cost; more-sources-cn spec 2.6: Doubao Work records no usage at
+ * all). Baselines are per (project, origin), so leaving these groups out changes no other origin's results.
  */
-export const COST_EXCLUDED_ORIGINS: readonly Origin[] = ['copilot'];
+export const COST_EXCLUDED_ORIGINS: readonly Origin[] = ['copilot', 'doubao'];
 
 /**
  * Origins whose sessions take part in `cost` only when they record per-turn usage (more-sources spec section 6: a Grok

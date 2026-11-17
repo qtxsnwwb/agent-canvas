@@ -5,14 +5,16 @@ import { fileURLToPath } from 'node:url';
 import { expect, test } from 'vitest';
 import { loadConfig } from '../src/config.js';
 
-// Guard: no test may reach the real directories of Gemini CLI, Grok or Copilot CLI (plan, Global Constraints).
+// Guard: no test may reach the real directories of Gemini CLI, Grok, Copilot CLI, DeepSeek Harness, WorkBuddy, CodeBuddy
+// Code or Doubao Work (plans more-sources and more-sources-cn, Global Constraints).
 
-const TOOL_KEYS = ['geminiDir', 'grokDir', 'copilotDir'] as const;
+const TOOL_KEYS = ['geminiDir', 'grokDir', 'copilotDir', 'deepseekDir', 'workbuddyDirs', 'codebuddyDir', 'doubaoDirs'] as const;
 /** Tests of the resolution rules themselves: they read the resolved paths, never the directories. */
-const RESOLUTION_TESTS = new Set(['config.test.ts', 'config-more-sources.test.ts', 'no-real-tool-dirs.test.ts']);
+const RESOLUTION_TESTS = new Set(['config.test.ts', 'config-more-sources.test.ts', 'config-more-sources-cn.test.ts', 'no-real-tool-dirs.test.ts']);
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const home = path.resolve(os.homedir()).toLowerCase();
-const underHome = (p: string | null): boolean => p !== null && path.resolve(p).toLowerCase().startsWith(home);
+const underHome = (p: string | null | readonly string[]): boolean =>
+  Array.isArray(p) ? p.some((one: string) => underHome(one)) : p !== null && path.resolve(p as string).toLowerCase().startsWith(home);
 
 /** The argument text of every `loadConfig(...)` call in `src` (balanced parentheses). */
 function loadConfigCalls(src: string): string[] {
@@ -31,7 +33,7 @@ function loadConfigCalls(src: string): string[] {
   return out;
 }
 
-test('every loadConfig in the tests either reads process.env (guarded by the vitest env) or overrides all three tool dirs', () => {
+test('every loadConfig in the tests either reads process.env (guarded by the vitest env) or overrides all seven tool dirs', () => {
   const offenders: string[] = [];
   for (const file of fs.readdirSync(testDir).filter((f) => f.endsWith('.ts') && !RESOLUTION_TESTS.has(f))) {
     for (const args of loadConfigCalls(fs.readFileSync(path.join(testDir, file), 'utf8'))) {
@@ -51,7 +53,7 @@ test('the scanner finds a call that leaves a tool dir to its default', () => {
 
 test('configs built as tests build them resolve no tool dir under the real home', () => {
   const fromEnv = loadConfig(process.env);
-  const fromTest = loadConfig({}, { projectsDir: path.join(os.tmpdir(), 'p'), dataDir: path.join(os.tmpdir(), 'd'), geminiDir: null, grokDir: null, copilotDir: null });
+  const fromTest = loadConfig({}, { projectsDir: path.join(os.tmpdir(), 'p'), dataDir: path.join(os.tmpdir(), 'd'), geminiDir: null, grokDir: null, copilotDir: null, deepseekDir: null, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [] });
   for (const c of [fromEnv, fromTest]) for (const k of TOOL_KEYS) expect(underHome(c[k]), k).toBe(false);
   // Without the overrides they would: this is what the guard above prevents.
   expect(TOOL_KEYS.some((k) => underHome(loadConfig({})[k]))).toBe(true);

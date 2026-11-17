@@ -22,6 +22,20 @@ export interface Config {
   grokDir: string | null;
   /** Copilot CLI's directory (`AGENT_CANVAS_COPILOT_DIR`, else `$COPILOT_HOME`, else `~/.copilot`); null = not read. */
   copilotDir: string | null;
+  /** DeepSeek Harness's home (`AGENT_CANVAS_DSH_DIR`, else `$DSH_HOME`, else `~/.dsh`); null = not read. */
+  deepseekDir: string | null;
+  /**
+   * WorkBuddy's directories: `AGENT_CANVAS_WORKBUDDY_DIR` (one; the empty string: none, not read), else
+   * `$WORKBUDDY_CONFIG_DIR` (one), else both `~/.workbuddy` and `~/.workbuddy-ai`. Empty = not read.
+   */
+  workbuddyDirs: readonly string[];
+  /** CodeBuddy Code's directory (`AGENT_CANVAS_CODEBUDDY_DIR`, else `$CODEBUDDY_CONFIG_DIR`, else `~/.codebuddy`); null = not read. */
+  codebuddyDir: string | null;
+  /**
+   * Doubao Work's "User Data"-level directories: `AGENT_CANVAS_DOUBAO_DIR` (one; the empty string: none, not read),
+   * else defaultDoubaoDirs(). Empty = not read.
+   */
+  doubaoDirs: readonly string[];
   dataDir: string;
   dbPath: string;
   host: '127.0.0.1';
@@ -53,6 +67,48 @@ export function defaultCursorDbPath(
   }
   if (platform === 'darwin') return path.posix.join(home, 'Library', 'Application Support', ...tail);
   return path.posix.join(home, '.config', ...tail);
+}
+
+/**
+ * Where Doubao Work keeps its "User Data"-level directories on `platform`, the standalone client first, then the Doubao
+ * app's work mode: Windows `%LOCALAPPDATA%\DoubaoWork\User Data` and `%LOCALAPPDATA%\Doubao\User Data` (LOCALAPPDATA
+ * unset or empty: `<home>\AppData\Local`), macOS `~/Library/Application Support/DoubaoWork` and `…/Doubao`; none
+ * elsewhere (there is no client).
+ */
+export function defaultDoubaoDirs(
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+  home: string = os.homedir(),
+): string[] {
+  if (platform === 'win32') {
+    const local = env.LOCALAPPDATA !== undefined && env.LOCALAPPDATA !== '' ? env.LOCALAPPDATA : path.win32.join(home, 'AppData', 'Local');
+    return [path.win32.join(local, 'DoubaoWork', 'User Data'), path.win32.join(local, 'Doubao', 'User Data')];
+  }
+  if (platform === 'darwin') {
+    const support = path.posix.join(home, 'Library', 'Application Support');
+    return [path.posix.join(support, 'DoubaoWork'), path.posix.join(support, 'Doubao')];
+  }
+  return [];
+}
+
+/**
+ * Several tool directories, in resolveToolDir's order: the explicit override → our variable `ownVar` naming one
+ * directory (the empty string: none, the tool is not read) → the tool's own variable `toolVar` naming one (unset or
+ * empty: skipped; null: the tool has none) → `fallback`.
+ */
+function resolveToolDirs(
+  override: readonly string[] | undefined,
+  env: NodeJS.ProcessEnv,
+  ownVar: string,
+  toolVar: string | null,
+  fallback: () => readonly string[],
+): readonly string[] {
+  if (override !== undefined) return override;
+  const own = env[ownVar];
+  if (own !== undefined) return own === '' ? [] : [own];
+  const tool = toolVar === null ? undefined : env[toolVar];
+  if (tool !== undefined && tool !== '') return [tool];
+  return fallback();
 }
 
 /**
@@ -102,6 +158,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, overrides: Part
   const geminiDir = resolveToolDir(overrides.geminiDir, env, 'AGENT_CANVAS_GEMINI_DIR', 'GEMINI_CLI_HOME', (v) => path.join(v, '.gemini'), path.join(home, '.gemini'));
   const grokDir = resolveToolDir(overrides.grokDir, env, 'AGENT_CANVAS_GROK_DIR', 'GROK_HOME', (v) => v, path.join(home, '.grok'));
   const copilotDir = resolveToolDir(overrides.copilotDir, env, 'AGENT_CANVAS_COPILOT_DIR', 'COPILOT_HOME', (v) => v, path.join(home, '.copilot'));
+  const deepseekDir = resolveToolDir(overrides.deepseekDir, env, 'AGENT_CANVAS_DSH_DIR', 'DSH_HOME', (v) => v, path.join(home, '.dsh'));
+  const workbuddyDirs = resolveToolDirs(overrides.workbuddyDirs, env, 'AGENT_CANVAS_WORKBUDDY_DIR', 'WORKBUDDY_CONFIG_DIR', () => [
+    path.join(home, '.workbuddy'),
+    path.join(home, '.workbuddy-ai'),
+  ]);
+  const codebuddyDir = resolveToolDir(overrides.codebuddyDir, env, 'AGENT_CANVAS_CODEBUDDY_DIR', 'CODEBUDDY_CONFIG_DIR', (v) => v, path.join(home, '.codebuddy'));
+  const doubaoDirs = resolveToolDirs(overrides.doubaoDirs, env, 'AGENT_CANVAS_DOUBAO_DIR', null, () => defaultDoubaoDirs(process.platform, env, home));
   return {
     host: '127.0.0.1',
     port: 4317,
@@ -116,6 +179,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, overrides: Part
     geminiDir,
     grokDir,
     copilotDir,
+    deepseekDir,
+    workbuddyDirs,
+    codebuddyDir,
+    doubaoDirs,
     dataDir,
     dbPath: overrides.dbPath ?? path.join(dataDir, 'data.db'),
   };

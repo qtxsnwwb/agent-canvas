@@ -14,9 +14,9 @@
  * masked, and the page that receives it compares with sameMaskedValue.
  */
 import {
-  createMasker, isCutSummary, isCutTitle, MASK_FAILED_TEXT, type AnomalyListResponse, type Diagnostics, type Graph, type GraphNode,
+  createMasker, FILE_ONLY_ORIGINS, isCutSummary, isCutTitle, MASK_FAILED_TEXT, type AnomalyListResponse, type Diagnostics, type Graph, type GraphNode,
   type LearnedValue, type Masker, type MaskCategory, type NodeDetail, type Project, type ProjectFilesResponse, type Session,
-  type SessionAnomaliesResponse, type SessionFilesResponse, type StatsResponse,
+  type FileOnlyOrigin, type FileSourceStatus, type SessionAnomaliesResponse, type SessionFilesResponse, type StatsResponse,
 } from '@agent-canvas/shared';
 import { neutralizeBidi, neutralizeBidiValue } from './bidi';
 import { projectTitle } from './home';
@@ -451,6 +451,25 @@ export function maskAnomalyList(r: AnomalyListResponse, m: PageMasker): AnomalyL
   };
 }
 
+/**
+ * Diagnostics.sources: the directories (and every root of a source with several) and the reason a source cannot run.
+ * Only the origins the server sent are kept (one from before an origin existed sends no entry for it).
+ */
+function maskFileSources(sources: Record<FileOnlyOrigin, FileSourceStatus>, m: PageMasker): Record<FileOnlyOrigin, FileSourceStatus> {
+  const out: Partial<Record<FileOnlyOrigin, FileSourceStatus>> = {};
+  for (const origin of FILE_ONLY_ORIGINS) {
+    const s = sources[origin] as FileSourceStatus | undefined;
+    if (s === undefined) continue;
+    out[origin] = {
+      ...s,
+      dir: maybe(s.dir, m.text),
+      ...(s.dirs !== undefined ? { dirs: s.dirs.map((d) => ({ ...d, dir: m.text(d.dir) })) } : {}),
+      ...(s.unavailable !== undefined ? { unavailable: m.text(s.unavailable) } : {}),
+    };
+  }
+  return out as Record<FileOnlyOrigin, FileSourceStatus>;
+}
+
 /** Diagnostics: unknown-record samples (conversation text), file keys, errors and configured paths. */
 export function maskDiagnostics(d: Diagnostics, m: PageMasker): Diagnostics {
   if (!m.on) return d;
@@ -471,11 +490,7 @@ export function maskDiagnostics(d: Diagnostics, m: PageMasker): Diagnostics {
     ...(d.search !== undefined ? { search: { ...d.search, lastError: t(d.search.lastError) } } : {}),
     ...(d.sources !== undefined
       ? {
-        sources: {
-          gemini: { ...d.sources.gemini, dir: t(d.sources.gemini.dir) },
-          grok: { ...d.sources.grok, dir: t(d.sources.grok.dir) },
-          copilot: { ...d.sources.copilot, dir: t(d.sources.copilot.dir) },
-        },
+        sources: maskFileSources(d.sources, m),
       }
       : {}),
   };

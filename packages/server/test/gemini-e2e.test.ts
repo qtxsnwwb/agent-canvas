@@ -52,7 +52,7 @@ beforeEach(async () => {
   const geminiDir = path.join(tmp, '.gemini');
   gemTmp = path.join(geminiDir, 'tmp');
   await fs.mkdir(gemTmp, { recursive: true });
-  config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, grokDir: null, copilotDir: null, geminiDir });
+  config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, grokDir: null, copilotDir: null, deepseekDir: null, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [], geminiDir });
   await writeRel('demo-app/.project_root', CWD);
 });
 afterEach(async () => {
@@ -65,14 +65,14 @@ describe('Gemini CLI end to end', () => {
     expect(fileSources(config).some((s) => s instanceof GeminiFileSource)).toBe(true);
     const noTmp = path.join(tmp, 'empty-gemini');
     await fs.mkdir(noTmp);
-    const c2 = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, grokDir: null, copilotDir: null, geminiDir: noTmp });
+    const c2 = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, grokDir: null, copilotDir: null, deepseekDir: null, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [], geminiDir: noTmp });
     const store = open();
     const p = new Pipeline(store, c2, { sources: fileSources(c2, store) });
     expect(p.fileSources().map((s) => s.origin)).toEqual(['claude']);
     await p.scanAll();
     await p.idle();
     expect(await fs.readdir(noTmp)).toEqual([]);
-    const c3 = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, grokDir: null, copilotDir: null, geminiDir: null });
+    const c3 = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, grokDir: null, copilotDir: null, deepseekDir: null, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [], geminiDir: null });
     expect(fileSources(c3).map((s) => s.origin)).toEqual(['claude']);
   });
 

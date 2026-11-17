@@ -74,18 +74,35 @@ export interface Diagnostics {
   foreignHooksDropped?: number;
   /**
    * The file sources without hooks, read only when their directory exists at start (spec more-sources 4.2): dir = the
-   * directory read (`<geminiDir>/tmp`, `<grokDir>/sessions`, `<copilotDir>/session-state`; null when the origin is
-   * disabled), present = it exists now (stat only), reading = the source was created at start (the directory existed
-   * then; one that appeared later is read after a restart), sessionCount = that origin's stored sessions. Absent from
-   * servers before it existed.
+   * directory read (`<geminiDir>/tmp`, `<grokDir>/sessions`, `<copilotDir>/session-state`, `<deepseekDir>/sessions`,
+   * `<workbuddyDir>/projects`, `<codebuddyDir>/projects`, a Doubao "User Data" directory; the first when there are
+   * several; null when the origin is disabled), present = it (any of them) exists now (stat only), reading = the source
+   * was created at start (the directory existed then; one that appeared later is read after a restart), sessionCount =
+   * that origin's stored sessions. Absent from servers before it existed; the four origins added by more-sources-cn
+   * are absent from servers before them.
    */
   sources?: Record<FileOnlyOrigin, FileSourceStatus>;
 }
 
 /** The origins read from files only (no hooks, no live waiting states). */
-export type FileOnlyOrigin = 'gemini' | 'grok' | 'copilot';
-export const FILE_ONLY_ORIGINS: readonly FileOnlyOrigin[] = ['gemini', 'grok', 'copilot'];
-export interface FileSourceStatus { dir: string | null; present: boolean; reading: boolean; sessionCount: number }
+export type FileOnlyOrigin = 'gemini' | 'grok' | 'copilot' | 'deepseek' | 'workbuddy' | 'codebuddy' | 'doubao';
+export const FILE_ONLY_ORIGINS: readonly FileOnlyOrigin[] = ['gemini', 'grok', 'copilot', 'deepseek', 'workbuddy', 'codebuddy', 'doubao'];
+export interface FileSourceStatus {
+  dir: string | null;
+  present: boolean;
+  reading: boolean;
+  sessionCount: number;
+  /** Every configured root when a source has more than one (workbuddy, doubao). */
+  dirs?: { dir: string; present: boolean }[];
+  /** deepseek: session directories holding only files of an unsupported format version. */
+  legacyFiles?: number;
+  /** Why the source cannot run on this runtime (deepseek on Node < 22.15), else absent. */
+  unavailable?: string;
+  /** workbuddy / doubao: sessions found again under another root or profile and not read twice. */
+  duplicateSessions?: number;
+  /** doubao: threads whose time could only be taken from the file's modification time. */
+  mtimeFallbacks?: number;
+}
 
 /**
  * The content search index (Diagnostics.search). indexing: the index is incomplete (a database from before it existed,
