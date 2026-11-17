@@ -5,6 +5,7 @@ import { CodexNormalizer } from './codex.js';
 import { CopilotNormalizer } from './copilot.js';
 import { CursorNormalizer } from './cursor.js';
 import { DeepSeekNormalizer } from './deepseek.js';
+import { DoubaoNormalizer } from './doubao.js';
 import { GeminiNormalizer } from './gemini.js';
 import { GrokNormalizer } from './grok.js';
 import { Normalizer } from './normalizer.js';
@@ -25,7 +26,7 @@ export const NORMALIZER_FACTORIES: NormalizerFactories = {
   deepseek: () => new DeepSeekNormalizer(),
   workbuddy: () => new BuddyNormalizer('workbuddy'),
   codebuddy: () => new BuddyNormalizer('codebuddy'),
-  doubao: null,
+  doubao: () => new DoubaoNormalizer(),
 };
 
 const originOf = (event: RawEvent): Origin => event.origin ?? 'claude';

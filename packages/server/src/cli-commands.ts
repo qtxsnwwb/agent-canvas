@@ -32,6 +32,7 @@ import { CursorSource } from './sources/cursor/source.js';
 import { isExistingDir, sourceDirOf, sourceDirsOf } from './sources/dirs.js';
 import { CopilotFileSource } from './sources/copilot/source.js';
 import { DeepSeekFileSource } from './sources/deepseek/source.js';
+import { DoubaoFileSource } from './sources/doubao/source.js';
 import { zstdAvailable } from './sources/deepseek/zstd-frames.js';
 import { GeminiFileSource } from './sources/gemini/source.js';
 import { GrokFileSource } from './sources/grok/source.js';
@@ -144,7 +145,8 @@ export const PACKAGE_NAME = '@qtxsnwwb/agent-canvas';
  * directory, Gemini CLI's `tmp`, Copilot CLI's `session-state` and Grok Build's `sessions` when they name an existing directory (otherwise that
  * origin is skipped silently), and DeepSeek Harness's `sessions` likewise when this Node has zstd (`caps.zstd`, default
  * zstdAvailable(); without it the source is not created and diagnostics say why), and one source each for WorkBuddy
- * and CodeBuddy Code holding every root whose `projects` exists (none when no root does). `store` lets the
+ * and CodeBuddy Code holding every root whose `projects` exists (none when no root does), and one for Doubao Work
+ * holding every existing root. `store` lets the
  * Codex source place files from their stored raw events (files that are gone, restarts) without reading them.
  */
 export function fileSources(config: Config, store?: Store, caps: { zstd: boolean } = { zstd: zstdAvailable() }): FileSource[] {
@@ -169,6 +171,10 @@ export function fileSources(config: Config, store?: Store, caps: { zstd: boolean
     const roots = buddyRootsOf(origin === 'workbuddy' ? config.workbuddyDirs : [config.codebuddyDir]).filter((r) => isExistingDir(path.join(r.dir, 'projects')));
     if (roots.length > 0) sources.push(new BuddyFileSource(origin, roots, store ? storeLookup(store, config.projectsDir) : undefined));
   }
+  // Doubao Work: one source holding every "User Data"-level root that exists at start; none when no root does. Its
+  // profiles' `.sessions` directories are found below each root (a profile that appears later: by the full scan).
+  const doubaoRoots = sourceDirsOf(config, 'doubao').filter((d) => isExistingDir(d));
+  if (doubaoRoots.length > 0) sources.push(new DoubaoFileSource(doubaoRoots, store ? storeLookup(store, config.projectsDir) : undefined));
   return sources;
 }
 

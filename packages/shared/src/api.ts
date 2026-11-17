@@ -102,6 +102,8 @@ export interface FileSourceStatus {
   duplicateSessions?: number;
   /** doubao: threads whose time could only be taken from the file's modification time. */
   mtimeFallbacks?: number;
+  /** doubao: conversations not read because they have no main agent (`m_…` directory) or several. */
+  unknownSessions?: number;
 }
 
 /**

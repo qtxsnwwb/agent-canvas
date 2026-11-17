@@ -390,6 +390,44 @@ export function buddyTouches(toolName: string, input: unknown): RawTouch[] {
   return [];
 }
 
+// ---- Doubao Work ----
+
+/**
+ * File tools of Doubao Work by name (spec section 10 item 16): the format reference evidences the names `Read`, `Write`
+ * and `Edit` (besides `Bash`, `PowerShell`, `Wait`, `create_agent`, `present_files`, which name no file here) but none
+ * of their argument names, so the path arguments are a conservative guess, unverified.
+ */
+const DOUBAO_TOOLS: Record<string, FileAction> = {
+  Read: 'read',
+  Write: 'write',
+  Edit: 'edit',
+};
+/** Path arguments, tried in this order (unverified names). */
+const DOUBAO_PATH_KEYS = ['file_path', 'filePath', 'path', 'file', 'target_file', 'filename'];
+
+/**
+ * The file a Doubao Work tool call names (DOUBAO_TOOLS): the first path argument present (DOUBAO_PATH_KEYS order);
+ * `arguments` given as a JSON string is parsed first, and arguments that do not parse to an object name no file.
+ */
+export function doubaoTouches(toolName: string, input: unknown): RawTouch[] {
+  const action = Object.hasOwn(DOUBAO_TOOLS, toolName) ? DOUBAO_TOOLS[toolName] : undefined;
+  if (action === undefined) return [];
+  let parsed: unknown = input;
+  if (typeof input === 'string') {
+    try {
+      parsed = JSON.parse(input);
+    } catch {
+      return [];
+    }
+  }
+  if (!isObject(parsed)) return [];
+  for (const key of DOUBAO_PATH_KEYS) {
+    const path = stringField(parsed, key);
+    if (path !== null) return [{ path, action }];
+  }
+  return [];
+}
+
 // ---- Codex ----
 
 const BEGIN = '*** Begin Patch';
