@@ -36,6 +36,9 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm build
       - run: pnpm test
+        env:
+          # Wall-clock bounds measured on a developer machine, scaled for a shared runner (pipeline.timing.test.ts).
+          AGENT_CANVAS_TIMING_SCALE: '3'
       # The package as it would be published: assembled, then run from a temp directory (see scripts/check-release.mjs).
       - run: node scripts/pack.mjs
       - run: node scripts/check-release.mjs

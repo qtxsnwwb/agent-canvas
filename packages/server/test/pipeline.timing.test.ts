@@ -29,6 +29,14 @@ async function maxLoopGap(fn: () => Promise<void>): Promise<number> {
   return maxGap;
 }
 
+/**
+ * The loop-gap bounds below are wall-clock figures measured on a developer machine. A shared CI runner is several times
+ * slower (a file database commit alone took 300-500 ms on GitHub's Windows runner), so CI sets
+ * AGENT_CANVAS_TIMING_SCALE and the bounds grow by that factor there; unset, they are as written.
+ */
+const TIMING_SCALE = Math.max(1, Number(process.env.AGENT_CANVAS_TIMING_SCALE) || 1);
+const gapBound = (ms: number): number => ms * TIMING_SCALE;
+
 const bigSession = (n: number): RawEvent[] =>
   Array.from({ length: n }, (_, i) => assistantBlock(`a${i}`, i ? `a${i - 1}` : null, { type: 'text', text: 'x'.repeat(500) }));
 
@@ -63,7 +71,7 @@ describe('pipeline timing', () => {
   test('大文件导入期间事件循环不被长时间占用', async () => {
     await write('proj/s1.jsonl', bigSession(20_000));
     const gap = await maxLoopGap(() => pipeline.ingestFile(abs('proj/s1.jsonl')));
-    expect(gap).toBeLessThan(100);
+    expect(gap).toBeLessThan(gapBound(100));
     expect(store.getGraph('s1')!.nodes).toHaveLength(20_000);
   }, 60_000);
 
@@ -83,7 +91,7 @@ describe('pipeline timing', () => {
       await p2.idle();
       await file;
     });
-    expect(gap).toBeLessThan(100);
+    expect(gap).toBeLessThan(gapBound(100));
     const ids = store.getGraph('s1')!.nodes.map((n) => n.id);
     expect(ids).toContain('tool:tuH');
     expect(ids).toContain('late');
@@ -118,7 +126,7 @@ describe('pipeline timing', () => {
       );
       await p2.idle();
     });
-    expect(gap).toBeLessThan(100);
+    expect(gap).toBeLessThan(gapBound(100));
     expect(store.getGraph('s1')!.nodes.map((n) => n.id)).toContain('tool:tuH');
   }, 180_000);
 
@@ -141,7 +149,7 @@ describe('pipeline timing', () => {
       await importing;
       await pipeline.idle();
     });
-    expect(gap).toBeLessThan(250);
+    expect(gap).toBeLessThan(gapBound(250));
     expect(store.getGraph('s1')!.nodes).toHaveLength(20_000);
     expect(store.getGraph('s2')!.nodes.filter((n) => n.id.startsWith('tool:h'))).toHaveLength(20);
   }, 120_000);
