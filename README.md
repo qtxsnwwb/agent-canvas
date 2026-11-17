@@ -120,6 +120,25 @@ agent-canvas --version
 
 按 `Ctrl+C` 停止。同一个数据目录同时只能运行一个服务。想装 Codex 或 Cursor 的 hooks 的话，需要用这种方式安装（见下）。
 
+升级和卸载：
+
+```bash
+npm install -g @qtxsnwwb/agent-canvas@latest   # 升级；路径不变，hooks 不用重装
+npm uninstall -g @qtxsnwwb/agent-canvas        # 卸载；装过 hooks 的话先运行 agent-canvas hooks uninstall
+```
+
+卸载不会删除数据目录 `~/.agent-canvas`，不再需要时手动删掉。
+
+</details>
+
+<details>
+<summary><b>装不上或跑不起来时</b></summary>
+
+- **Windows PowerShell 提示“禁止运行脚本”**：这是 PowerShell 的执行策略不允许运行 `npm.ps1` / `npx.ps1` / `agent-canvas.ps1`。在命令后面加上 `.cmd` 即可，不用改系统设置：`npx.cmd @qtxsnwwb/agent-canvas`、`npm.cmd install -g @qtxsnwwb/agent-canvas`、`agent-canvas.cmd`。也可以改用“命令提示符”（cmd）。
+- **用了 npm 镜像，提示找不到包或版本**：镜像同步新版本可能有延迟，加上 `--registry=https://registry.npmjs.org/` 直接从官方源安装。
+- **安装时出现 `prebuild-install` 已不再维护的警告**：来自数据库依赖 better-sqlite3，不影响使用。
+- **Node 版本低于 22**：先升级 Node（`node --version` 查看）。
+
 </details>
 
 ### 🔌 可选：装上 hooks，状态更实时
