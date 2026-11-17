@@ -64,7 +64,7 @@ name = byteLength(base, "utf8") <= 255 ? base
 ```
 
 - Input is `realpathSync(cwd)`, falling back to `path.resolve(cwd)` [PKG JS "canonicalizeCwd"].
-- Only `/`, `\`, `:` are replaced. Dots, spaces, underscores and non-ASCII characters are kept; runs of `-` collapse; leading/trailing `-` are removed. Official example: `/Users/ericffan/my-project` → `Users-ericffan-my-project` [PKG compress-path.source.d.ts:54].
+- Only `/`, `\`, `:` are replaced. Dots, spaces, underscores and non-ASCII characters are kept; runs of `-` collapse; leading/trailing `-` are removed. Official example, with the account name in it replaced by a placeholder: `/Users/<user>/my-project` → `Users-<user>-my-project` [PKG compress-path.source.d.ts:54].
 - **Not Claude Code's rule.** Claude Code turns every non-alphanumeric character into `-` without collapsing and keeps the leading `-` (`/Users/a/my.proj` → `-Users-a-my-proj`); here the same path gives `Users-a-my.proj`. `D:\Projects\X` → `D-Projects-X` [INF applying the code; drive-letter case follows the cwd string — TS's fixture uses `c-Users-alice-repo`, TS codebuddy.rs:27].
 - Not reversible (a `-` in a folder name is indistinguishable). Every reader takes `cwd` from the records and uses the directory name only as a label [DSH lib/discovery/claude.mjs:358-371; AV workbuddy.go:61-69; TT 11567-11600].
 - Same rule for WorkBuddy [PKG compress-path.source.d.ts:7-13 names workbuddy-core/workbuddy-server as consumers; "legacy" read-side fallback by prefix exists in workbuddy-core, line 46-48]. Third-party readers call it `<project-hash>` without checking [DSH workbuddy.mjs:3].
