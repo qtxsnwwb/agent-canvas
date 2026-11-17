@@ -477,6 +477,14 @@ test('升级：已有数据库打开时从 raw_event 回填一次 hook_stat，�
   }
 });
 
+/**
+ * How long the two tests below give the background checkpointer. It needs a second or two on a developer machine; a
+ * shared CI runner's disk took longer than 2.5 s for the same WAL, so the wait grows by AGENT_CANVAS_TIMING_SCALE there
+ * (see vitest.config.ts). Unset, it is as written.
+ */
+const WAL_TIMING_SCALE = Math.max(1, Number(process.env.AGENT_CANVAS_TIMING_SCALE) || 1);
+const CHECKPOINT_WAIT_MS = 2500 * WAL_TIMING_SCALE;
+
 test('文件数据库的 WAL 由后台线程检查点，主连接不做自动检查点', async () => {
   const fsp = await import('node:fs/promises');
   const os = await import('node:os');
@@ -494,14 +502,14 @@ test('文件数据库的 WAL 由后台线程检查点，主连接不做自动检
     // No automatic checkpoint on the main connection: the WAL holds all ~12 MB (SQLite's default would cap it near 4 MB).
     expect(walAfterFirst).toBeGreaterThan(8_000_000);
     // The worker checkpoints within a second or two; the WAL is then reused from its start instead of growing.
-    await new Promise((r) => setTimeout(r, 2500));
+    await new Promise((r) => setTimeout(r, CHECKPOINT_WAIT_MS));
     write(1);
     expect((await fsp.stat(`${file}-wal`)).size).toBeLessThan(walAfterFirst * 1.5);
   } finally {
     s.close();
     await fsp.rm(dir, { recursive: true, force: true, maxRetries: 10 });
   }
-}, 30_000);
+}, 30_000 * WAL_TIMING_SCALE);
 
 test('WAL 在检查点后被截断到上限，不保留导入时的峰值大小', async () => {
   const fsp = await import('node:fs/promises');
@@ -514,14 +522,21 @@ test('WAL 在检查点后被截断到上限，不保留导入时的峰值大小'
     const big = 'z'.repeat(4000);
     for (let i = 0; i < 3000; i++) s.applyChanges([{ type: 'node_added', node: mkNode(`n${i}`, 's1'), detail: { output: big } }]);
     expect((await fsp.stat(`${file}-wal`)).size).toBeGreaterThan(8_000_000);
-    await new Promise((r) => setTimeout(r, 2500)); // the worker checkpoints
-    s.applyChanges([{ type: 'node_added', node: mkNode('last', 's1'), detail: {} }]);
-    expect((await fsp.stat(`${file}-wal`)).size).toBeLessThanOrEqual(1_100_000);
+    // The worker checkpoints; the write after it truncates the WAL to the limit. Asked again until it has (or the wait
+    // is used up): how long the checkpoint takes depends on the disk.
+    const deadline = Date.now() + CHECKPOINT_WAIT_MS * 4;
+    let size = Infinity;
+    for (let i = 0; size > 1_100_000 && Date.now() < deadline; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      s.applyChanges([{ type: 'node_added', node: mkNode(`last${i}`, 's1'), detail: {} }]);
+      size = (await fsp.stat(`${file}-wal`)).size;
+    }
+    expect(size).toBeLessThanOrEqual(1_100_000);
   } finally {
     s.close();
     await fsp.rm(dir, { recursive: true, force: true, maxRetries: 10 });
   }
-}, 30_000);
+}, 30_000 * WAL_TIMING_SCALE);
 
 test('epoch 在建库时生成，重开和 clearDerived 后不变，新库不同', async () => {
   const fsp = await import('node:fs/promises');
