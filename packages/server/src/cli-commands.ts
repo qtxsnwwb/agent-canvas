@@ -27,6 +27,7 @@ import { NORMALIZER_VERSION_KEY, Pipeline, REBUILD_FLAG } from './pipeline.js';
 import { ClaudeFileSource } from './sources/claude.js';
 import { storeLookup } from './sources/codex/lookup.js';
 import { CodexFileSource } from './sources/codex/source.js';
+import { BuddyFileSource, buddyRootsOf } from './sources/buddy/source.js';
 import { CursorSource } from './sources/cursor/source.js';
 import { isExistingDir, sourceDirOf, sourceDirsOf } from './sources/dirs.js';
 import { CopilotFileSource } from './sources/copilot/source.js';
@@ -142,7 +143,8 @@ export const PACKAGE_NAME = '@qtxsnwwb/agent-canvas';
  * The session-file directories read for this configuration: Claude Code's projects directory, and Codex's sessions
  * directory, Gemini CLI's `tmp`, Copilot CLI's `session-state` and Grok Build's `sessions` when they name an existing directory (otherwise that
  * origin is skipped silently), and DeepSeek Harness's `sessions` likewise when this Node has zstd (`caps.zstd`, default
- * zstdAvailable(); without it the source is not created and diagnostics say why). `store` lets the
+ * zstdAvailable(); without it the source is not created and diagnostics say why), and one source each for WorkBuddy
+ * and CodeBuddy Code holding every root whose `projects` exists (none when no root does). `store` lets the
  * Codex source place files from their stored raw events (files that are gone, restarts) without reading them.
  */
 export function fileSources(config: Config, store?: Store, caps: { zstd: boolean } = { zstd: zstdAvailable() }): FileSource[] {
@@ -161,6 +163,12 @@ export function fileSources(config: Config, store?: Store, caps: { zstd: boolean
   // DeepSeek Harness: only when <deepseekDir>/sessions exists at start and node:zlib has zstd (Node >= 22.15).
   const dshSessions = sourceDirsOf(config, 'deepseek')[0] ?? null;
   if (caps.zstd && isExistingDir(dshSessions)) sources.push(new DeepSeekFileSource(config.deepseekDir!, store ? storeLookup(store, config.projectsDir) : undefined));
+  // WorkBuddy (both default roots, or the one override) and CodeBuddy Code: one source per origin holding each root
+  // whose <dir>/projects exists at start; none when no root exists. Labels are given over every configured root.
+  for (const origin of ['workbuddy', 'codebuddy'] as const) {
+    const roots = buddyRootsOf(origin === 'workbuddy' ? config.workbuddyDirs : [config.codebuddyDir]).filter((r) => isExistingDir(path.join(r.dir, 'projects')));
+    if (roots.length > 0) sources.push(new BuddyFileSource(origin, roots, store ? storeLookup(store, config.projectsDir) : undefined));
+  }
   return sources;
 }
 
