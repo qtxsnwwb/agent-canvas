@@ -11,7 +11,7 @@ import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkInBrowser, exportSynthetic } from './export-smoke.mjs';
+import { checkInBrowser, exportSynthetic, isolatedServerEnv } from './export-smoke.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const release = path.join(root, 'release');
@@ -43,13 +43,8 @@ try {
   db.pragma('wal_checkpoint(TRUNCATE)');
   db.close();
 
-  const env = {
-    ...process.env,
-    AGENT_CANVAS_DATA_DIR: dataDir,
-    AGENT_CANVAS_PROJECTS_DIR: path.join(tmp, 'projects'),
-    AGENT_CANVAS_CODEX_DIR: '',
-    AGENT_CANVAS_CURSOR_DB: '',
-  };
+  // Every tool directory off, a temp home (export-smoke.mjs isolatedServerEnv); the data directory is `dataDir`.
+  const env = isolatedServerEnv(tmp, { AGENT_CANVAS_DATA_DIR: dataDir });
   let out;
   try {
     out = execFileSync(process.execPath, [path.join(pkg, 'dist/cli.js'), 'compact', '--force'], { env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });

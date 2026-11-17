@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { expect, test } from 'vitest';
 import { loadConfig } from '../src/config.js';
 
@@ -49,6 +49,48 @@ test('the scanner finds a call that leaves a tool dir to its default', () => {
   expect(loadConfigCalls("loadConfig({}, { projectsDir: 'x', geminiDir: null })")).toEqual(["{}, { projectsDir: 'x', geminiDir: null }"]);
   const call = loadConfigCalls("loadConfig({}, { projectsDir: 'x', geminiDir: null })")[0]!;
   expect(TOOL_KEYS.every((k) => call.includes(k))).toBe(false);
+});
+
+const repoRoot = path.resolve(testDir, '../../..');
+
+test('the release scripts start the CLI with every tool directory off and a temp home (final review I-1)', async () => {
+  const smoke = (await import(pathToFileURL(path.join(repoRoot, 'scripts/export-smoke.mjs')).href)) as {
+    isolatedServerEnv: (tmp: string, extra?: Record<string, string>) => NodeJS.ProcessEnv;
+  };
+  expect(typeof smoke.isolatedServerEnv).toBe('function');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ac-guard-scripts-'));
+  try {
+    // As if the tools' own variables and a Windows %LOCALAPPDATA% named real directories.
+    const before = { ...process.env };
+    Object.assign(process.env, {
+      DSH_HOME: path.join(tmp, 'x-dsh'), WORKBUDDY_CONFIG_DIR: path.join(tmp, 'x-wb'), CODEBUDDY_CONFIG_DIR: path.join(tmp, 'x-cb'),
+      GEMINI_CLI_HOME: path.join(tmp, 'x-gem'), GROK_HOME: path.join(tmp, 'x-grok'), COPILOT_HOME: path.join(tmp, 'x-cop'),
+      LOCALAPPDATA: path.join(tmp, 'x-local'),
+    });
+    // ...and the caller's environment did not turn any tool off (the Vitest env does).
+    for (const k of Object.keys(process.env)) if (/^AGENT_CANVAS_.*_(?:DIR|DB)$/.test(k)) delete process.env[k];
+    let env: NodeJS.ProcessEnv;
+    try {
+      env = smoke.isolatedServerEnv(tmp);
+    } finally {
+      for (const k of Object.keys(process.env)) if (!(k in before)) delete process.env[k];
+      Object.assign(process.env, before);
+    }
+    const c = loadConfig(env);
+    expect(c.codexSessionsDir).toBeNull();
+    expect(c.cursorDbPath).toBeNull();
+    for (const k of TOOL_KEYS) expect(Array.isArray(c[k]) ? c[k] : c[k] === null ? [] : [c[k]], k).toEqual([]);
+    for (const p of [env.HOME, env.USERPROFILE, c.dataDir, c.projectsDir]) expect(path.resolve(p!).startsWith(path.resolve(tmp))).toBe(true);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+  // Every script that starts the CLI builds its environment with that helper.
+  const scripts = path.join(repoRoot, 'scripts');
+  for (const f of fs.readdirSync(scripts).filter((n) => n.endsWith('.mjs'))) {
+    const src = fs.readFileSync(path.join(scripts, f), 'utf8');
+    const startsCli = /(?:spawn|execFileSync|execFile)\(process\.execPath/.test(src);
+    if (startsCli) expect(src.includes('isolatedServerEnv('), f).toBe(true);
+  }
 });
 
 test('configs built as tests build them resolve no tool dir under the real home', () => {
