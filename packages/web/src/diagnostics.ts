@@ -160,8 +160,8 @@ export function cursorHooks(d: Diagnostics): OriginHooks {
 }
 
 /**
- * Unknown records of a file-only origin (Gemini CLI, Grok Build, Copilot CLI): their normalizers report every type as
- * `<origin>:<type>`.
+ * Unknown records of a file-only origin (Gemini CLI, Grok Build, Copilot CLI, DeepSeek, WorkBuddy, CodeBuddy, 豆包):
+ * their normalizers report every type as `<origin>:<type>`.
  */
 export function originUnknownRecords(d: Diagnostics, origin: FileOnlyOrigin): Diagnostics['unknownRecords'] {
   return d.unknownRecords.filter((r) => r.recordType.startsWith(`${origin}:`));
@@ -196,8 +196,28 @@ export function fileSourceDirLine(origin: FileOnlyOrigin, s: FileSourceStatus): 
   if (s.dir === null) return `${label} 会话目录：未启用`;
   const state = !s.present
     ? '不存在。目录出现后要重启服务才会读取'
+    : s.unavailable !== undefined ? `存在，但无法读取：${s.unavailable}`
     : s.reading === false ? '存在，但服务启动时还没有这个目录，尚未读取。重启服务后读取' : '存在';
   return `${label} 会话目录：${s.dir}（${state}）`;
+}
+
+/**
+ * The lines a file-only origin's block shows below its directory line, from the optional fields of FileSourceStatus
+ * (plan more-sources-cn; a field the server does not send gives no line, so Gemini CLI / Grok / Copilot CLI show none):
+ * each folder read when there are several (WorkBuddy, Doubao Work), why the source cannot run (DeepSeek on a Node
+ * without zstd), session directories with a format version not read (DeepSeek), sessions found again under another
+ * root or profile (WorkBuddy, CodeBuddy, Doubao Work), threads timed by file modification time and conversations not
+ * read for want of a single main agent (Doubao Work). `warn`: worth a look (shown as a warning).
+ */
+export function fileSourceDetailLines(s: FileSourceStatus): { text: string; warn: boolean }[] {
+  const out: { text: string; warn: boolean }[] = [];
+  s.dirs?.forEach((d, i) => out.push({ text: `读取的目录 ${i + 1}：${d.dir}（${d.present ? '存在' : '不存在'}）`, warn: false }));
+  if (s.unavailable !== undefined) out.push({ text: `无法读取：${s.unavailable}`, warn: true });
+  if (s.legacyFiles !== undefined) out.push({ text: `有其他格式版本文件（不读）的会话目录：${s.legacyFiles} 个。只读第 4 版的 session.v4.jsonl.zstd`, warn: s.legacyFiles > 0 });
+  if (s.duplicateSessions !== undefined) out.push({ text: `在另一个目录或配置里重复出现、只读了一份的会话：${s.duplicateSessions} 个`, warn: false });
+  if (s.mtimeFallbacks !== undefined) out.push({ text: `时间只能取自文件修改时间的线程：${s.mtimeFallbacks} 个`, warn: s.mtimeFallbacks > 0 });
+  if (s.unknownSessions !== undefined) out.push({ text: `没有主代理或有多个主代理、没有读取的对话：${s.unknownSessions} 个`, warn: s.unknownSessions > 0 });
+  return out;
 }
 
 /**

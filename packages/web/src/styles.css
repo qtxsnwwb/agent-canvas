@@ -41,20 +41,20 @@
   --copilot-soft: #ffe0ee;
   --copilot-edge: #f5b8d2;
   --copilot-ink: #a3195a;
-  /* DeepSeek, WorkBuddy, CodeBuddy and 豆包: a neutral placeholder (the page's own lavender grey) until their colours
-     are chosen (plan more-sources-cn, Task 8). */
-  --deepseek-soft: #f5ecff;
-  --deepseek-edge: #e2d9f1;
-  --deepseek-ink: #3f3a5a;
-  --workbuddy-soft: #f5ecff;
-  --workbuddy-edge: #e2d9f1;
-  --workbuddy-ink: #3f3a5a;
-  --codebuddy-soft: #f5ecff;
-  --codebuddy-edge: #e2d9f1;
-  --codebuddy-ink: #3f3a5a;
-  --doubao-soft: #f5ecff;
-  --doubao-edge: #e2d9f1;
-  --doubao-ink: #3f3a5a;
+  /* DeepSeek an indigo, WorkBuddy a yellow-green, CodeBuddy a violet, 豆包 a warm brown (badge families of their series
+     colours; text on its own background >= 4.5:1). */
+  --deepseek-soft: #e8deff;
+  --deepseek-edge: #c9b5f8;
+  --deepseek-ink: #3b1fa8;
+  --workbuddy-soft: #eef5cc;
+  --workbuddy-edge: #d0e096;
+  --workbuddy-ink: #4f6500;
+  --codebuddy-soft: #f1e6ff;
+  --codebuddy-edge: #d9bdfb;
+  --codebuddy-ink: #6f2cc0;
+  --doubao-soft: #f2e8d4;
+  --doubao-edge: #dcc49a;
+  --doubao-ink: #764000;
   /* Origins as chart series (stats page): the badge families, stepped until the dataviz palette validator passes on
      the white card surface (lightness band, chroma, colour-blind separation over all pairs, 3:1 contrast). Marks only:
      text next to them stays in the ink colours. */
@@ -66,11 +66,14 @@
   --series-gemini: #00a0c8;
   --series-grok: #801895;
   --series-copilot: #e62d83;
-  /* Placeholders (Task 8 of plan more-sources-cn): the page's soft ink. */
-  --series-deepseek: #7b7694;
-  --series-workbuddy: #7b7694;
-  --series-codebuddy: #7b7694;
-  --series-doubao: #7b7694;
+  /* The ten in ORIGINS order (the stacking order) pass the same validator: adjacent pairs CVD worst 14.1, normal-vision
+     worst 22.3; over all pairs normal-vision worst 15.2 and CVD worst 6.2 (WorkBuddy and Claude Code under deutan),
+     inside the 6-8 band the validator allows with secondary encoding: the legend, the tooltip and the gaps between
+     stacked segments. All >= 3:1 on white. */
+  --series-deepseek: #4b1ed2;
+  --series-workbuddy: #00a52d;
+  --series-codebuddy: #c369ff;
+  --series-doubao: #963c00;
   --chart-grid: #f0ebf6;
   --chart-axis: #d6cde6;
   --font: "Microsoft YaHei UI", "PingFang SC", "Hiragino Sans GB", system-ui, -apple-system, "Segoe UI", sans-serif;

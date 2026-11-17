@@ -141,3 +141,11 @@ test('projectTitle: the directory name; a Cursor project without a directory is 
   expect(projectTitle({ id: 'cursor-unknown', cwd: null })).toBe('Cursor（未知目录）');
   expect(projectTitle({ id: 'D--work-app', cwd: null })).toBe('D--work-app');
 });
+
+test('projectTitle: 豆包工作的固定项目（没有工作目录）显示为“豆包工作”', async () => {
+  const { projectTitle } = await import('../src/home');
+  expect(projectTitle({ id: 'doubao-work', cwd: null })).toBe('豆包工作');
+  // Only that id without a directory: a project with a directory keeps its directory name.
+  expect(projectTitle({ id: 'doubao-work', cwd: '/home/dev/doubao-work' })).toBe('doubao-work');
+  expect(projectTitle({ id: 'doubao-work-2', cwd: null })).toBe('doubao-work-2');
+});

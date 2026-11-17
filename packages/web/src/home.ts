@@ -8,7 +8,6 @@ export const ORIGIN_LOOK: Record<Origin, { label: string; className: string }> =
   gemini: { label: 'Gemini CLI', className: 'origin-gemini' },
   grok: { label: 'Grok', className: 'origin-grok' },
   copilot: { label: 'Copilot CLI', className: 'origin-copilot' },
-  // Placeholder colours (styles.css) until their own are chosen (plan more-sources-cn, Task 8).
   deepseek: { label: 'DeepSeek', className: 'origin-deepseek' },
   workbuddy: { label: 'WorkBuddy', className: 'origin-workbuddy' },
   codebuddy: { label: 'CodeBuddy', className: 'origin-codebuddy' },
@@ -113,10 +112,14 @@ export function projectName(pathOrId: string): string {
 
 /** Display name of a Cursor project whose working directory could not be found (id `cursor-<workspaceId>`, spec 5.4). */
 export const CURSOR_UNKNOWN_DIR_NAME = 'Cursor（未知目录）';
+/** The one fixed project of every Doubao Work session (no working directory in its files; spec 5.3) and its name. */
+export const DOUBAO_PROJECT_ID = 'doubao-work';
+export const DOUBAO_PROJECT_NAME = '豆包工作';
 
 /** A project's display name: the last segment of its directory; a Cursor project without one is "Cursor（未知目录）". */
 export function projectTitle(project: Pick<Project, 'id' | 'cwd'>): string {
   if (project.cwd === null && project.id.startsWith('cursor-')) return CURSOR_UNKNOWN_DIR_NAME;
+  if (project.cwd === null && project.id === DOUBAO_PROJECT_ID) return DOUBAO_PROJECT_NAME;
   return projectName(project.cwd ?? project.id);
 }
 

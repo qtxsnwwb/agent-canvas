@@ -9,13 +9,13 @@ const TILE = 'M7 2h10a5 5 0 0 1 5 5v10a5 5 0 0 1-5 5H7a5 5 0 0 1-5-5V7a5 5 0 0 1
 /**
  * Marks of the origins without a mark we use: our own plain glyphs, a block letter cut out of a rounded square (drawn
  * with the even-odd rule), so they identify the tool without imitating any vendor logo. G for Gemini CLI, K for Grok,
- * C for Copilot CLI.
+ * C for Copilot CLI, D for DeepSeek, W for WorkBuddy, B for CodeBuddy (C is Copilot CLI's), O for 豆包 (Dou, a round
+ * bean).
  */
 const LETTER_MARKS = {
   gemini: `${TILE}M17 6v2H9v8h6v-3h-3v-2h5v7H7V6z`,
   grok: `${TILE}M7 6h2.5v5L14 6h3l-5.2 6L17 18h-3l-4.5-5v5H7z`,
   copilot: `${TILE}M17 6v2.5H9.5v7H17V18H7V6z`,
-  // Placeholders until their own marks are drawn (plan more-sources-cn, Task 8): D, W, B and a ring.
   deepseek: `${TILE}M7 6h6a4 4 0 0 1 4 4v4a4 4 0 0 1-4 4H7zM9.5 8.5v7H13a1.5 1.5 0 0 0 1.5-1.5v-4A1.5 1.5 0 0 0 13 8.5z`,
   workbuddy: `${TILE}M5.5 6h2.4l1.3 7.6L10.9 6h2.2l1.7 7.6L16.1 6h2.4L16 18h-2.3L12 10.9 10.3 18H8z`,
   codebuddy: `${TILE}M7 6h6a3 3 0 0 1 2.2 5A3.2 3.2 0 0 1 13.6 18H7zM9.5 8.3V11h3a1.35 1.35 0 0 0 0-2.7zM9.5 13.2v2.5H13a1.25 1.25 0 0 0 0-2.5z`,
@@ -24,9 +24,9 @@ const LETTER_MARKS = {
 
 /**
  * The mark shown for each origin, drawn in the badge's text colour. Claude Code and Cursor: the product's own mark from
- * simple-icons; Codex has no mark of its own and uses OpenAI's (see openaiMark.ts); Gemini CLI, Grok and Copilot CLI:
- * our letter marks above. The product marks are trademarks of their owners and are used only to identify which tool a
- * session comes from.
+ * simple-icons; Codex has no mark of its own and uses OpenAI's (see openaiMark.ts); Gemini CLI, Grok, Copilot CLI,
+ * DeepSeek, WorkBuddy, CodeBuddy and 豆包: our letter marks above. The product marks are trademarks of their owners
+ * and are used only to identify which tool a session comes from.
  */
 export const ORIGIN_MARKS: Readonly<Record<Origin, { viewBox: string; path: string; fillRule?: 'evenodd' }>> = {
   claude: { viewBox: '0 0 24 24', path: siClaude.path },

@@ -1,7 +1,7 @@
 import { expect, test } from 'vitest';
 import type { Diagnostics } from '@agent-canvas/shared';
 import {
-  cursorUnknownRecords, fileSourceBlocks, fileSourceDirLine, foreignHooksLine, hooksByOrigin, originUnknownRecords,
+  cursorUnknownRecords, fileSourceBlocks, fileSourceDetailLines, fileSourceDirLine, foreignHooksLine, hooksByOrigin, originUnknownRecords,
 } from '../src/diagnostics';
 import { createPageMasker, maskDiagnostics } from '../src/masking';
 
@@ -107,4 +107,61 @@ test('遮蔽：多个根的目录也被遮蔽；旧服务端没有的来源不�
   expect(out.sources?.workbuddy.dirs?.map((r) => r.present)).toEqual([true, false]);
   const old = { ...base, sources: { gemini: off, grok: off, copilot: off } } as unknown as Diagnostics;
   expect(Object.keys(maskDiagnostics(old, m).sources ?? {})).toEqual(['gemini', 'grok', 'copilot']);
+});
+
+test('四个新来源的附加行：每个读取的目录、运行环境不支持、旧格式、重复会话、按修改时间、没有主代理；没有的字段不出行', () => {
+  // The three older sources send none of the new fields: no extra line, as before.
+  expect(fileSourceDetailLines({ dir: '/h/.gemini/tmp', present: true, reading: true, sessionCount: 1 })).toEqual([]);
+  // WorkBuddy with its two default roots, one present; two sessions found in both.
+  const wb = { dir: '/h/.workbuddy/projects', present: true, reading: true, sessionCount: 3, duplicateSessions: 2, dirs: [{ dir: '/h/.workbuddy/projects', present: true }, { dir: '/h/.workbuddy-ai/projects', present: false }] };
+  expect(fileSourceDetailLines(wb)).toEqual([
+    { text: '读取的目录 1：/h/.workbuddy/projects（存在）', warn: false },
+    { text: '读取的目录 2：/h/.workbuddy-ai/projects（不存在）', warn: false },
+    { text: '在另一个目录或配置里重复出现、只读了一份的会话：2 个', warn: false },
+  ]);
+  // DeepSeek: directories with only an unsupported format version; zero is shown too (the source reports it).
+  expect(fileSourceDetailLines({ dir: '/h/.dsh/sessions', present: true, reading: true, sessionCount: 1, legacyFiles: 3 })).toEqual([
+    { text: '有其他格式版本文件（不读）的会话目录：3 个。只读第 4 版的 session.v4.jsonl.zstd', warn: true },
+  ]);
+  expect(fileSourceDetailLines({ dir: '/h/.dsh/sessions', present: true, reading: true, sessionCount: 1, legacyFiles: 0 })).toEqual([
+    { text: '有其他格式版本文件（不读）的会话目录：0 个。只读第 4 版的 session.v4.jsonl.zstd', warn: false },
+  ]);
+  // DeepSeek on a Node without zstd: the reason, as a warning.
+  expect(fileSourceDetailLines({ dir: '/h/.dsh/sessions', present: true, reading: false, sessionCount: 0, unavailable: '需要 Node 22.15 或更高' })).toEqual([
+    { text: '无法读取：需要 Node 22.15 或更高', warn: true },
+  ]);
+  // Doubao: every count it reports.
+  const db = { dir: '/h/AppData/Local/DoubaoWork/User Data', present: true, reading: true, sessionCount: 4, duplicateSessions: 0, unknownSessions: 1, mtimeFallbacks: 2 };
+  expect(fileSourceDetailLines(db)).toEqual([
+    { text: '在另一个目录或配置里重复出现、只读了一份的会话：0 个', warn: false },
+    { text: '时间只能取自文件修改时间的线程：2 个', warn: true },
+    { text: '没有主代理或有多个主代理、没有读取的对话：1 个', warn: true },
+  ]);
+});
+
+test('DeepSeek 在不支持解压的 Node 上：目录行说明原因，不说“启动后才出现”', () => {
+  const s = { dir: '/h/.dsh/sessions', present: true, reading: false, sessionCount: 0, unavailable: '需要 Node 22.15 或更高' };
+  expect(fileSourceDirLine('deepseek', s)).toBe('DeepSeek 会话目录：/h/.dsh/sessions（存在，但无法读取：需要 Node 22.15 或更高）');
+  const d: Diagnostics = { ...base, sources: { gemini: off, grok: off, copilot: off, ...newOff, deepseek: s } };
+  expect(fileSourceBlocks(d).map((b) => b.origin)).toEqual(['deepseek']);
+});
+
+test('遮蔽：四个新来源的目录、每个根和不可用原因都被遮蔽，计数不变', () => {
+  const m = createPageMasker({ customTerms: ['dev42'], numbered: true });
+  const d: Diagnostics = {
+    ...base,
+    sources: {
+      gemini: off, grok: off, copilot: off,
+      deepseek: { dir: '/home/dev42/.dsh/sessions', present: true, reading: false, sessionCount: 0, legacyFiles: 1, unavailable: 'dev42 needs Node 22.15' },
+      workbuddy: { dir: '/home/dev42/.workbuddy/projects', present: true, reading: true, sessionCount: 1, duplicateSessions: 1, dirs: [{ dir: '/home/dev42/.workbuddy/projects', present: true }, { dir: '/home/dev42/.workbuddy-ai/projects', present: true }] },
+      codebuddy: { dir: '/home/dev42/.codebuddy/projects', present: true, reading: true, sessionCount: 2 },
+      doubao: { dir: '/home/dev42/Library/Application Support/DoubaoWork', present: true, reading: true, sessionCount: 3, mtimeFallbacks: 1, unknownSessions: 2, duplicateSessions: 0 },
+    },
+  };
+  const out = maskDiagnostics(d, m);
+  expect(JSON.stringify(out.sources)).not.toContain('dev42');
+  expect(out.sources?.deepseek).toMatchObject({ legacyFiles: 1, present: true, reading: false });
+  expect(out.sources?.workbuddy).toMatchObject({ duplicateSessions: 1, sessionCount: 1 });
+  expect(out.sources?.codebuddy.sessionCount).toBe(2);
+  expect(out.sources?.doubao).toMatchObject({ mtimeFallbacks: 1, unknownSessions: 2, duplicateSessions: 0 });
 });
