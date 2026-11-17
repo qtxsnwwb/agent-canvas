@@ -512,4 +512,34 @@ describe('one directory, one project', () => {
     // The timestamp folder stays the session's own working directory.
     expect(store.getSession('b0000000-0000-4000-8000-000000000a02')?.cwd).toBe(path.join(cwd, '2026-10-27-13-46-52'));
   });
+
+  test('one directory spelled in three letter cases by DeepSeek, WorkBuddy and CodeBuddy in the same first scan, no Claude Code project: one project, the first spelling met (final review I-3)', async () => {
+    const d = dirs();
+    const ids = { cb: 'c0000000-0000-4000-8000-000000000b01', dsh: 'd5000000-0000-4000-8000-000000000b01', wb: 'b0000000-0000-4000-8000-000000000b01' };
+    // Files are classified in path order: .codebuddy, then .dsh, then .workbuddy.
+    await write(path.join(d.codebuddyDir, 'projects', 'x', `${ids.cb}.jsonl`), body(buddyLoop(ids.cb, 'D:\\WORK\\APP')));
+    if (dsh.HAS_ZSTD) await writeDsh(d, ids.dsh, 'D:\\Work\\App', dshLoop());
+    await write(path.join(d.workbuddyDirs[0]!, 'projects', 'y', `${ids.wb}.jsonl`), body(buddyLoop(ids.wb, 'd:\\work\\app')));
+    const store = openStore(':memory:');
+    stores.push(store);
+    const config = cnConfig(d);
+    await fs.mkdir(config.projectsDir, { recursive: true });
+    const first = new Pipeline(store, config, { sources: fileSources(config, store) });
+    pipelines.push(first);
+    await first.scanAll();
+    await first.idle();
+    expect(first.ingestFailures()).toEqual([]);
+    expect(store.listProjects(NOW).map((p) => [p.id, p.sessionCount])).toEqual([['D--WORK-APP', dsh.HAS_ZSTD ? 3 : 2]]);
+    // A later process: what is stored wins, for a new session of either tool in yet another spelling.
+    await first.close();
+    await first.idle();
+    const later = { cb: 'c0000000-0000-4000-8000-000000000b02', wb: 'b0000000-0000-4000-8000-000000000b02' };
+    await write(path.join(d.workbuddyDirs[0]!, 'projects', 'y', `${later.wb}.jsonl`), body(buddyLoop(later.wb, 'd:\\Work\\app')));
+    await write(path.join(d.codebuddyDir, 'projects', 'x', `${later.cb}.jsonl`), body(buddyLoop(later.cb, 'd:\\wOrk\\APP')));
+    const second = new Pipeline(store, config, { sources: fileSources(config, store) });
+    pipelines.push(second);
+    await second.scanAll();
+    await second.idle();
+    expect(store.listProjects(NOW).map((p) => [p.id, p.sessionCount])).toEqual([['D--WORK-APP', dsh.HAS_ZSTD ? 5 : 4]]);
+  });
 });

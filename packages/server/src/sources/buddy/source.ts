@@ -130,15 +130,20 @@ export class BuddyFileSource implements FileSource {
   private readonly unplaced = new Map<string, Unplaced>();
   private readonly resolver: ProjectIdResolver;
 
+  /**
+   * `resolver`: the project-id resolver shared with the other sources of plan more-sources-cn (fileSources), so one
+   * directory spelled in another letter case by two of them in the same first scan is one project; default: its own.
+   */
   constructor(
     readonly origin: 'workbuddy' | 'codebuddy',
     private readonly roots: readonly { label: string; dir: string }[],
     private readonly lookup: BuddyLookup = NO_LOOKUP,
+    resolver?: ProjectIdResolver,
   ) {
     this.prefix = KEY_PREFIXES[origin];
     for (const r of roots) if (!this.projectsByLabel.has(r.label)) this.projectsByLabel.set(r.label, path.join(r.dir, PROJECTS));
     this.rootDir = roots.length > 0 ? path.join(roots[0]!.dir, PROJECTS) : '';
-    this.resolver = new ProjectIdResolver(() => this.lookup.knownProjectIds());
+    this.resolver = resolver ?? new ProjectIdResolver(() => this.lookup.knownProjectIds());
   }
 
   /** Each root's `projects` directory that exists now, at watchDepth (a missing one is not watched). */

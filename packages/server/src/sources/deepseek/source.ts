@@ -113,12 +113,17 @@ export class DeepSeekFileSource implements FileSource {
    */
   private readonly unplaced = new Map<string, { size: number; mtimeMs: number; missing: string | null; listEpoch: number }>();
 
+  /**
+   * `resolver`: the project-id resolver shared with the other sources of plan more-sources-cn (fileSources), so one
+   * directory spelled in another letter case by two of them in the same first scan is one project; default: its own.
+   */
   constructor(
     dshHome: string,
     private readonly lookup: DeepSeekLookup = NO_LOOKUP,
+    resolver?: ProjectIdResolver,
   ) {
     this.rootDir = path.join(dshHome, 'sessions');
-    this.resolver = new ProjectIdResolver(() => this.lookup.knownProjectIds());
+    this.resolver = resolver ?? new ProjectIdResolver(() => this.lookup.knownProjectIds());
   }
 
   /** The v4 file of every session directory (sorted); counts the directories with generations not read. */
