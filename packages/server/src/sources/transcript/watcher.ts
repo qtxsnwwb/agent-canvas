@@ -2,10 +2,16 @@ import path from 'node:path';
 import chokidar from 'chokidar';
 import type { Config } from '../../config.js';
 import type { Pipeline } from '../../pipeline.js';
+import type { FileSource } from '../source.js';
+
+/** The directories a source's watcher subscribes to: its watchRoots when it has them, else rootDir at watchDepth. */
+export function watchRootsOf(source: FileSource): readonly { dir: string; depth: number }[] {
+  return source.watchRoots ?? [{ dir: source.rootDir, depth: source.watchDepth }];
+}
 
 /**
  * Watches the root directory of each of the pipeline's file sources with chokidar (one watcher per source, at the
- * source's depth) and, independently, rescans hot files every `rescanMs` and lists every source's files every
+ * source's depth; one per entry of a source's watchRoots instead when it has them) and, independently, rescans hot files every `rescanMs` and lists every source's files every
  * `fullScanMs`, so that missed file-system events (common on Windows and network drives) are still picked up.
  */
 export function startWatcher(pipeline: Pipeline, config: Config): { ready: Promise<void>; close(): Promise<void> } {
@@ -15,7 +21,9 @@ export function startWatcher(pipeline: Pipeline, config: Config): { ready: Promi
     if (!closed) void pipeline.ingestFile(file).catch(swallow);
   };
   const watchers = pipeline.fileSources().flatMap((source) => [
-    chokidar.watch(source.rootDir, { ignoreInitial: true, depth: source.watchDepth }).on('add', onFile).on('change', onFile).on('error', swallow),
+    ...watchRootsOf(source).map(({ dir, depth }) =>
+      chokidar.watch(dir, { ignoreInitial: true, depth }).on('add', onFile).on('change', onFile).on('error', swallow),
+    ),
     // Index files may live outside rootDir (Codex's session_index.jsonl): watch each one's directory, that file only.
     ...(source.indexFiles?.() ?? []).map((file) => {
       const target = path.resolve(file);

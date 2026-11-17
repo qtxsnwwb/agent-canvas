@@ -27,6 +27,21 @@ export interface IndexEntry {
   payload: string;
 }
 
+/**
+ * What FileSource.readLines read from a file: complete lines from `fromOffset` on (or from the start when `truncated`),
+ * and where to resume.
+ */
+export interface SourceRead {
+  /** Offset strictly increasing within one generation of the file (normalisers take a smaller one for a restart). */
+  lines: { offset: number; text: string }[];
+  /** Byte position in the file to resume from. */
+  newOffset: number;
+  /** The file was rewritten: lines restart from the beginning (the generation of a lineIdentity 'offset' file is bumped). */
+  truncated: boolean;
+  /** Opaque reader state persisted with the offset (same transaction); undefined = leave the stored one as is, null = remove it. */
+  state?: string | null;
+}
+
 /** A value, or a promise of it: synchronous sources answer directly, so the pipeline never waits on them. */
 export type MaybePromise<T> = T | Promise<T>;
 
@@ -68,6 +83,20 @@ export interface FileSource {
   readonly rootDir: string;
   /** chokidar depth below rootDir that reaches every file of the source. */
   readonly watchDepth: number;
+  /**
+   * Optional. The directories to watch, each at its own chokidar depth, when the source's files live under several
+   * roots; preferred over rootDir/watchDepth when present (an empty list watches nothing). Read once when the watcher
+   * starts: roots that appear later are found by the full scan's listing.
+   */
+  readonly watchRoots?: readonly { dir: string; depth: number }[];
+  /**
+   * Optional. Reads the session/agent file's lines itself (a container that is not plain JSONL, or a guard against
+   * rewrites, see readGuardedLines) instead of the pipeline's readNewLines. Called with the stored offset (0 the first
+   * time) and the state it returned last time (null the first time, or after it returned null); the state returned is
+   * stored in the same transaction as `newOffset`. Called on every change event, and by the scans when the file's size
+   * or modification time differs from what the last read saw (a source without readLines is compared by size only).
+   */
+  readLines?(absPath: string, fromOffset: number, maxBytes: number, state: string | null): Promise<SourceRead>;
   /**
    * Optional. How a line of the source's session files is told apart from the others when stored (the raw-event dedupe):
    * `content` (default) by its text alone — a byte-identical line anywhere in the file is the same line; `offset` by its

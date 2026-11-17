@@ -30,38 +30,52 @@ export async function readNewLines(
     const { size } = await handle.stat();
     const truncated = size < fromOffset;
     const start = truncated ? 0 : fromOffset;
-    const lines: ReadResult['lines'] = [];
-    let newOffset = start;
-    let pending: Buffer = Buffer.alloc(0);
-    let filePos = start;
-    let done = false;
-
-    while (!done && filePos < size) {
-      const chunk = Buffer.alloc(Math.min(CHUNK_SIZE, size - filePos));
-      const { bytesRead } = await handle.read(chunk, 0, chunk.length, filePos);
-      if (bytesRead === 0) break;
-      filePos += bytesRead;
-      pending = pending.length === 0 ? chunk.subarray(0, bytesRead) : Buffer.concat([pending, chunk.subarray(0, bytesRead)]);
-
-      let from = 0;
-      for (;;) {
-        const nl = pending.indexOf(NEWLINE, from);
-        if (nl === -1) break;
-        const lineEnd = newOffset + (nl + 1 - from);
-        // Stop at a line boundary once the budget would be exceeded (the first line is always read in full).
-        if (lines.length > 0 && lineEnd - start > maxBytes) {
-          done = true;
-          break;
-        }
-        const text = pending.toString('utf8', from, nl).replace(/\r$/, '');
-        if (text !== '') lines.push({ offset: newOffset, text });
-        newOffset = lineEnd;
-        from = nl + 1;
-      }
-      pending = pending.subarray(from);
-    }
+    const { lines, newOffset } = await readLinesAt(handle, size, start, maxBytes);
     return { lines, newOffset, truncated };
   } finally {
     await handle.close();
   }
+}
+
+/**
+ * The line splitting of readNewLines on an open file of `size` bytes, from `start` (a line boundary): complete lines
+ * up to the byte budget (the first line always in full), a trailing partial line left unread.
+ */
+export async function readLinesAt(
+  handle: fs.FileHandle,
+  size: number,
+  start: number,
+  maxBytes: number,
+): Promise<Pick<ReadResult, 'lines' | 'newOffset'>> {
+  const lines: ReadResult['lines'] = [];
+  let newOffset = start;
+  let pending: Buffer = Buffer.alloc(0);
+  let filePos = start;
+  let done = false;
+
+  while (!done && filePos < size) {
+    const chunk = Buffer.alloc(Math.min(CHUNK_SIZE, size - filePos));
+    const { bytesRead } = await handle.read(chunk, 0, chunk.length, filePos);
+    if (bytesRead === 0) break;
+    filePos += bytesRead;
+    pending = pending.length === 0 ? chunk.subarray(0, bytesRead) : Buffer.concat([pending, chunk.subarray(0, bytesRead)]);
+
+    let from = 0;
+    for (;;) {
+      const nl = pending.indexOf(NEWLINE, from);
+      if (nl === -1) break;
+      const lineEnd = newOffset + (nl + 1 - from);
+      // Stop at a line boundary once the budget would be exceeded (the first line is always read in full).
+      if (lines.length > 0 && lineEnd - start > maxBytes) {
+        done = true;
+        break;
+      }
+      const text = pending.toString('utf8', from, nl).replace(/\r$/, '');
+      if (text !== '') lines.push({ offset: newOffset, text });
+      newOffset = lineEnd;
+      from = nl + 1;
+    }
+    pending = pending.subarray(from);
+  }
+  return { lines, newOffset };
 }

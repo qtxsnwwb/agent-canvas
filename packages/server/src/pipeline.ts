@@ -12,7 +12,7 @@ import { encodeProjectId } from './sources/codex/source.js';
 import { fileUriToPath, normaliseCwd } from './sources/cursor/project.js';
 import type { PollBatch, PollSink, PollSource, PollStatus } from './sources/poll.js';
 import { ProjectIdResolver } from './sources/project-ids.js';
-import { isPromise, KEY_PREFIXES, originOfKey, type FileClass, type FileSource, type MaybePromise } from './sources/source.js';
+import { isPromise, KEY_PREFIXES, originOfKey, type FileClass, type FileSource, type MaybePromise, type SourceRead } from './sources/source.js';
 import { readNewLines } from './sources/transcript/reader.js';
 import type { RawEvent, Store, StoredRawEvent } from './store/store.js';
 
@@ -27,6 +27,11 @@ const LIVE_STATUSES: ReadonlySet<string> = new Set(['running', 'awaiting_permiss
 const UNKNOWN_PROJECT = 'unknown';
 /** Meta key prefix of a file's line generation (FileSource.lineIdentity 'offset'): `line-generation:<store key>`. */
 export const LINE_GENERATION_PREFIX = 'line-generation:';
+/**
+ * Meta key prefix of a file's reader state (FileSource.readLines): `reader-state:<store key>`, written in the same
+ * transaction as the file's offset; like the line generation, never removed by a rebuild (offsets are kept too).
+ */
+export const READER_STATE_PREFIX = 'reader-state:';
 const REBUILD_PROGRESS_EVERY = 100;
 
 /**
@@ -157,6 +162,11 @@ export class Pipeline {
   private readonly filesBySession = new Map<string, Set<string>>();
   /** Known file sizes (mirror of file_offset.size) and last hook time, loaded from the store once. */
   private sizes: Map<string, number> | null = null;
+  /**
+   * Store key -> modification time (stat mtimeMs taken before the read) of the last read of a file of a source with
+   * readLines; unchanged() requires it to match too. In memory only: after a restart each such file is read once more.
+   */
+  private readonly readMtimes = new Map<string, number>();
   private lastHook: string | null = null;
   /** Hook events already inserted into raw_event (so a failed task does not insert them twice). */
   private readonly persistedHooks = new WeakSet<object>();
@@ -823,15 +833,30 @@ export class Pipeline {
     return this.sizes!;
   }
 
-  /** True when the file's size equals the stored size (nothing new can be complete), or when it is gone. */
+  /**
+   * True when the file's size equals the stored size (nothing new can be complete), or when it is gone. For a source
+   * that reads its own lines (FileSource.readLines, which may detect a rewrite that kept the size), the modification
+   * time must also equal the one its last read saw in this process (none after a restart: read once more).
+   */
   private async unchanged(absPath: string): Promise<boolean> {
-    const stored = this.sizeMap().get(this.rel(absPath));
+    const hit = this.locate(absPath);
+    const key = hit?.key ?? absPath;
+    const stored = this.sizeMap().get(key);
     if (stored === undefined) return false;
     try {
-      return (await fsp.stat(absPath)).size === stored;
+      const st = await fsp.stat(absPath);
+      if (hit?.source.readLines === undefined) return st.size === stored;
+      return st.size === stored && this.readMtimes.get(key) === st.mtimeMs;
     } catch {
       return true; // gone: the full scan's listing marks the session
     }
+  }
+
+  /** Stores (in the caller's transaction, if any) a reader state returned by FileSource.readLines; null removes it. */
+  private putReaderState(file: string, state: string | null): void {
+    const key = `${READER_STATE_PREFIX}${file}`;
+    if (state === null) this.store.deleteMeta(key);
+    else this.store.setMeta(key, state);
   }
 
   private registerFile(sessionId: string, absPath: string): void {
@@ -990,6 +1015,15 @@ export class Pipeline {
     this.sizeMap().set(file, size);
   }
 
+  /** recordOffset plus a FileSource.readLines state, in one transaction. */
+  private recordOffsetAndState(file: string, offset: number, size: number, state: string | null): void {
+    this.store.transaction(() => {
+      this.store.setOffset(file, offset, size);
+      this.putReaderState(file, state);
+    });
+    this.sizeMap().set(file, size);
+  }
+
   /** Registers p in `active`; the cleanup runs before any consumer awaiting p resumes. */
   private track<T>(p: Promise<T>, onDone?: (self: Promise<void>) => void): Promise<T> {
     const done: Promise<void> = p.then(
@@ -1070,15 +1104,21 @@ export class Pipeline {
     this.registerFile(cls.sessionId, absPath);
     for (;;) {
       let size: number;
+      let mtimeMs: number;
       try {
-        size = (await fsp.stat(absPath)).size;
+        ({ size, mtimeMs } = await fsp.stat(absPath));
       } catch {
         return; // file is gone: keep the stored offset, scanAll marks the session
       }
       if (this.writeHold !== null) await this.writable();
       if (cls.kind === 'session') this.clearDeleted(cls.sessionId);
       const from = this.store.getOffset(file);
-      const res = await readNewLines(absPath, from, READ_BUDGET_BYTES);
+      // A source that reads its own lines (FileSource.readLines) gets its stored state and returns the next one, written
+      // with the offset below; every other source takes readNewLines exactly as before.
+      const prevState = source.readLines === undefined ? null : this.store.getMeta(`${READER_STATE_PREFIX}${file}`);
+      const res: SourceRead =
+        source.readLines === undefined ? await readNewLines(absPath, from, READ_BUDGET_BYTES) : await source.readLines(absPath, from, READ_BUDGET_BYTES, prevState);
+      const newState = res.state !== undefined && res.state !== prevState ? res.state : undefined;
       if (this.writeHold !== null) await this.writable();
       // Lines identified by their place (FileSource.lineIdentity 'offset'): the file's generation, bumped when it was found
       // shorter than what was read (rewritten: every line of the new content is a new line).
@@ -1117,17 +1157,24 @@ export class Pipeline {
             if (out.unknownRecordType !== undefined) this.store.bumpUnknown(out.unknownRecordType, text);
           }
           this.store.setOffset(file, res.newOffset, seen);
+          if (newState !== undefined) this.putReaderState(file, newState);
           return changes;
         };
         await this.enqueue(cls.sessionId, () => this.atomically(cls.sessionId, slice, () => this.sizeMap().set(file, seen)));
       } else if (progressed) {
         // Reads that only consumed blank lines still persist their progress.
-        this.recordOffset(file, res.newOffset, seen);
+        if (newState === undefined) this.recordOffset(file, res.newOffset, seen);
+        else this.recordOffsetAndState(file, res.newOffset, seen, newState);
       } else if (this.sizeMap().get(file) !== size) {
         // No complete line yet (trailing partial line, or growth during the read): record the size so the rescan does
         // not reopen the file every tick; the next size change brings it back.
-        this.recordOffset(file, from, size);
+        if (newState === undefined) this.recordOffset(file, from, size);
+        else this.recordOffsetAndState(file, from, size, newState);
+      } else if (newState !== undefined) {
+        this.putReaderState(file, newState);
       }
+      // Sources with readLines: the scans skip the file again only while its size and modification time stay as seen here.
+      if (source.readLines !== undefined) this.readMtimes.set(file, mtimeMs);
       if (res.newOffset === from) return;
       await yieldToEventLoop();
     }
