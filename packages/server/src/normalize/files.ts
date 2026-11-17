@@ -340,6 +340,56 @@ export function deepseekTouches(toolName: string, input: unknown): RawTouch[] {
   return [];
 }
 
+// ---- WorkBuddy / CodeBuddy Code ----
+
+/**
+ * File tools of the Buddy engine by name (spec section 10 item 16: no source evidences the tool names beyond `Bash` and
+ * the Agent tool, so this is a conservative guess, unverified): the Claude-Code-style names the CodeBuddy Code CLI
+ * documents, plus the snake_case names of the CodeBuddy IDE family.
+ */
+const BUDDY_TOOLS: Record<string, FileAction> = {
+  Read: 'read',
+  read_file: 'read',
+  Write: 'write',
+  write_file: 'write',
+  write_to_file: 'write',
+  create_file: 'write',
+  Edit: 'edit',
+  MultiEdit: 'edit',
+  NotebookEdit: 'edit',
+  edit_file: 'edit',
+  replace_in_file: 'edit',
+  search_replace: 'edit',
+  str_replace: 'edit',
+  Delete: 'delete',
+  delete_file: 'delete',
+};
+/** Path arguments, tried in this order (unverified names). */
+const BUDDY_PATH_KEYS = ['file_path', 'filePath', 'path', 'notebook_path', 'target_file', 'file', 'filename'];
+
+/**
+ * The file a Buddy tool call names (BUDDY_TOOLS): the first path argument present (BUDDY_PATH_KEYS order); `input`
+ * given as a JSON string (the call's raw `arguments`) is parsed first, and arguments that do not parse name no file.
+ */
+export function buddyTouches(toolName: string, input: unknown): RawTouch[] {
+  const action = Object.hasOwn(BUDDY_TOOLS, toolName) ? BUDDY_TOOLS[toolName] : undefined;
+  if (action === undefined) return [];
+  let parsed: unknown = input;
+  if (typeof input === 'string') {
+    try {
+      parsed = JSON.parse(input);
+    } catch {
+      return [];
+    }
+  }
+  if (!isObject(parsed)) return [];
+  for (const key of BUDDY_PATH_KEYS) {
+    const path = stringField(parsed, key);
+    if (path !== null) return [{ path, action }];
+  }
+  return [];
+}
+
 // ---- Codex ----
 
 const BEGIN = '*** Begin Patch';

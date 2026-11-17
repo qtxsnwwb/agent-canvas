@@ -1,5 +1,6 @@
 import { ORIGINS, type Origin } from '@agent-canvas/shared';
 import type { RawEvent } from '../store/store.js';
+import { BuddyNormalizer } from './buddy.js';
 import { CodexNormalizer } from './codex.js';
 import { CopilotNormalizer } from './copilot.js';
 import { CursorNormalizer } from './cursor.js';
@@ -22,8 +23,8 @@ export const NORMALIZER_FACTORIES: NormalizerFactories = {
   copilot: () => new CopilotNormalizer(),
   // Filled by the tasks that add their normalizers (plan more-sources-cn).
   deepseek: () => new DeepSeekNormalizer(),
-  workbuddy: null,
-  codebuddy: null,
+  workbuddy: () => new BuddyNormalizer('workbuddy'),
+  codebuddy: () => new BuddyNormalizer('codebuddy'),
   doubao: null,
 };
 
