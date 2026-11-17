@@ -55,9 +55,11 @@
   --doubao-soft: #f2e8d4;
   --doubao-edge: #dcc49a;
   --doubao-ink: #764000;
-  /* Origins as chart series (stats page): the badge families, stepped until the dataviz palette validator passes on
-     the white card surface (lightness band, chroma, colour-blind separation over all pairs, 3:1 contrast). Marks only:
-     text next to them stays in the ink colours. */
+  /* Origins as chart series (stats page): the badge families, stepped against the dataviz palette validator on the
+     white card surface (lightness band, chroma, colour-blind and normal-vision separation, 3:1 contrast). With all ten,
+     neighbouring pairs (the stacking order) pass; over all pairs colour-blind separation is at warning level (below),
+     acceptable because the charts also have a legend, tooltips and gaps. Marks only: text next to them stays in the
+     ink colours. */
   --series-claude: #e3743f;
   --series-codex: #5f6bdc;
   --series-cursor: #136b3d;

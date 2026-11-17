@@ -141,7 +141,10 @@ test('四个新来源的附加行：每个读取的目录、运行环境不支�
 
 test('DeepSeek 在不支持解压的 Node 上：目录行说明原因，不说“启动后才出现”', () => {
   const s = { dir: '/h/.dsh/sessions', present: true, reading: false, sessionCount: 0, unavailable: '需要 Node 22.15 或更高' };
-  expect(fileSourceDirLine('deepseek', s)).toBe('DeepSeek 会话目录：/h/.dsh/sessions（存在，但无法读取：需要 Node 22.15 或更高）');
+  // The reason is said once, in the warning line below it (Task 8 review M4).
+  expect(fileSourceDirLine('deepseek', s)).toBe('DeepSeek 会话目录：/h/.dsh/sessions（存在，但无法读取，原因见下）');
+  const all = [fileSourceDirLine('deepseek', s), ...fileSourceDetailLines(s).map((l) => l.text)].join(' | ');
+  expect(all.split('需要 Node 22.15 或更高')).toHaveLength(2);
   const d: Diagnostics = { ...base, sources: { gemini: off, grok: off, copilot: off, ...newOff, deepseek: s } };
   expect(fileSourceBlocks(d).map((b) => b.origin)).toEqual(['deepseek']);
 });

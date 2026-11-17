@@ -184,7 +184,8 @@ describe('the example session (spec 3.3 table)', () => {
       cwd: 'D:\\Projects\\Demo\\packages\\api',
       title: 'Fix the parser test',
       gitBranch: null,
-      status: 'running',
+      // Its last turn ended (aborted): idle (Task 8 review I1).
+      status: 'idle',
       sourceDeleted: false,
       startedAt: isoOf(T0),
       lastActivityAt: isoOf(timeOf(37)),
@@ -304,13 +305,86 @@ describe('records', () => {
     for (let cut = 1; cut < events.length; cut++) expect(comparable(paged(events, 2, cut))).toEqual(want);
   });
 
-  test('a message that makes no node in a thread with no node yet: its usage has nowhere to go and nothing fails', () => {
+  test('a message that makes no node in a thread with no node yet: its usage waits for the next reply of the thread and is added to it (Task 8 review M1)', () => {
+    const build = (l: DshLog): void => {
+      l.turnStart(1); // 0
+      l.assistant(1, 1, [{ type: 'image', attachment: { attachmentId: 'sha256:00' } }], { id: 'm0', usage: { inputTokens: 2, outputTokens: 1 } }); // 1
+      l.assistant(1, 2, [{ type: 'image', attachment: { attachmentId: 'sha256:01' } }], { id: 'm1', usage: { inputTokens: 3, outputTokens: 1, cacheReadTokens: 4 } }); // 2
+      // m2: thinking (not its holder) then its tool call (the holder): the waiting usage goes on the holder, not the thinking.
+      l.assistant(1, 3, [reasoningBlock('hmm'), callBlock('c1', 'bash', { command: 'ls' })], { id: 'm2', usage: { inputTokens: 10, outputTokens: 5 } }); // 3
+      l.assistant(1, 4, [textBlock('done')], { id: 'm3', usage: { inputTokens: 1, outputTokens: 1 } }); // 4
+    };
+    const l = new DshLog();
+    build(l);
+    const events = dshEvents(header, l.lines);
+    const f = go(events);
+    expect(f.unknown).toEqual([]);
+    expect(nodeOf(f, at(3, 0))).toMatchObject({ kind: 'thinking', usage: null });
+    expect(nodeOf(f, call(1, 3, 'c1')).usage).toEqual({ inputTokens: 15, cachedInputTokens: 4, outputTokens: 7 });
+    expect(nodeOf(f, at(4, 0)).usage).toEqual({ inputTokens: 1, cachedInputTokens: 0, outputTokens: 1 });
+    expect(usageTotal(Object.values(f.graph.nodes))).toEqual({ inputTokens: 16, cachedInputTokens: 4, outputTokens: 8 });
+    const want = comparable(f);
+    for (const page of [1, 2, 4]) expect(comparable(paged(events, page))).toEqual(want);
+    for (let cut = 1; cut < events.length; cut++) expect(comparable(paged(events, 1, cut))).toEqual(want);
+  });
+
+  test('a waiting usage also joins the usage carried onto a later node; a thread that never shows a reply loses it (and nothing fails)', () => {
+    const g = run((l) => {
+      l.turnStart(1);
+      l.assistant(1, 1, [{ type: 'image', attachment: { attachmentId: 'sha256:00' } }], { id: 'm0', usage: { inputTokens: 2, outputTokens: 1 } });
+      l.user('go'); // 2: a node without a message id
+      l.assistant(1, 2, [{ type: 'image', attachment: { attachmentId: 'sha256:01' } }], { id: 'm1', usage: { inputTokens: 3, outputTokens: 1 } });
+    });
+    expect(nodeOf(g, at(2)).usage).toEqual({ inputTokens: 5, cachedInputTokens: 0, outputTokens: 2 });
     const f = run((l) => {
       l.turnStart(1);
       l.assistant(1, 1, [{ type: 'image', attachment: { attachmentId: 'sha256:00' } }], { id: 'm0', usage: { inputTokens: 2, outputTokens: 1 } });
     });
     expect(f.unknown).toEqual([]);
     expect(Object.keys(f.graph.nodes)).toEqual([]);
+  });
+
+  test('session status (Task 8 review I1): idle with no turn yet; running while a turn of the main thread is open; idle once it ended, whatever the reason', () => {
+    const statuses = (build: (l: DshLog) => void): string[] => {
+      const l = new DshLog();
+      build(l);
+      const out: string[] = [];
+      const n = new DeepSeekNormalizer();
+      for (const ev of dshEvents(header, l.lines)) for (const c of n.apply(ev, PROJECT).changes) if (c.type === 'session_upserted') out.push(c.session.status);
+      return out.filter((s, i) => i === 0 || out[i - 1] !== s);
+    };
+    expect(run(() => {}).session?.status).toBe('idle');
+    expect(statuses((l) => {
+      l.turnStart(1);
+      l.user('go');
+      l.assistant(1, 1, [textBlock('ok')]);
+      l.turnEnd(1);
+      l.user('again'); // a prompt before its turn/start opens the turn
+      l.turnStart(2);
+      l.turnEnd(2, { kind: 'error', error: { message: 'boom' } });
+      l.turnStart(3);
+      l.turnEnd(3, { kind: 'aborted', reason: { kind: 'user' } });
+    })).toEqual(['idle', 'running', 'idle', 'running', 'idle', 'running', 'idle']);
+  });
+
+  test('session status: an open turn of a subagent thread does not make the session running; a rewritten main file keeps no stale status', () => {
+    const m = new DshLog();
+    m.turnStart(1);
+    m.user('go');
+    m.turnEnd(1);
+    const c = new DshLog(0, T0 + 40_000);
+    c.turnStart(1);
+    c.user('child task');
+    const f = go([...dshEvents(header, m.lines), ...dshEvents(child.header, c.lines, { agentId: CHILD })]);
+    expect(f.session?.status).toBe('idle');
+    // The main file is read again from its start and now ends inside a turn: running.
+    const again = new DshLog();
+    again.turnStart(1);
+    again.user('go');
+    const n = new DeepSeekNormalizer();
+    const changes: Change[] = [];
+    for (const ev of [...dshEvents(header, m.lines), ...dshEvents(header, again.lines)]) changes.push(...n.apply(ev, PROJECT).changes);
+    expect(fold(changes).session?.status).toBe('running');
   });
 
   test('consecutive text blocks are one node; empty blocks, images and tool additions make none; reasoning after text is a node of its own', () => {

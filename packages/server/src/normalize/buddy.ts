@@ -284,6 +284,8 @@ interface Line extends BranchLine {
   result: ResultFacts | null;
   /** The response a usage record, or a node with a messageId / usage, belongs to. */
   resp: Resp | null;
+  /** A turn-end record (`turn-metrics` of a turn, `acp-terminal-state`; Task 8 review I1). */
+  end: boolean;
 }
 
 interface Thread {
@@ -337,6 +339,10 @@ interface Thread {
   firstModel: { model: string; seq: number } | null;
   /** The dispatch this agent thread hangs off. */
   linkedTo: Call | null;
+  /** Lines that decide the session status (main thread): accepted prompts and turn-end records, in order. */
+  statusLines: number[];
+  /** `acp-terminal-state` lines with an error that made a node (their shown flag follows the walk, as an entry's). */
+  errorLines: number[];
 }
 
 interface SessionState {
@@ -528,6 +534,8 @@ export class BuddyNormalizer implements AgentNormalizer {
       firstPrompt: null,
       firstModel: null,
       linkedTo: null,
+      statusLines: [],
+      errorLines: [],
     };
   }
 
@@ -587,6 +595,7 @@ export class BuddyNormalizer implements AgentNormalizer {
       call: null,
       result: null,
       resp: null,
+      end: false,
     };
     const i = t.lines.length;
     line.prevEntry = t.flags.lastEntry;
@@ -597,7 +606,7 @@ export class BuddyNormalizer implements AgentNormalizer {
     const anomaly = this.branch(state, t, line, i, compactBefore, changes);
     let unknown: string | undefined;
     if (!known || UNHANDLED_ITEMS.has(type)) unknown = unknownTypeName(this.origin, type);
-    else if (custom) this.fact(state, t, line, i, rec, pd, changes);
+    else if (custom) this.fact(state, t, line, i, rec, pd, ts, changes);
     else if (line.active) unknown = this.item(state, t, line, i, rec, pd, ts, changes);
     if (ts !== null) t.lastTs = ts;
     this.flushConcrete(state, changes);
@@ -736,6 +745,8 @@ export class BuddyNormalizer implements AgentNormalizer {
         for (let j = 0; j < n; j++) if (isEntry(lines[j]!)) set(j, mark[j] === 1);
       }
     }
+    // Error end records with a node follow the entries they hang off, as nodes of entries do.
+    for (const j of t.errorLines) set(j, !t.walked || this.factActive(t, lines[j]!));
     // model-usage facts follow the entries they hang off.
     const usage: Resp[] = [];
     t.waiting.clear();
@@ -935,8 +946,29 @@ export class BuddyNormalizer implements AgentNormalizer {
 
   // ---- facts (custom records) ----
 
-  private fact(state: SessionState, t: Thread, line: Line, i: number, rec: Obj, pd: Obj, changes: Change[]): void {
+  private fact(state: SessionState, t: Thread, line: Line, i: number, rec: Obj, pd: Obj, ts: string | null, changes: Change[]): void {
     switch (rec.type) {
+      // Turn-end records (format reference 5; optional, host-dependent; Task 8 review I1): they end the current turn for
+      // the session status. A `turn-metrics` of a background task is not the end of a user turn.
+      case 'turn-metrics': {
+        if (rec.source !== undefined && rec.source !== 'turn') return;
+        line.end = true;
+        t.statusLines.push(i);
+        return;
+      }
+      case 'acp-terminal-state': {
+        line.end = true;
+        t.statusLines.push(i);
+        // `error` (format reference 3: `error?: {code, message, …}`) says the turn failed: a "Turn failed" system node
+        // (interrupt, as DeepSeek's and Codex's) in the running turn. Made only when the record is shown on arrival.
+        if (!isObject(rec.error) || !line.active) return;
+        const summary = brief(nonEmpty(rec.error.message) ?? nonEmpty(rec.error.code) ?? '');
+        const nodeId = buddyNodeId(state.session.id, t.agentId, `@${t.lastOffset}`);
+        line.turn = t.cur;
+        this.addNode(state, t, line, { ...blankNode(nodeId, 'system', 'Turn failed', summary), systemSubtype: 'interrupt' }, ts, { text: summary }, changes);
+        t.errorLines.push(i);
+        return;
+      }
       case 'custom-title': {
         const v = nonEmpty(rec.customTitle);
         if (v !== null) t.customTitle = brief(v.trim());
@@ -1098,6 +1130,7 @@ export class BuddyNormalizer implements AgentNormalizer {
     const c = idOf(pd.conversationRequestId);
     line.turn = kind === 'prompt' ? this.promptTurn(t, c) : (t.cur ?? this.newTurn(t, c));
     this.addNode(state, t, line, blankNode(nodeId, 'prompt', 'Prompt', brief(text)), ts, { text }, changes);
+    t.statusLines.push(t.lines.length - 1);
     if (t.firstPrompt === null) {
       const title = promptTitle(head(text, PREFIX_MAX));
       if (title !== null) t.firstPrompt = own(title);
@@ -1525,10 +1558,23 @@ export class BuddyNormalizer implements AgentNormalizer {
 
   // ---- session ----
 
+  /** The main thread's latest shown status line: a turn-end record (idle) or an accepted prompt (running); none: running. */
+  private statusOf(state: SessionState, t: Thread): Session['status'] {
+    for (let k = t.statusLines.length - 1; k >= 0; k--) {
+      const l = t.lines[t.statusLines[k]!]!;
+      if (l.end) {
+        if (!t.walked || this.factActive(t, l)) return 'idle';
+      } else if (l.active && l.node !== null && state.nodes.has(l.node)) return 'running';
+    }
+    return 'running';
+  }
+
   /**
    * The session as a function of what was read: title = the main file's latest non-empty custom-title, else its latest
    * ai-title, else its latest topic, else its first prompt; cwd = the main file's latest `cwd`; started / last activity
-   * = the earliest / latest line time over all threads; status running (spec 4.5 turns a quiet session idle).
+   * = the earliest / latest line time over all threads; status (Task 8 review I1): idle when the main thread's latest
+   * shown status line is a turn-end record, running when it is an accepted prompt or there is none (no turn-end record
+   * is ever written by some hosts: running, as before).
    */
   private commitSession(state: SessionState, changes: Change[]): void {
     const main = state.threads.get(MAIN);
@@ -1546,7 +1592,7 @@ export class BuddyNormalizer implements AgentNormalizer {
       cwd: main?.cwd ?? null,
       title: main?.customTitle ?? main?.aiTitle ?? main?.topic ?? main?.firstPrompt ?? null,
       gitBranch: null,
-      status: 'running',
+      status: main === undefined ? 'running' : this.statusOf(state, main),
       startedAt,
       lastActivityAt,
     };

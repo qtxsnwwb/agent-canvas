@@ -196,7 +196,7 @@ export function fileSourceDirLine(origin: FileOnlyOrigin, s: FileSourceStatus): 
   if (s.dir === null) return `${label} 会话目录：未启用`;
   const state = !s.present
     ? '不存在。目录出现后要重启服务才会读取'
-    : s.unavailable !== undefined ? `存在，但无法读取：${s.unavailable}`
+    : s.unavailable !== undefined ? '存在，但无法读取，原因见下' // the reason: fileSourceDetailLines' warning line
     : s.reading === false ? '存在，但服务启动时还没有这个目录，尚未读取。重启服务后读取' : '存在';
   return `${label} 会话目录：${s.dir}（${state}）`;
 }

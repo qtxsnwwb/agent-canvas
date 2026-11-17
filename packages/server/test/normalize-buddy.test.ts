@@ -881,6 +881,181 @@ describe('determinism against the branch walk (randomised)', () => {
   }
 });
 
+describe('session status from the turn-end records (Task 8 review I1)', () => {
+  const metrics = (source?: string) => (env: Parameters<typeof record>[1]) => record('turn-metrics', env, { durationMs: 4200, tokenDelta: 3000, ...(source !== undefined ? { source } : {}) });
+  const terminal = (error?: { code: string; message: string }) => (env: Parameters<typeof record>[1]) =>
+    record('acp-terminal-state', env, { requestId: 'req-x', rootRequestId: 'req-x', stopReason: error === undefined ? 'end_turn' : 'error', ...(error !== undefined ? { error } : {}) });
+  /** The session status after each line (consecutive repeats collapsed). */
+  const statuses = (lines: string[]): string[] => {
+    const n = new BuddyNormalizer('codebuddy');
+    const out: string[] = [];
+    for (const ev of buddyEvents(lines)) for (const c of n.apply(ev, PROJECT).changes) if (c.type === 'session_upserted') out.push(c.session.status);
+    return out.filter((x, i) => i === 0 || out[i - 1] !== x);
+  };
+
+  test('no turn-end record ever: running, as before', () => {
+    expect(statuses(exampleMain().lines.filter((l) => !l.includes('"turn-metrics"')))).toEqual(['running']);
+  });
+
+  test('idle when the turn-end record of the current turn arrives, running again at the next accepted prompt; a background-task turn-metrics and a hidden user message change nothing', () => {
+    const c = new Chain();
+    c.prompt('one');
+    c.reply('a1', 'r1');
+    c.fact(metrics());
+    c.fact(metrics('background-task'));
+    c.user([inputText('<system-reminder data-role="x">\nctx\n</system-reminder>')], { isMeta: true });
+    c.prompt('two');
+    c.reply('a2', 'r2');
+    c.fact(terminal());
+    expect(statuses(c.lines)).toEqual(['running', 'idle', 'running', 'idle']);
+  });
+
+  test('an acp-terminal-state with an error: a "Turn failed" system node (interrupt) in the turn, and idle', () => {
+    const c = new Chain();
+    c.prompt('one');
+    c.reply('a1', 'r1');
+    c.fact(terminal({ code: 'E_API', message: 'upstream 500' }));
+    const ev = buddyEvents(c.lines);
+    const f = go(ev);
+    expect(f.unknown).toEqual([]);
+    expect(nodeOf(f, nodeAt(ev, 2))).toMatchObject({ kind: 'system', title: 'Turn failed', systemSubtype: 'interrupt', summary: 'upstream 500', parentId: nodeAt(ev, 1), turnId: nodeAt(ev, 0) });
+    expect(f.details.get(nodeAt(ev, 2))).toEqual({ text: 'upstream 500' });
+    expect(f.session?.status).toBe('idle');
+    // A normal end makes no node.
+    const ok = new Chain();
+    ok.prompt('one');
+    ok.reply('a1', 'r1');
+    ok.fact(terminal());
+    expect(Object.keys(go(buddyEvents(ok.lines)).graph.nodes)).toHaveLength(2);
+  });
+
+  test('records on an abandoned branch do not count: after a rewind the status follows the current branch, and the abandoned error node goes', () => {
+    const c = new Chain();
+    c.prompt('one'); // 0
+    c.reply('a1', 'r1'); // 1
+    c.fact(metrics()); // 2
+    const p2 = c.peekId();
+    c.prompt('two'); // 3
+    c.reply('a2', 'r2'); // 4
+    c.fact(terminal({ code: 'E', message: 'boom' })); // 5
+    const cut = c.lines.length;
+    c.rewind(p2); // 6: back to the prompt "two", its reply and end record abandoned
+    const ev = buddyEvents(c.lines);
+    const before = go(ev.slice(0, cut));
+    expect(before.session?.status).toBe('idle');
+    expect(nodeOf(before, nodeAt(ev, 5)).title).toBe('Turn failed');
+    const f = go(ev);
+    expect(f.session?.status).toBe('running');
+    expect(Object.keys(f.graph.nodes)).toEqual([0, 1, 3].map((i) => nodeAt(ev, i)));
+    // Rewind further, to the reply "a1": its end record is on the branch again.
+    const back = buddyEvents([...c.lines, resendForkNotice({ parentId: JSON.parse(c.lines[1]!).id as string, timestamp: c.now(), sessionId: SID, cwd: CWD })]);
+    expect(go(back).session?.status).toBe('idle');
+    for (const evs of [ev, back]) {
+      const want = comparable(go(evs));
+      for (const page of [1, 2, 3]) expect(comparable(paged(evs, page))).toEqual(want);
+      for (let k = 1; k < evs.length; k++) expect(comparable(paged(evs, 2, k))).toEqual(want);
+    }
+  });
+
+  test('the error node of an abandoned branch comes back when the branch does', () => {
+    const c = new Chain();
+    c.prompt('one'); // 0
+    const a1 = c.peekId();
+    c.reply('a1', 'r1'); // 1
+    c.prompt('two'); // 2
+    const a2 = c.peekId();
+    c.reply('a2', 'r2'); // 3
+    c.fact(terminal({ code: 'E', message: 'boom' })); // 4
+    c.rewind(a1); // 5
+    c.rewind(a2); // 6: back onto the abandoned branch (tip = a2)
+    const ev = buddyEvents(c.lines);
+    const f = go(ev);
+    expect(Object.keys(f.graph.nodes)).toEqual([0, 1, 2, 3, 4].map((i) => nodeAt(ev, i)));
+    expect(nodeOf(f, nodeAt(ev, 4))).toMatchObject({ title: 'Turn failed', parentId: nodeAt(ev, 3) });
+    expect(f.session?.status).toBe('idle');
+    const want = comparable(f);
+    for (let k = 1; k < ev.length; k++) expect(comparable(paged(ev, 1, k))).toEqual(want);
+  });
+
+  test('a restart of the file leaves no stale status: the new content decides', () => {
+    const c = new Chain();
+    c.prompt('old');
+    c.reply('done', 'r1');
+    c.fact(metrics());
+    const d = new Chain({ t0: 1_790_000_500_000 });
+    d.prompt('new');
+    const f = go([...buddyEvents(c.lines), ...buddyEvents(d.lines)]);
+    expect(f.session?.status).toBe('running');
+    expect(comparable(f)).toEqual(comparable(go(buddyEvents(d.lines))));
+  });
+
+  test('randomised: rewinds, end records and errors: one by one = pages = re-hydrated; error nodes and the status follow the current branch', () => {
+    const CUSTOM = new Set(['resend-fork-notice', 'turn-metrics', 'acp-terminal-state']);
+    const branchLine = (line: string): BranchLine => {
+      const r = JSON.parse(line) as Record<string, unknown>;
+      const pd = (r.providerData ?? {}) as Record<string, unknown>;
+      const str = (v: unknown) => (typeof v === 'string' && v !== '' ? v : null);
+      return { id: str(r.id), parentId: str(r.parentId), logicalParentId: str(r.logicalParentId), type: r.type as string, custom: CUSTOM.has(r.type as string), isCompactAgent: false, contentFilterNotice: pd.contentFilterNotice === true, resendForkNotice: r.type === 'resend-fork-notice' };
+    };
+    for (let seed = 1; seed <= 16; seed++) {
+      let x = seed;
+      const next = (): number => {
+        x = (x * 1103515245 + 12345) % 2147483648;
+        return x / 2147483648;
+      };
+      const c = new Chain();
+      const ids: string[] = [];
+      c.prompt('start');
+      ids.push(c.tip!);
+      for (let k = 0; k < 80; k++) {
+        const r = next();
+        if (r < 0.35) c.reply(`r${k}`, `m${k}`);
+        else if (r < 0.5) c.prompt(`p${k}`);
+        else if (r < 0.6) c.rewind(ids[Math.floor(next() * ids.length)]!);
+        else if (r < 0.72) c.fact(metrics());
+        else if (r < 0.82) c.fact(terminal());
+        else c.fact(terminal({ code: 'E', message: `boom ${k}` }));
+        if (c.tip !== null && !ids.includes(c.tip)) ids.push(c.tip);
+      }
+      const ev = buddyEvents(c.lines);
+      const f = go(ev);
+      const want = comparable(f);
+      expect(comparable(paged(ev, 7)), `seed ${seed}`).toEqual(want);
+      expect(comparable(paged(ev, 3, Math.floor(ev.length / 3))), `seed ${seed}`).toEqual(want);
+      // Independently: shown entries from the walk; a fact is shown when its parent is a shown entry's id.
+      const lines = c.lines.map(branchLine);
+      const set = activeBranch(lines);
+      const shownEntry = (i: number) => !lines[i]!.custom && (set === null || set.has(i));
+      const shownIds = new Set(lines.flatMap((l, i) => (shownEntry(i) && l.id !== null ? [l.id] : [])));
+      const factShown = (i: number) => set === null || (lines[i]!.parentId !== null && shownIds.has(lines[i]!.parentId!));
+      const errorsShown = c.lines.flatMap((l, i) => (l.includes('"error":{') && factShown(i) ? [nodeAt(ev, i)] : []));
+      const errorNodes = Object.values(f.graph.nodes).filter((n) => n.title === 'Turn failed').map((n) => n.id);
+      // An error record not shown on arrival makes no node (as an entry not shown on arrival): a subset.
+      for (const id of errorNodes) expect(errorsShown, `seed ${seed}`).toContain(id);
+      let status = 'running';
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const l = lines[i]!;
+        if ((l.type === 'turn-metrics' || l.type === 'acp-terminal-state') && factShown(i)) {
+          status = 'idle';
+          break;
+        }
+        if (l.type === 'message' && JSON.parse(c.lines[i]!).role === 'user' && shownEntry(i)) break;
+      }
+      expect(f.session?.status, `seed ${seed}`).toBe(status);
+    }
+  });
+
+  test('a subagent thread’s turn-end record does not change the session status', () => {
+    const c = new Chain();
+    c.prompt('go');
+    const k = new Chain({ prefix: 'c', sessionId: 'runtime', t0: T0 + 30_000 });
+    k.reply('child done', 'cr1');
+    k.fact(metrics());
+    const f = go([...buddyEvents(c.lines), ...buddyEvents(k.lines, { agentId: CHILD })]);
+    expect(f.session?.status).toBe('running');
+  });
+});
+
 describe('buddyTouches (conservative table, tool and argument names unverified)', () => {
   test('file tools by name, path arguments tried in order, JSON-string arguments parsed', () => {
     expect(buddyTouches('Read', { file_path: 'a.ts' })).toEqual([{ path: 'a.ts', action: 'read' }]);

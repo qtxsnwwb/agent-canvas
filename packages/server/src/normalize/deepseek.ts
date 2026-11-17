@@ -176,6 +176,8 @@ interface Turn {
   num: number | null;
   /** Calls made in the turn (a turn ended by an error or abort fails the ones still running). */
   calls: Call[];
+  /** The seq of the row that opened it (a turn opened before a seeded file's cut is inherited). */
+  seq: number;
 }
 
 interface CatalogEntry {
@@ -221,6 +223,18 @@ interface Thread {
   maxMs: number | null;
   /** The dispatch this agent thread hangs off. */
   linkedTo: Call | null;
+  /**
+   * Usage of messages that made no node while the thread had no node that could carry it (Task 8 review M1): added to
+   * the next node that carries usage (carryUsage target or a message's holder).
+   */
+  pendingUsage: Usage | null;
+}
+
+/** Sum of two usages (null counts as nothing). */
+function addUsage(a: Usage | null, b: Usage | null): Usage | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return { inputTokens: a.inputTokens + b.inputTokens, cachedInputTokens: (a.cachedInputTokens ?? 0) + (b.cachedInputTokens ?? 0), outputTokens: a.outputTokens + b.outputTokens };
 }
 
 /** A tool call's state: never its arguments or output (they go out in the node's detail when a row brings them). */
@@ -398,6 +412,7 @@ export class DeepSeekNormalizer implements AgentNormalizer {
         minMs: null,
         maxMs: null,
         linkedTo: null,
+        pendingUsage: null,
       };
       state.threads.set(key, t);
       if (agentId !== null) this.relink(state, t, changes); // a call naming it may have been read already
@@ -446,7 +461,7 @@ export class DeepSeekNormalizer implements AgentNormalizer {
     const data = isObject(rec.data) ? rec.data : {};
     switch (type) {
       case 'turn/start':
-        this.turnStart(t, int(data.turn));
+        this.turnStart(t, int(data.turn), event.offset - 1);
         break;
       case 'turn/end':
         this.turnEnd(state, t, data, ts, event.offset, changes);
@@ -506,7 +521,7 @@ export class DeepSeekNormalizer implements AgentNormalizer {
 
   // ---- turns and nodes ----
 
-  private turnStart(t: Thread, n: number | null): void {
+  private turnStart(t: Thread, n: number | null, seq: number): void {
     t.turnNum = n;
     t.stepNum = null;
     // A turn a prompt opened before its bracket was read is this turn.
@@ -514,7 +529,7 @@ export class DeepSeekNormalizer implements AgentNormalizer {
       t.turn.num = n;
       return;
     }
-    t.turn = { id: '', num: n, calls: [] };
+    t.turn = { id: '', num: n, calls: [], seq };
   }
 
   /**
@@ -596,7 +611,7 @@ export class DeepSeekNormalizer implements AgentNormalizer {
       return;
     }
     if (text.trim() === '') return;
-    t.turn ??= { id: '', num: null, calls: [] };
+    t.turn ??= { id: '', num: null, calls: [], seq: offset - 1 };
     this.addNode(state, t, t.turn, blankNode(id, 'prompt', 'Prompt', brief(text)), ts, { text }, changes);
     if (t.firstPrompt === null) {
       const title = promptTitle(head(text, PREFIX_MAX));
@@ -635,15 +650,18 @@ export class DeepSeekNormalizer implements AgentNormalizer {
       return undefined;
     };
     const holder = lastOf('text') ?? parts.find((p) => p.kind === 'call') ?? lastOf('thinking');
-    const usage = usageOf(data.usage);
+    const ownUsage = usageOf(data.usage);
     const source = isObject(message.source) ? message.source : {};
     const provider = nonEmpty(source.provider);
     const model = nonEmpty(source.model);
     const raw = provider !== null || model !== null ? { raw: { provider, model } } : {};
     if (holder === undefined) {
-      if (usage !== null) this.carryUsage(state, t, usage, changes);
+      if (ownUsage !== null) this.carryUsage(state, t, ownUsage, changes);
       return;
     }
+    // The holder also takes usage left waiting by earlier messages of the thread that made no node.
+    const usage = addUsage(ownUsage, t.pendingUsage);
+    t.pendingUsage = null;
     for (const p of parts) {
       const holds = p === holder;
       if (p.kind === 'call') {
@@ -671,22 +689,20 @@ export class DeepSeekNormalizer implements AgentNormalizer {
    * m1), added to the nearest preceding node of thread `t` that may carry it, so session totals keep it: a node that
    * already has usage, or one without a message id. A node of another message that has no usage is passed over (that
    * message's usage is on a sibling node, and the totals count only the first node of a message id that has usage).
-   * Nowhere to put it (no such node yet in the thread): it is dropped.
+   * No such node yet in the thread (e.g. a subagent's first reply): it waits in `pendingUsage` for the thread's next
+   * node that carries usage (Task 8 review M1); a thread that never gets one loses it.
    */
   private carryUsage(state: SessionState, t: Thread, usage: Usage, changes: Change[]): void {
     for (let i = t.nodes.length - 1; i >= 0; i--) {
       const node = state.nodes.get(t.nodes[i]!);
       if (node === undefined) continue;
       if (node.usage == null && node.messageId) continue;
-      const prev = node.usage ?? { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 };
-      const sum: Usage = {
-        inputTokens: prev.inputTokens + usage.inputTokens,
-        cachedInputTokens: (prev.cachedInputTokens ?? 0) + (usage.cachedInputTokens ?? 0),
-        outputTokens: prev.outputTokens + usage.outputTokens,
-      };
-      this.update(state, { ...node, usage: sum }, changes);
+      const sum = addUsage(addUsage(node.usage ?? null, usage), t.pendingUsage)!;
+      t.pendingUsage = null;
+      this.update(state, { ...node, usage: { inputTokens: sum.inputTokens, cachedInputTokens: sum.cachedInputTokens ?? 0, outputTokens: sum.outputTokens } }, changes);
       return;
     }
+    t.pendingUsage = addUsage(t.pendingUsage, usage);
   }
 
   // ---- tool calls ----
@@ -939,6 +955,7 @@ export class DeepSeekNormalizer implements AgentNormalizer {
     t.callIds.clear();
     t.minMs = null;
     t.maxMs = null;
+    t.pendingUsage = null;
     for (const child of affected) if (child !== t) this.relink(state, child, changes);
   }
 
@@ -968,7 +985,9 @@ export class DeepSeekNormalizer implements AgentNormalizer {
   /**
    * The session as a function of what was read: title = the main file's last session/title, else its first prompt;
    * cwd = its last working-directory/change, else its header's; started = the header's createdAt, else the earliest row
-   * time; status running (spec 4.5 turns a quiet session idle in the display).
+   * time; status (Task 8 review I1) running while the main thread has a turn open (from its `turn/start`, or a prompt
+   * read before it, to its `turn/end`), else idle: subagent threads do not change it; a seeded file (a fork) is idle
+   * until its inherited cut is read.
    */
   private commitSession(state: SessionState, changes: Change[]): void {
     const main = state.threads.get(MAIN);
@@ -987,7 +1006,9 @@ export class DeepSeekNormalizer implements AgentNormalizer {
       cwd: main === undefined ? null : this.cwdOf(main),
       title: main?.title ?? main?.firstPrompt ?? null,
       gitBranch: null,
-      status: 'running',
+      // A turn opened before a seeded file's cut (or while the cut is not read yet) is copied history: idle, so
+      // replaying a fork never notifies.
+      status: main !== undefined && main.turn !== null && main.turn.seq >= main.cutSeq ? 'running' : 'idle',
       startedAt,
       lastActivityAt: isoOfMs(lastMs),
     };
