@@ -303,3 +303,146 @@ describe.skipIf(!HAS_ZSTD)('readDshLines', () => {
     ]);
   });
 });
+
+/**
+ * Drives readDshLines as the pipeline's doIngest does (Task 2): from the stored offset and state while the offset moves,
+ * at most one restart per call (a second `truncated` in the same call is discarded and the call ends). Each generation
+ * keeps the ordinals stored under it.
+ */
+class Pipelined {
+  offset = 0;
+  state: string | null = null;
+  generations: number[][] = [[]];
+  texts: string[][] = [[]];
+  truncatedResults = 0;
+  constructor(readonly maxBytes: number) {}
+  async ingest(): Promise<void> {
+    let restarted = false;
+    for (let i = 0; i < 100_000; i++) {
+      const from = this.offset;
+      const res = await readDshLines(file, from, this.maxBytes, this.state);
+      if (res.truncated) {
+        this.truncatedResults++;
+        if (restarted) return;
+        restarted = true;
+        this.generations.push([]);
+        this.texts.push([]);
+      }
+      this.generations.at(-1)!.push(...res.lines.map((l) => l.offset));
+      this.texts.at(-1)!.push(...res.lines.map((l) => l.text));
+      this.offset = res.newOffset;
+      if (res.state !== undefined) this.state = res.state;
+      if (res.newOffset === from && !res.truncated) return;
+    }
+    throw new Error('reader did not settle');
+  }
+}
+
+describe.skipIf(!HAS_ZSTD)('readDshLines: damage in a file of several slices', () => {
+  const BUDGET = 16 * 1024;
+  // Frames of a few KB that do not compress away (hex of pseudo-random bytes).
+  const noise = (i: number): string => Array.from({ length: 160 }, (_, k) => ((i * 2654435761 + k * 40503) >>> 0).toString(16).padStart(8, '0')).join('');
+  const header = headerLine();
+  const batch = (i: number): string[] => [eventLine(2 * i, 'tool/result', { text: noise(2 * i) }), eventLine(2 * i + 1, 'tool/result', { text: noise(2 * i + 1) })];
+  const N = 40;
+  /** Frames of the file, with their byte ranges. */
+  function build(): { frames: Buffer[]; starts: number[]; lines: string[][] } {
+    const frames = [frameOf([header]), ...Array.from({ length: N }, (_, i) => frameOf(batch(i)))];
+    const starts: number[] = [];
+    let at = 0;
+    for (const f of frames) {
+      starts.push(at);
+      at += f.length;
+    }
+    return { frames, starts, lines: [[header], ...Array.from({ length: N }, (_, i) => batch(i))] };
+  }
+  /** Byte offsets where the reader's slices start on the clean file (with this budget). */
+  async function sliceStarts(maxBytes: number): Promise<number[]> {
+    const out: number[] = [];
+    let offset = 0;
+    let state: string | null = null;
+    for (;;) {
+      out.push(offset);
+      const res = await readDshLines(file, offset, maxBytes, state);
+      if (res.state !== undefined) state = res.state;
+      if (res.newOffset === offset) return out;
+      offset = res.newOffset;
+    }
+  }
+  const damaged = (f: Buffer): Buffer => {
+    const b = Buffer.from(f);
+    b[b.length - 1] = b[b.length - 1]! ^ 0xff; // content checksum no longer matches
+    return b;
+  };
+
+  /** 30 ingests: at most one truncated result in all; each generation holds every ordinal before the damage at most once, the last one exactly once. */
+  async function expectOneRestartAtMost(p: Pipelined, linesBefore: string[]): Promise<void> {
+    for (let i = 0; i < 30; i++) await p.ingest();
+    expect(p.truncatedResults).toBeLessThanOrEqual(1);
+    for (const g of p.generations) expect(new Set(g).size).toBe(g.length);
+    expect(p.generations.at(-1)).toEqual(range(linesBefore.length));
+    expect(p.texts.at(-1)).toEqual(linesBefore);
+  }
+
+  async function recovers(p: Pipelined, at: number, all: string[][], frames: Buffer[], from: number): Promise<void> {
+    const restartsBefore = p.truncatedResults;
+    await truncateTo(file, at);
+    await fs.appendFile(file, Buffer.concat(frames.slice(from)));
+    for (let i = 0; i < 3; i++) await p.ingest();
+    expect(p.truncatedResults).toBe(restartsBefore);
+    expect(p.texts.at(-1)).toEqual(all.flat());
+    expect(p.generations.at(-1)).toEqual(range(all.flat().length));
+  }
+
+  test('(a) damage inside a later slice (not at its start)', async () => {
+    const { frames, starts, lines } = build();
+    await fs.writeFile(file, Buffer.concat(frames));
+    const slices = await sliceStarts(BUDGET);
+    expect(slices.length).toBeGreaterThan(4);
+    // A frame strictly inside the third slice.
+    const k = starts.findIndex((s) => s > slices[2]! && s < slices[3]! && !slices.includes(s));
+    expect(k).toBeGreaterThan(0);
+    await fs.writeFile(file, Buffer.concat([...frames.slice(0, k), damaged(frames[k]!), ...frames.slice(k + 1)]));
+    const p = new Pipelined(BUDGET);
+    await expectOneRestartAtMost(p, lines.slice(0, k).flat());
+    await recovers(p, starts[k]!, lines, frames, k);
+  });
+
+  test('(b) damage exactly at a slice boundary (a damaged frame, then garbage at a slice end)', async () => {
+    const { frames, starts, lines } = build();
+    await fs.writeFile(file, Buffer.concat(frames));
+    const slices = await sliceStarts(BUDGET);
+    const boundary = slices[2]!;
+    const k = starts.indexOf(boundary);
+    expect(k).toBeGreaterThan(0);
+    await fs.writeFile(file, Buffer.concat([...frames.slice(0, k), damaged(frames[k]!), ...frames.slice(k + 1)]));
+    const p = new Pipelined(BUDGET);
+    await expectOneRestartAtMost(p, lines.slice(0, k).flat());
+    await recovers(p, boundary, lines, frames, k);
+
+    // Garbage where a slice ends: the clean prefix, then bytes that are not a frame.
+    await fs.writeFile(file, Buffer.concat([...frames.slice(0, k), Buffer.from('not a zstd frame at all, just some bytes\n'.repeat(20))]));
+    const q = new Pipelined(BUDGET);
+    await expectOneRestartAtMost(q, lines.slice(0, k).flat());
+    await recovers(q, boundary, lines, frames, k);
+  });
+
+  test('(c) a tiny budget (one frame per call), damage in the middle', async () => {
+    const { frames, starts, lines } = build();
+    const k = 11;
+    await fs.writeFile(file, Buffer.concat([...frames.slice(0, k), damaged(frames[k]!), ...frames.slice(k + 1)]));
+    const p = new Pipelined(1);
+    await expectOneRestartAtMost(p, lines.slice(0, k).flat());
+    await recovers(p, starts[k]!, lines, frames, k);
+  });
+
+  test('damage found on the very first read of a file: no restart at all when it sits inside the slice', async () => {
+    const { frames, lines } = build();
+    const k = 2;
+    await fs.writeFile(file, Buffer.concat([...frames.slice(0, k), damaged(frames[k]!), ...frames.slice(k + 1)]));
+    const p = new Pipelined(1 << 20);
+    for (let i = 0; i < 10; i++) await p.ingest();
+    expect(p.truncatedResults).toBe(0);
+    expect(p.texts.at(-1)).toEqual(lines.slice(0, k).flat());
+  });
+});

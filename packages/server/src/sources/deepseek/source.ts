@@ -100,6 +100,18 @@ export class DeepSeekFileSource implements FileSource {
   private readonly dirsBySegment = new Map<string, Set<string>>();
   private legacyFiles = 0;
   private readonly resolver: ProjectIdResolver;
+  /** Bumped when the listing finds a v4 file it had not seen (a session directory that may be a missing parent). */
+  private listEpoch = 0;
+  /** v4 files seen by listFiles (absolute paths). */
+  private readonly listed = new Set<string>();
+  /**
+   * Key -> why it was last found unplaceable, with the file's size and modification time then. `missing`: the session
+   * id on its chain whose header could not be read (null: its own header is unreadable, or the chain is a cycle or
+   * longer than DSH_CHAIN_MAX links: only the file itself changing can change that, headers being immutable). Asked
+   * again while the file is unchanged, the missing header has not been read since (by any classification) and the
+   * listing found no new v4 file, it answers null after one stat, reading nothing else.
+   */
+  private readonly unplaced = new Map<string, { size: number; mtimeMs: number; missing: string | null; listEpoch: number }>();
 
   constructor(
     dshHome: string,
@@ -139,6 +151,10 @@ export class DeepSeekFileSource implements FileSource {
         let at = this.dirsBySegment.get(seg);
         if (at === undefined) this.dirsBySegment.set(seg, (at = new Set()));
         at.add(project);
+        if (!this.listed.has(v4)) {
+          this.listed.add(v4);
+          this.listEpoch++;
+        }
         out.push(v4);
       }
     }
@@ -190,31 +206,59 @@ export class DeepSeekFileSource implements FileSource {
   // ---------------------------------------------------------------- internals
 
   private async classifyFromHeaders(key: string, dir: string): Promise<FileClass | null> {
+    let st: { size: number; mtimeMs: number };
+    try {
+      st = await fsp.stat(this.pathOf(key)!);
+    } catch {
+      return null;
+    }
+    const was = this.unplaced.get(key);
+    if (
+      was !== undefined &&
+      was.size === st.size &&
+      was.mtimeMs === st.mtimeMs &&
+      (was.missing === null || (!this.keyById.has(was.missing) && was.listEpoch === this.listEpoch))
+    ) {
+      return null;
+    }
+    const listEpoch = this.listEpoch;
+    const placed = await this.placeFromHeaders(key, dir);
+    if ('cls' in placed) {
+      this.unplaced.delete(key);
+      return placed.cls;
+    }
+    this.unplaced.set(key, { size: st.size, mtimeMs: st.mtimeMs, missing: placed.missing, listEpoch });
+    return null;
+  }
+
+  private async placeFromHeaders(key: string, dir: string): Promise<{ cls: FileClass } | { missing: string | null }> {
     const header = await this.headerOf(key);
-    if (header === null) return null; // not a session (yet)
-    const projectId = this.project(header.cwd);
-    if (!isSubagent(header)) return this.remember(key, { kind: 'session', projectId, sessionId: header.id });
+    if (header === null) return { missing: null }; // not a session (yet)
+    if (!isSubagent(header)) return { cls: this.remember(key, { kind: 'session', projectId: this.project(header.cwd), sessionId: header.id }) };
     const root = await this.rootOf(header, dir);
-    return root === null ? null : this.remember(key, { kind: 'agent', projectId, sessionId: root, agentId: header.id });
+    if (!('root' in root)) return root;
+    // A thread always gets its root session's project (one session, one project), whatever its own header says.
+    return { cls: this.remember(key, { kind: 'agent', projectId: this.project(root.root.cwd), sessionId: root.root.id, agentId: header.id }) };
   }
 
   /**
    * The root session of a subagent: up the chain of `parentSession` headers while the parent is a subagent itself.
-   * Null ("cannot tell yet") while a link's header cannot be read, on a cycle, or past DSH_CHAIN_MAX links.
+   * Not found ("cannot tell yet"): `missing` = the id whose header cannot be read (yet), or null on a cycle or past
+   * DSH_CHAIN_MAX links.
    */
-  private async rootOf(child: DshHeader, dir: string): Promise<string | null> {
+  private async rootOf(child: DshHeader, dir: string): Promise<{ root: DshHeader } | { missing: string | null }> {
     const seen = new Set([child.id]);
     let id = child.parentSession!;
     for (let depth = 0; depth < DSH_CHAIN_MAX; depth++) {
-      if (seen.has(id)) return null;
+      if (seen.has(id)) return { missing: null };
       seen.add(id);
       const parent = await this.findHeader(id, dir);
-      if (parent === null) return null;
-      if (!isSubagent(parent.header)) return id;
+      if (parent === null) return { missing: id };
+      if (!isSubagent(parent.header)) return { root: parent.header };
       dir = parent.dir;
       id = parent.header.parentSession!;
     }
-    return null;
+    return { missing: null };
   }
 
   /**
@@ -253,6 +297,8 @@ export class DeepSeekFileSource implements FileSource {
 
   /** Cached, else stored with the key's raw events (no read). */
   private known(key: string): FileClass | null {
+    // Cached for good: a session header is immutable (format reference 4.1, 4.8); a rewritten frame 1 is read as a
+    // rewrite of the whole file (readDshLines), not as a session moving to another project.
     const cached = this.classes.get(key);
     if (cached !== undefined) return cached;
     const stored = this.lookup.storedFile(key);

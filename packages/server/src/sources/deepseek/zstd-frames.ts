@@ -108,13 +108,16 @@ const TAIL_BYTES = 64;
 /**
  * The reader state (opaque to the pipeline): `head` = `<length>:<sha1>` of frame 1, `tail` = SHA-1 of the last (up to)
  * 64 bytes before the resume offset, `lines` = the ordinal the next line gets; `corrupt` (only when true) = the bytes
- * at the resume offset were found not to be a decodable frame after a restart had already re-read the file up to them.
+ * at the resume offset are not a decodable frame (the read waits there for them to change); `restarted` (only when true) =
+ * this generation already began with a restart because the bytes at a resume offset were not a frame, so damage met at
+ * a resume offset now stops the read there instead of restarting again (at most one such restart per generation).
  */
 interface DshState {
   head: string;
   tail: string;
   lines: number;
   corrupt?: true;
+  restarted?: true;
 }
 
 function parseState(state: string | null): DshState | null {
@@ -122,7 +125,7 @@ function parseState(state: string | null): DshState | null {
   try {
     const s = JSON.parse(state) as Partial<DshState> | null;
     if (typeof s?.head === 'string' && typeof s.tail === 'string' && typeof s.lines === 'number' && Number.isSafeInteger(s.lines) && s.lines >= 0) {
-      return { head: s.head, tail: s.tail, lines: s.lines, ...(s.corrupt === true ? { corrupt: true as const } : {}) };
+      return { head: s.head, tail: s.tail, lines: s.lines, ...(s.corrupt === true ? { corrupt: true as const } : {}), ...(s.restarted === true ? { restarted: true as const } : {}) };
     }
   } catch {
     // not ours: start over
@@ -130,7 +133,8 @@ function parseState(state: string | null): DshState | null {
   return null;
 }
 
-const stateText = (s: DshState): string => JSON.stringify(s.corrupt === true ? { head: s.head, tail: s.tail, lines: s.lines, corrupt: true } : { head: s.head, tail: s.tail, lines: s.lines });
+const stateText = (s: DshState): string =>
+  JSON.stringify({ head: s.head, tail: s.tail, lines: s.lines, ...(s.corrupt === true ? { corrupt: true } : {}), ...(s.restarted === true ? { restarted: true } : {}) });
 
 /** The lines of one decompressed frame, or null when it does not decode to whole lines (corrupt). */
 function frameLines(frame: Uint8Array): string[] | null {
@@ -158,7 +162,9 @@ function frameLines(frame: Uint8Array): string[] | null {
  * next call. A rewrite — the file is shorter than `fromOffset`, frame 1 changed, the tail fingerprint changed, the bytes
  * at `fromOffset` are not a frame start, or a non-zero offset comes without a state — restarts from 0 with
  * `truncated: true`. A complete frame that is not a frame or does not decode stops the read before it: the frames
- * before it are kept and reading goes on once the bytes there are a valid frame (no restart loop on a damaged file).
+ * before it are kept and reading goes on once the bytes there are a valid frame. Damage costs at most one restart per
+ * generation (the "not a frame start" rule spends it; damage met afterwards, at any offset, stops the read there), so a
+ * damaged file is never re-stored over and over.
  * One open handle and one stat per call; the new fingerprints are taken from the bytes this call read.
  */
 export async function readDshLines(absPath: string, fromOffset: number, maxBytes: number, state: string | null): Promise<SourceRead> {
@@ -184,15 +190,17 @@ export async function readDshLines(absPath: string, fromOffset: number, maxBytes
         if (sha1(before) !== prev.tail) restart = true;
       }
     }
+    let damageRestart = false;
     for (let attempt = 0; ; attempt++) {
       const start = restart ? 0 : fromOffset;
       const base: DshState | null = restart || fromOffset === 0 ? null : prev;
       if (start === 0) before = Buffer.alloc(0);
       const read = await readFrames(handle, size, start, maxBytes, base?.lines ?? 0);
-      // The bytes at the resume offset are not a frame: a rewrite, unless this offset was already found damaged after
-      // a restart (then wait for the bytes to change, without restarting again).
-      if (read.corruptAt === start && start > 0 && base !== null && base.corrupt !== true && attempt === 0) {
+      // The bytes at the resume offset are not a frame: a rewrite (spec 10.6), unless this offset is already known to be
+      // damaged or this generation already spent its restart on damage (then stop here and wait for the bytes to change).
+      if (read.corruptAt === start && start > 0 && base !== null && base.corrupt !== true && base.restarted !== true && attempt === 0) {
         restart = true;
+        damageRestart = true;
         continue;
       }
       const corrupt = read.corruptAt !== null && read.corruptAt === read.newOffset;
@@ -204,8 +212,9 @@ export async function readDshLines(absPath: string, fromOffset: number, maxBytes
         return restart ? { lines, newOffset: 0, truncated: true, state: null } : { lines, newOffset: 0, truncated: false };
       }
       const moved = read.newOffset !== start;
-      // Nothing new (nothing appended, a torn last frame, or still the damaged frame found before): the state holds.
-      if (!restart && !moved) return { lines, newOffset: start, truncated: false };
+      // Nothing new (nothing appended, a torn last frame, or still the damaged frame found before): the state holds. Damage
+      // newly found right at the resume offset is recorded (the state changes, the offset does not).
+      if (!restart && !moved && !(corrupt && base?.corrupt !== true)) return { lines, newOffset: start, truncated: false };
       const consumed = read.bytes.subarray(0, read.newOffset - start);
       const joined = consumed.length >= TAIL_BYTES ? consumed : Buffer.concat([before, consumed]);
       const next: DshState = {
@@ -213,6 +222,7 @@ export async function readDshLines(absPath: string, fromOffset: number, maxBytes
         tail: sha1(joined.subarray(Math.max(0, joined.length - TAIL_BYTES))),
         lines: (base?.lines ?? 0) + lines.length,
         ...(corrupt ? { corrupt: true as const } : {}),
+        ...(damageRestart || (!restart && base?.restarted === true) ? { restarted: true as const } : {}),
       };
       return { lines, newOffset: read.newOffset, truncated: restart, state: stateText(next) };
     }

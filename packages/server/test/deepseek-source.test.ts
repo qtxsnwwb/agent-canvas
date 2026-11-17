@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, test } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { fileSources } from '../src/cli.js';
 import { loadConfig } from '../src/config.js';
 import { LINE_GENERATION_PREFIX, Pipeline } from '../src/pipeline.js';
@@ -149,6 +149,8 @@ describe.skipIf(!HAS_ZSTD)('DeepSeekFileSource: classification', () => {
     await fs.writeFile(abs(sessionRel(SID)), Buffer.from([0x28, 0xb5, 0x2f, 0xfd]));
     expect(await s.classify(key(sessionRel(CHILD)))).toBeNull();
     await writeSession(abs(sessionRel(SID)), headerLine());
+    // The next scan lists the parent (a v4 file not seen before), so the child is tried again.
+    await s.listFiles();
     expect(await s.classify(key(sessionRel(CHILD)))).toEqual({ kind: 'agent', projectId: PROJECT, sessionId: SID, agentId: CHILD });
   });
 
@@ -172,8 +174,54 @@ describe.skipIf(!HAS_ZSTD)('DeepSeekFileSource: classification', () => {
         const present = order.slice(0, i + 1);
         if (present.includes('grand')) expect(grand, `${order.join(',')} @${i}`).toEqual(complete ? { kind: 'agent', projectId: PROJECT, sessionId: SID, agentId: GRANDCHILD } : null);
       }
-      expect(await s.classify(key(sessionRel(CHILD, otherCwd)))).toEqual({ kind: 'agent', projectId: 'D--Projects-Elsewhere', sessionId: SID, agentId: CHILD });
+      expect(await s.classify(key(sessionRel(CHILD, otherCwd)))).toEqual({ kind: 'agent', projectId: PROJECT, sessionId: SID, agentId: CHILD });
     }
+  });
+
+  test("a thread gets its root session's project, whatever its own header cwd says", async () => {
+    const otherCwd = 'D:\\Projects\\Elsewhere';
+    await writeSession(abs(sessionRel(SID)), headerLine());
+    await writeSession(abs(sessionRel(CHILD)), headerLine({ id: CHILD, parent: SID, origin: 'subagent', cwd: otherCwd }));
+    await writeSession(abs(sessionRel(GRANDCHILD, null)), headerLine({ id: GRANDCHILD, parent: CHILD, origin: 'subagent', cwd: null, depth: 2 }));
+    const s = new DeepSeekFileSource(home);
+    expect(await s.classify(key(sessionRel(CHILD)))).toEqual({ kind: 'agent', projectId: PROJECT, sessionId: SID, agentId: CHILD });
+    expect(await s.classify(key(sessionRel(GRANDCHILD, null)))).toEqual({ kind: 'agent', projectId: PROJECT, sessionId: SID, agentId: GRANDCHILD });
+  });
+
+  test('an unplaceable file is remembered: later scans read nothing for it until something new appears; a missing parent is picked up when it does', async () => {
+    // A cycle, a chain over 16 links, and a child whose parent does not exist.
+    await writeSession(abs(sessionRel('a')), headerLine({ id: 'a', parent: 'b', origin: 'subagent' }));
+    await writeSession(abs(sessionRel('b')), headerLine({ id: 'b', parent: 'a', origin: 'subagent' }));
+    for (let i = 0; i <= 17; i++) await writeSession(abs(sessionRel(`n${i}`)), headerLine({ id: `n${i}`, ...(i === 0 ? {} : { parent: `n${i - 1}`, origin: 'subagent' as const }) }));
+    const other = 'D:\\Other';
+    await writeSession(abs(sessionRel(CHILD, other)), headerLine({ id: CHILD, parent: SID, origin: 'subagent', cwd: other }));
+    const s = new DeepSeekFileSource(home);
+    const orphans = [key(sessionRel('a')), key(sessionRel('b')), key(sessionRel('n17')), key(sessionRel(CHILD, other))];
+    const scan = async (): Promise<(unknown)[]> => {
+      const out: unknown[] = [];
+      for (const k of orphans) out.push(await s.classify(k));
+      return out;
+    };
+    await s.listFiles();
+    expect(await scan()).toEqual([null, null, null, null]);
+    const readdir = vi.spyOn(fs, 'readdir');
+    const open = vi.spyOn(fs, 'open');
+    try {
+      for (let i = 0; i < 3; i++) {
+        await s.listFiles(); // nothing new listed
+        readdir.mockClear();
+        expect(await scan()).toEqual([null, null, null, null]);
+        expect(readdir).not.toHaveBeenCalled();
+        expect(open).not.toHaveBeenCalled();
+      }
+    } finally {
+      readdir.mockRestore();
+      open.mockRestore();
+    }
+    // The missing parent appears (in another project directory): the next scan lists it and the child attaches.
+    await writeSession(abs(sessionRel(SID)), headerLine());
+    await s.listFiles();
+    expect(await scan()).toEqual([null, null, null, { kind: 'agent', projectId: PROJECT, sessionId: SID, agentId: CHILD }]);
   });
 
   test('a cycle, or a chain longer than 16 links, is never classified', async () => {
