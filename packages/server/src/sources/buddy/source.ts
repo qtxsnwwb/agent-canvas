@@ -3,8 +3,8 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { normaliseCwd } from '../cursor/project.js';
 import { isExistingDir } from '../dirs.js';
-import { readGuardedLines } from '../guarded-reader.js';
 import { ProjectIdResolver } from '../project-ids.js';
+import { readBuddyLines } from './line-guard.js';
 import { KEY_PREFIXES, type FileClass, type FileSource, type MaybePromise } from '../source.js';
 
 /** Where the transcripts are below a tool directory (`<configDir>/projects`, format reference 1.1). */
@@ -109,7 +109,8 @@ export class BuddyFileSource implements FileSource {
   readonly watchDepth = 3;
   /** Lines are told apart by their byte offset: the file is append-only, and a rolled-back batch is a rewrite. */
   readonly lineIdentity = 'offset' as const;
-  readonly readLines = readGuardedLines;
+  /** readGuardedLines plus a guard on the last complete line read (a same-size rewrite ending on the same bytes). */
+  readonly readLines = readBuddyLines;
   private readonly prefix: string;
   /** Label -> that root's projects directory. */
   private readonly projectsByLabel = new Map<string, string>();
@@ -121,6 +122,8 @@ export class BuddyFileSource implements FileSource {
   private readonly mainKeys = new Map<string, Set<string>>();
   /** `<label>/<project>/<agent stem>` -> the directory its file sits under (a session id or another agent stem). */
   private readonly agentParents = new Map<string, string>();
+  /** Main-file keys found by the last listing; null before the first one. */
+  private listedMain: Set<string> | null = null;
   /** `<label>\0<session id>` of each copy skipped as a duplicate. */
   private readonly duplicates = new Set<string>();
   /** Main-file key -> what the last scan of its head found (no cwd). */
@@ -146,6 +149,7 @@ export class BuddyFileSource implements FileSource {
   /** Every main and subagent file under every root (sorted); remembers which stems and sessions are where. */
   async listFiles(): Promise<string[]> {
     const out: string[] = [];
+    const listedMain = new Set<string>();
     for (const [label, projects] of this.projectsByLabel) {
       for (const proj of await dirNames(projects)) {
         const projDir = path.join(projects, proj);
@@ -158,7 +162,9 @@ export class BuddyFileSource implements FileSource {
         for (const e of entries) {
           if (e.isFile() && e.name.endsWith(JSONL) && UUID.test(e.name.slice(0, -JSONL.length))) {
             const sid = e.name.slice(0, -JSONL.length);
-            this.noteMain(sid, this.keyFor(label, [proj, e.name]));
+            const key = this.keyFor(label, [proj, e.name]);
+            this.noteMain(sid, key);
+            listedMain.add(key);
             out.push(path.join(projDir, e.name));
             continue;
           }
@@ -176,6 +182,14 @@ export class BuddyFileSource implements FileSource {
           }
         }
       }
+    }
+    this.listedMain = listedMain;
+    // A claim whose file is gone (moved to another root, deleted) is released: another copy of the session, if one is
+    // listed, takes it at its next classification, and is no longer counted as a duplicate.
+    for (const [sid, holder] of [...this.claims]) {
+      if (listedMain.has(holder)) continue;
+      this.claims.delete(sid);
+      for (const d of [...this.duplicates]) if (d.endsWith(`\u0000${sid}`)) this.duplicates.delete(d);
     }
     return out.sort();
   }
@@ -201,6 +215,10 @@ export class BuddyFileSource implements FileSource {
   classify(key: string): MaybePromise<FileClass | null> {
     const shape = this.shapeOf(key);
     if (shape === null) return null;
+    if (shape.kind === 'main' && this.heldByOther(shape.sid, key)) {
+      this.duplicates.add(`${shape.label}\u0000${shape.sid}`);
+      return null;
+    }
     const known = this.known(key);
     if (known !== null) return known;
     return shape.kind === 'main' ? this.classifyMain(key, shape) : this.classifyAgent(key, shape);
@@ -220,7 +238,7 @@ export class BuddyFileSource implements FileSource {
   mainSessionOf(key: string): string | null {
     if (this.shapeOf(key)?.kind !== 'main') return null;
     const known = this.known(key);
-    return known?.kind === 'session' ? known.sessionId : null;
+    return known?.kind === 'session' && this.claims.get(known.sessionId) === key ? known.sessionId : null;
   }
 
   /** Sessions found again under another root and not read twice. (The configured roots are listed by the server.) */
@@ -257,6 +275,12 @@ export class BuddyFileSource implements FileSource {
     return null;
   }
 
+  /** Whether another main file holds the claim on the session id. */
+  private heldByOther(sid: string, key: string): boolean {
+    const holder = this.claims.get(sid);
+    return holder !== undefined && holder !== key;
+  }
+
   private noteMain(sid: string, key: string): void {
     let keys = this.mainKeys.get(sid);
     if (keys === undefined) this.mainKeys.set(sid, (keys = new Set()));
@@ -273,7 +297,7 @@ export class BuddyFileSource implements FileSource {
     let winner = this.claims.get(sid);
     if (winner === undefined) {
       for (const other of this.mainKeys.get(sid)!) {
-        if (other === key) continue;
+        if (other === key || (this.listedMain !== null && !this.listedMain.has(other))) continue; // gone: not a contender
         const stored = this.lookup.storedFile(other);
         if (stored !== null && stored.agentId === null && stored.sessionId === sid) {
           winner = other;
@@ -316,7 +340,6 @@ export class BuddyFileSource implements FileSource {
     if (mainShape?.kind !== 'main') return null;
     let root = this.known(mainKey);
     if (root === null) {
-      if (this.duplicates.has(`${label}\u0000${parent}`) && this.claims.get(parent) !== mainKey) return null;
       root = await this.classifyMain(mainKey, mainShape);
     }
     if (root === null || root.kind !== 'session') return null;

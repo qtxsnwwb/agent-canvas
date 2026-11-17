@@ -9,8 +9,10 @@ import { buddyNodeId } from '../src/normalize/buddy.js';
 import { Pipeline } from '../src/pipeline.js';
 import { BuddyFileSource, buddyRootsOf, workbuddyProjectDir, BUDDY_HEAD_LINE_MAX, BUDDY_HEAD_MAX_BYTES, type BuddyLookup } from '../src/sources/buddy/source.js';
 import { readGuardedLines } from '../src/sources/guarded-reader.js';
+import { readBuddyLines } from '../src/sources/buddy/line-guard.js';
+import type { SourceRead } from '../src/sources/source.js';
 import { openStore, type Store } from '../src/store/store.js';
-import { Chain, CHILD, CWD, exampleChild, exampleMain, GRANDCHILD, sessionMeta, SID, topicRecord } from './buddy-fixtures.js';
+import { Chain, CHILD, CWD, exampleChild, exampleMain, GRANDCHILD, sessionMeta, SID, T0, topicRecord } from './buddy-fixtures.js';
 
 // BuddyFileSource (WorkBuddy, CodeBuddy Code): which files under each `<root>/projects` are sessions and subagent
 // threads, which project each belongs to, and how two roots of one origin share a store. Temp directories only.
@@ -125,7 +127,7 @@ describe('roots, labels and keys', () => {
       { dir: path.join(wbAi, 'projects'), depth: 3 },
     ]);
     expect(s.lineIdentity).toBe('offset');
-    expect(s.readLines).toBe(readGuardedLines);
+    expect(s.readLines).toBe(readBuddyLines);
     expect(new BuddyFileSource('codebuddy', buddyRootsOf([cb])).origin).toBe('codebuddy');
   });
 
@@ -298,6 +300,84 @@ describe('the same session under two WorkBuddy roots', () => {
     const { pipeline } = await ingestAll(cfg({ codebuddyDir: null }), store);
     expect(buddyOf(pipeline, 'workbuddy').status()).toEqual({ duplicateSessions: 1 });
     expect(view(store, SID)).toEqual(before);
+  });
+
+  /** The graph of `lines` read once from a fresh store, under a WorkBuddy root of its own. */
+  async function freshWb(lines: string[]): Promise<ReturnType<typeof view>> {
+    const root = path.join(await fs.mkdtemp(path.join(tmp, 'fresh-')), '.workbuddy');
+    await write(mainAt(root, SID), body(lines));
+    const { store } = await ingestAll(cfg({ workbuddyDirs: [root], codebuddyDir: null }));
+    return view(store, SID);
+  }
+  /** A turn appended after the example session's last reply. */
+  function moreTurn(): string[] {
+    const more = new Chain({ prefix: 'n', t0: T0 + 100_000 }).at(exampleMain().ids.a2!);
+    more.prompt('one more thing');
+    more.reply('Done, one more.', 'resp-n');
+    return more.lines;
+  }
+
+  test('a session file moved to the other root while running is taken over there: appended turns appear, not flagged deleted, nothing duplicated', async () => {
+    const main = exampleMain();
+    await write(mainAt(wb, SID), body(main.lines));
+    await fs.mkdir(path.join(wbAi, 'projects'), { recursive: true });
+    const { store, pipeline } = await ingestAll(cfg({ codebuddyDir: null }));
+    const s = buddyOf(pipeline, 'workbuddy');
+    expect(s.status()).toEqual({ duplicateSessions: 0 });
+    // The upgrade moves the file to the other root; the tool then appends a turn there.
+    await fs.mkdir(path.dirname(mainAt(wbAi, SID)), { recursive: true });
+    await fs.rename(mainAt(wb, SID), mainAt(wbAi, SID));
+    const turn = moreTurn();
+    await fs.appendFile(mainAt(wbAi, SID), body(turn));
+    await pipeline.scanAll();
+    await pipeline.idle();
+    expect(pipeline.ingestFailures()).toEqual([]);
+    expect(store.getSession(SID)).toMatchObject({ origin: 'workbuddy', sourceDeleted: false });
+    expect(store.listProjects(Date.now()).flatMap((p) => store.listSessions(p.id)).map((x) => x.id)).toEqual([SID]);
+    const after = view(store, SID)!;
+    const expected = (await freshWb([...main.lines, ...turn]))!;
+    expect(after.nodes).toEqual(expected.nodes);
+    expect(after.edges).toEqual(expected.edges);
+    expect(JSON.stringify(after.nodes)).toContain('one more thing');
+    expect(s.status()).toEqual({ duplicateSessions: 0 });
+    expect(s.mainSessionOf(`workbuddy:workbuddy-ai/${PROJ}/${SID}.jsonl`)).toBe(SID);
+    expect(s.mainSessionOf(`workbuddy:workbuddy/${PROJ}/${SID}.jsonl`)).toBeNull();
+  });
+
+  test('both copies present: the stored one wins across restarts; when it vanishes the other copy takes over without a restart', async () => {
+    const main = exampleMain();
+    await write(mainAt(wb, SID), body(main.lines));
+    const store = open();
+    await ingestAll(cfg({ workbuddyDirs: [wb], codebuddyDir: null }), store);
+    await write(mainAt(wbAi, SID), body(main.lines)); // an identical copy under the other root (listed first)
+    const first = await ingestAll(cfg({ codebuddyDir: null }), store);
+    expect(buddyOf(first.pipeline, 'workbuddy').status()).toEqual({ duplicateSessions: 1 });
+    expect(buddyOf(first.pipeline, 'workbuddy').mainSessionOf(`workbuddy:workbuddy/${PROJ}/${SID}.jsonl`)).toBe(SID);
+    const before = view(store, SID)!;
+    const { pipeline } = await ingestAll(cfg({ codebuddyDir: null }), store); // restart, both still present
+    const s = buddyOf(pipeline, 'workbuddy');
+    expect(s.status()).toEqual({ duplicateSessions: 1 });
+    expect(s.mainSessionOf(`workbuddy:workbuddy/${PROJ}/${SID}.jsonl`)).toBe(SID);
+    expect(view(store, SID)).toEqual(before);
+    // The winning file goes away; the other copy gets a new turn.
+    await fs.rm(mainAt(wb, SID));
+    const turn = moreTurn();
+    await fs.appendFile(mainAt(wbAi, SID), body(turn));
+    await pipeline.scanAll();
+    await pipeline.idle();
+    expect(pipeline.ingestFailures()).toEqual([]);
+    expect(store.getSession(SID)).toMatchObject({ sourceDeleted: false });
+    const expected = (await freshWb([...main.lines, ...turn]))!;
+    expect(view(store, SID)!.nodes).toEqual(expected.nodes);
+    expect(view(store, SID)!.edges).toEqual(expected.edges);
+    expect(s.status()).toEqual({ duplicateSessions: 0 });
+    // A further turn on the new holder is read through a change event as usual.
+    const again = new Chain({ prefix: 'q', t0: T0 + 200_000 }).at('n-2'); // after moreTurn's reply
+    again.prompt('and another');
+    await fs.appendFile(mainAt(wbAi, SID), body(again.lines));
+    await pipeline.ingestFile(mainAt(wbAi, SID));
+    await pipeline.idle();
+    expect(JSON.stringify(view(store, SID)!.nodes)).toContain('and another');
   });
 });
 
@@ -579,5 +659,78 @@ describe('rewrites (format reference 7: a failed batch is truncated away)', () =
     expect(after.details).toEqual(expected.details);
     expect(JSON.stringify(after)).not.toContain('The reviewer agrees.');
     expect(JSON.stringify(after)).toContain('No.');
+  });
+});
+
+describe('the Buddy line guard (a same-size rewrite that keeps the last 64 bytes)', () => {
+  /** The example's last reply with another text of the same length: the file keeps its size and its last 64 bytes. */
+  function sameEnd(lines: string[]): string[] {
+    const last = lines[lines.length - 1]!;
+    const changed = last.replace('The reviewer agrees.', 'The reviewer objects');
+    expect(Buffer.byteLength(changed)).toBe(Buffer.byteLength(last));
+    expect(changed.slice(-64)).toBe(last.slice(-64));
+    return [...lines.slice(0, -1), changed];
+  }
+
+  test('the shared guard misses it; the Buddy reader reports a rewrite and reads again from the start', async () => {
+    const lines = exampleMain().lines;
+    const file = mainAt(cb, SID);
+    await write(file, body(lines));
+    const size = Buffer.byteLength(body(lines));
+    const g = await readGuardedLines(file, 0, 1 << 20, null);
+    const b = await readBuddyLines(file, 0, 1 << 20, null);
+    expect(b.lines).toEqual(g.lines);
+    expect(b.newOffset).toBe(size);
+    expect(b.truncated).toBe(false);
+    // Nothing new: nothing read, no state written.
+    expect(await readBuddyLines(file, size, 1 << 20, b.state ?? null)).toEqual({ lines: [], newOffset: size, truncated: false, state: undefined });
+    await fs.writeFile(file, body(sameEnd(lines)));
+    expect((await readGuardedLines(file, size, 1 << 20, g.state ?? null)).truncated).toBe(false);
+    const again = await readBuddyLines(file, size, 1 << 20, b.state ?? null);
+    expect(again.truncated).toBe(true);
+    expect(again.lines.map((l) => l.text)).toEqual(sameEnd(lines));
+    // After that, appends read on normally and nothing is reported rewritten.
+    const turn = new Chain({ prefix: 'n' });
+    turn.prompt('more');
+    await fs.appendFile(file, body(turn.lines));
+    const next = await readBuddyLines(file, again.newOffset, 1 << 20, again.state ?? null);
+    expect(next).toMatchObject({ truncated: false, lines: [{ offset: size, text: turn.lines[0] }] });
+  });
+
+  test('plain appends read in slices give the lines of the shared reader; a shrink is a rewrite', async () => {
+    const lines = exampleMain().lines;
+    const file = mainAt(cb, SID);
+    await write(file, body(lines));
+    const g: string[] = [];
+    const b: string[] = [];
+    for (const [read, out] of [[readGuardedLines, g], [readBuddyLines, b]] as const) {
+      let from = 0;
+      let state: string | null = null;
+      for (;;) {
+        const r: SourceRead = await read(file, from, 300, state);
+        out.push(...r.lines.map((l) => `${l.offset}:${l.text}`));
+        if (r.state !== undefined) state = r.state;
+        if (r.newOffset === from) break;
+        from = r.newOffset;
+      }
+    }
+    expect(b).toEqual(g);
+    const full = await readBuddyLines(file, 0, 1 << 20, null);
+    await fs.writeFile(file, body(lines.slice(0, 3)));
+    expect((await readBuddyLines(file, full.newOffset, 1 << 20, full.state ?? null)).truncated).toBe(true);
+  });
+
+  test('through the pipeline: the session is re-derived', async () => {
+    const main = exampleMain();
+    await write(mainAt(cb, SID), body(main.lines));
+    const { store, pipeline } = await ingestAll(cfg());
+    await fs.writeFile(mainAt(cb, SID), body(sameEnd(main.lines)));
+    const later = new Date(Date.now() + 5_000);
+    await fs.utimes(mainAt(cb, SID), later, later);
+    await pipeline.scanAll();
+    await pipeline.idle();
+    const text = JSON.stringify(view(store, SID));
+    expect(text).toContain('The reviewer objects');
+    expect(text).not.toContain('The reviewer agrees.');
   });
 });
