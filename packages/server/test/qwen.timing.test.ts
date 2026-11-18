@@ -4,7 +4,7 @@ import { describe, expect, test } from 'vitest';
 import type { Change } from '@agent-canvas/shared';
 import { QwenNormalizer } from '../src/normalize/qwen.js';
 import type { RawEvent } from '../src/store/store.js';
-import { agentEvents, fcall, Log, PROJECT, qwenEvents, rewindRecord, SID, T0, text, thought, turnResult, usageMeta } from './qwen-fixtures.js';
+import { agentEvents, agentMeta, fcall, Log, metaEvent, PROJECT, qwenEvents, rewindRecord, SID, T0, text, thought, turnResult, usageMeta } from './qwen-fixtures.js';
 
 // Timing- and memory-sensitive (Review Focus 2 and 5 of the plan): long Qwen Code sessions with many re-roots far
 // back are applied in pages, as the pipeline does. Appending is O(1) per record and a re-root costs the records it
@@ -163,6 +163,73 @@ describe('Qwen normalizer: a 60,000-record session', () => {
     console.log(`[qwen timing] held with 16 B outputs ${(small / 1e6).toFixed(1)} MB, with 4 KB outputs ${(large / 1e6).toFixed(1)} MB (${(extra / 1e6).toFixed(0)} MB more output read)`);
     expect(large - small).toBeLessThan(extra / 10);
   }, 120_000);
+});
+
+describe('Qwen normalizer: many subagents (review round 1, I-1)', () => {
+  /**
+   * A session with `n` agent calls (each with its result), one two-record thread file per call and three versions of
+   * each sidecar. `interleaved`: each call, its thread and its sidecars in turn; else the calls and threads in turn and
+   * every sidecar last. Applied in pages of 200; returns the time and the spawn edges in the folded graph.
+   */
+  function agents(n: number, interleaved: boolean): { ms: number; spawns: number } {
+    const main = new Log();
+    main.prompt('fan out');
+    const perCall: number[] = [];
+    for (let i = 0; i < n; i++) {
+      main.reply([fcall('agent', { description: 'd', prompt: 'p', subagent_type: 'Explore' }, `call_${i}`)]);
+      main.result('agent', 'done', { id: `call_${i}` });
+      perCall.push(main.lines.length);
+    }
+    const mainEvents = qwenEvents(main.lines);
+    const streams: RawEvent[][] = [];
+    const sidecars: RawEvent[] = [];
+    let from = 0;
+    for (let i = 0; i < n; i++) {
+      const id = `Explore-call_${i}`;
+      const a = new Log({ prefix: `c${i}`, t0: T0 + 1_000_000 + i * 10_000, agent: { agentId: id } });
+      a.prompt('go', { payload: null, parts: [text('go')] });
+      a.reply([text('done')], { usage: usageMeta(10, 1) });
+      const metas = [1, 2, 3].map((v) => metaEvent(agentMeta({ agentId: id, agentType: `Explore v${v}`, toolUseId: `call_${i}`, model: 'm' }), { agentStem: id }));
+      const chunk = [...mainEvents.slice(from, perCall[i]!), ...agentEvents(id, a.lines)];
+      from = perCall[i]!;
+      if (interleaved) chunk.push(...metas);
+      else sidecars.push(...metas);
+      streams.push(chunk);
+    }
+    const events = [...streams.flat(), ...sidecars]; // the first chunk starts with the prompt
+    const n2 = new QwenNormalizer();
+    const changes: Change[] = [];
+    const t0 = performance.now();
+    for (let i = 0; i < events.length; i += PAGE_AGENTS) {
+      const r = n2.applyBatch(events.slice(i, i + PAGE_AGENTS).map((event) => ({ event, projectId: PROJECT })));
+      changes.push(...r.changes);
+    }
+    const ms = performance.now() - t0;
+    const spawns = new Set<string>();
+    for (const c of changes) {
+      if (c.type === 'edge_added' && c.edge.kind === 'spawn') spawns.add(c.edge.id);
+      else if (c.type === 'edge_removed') spawns.delete(c.id);
+    }
+    return { ms, spawns: spawns.size };
+  }
+  const PAGE_AGENTS = 200;
+
+  test('2,000 agent calls, threads and sidecars, interleaved or sidecars last: near-linear', () => {
+    const out: string[] = [];
+    const time = (n: number, interleaved: boolean): number => {
+      const r = agents(n, interleaved);
+      expect(r.spawns).toBe(n); // every thread linked once
+      out.push(`${n} ${interleaved ? 'interleaved' : 'sidecars last'}: ${r.ms.toFixed(0)} ms`);
+      return r.ms;
+    };
+    for (const interleaved of [true, false]) {
+      const small = time(1_000, interleaved);
+      const large = time(2_000, interleaved);
+      expect(large).toBeLessThan(gapBound(2_000));
+      expect(large).toBeLessThan(small * 3 + gapBound(200)); // doubling the agents does not quadruple the time
+    }
+    console.log(`[qwen timing] subagents: ${out.join('; ')}`);
+  }, 600_000);
 });
 
 describe('Qwen normalizer: one very long line (Review Focus 5)', () => {

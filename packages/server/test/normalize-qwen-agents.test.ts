@@ -377,6 +377,100 @@ describe('nested agents (parentAgentId)', () => {
   });
 });
 
+describe('malformed links (review round 1, M-3, M-4)', () => {
+  /** Two agent threads, each with an `agent` call whose id the other's agent id ends with. */
+  function crossed(): { a: Log; b: Log; ac: string; bc: string } {
+    const a = new Log({ prefix: 'a', t0: T0 + 100_000, agent: { agentId: 'A-call_b' } });
+    a.prompt('a', { payload: null, parts: [text('a')] });
+    const ac = a.add((env) => line('assistant', undefined, env, { message: { role: 'model', parts: [fcall('agent', agentArgs('B'), 'call_a')] } }));
+    const b = new Log({ prefix: 'b', t0: T0 + 200_000, agent: { agentId: 'B-call_a' } });
+    b.prompt('b', { payload: null, parts: [text('b')] });
+    const bc = b.add((env) => line('assistant', undefined, env, { message: { role: 'model', parts: [fcall('agent', agentArgs('A'), 'call_b')] } }));
+    return { a, b, ac, bc };
+  }
+
+  /** The thread parents through spawn edges never loop. */
+  function acyclic(f: Folded): void {
+    const parentOf = new Map<string, string | null>();
+    for (const n of Object.values(f.graph.nodes)) {
+      if (n.agentId === null || n.parentId === null) continue;
+      const p = f.graph.nodes[n.parentId];
+      if (p !== undefined && p.agentId !== n.agentId) parentOf.set(n.agentId, p.agentId);
+    }
+    for (const start of parentOf.keys()) {
+      const seen = new Set<string>();
+      for (let cur: string | null | undefined = start; cur != null; cur = parentOf.get(cur)) {
+        expect(seen.has(cur), `cycle through ${start}`).toBe(false);
+        seen.add(cur);
+      }
+    }
+  }
+
+  test('two threads whose ids end with each other’s call ids: no cycle; the one with the smaller key stays unlinked, in any order', () => {
+    const { a, b, ac, bc } = crossed();
+    const streams = [qwenEvents(mainLog().log.lines), agentEvents('A-call_b', a.lines), agentEvents('B-call_a', b.lines)];
+    const f = run(streams.flat());
+    acyclic(f);
+    expect(Object.values(f.graph.nodes).find((n) => n.agentId === 'A-call_b' && n.kind === 'prompt')!.parentId).toBeNull();
+    expect(Object.values(f.graph.nodes).find((n) => n.agentId === 'B-call_a' && n.kind === 'prompt')!.parentId).toBe(NA('A-call_b', ac, 'call:call_a'));
+    expect(nodeOf(f, NA('B-call_a', bc, 'call:call_b')).childAgentId).toBeNull();
+    for (const order of permutations([0, 1, 2])) expect(comparable(go(order.flatMap((i) => streams[i]!))), order.join(',')).toEqual(comparable(f));
+  });
+
+  test('sidecars naming each other as parents: the same', () => {
+    const { a, b, ac } = crossed();
+    const streams = [
+      qwenEvents(mainLog().log.lines),
+      agentEvents('A-call_b', a.lines),
+      agentEvents('B-call_a', b.lines),
+      [metaEvent(agentMeta({ agentId: 'A-call_b', agentType: 'A', toolUseId: 'call_b', parentAgentId: 'B-call_a' }), { agentStem: 'A-call_b' })],
+      [metaEvent(agentMeta({ agentId: 'B-call_a', agentType: 'B', toolUseId: 'call_a', parentAgentId: 'A-call_b' }), { agentStem: 'B-call_a' })],
+    ];
+    const f = run(streams.flat());
+    acyclic(f);
+    expect(Object.values(f.graph.nodes).find((n) => n.agentId === 'A-call_b' && n.kind === 'prompt')!.parentId).toBeNull();
+    expect(Object.values(f.graph.nodes).find((n) => n.agentId === 'B-call_a' && n.kind === 'prompt')!.parentId).toBe(NA('A-call_b', ac, 'call:call_a'));
+    for (const order of permutations([0, 1, 2, 3, 4])) expect(comparable(go(order.flatMap((i) => streams[i]!))), order.join(',')).toEqual(comparable(f));
+  });
+
+  test('an invalid or oversized agent sidecar counts as none: the suffix rule links the thread, no agentType, no model', () => {
+    const main = mainLog();
+    const agent = agentThread(AGENT, { agentName: 'Explorer' });
+    // Valid, it would leave the thread unlinked (its toolUseId names no call) and name it "Ignored".
+    const big = JSON.stringify({ ...(JSON.parse(agentMeta({ agentId: AGENT, agentType: 'Ignored', toolUseId: 'call_none', model: MODEL })) as object), padding: 'x'.repeat(1024 * 1024 + 16) });
+    for (const payload of ['not json', '[1,2]', big]) {
+      const f = run([...qwenEvents(main.log.lines), ...agentEvents(AGENT, agent.log.lines), metaEvent(payload, { agentStem: AGENT })]);
+      expect(nodeOf(f, NM(main.ids.a1!, 'call:call_b7'))).toMatchObject({ childAgentId: AGENT, title: 'Explorer' });
+      expect(f.details.get(NA(AGENT, agent.ids.a1!, 'thought:0'))).toEqual({ text: 'Searching first.' });
+    }
+  });
+
+  test('a valid sidecar whose toolUseId names no call leaves the thread unlinked (the suffix rule is only without one)', () => {
+    const main = mainLog();
+    const agent = agentThread(AGENT);
+    const f = run([...qwenEvents(main.log.lines), ...agentEvents(AGENT, agent.log.lines), metaEvent(agentMeta({ agentId: AGENT, agentType: 'Explore', toolUseId: 'call_none' }), { agentStem: AGENT })]);
+    expect(nodeOf(f, NA(AGENT, agent.ids.p!, 'prompt')).parentId).toBeNull();
+    expect(nodeOf(f, NM(main.ids.a1!, 'call:call_b7')).childAgentId).toBeNull();
+  });
+});
+
+describe('a message delivered to a running agent (reference 5.2: user with externalInputKind)', () => {
+  test('a system node in the agent thread, not a prompt: no turn of its own, the session status untouched', () => {
+    const main = mainLog();
+    const a = new Log({ prefix: 'c', t0: T0 + 100_000, agent: { agentId: AGENT } });
+    const p = a.prompt('go', { payload: null, parts: [text('go')] });
+    const msg = a.add((env) => line('user', undefined, env, { externalInputKind: 'message', message: { role: 'user', parts: [text('also check b.ts')] } }));
+    const note = a.add((env) => line('user', undefined, env, { externalInputKind: 'notification', message: { role: 'user', parts: [text('<task-notification>shell done</task-notification>')] } }));
+    const r = a.reply([text('checked')]);
+    const f = run([...qwenEvents(main.log.lines), ...agentEvents(AGENT, a.lines)]);
+    expect(f.unknown).toEqual([]);
+    expect(nodeOf(f, NA(AGENT, msg, 'system'))).toMatchObject({ kind: 'system', title: 'Message', systemSubtype: 'external_input', summary: 'also check b.ts', turnId: NA(AGENT, p, 'prompt') });
+    expect(nodeOf(f, NA(AGENT, note, 'system'))).toMatchObject({ kind: 'system', title: 'Notification', systemSubtype: 'external_input', turnId: NA(AGENT, p, 'prompt') });
+    expect(nodeOf(f, NA(AGENT, r, 'text:0')).turnId).toBe(NA(AGENT, p, 'prompt'));
+    expect(f.session?.status).toBe('idle');
+  });
+});
+
 describe('unlinked threads (no phantom session)', () => {
   test('a thread no call matches hangs under the session, unlinked', () => {
     const lone = 'Lone-call_zzz';

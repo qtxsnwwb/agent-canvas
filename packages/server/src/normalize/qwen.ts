@@ -5,6 +5,7 @@ import { filesFields, nodeFiles, qwenTouches, type NodeFiles } from './files.js'
 import { nodePatch, outputOf, toolSummary } from './gemini.js';
 import { inputKeyFields, inputKeyOf } from './input-key.js';
 import { LiveChain } from './qwen-chain.js';
+import { SubagentLinks, type LinkInfo } from './qwen-links.js';
 import { classifyUser, promptText } from './qwen-prompt.js';
 import { qwenUsage } from './qwen-usage.js';
 import { summarize } from './summary.js';
@@ -18,12 +19,13 @@ import { unknownTypeName } from './unknown-type.js';
  * lossy form of the id) and named in node ids by its first record's `agentId`. The two sidecars arrive whole as meta
  * events: the title sidecar (agentId null) and an agent's `.meta.json` (agentId = its stem).
  *
- * Subagent links (spec 6, reference 5.3) are a function of what is read, recomputed at the end of every event that may
- * change them (relink): a thread hangs off the shown dispatch call its sidecar names (`toolUseId` in the thread of
- * `parentAgentId`), else the first one whose id ends its agent id after a `-`; so any arrival order of the call, the
- * thread and the sidecar ends in the same graph, and a dispatch call leaving the chain unlinks its thread until it
- * returns. Agent-thread nodes are emitted as read, before the session row exists (as Buddy's and DeepSeek's); only the
- * main thread starts the session, decides its status, title, cwd and git branch.
+ * Subagent links (spec 6, reference 5.3) are kept by an incremental index (qwen-links.ts), settled at the end of every
+ * event and costing what the event touched: a thread hangs off the shown dispatch call its sidecar names (`toolUseId`
+ * in the thread of `parentAgentId`), else the first one whose id ends its agent id after a `-`; a link that would make
+ * a thread its own ancestor is not made. Any arrival order of the call, the thread and the sidecar ends in the same
+ * graph, and a dispatch call leaving the chain unlinks its thread until it returns. Agent-thread nodes are emitted as
+ * read, before the session row exists (as Buddy's and DeepSeek's); only the main thread starts the session, decides
+ * its status, title, cwd and git branch.
  *
  * Each record is a `ChatRecord` linked into a tree by `parentUuid`; the graph shows the live chain only (the last
  * conversation record walked to its root, qwen-chain.ts). A thread keeps, per conversation record, small facts (the
@@ -267,11 +269,10 @@ interface SessionState {
   projectId: string;
   threads: Map<string, Thread>;
   nodes: Map<string, GraphNode>;
-  /** Every dispatch call of every thread (on the chain or not), and those by node id. */
-  dispatches: Set<Call>;
+  /** Dispatch calls by node id. */
   dispatchByNode: Map<string, Call>;
-  /** Something the links depend on changed: they are recomputed at the end of the event. */
-  linksDirty: boolean;
+  /** Which dispatch call each agent thread hangs off, kept incrementally (qwen-links.ts). */
+  links: SubagentLinks<Thread, Call>;
   /** The title sidecar's name when its source is manual or auto (latest version). */
   sidecarTitle: string | null;
 }
@@ -369,9 +370,8 @@ export class QwenNormalizer implements AgentNormalizer {
         projectId,
         threads: new Map(),
         nodes: new Map(),
-        dispatches: new Set(),
         dispatchByNode: new Map(),
-        linksDirty: false,
+        links: new SubagentLinks<Thread, Call>(callOrder),
         sidecarTitle: null,
       };
       this.sessions.set(sessionId, state);
@@ -386,7 +386,7 @@ export class QwenNormalizer implements AgentNormalizer {
     if (t === undefined) {
       t = this.blankThread(key, stem);
       state.threads.set(key, t);
-      if (stem !== null) state.linksDirty = true;
+      if (stem !== null) state.links.setThread(t, linkInfo(t));
     }
     return t;
   }
@@ -486,13 +486,13 @@ export class QwenNormalizer implements AgentNormalizer {
         t.recordId = own(head(id, ID_MAX_CHARS));
         t.agentId = t.recordId;
       }
-      state.linksDirty = true;
+      state.links.setThread(t, linkInfo(t));
     }
     if (t.agentName === null) {
       const name = nonEmpty(obj.agentName);
       if (name !== null) {
         t.agentName = brief(name.trim());
-        state.linksDirty = true;
+        state.links.touch(t); // its dispatch node's title
       }
     }
   }
@@ -511,7 +511,7 @@ export class QwenNormalizer implements AgentNormalizer {
     const t = this.thread(state, event.agentId);
     const before = this.modelOf(t, null);
     t.meta = agentMetaOf(event.payload);
-    state.linksDirty = true;
+    state.links.setThread(t, linkInfo(t));
     if (this.modelOf(t, null) !== before) this.modelChanged(state, t, changes);
   }
 
@@ -564,6 +564,14 @@ export class QwenNormalizer implements AgentNormalizer {
     };
     switch (type) {
       case 'user': {
+        // A message delivered to a running agent (reference 5.2, `externalInputKind`): not typed into this thread as a
+        // prompt, so a system node in the current turn, as notices are (spec 4.1).
+        const external = obj.externalInputKind;
+        if (t.stem !== null && subtype === null && (external === 'message' || external === 'notification')) {
+          const text = (isObject(obj.systemPayload) ? str(obj.systemPayload.displayText) : null) ?? partsText(obj);
+          node('system', 'system', external === 'message' ? 'Message' : 'Notification', brief(text), 'external_input', { text });
+          break;
+        }
         const kind = classifyUser(obj);
         if (kind === 'unknown') return unknown();
         if (kind === 'hidden') break;
@@ -681,10 +689,7 @@ export class QwenNormalizer implements AgentNormalizer {
           child: null,
         };
         nf.call = call;
-        if (dispatch) {
-          state.dispatches.add(call);
-          state.dispatchByNode.set(nf.id, call);
-        }
+        if (dispatch) state.dispatchByNode.set(nf.id, call);
         return;
       }
       if (typeof p.text === 'string') {
@@ -800,6 +805,8 @@ export class QwenNormalizer implements AgentNormalizer {
         dirty.add(call.nf);
       } else if (ctx.rec === rec) ctx.orphan = true;
     }
+    // An agent thread's records carry no auth type (reference 5.2), so its usage takes the "other" rule (spec 4.5):
+    // borrowing the main thread's would make the numbers depend on which file was read first.
     rec.usageNow = rec.usage === null ? null : qwenUsage(rec.usage, ws.auth);
     rec.nodes.forEach((nf, k) => {
       if (rec.opensTurn && k === 0) ws.turn = nf.id;
@@ -908,7 +915,7 @@ export class QwenNormalizer implements AgentNormalizer {
       if (model !== null) detail = { ...detail, raw: { model } };
       if (call !== null && call.result !== null) detail = { ...detail, ...this.resultDetail(t, call, ctx) };
       if (call !== null) call.shown = call.result;
-      if (call !== null && call.dispatch) state.linksDirty = true;
+      if (call !== null && call.dispatch) state.links.show(call);
       state.nodes.set(nf.id, node);
       changes.push({ type: 'node_added', node, detail });
       if (parentId !== null) changes.push({ type: 'edge_added', edge: { id: `${parentId}->${nf.id}`, sessionId: sid, from: parentId, to: nf.id, kind } });
@@ -964,7 +971,7 @@ export class QwenNormalizer implements AgentNormalizer {
     if (call === undefined) return;
     // A dispatch node left: its thread's first node loses the parent now (it may come back within this event, in which
     // case the spawn edge, dropped with the node, is added again when the links are recomputed).
-    state.linksDirty = true;
+    state.links.hide(call);
     const child = call.child;
     if (child === null || child.link !== call) return;
     const first = this.firstNode(state, child);
@@ -990,58 +997,32 @@ export class QwenNormalizer implements AgentNormalizer {
     return null;
   }
 
-  /** An agent thread's id for linking: the records', else the sidecar's, else the file's name form. */
-  private realId(t: Thread): string {
-    return t.recordId ?? t.meta?.agentId ?? t.stem!;
-  }
-
   /**
-   * Links each agent thread to a dispatch call (spec 6, reference 5.3), as a function of what is read now, so any
-   * arrival order ends the same:
-   * 1. with a sidecar: in the thread its `parentAgentId` names (the main thread when null), the shown call whose id is
-   *    its `toolUseId` (without one: whose id ends the thread's agent id after a `-`);
-   * 2. without: the first shown call (main thread first, then agent threads by key; in chain order) whose id ends the
-   *    thread's agent id after a `-`, among those rule 1 did not take.
-   * A call links one thread at most; a thread never links to its own calls. Then each linked call node shows its child
-   * (childAgentId, title) and each thread's first node hangs off its call by a spawn edge, or off nothing.
+   * Applies what the link index decided since the last event (spec 6, reference 5.3; the rules are in qwen-links.ts):
+   * each call whose child changed shows it (childAgentId, title), and each thread decided again or touched has its first
+   * node hang off its call by a spawn edge, or off nothing. Costs what the event touched.
    */
   private relink(state: SessionState, ctx: LineCtx, changes: Change[]): void {
-    if (!state.linksDirty) return;
-    state.linksDirty = false;
-    const main = state.threads.get(MAIN);
-    const agents = [...state.threads.values()].filter((t) => t.stem !== null).sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-    const rank = new Map<Thread, number>((main === undefined ? agents : [main, ...agents]).map((t, i) => [t, i]));
-    const at = (c: Call): number => c.thread.chain.indexOf(c.nf.rec.uuid);
-    const live = [...state.dispatches]
-      .filter((c) => c.callId !== null && state.nodes.has(c.nf.id))
-      .sort((a, b) => rank.get(a.thread)! - rank.get(b.thread)! || at(a) - at(b) || a.nf.rec.nodes.indexOf(a.nf) - b.nf.rec.nodes.indexOf(b.nf));
-    const claimed = new Set<Call>();
-    const want = new Map<Thread, Call>();
-    const suffix = (t: Thread, c: Call): boolean => this.realId(t).endsWith(`-${c.callId}`);
-    for (const t of agents) {
-      const m = t.meta;
-      if (m === null) continue;
-      const parent = m.parentAgentId === null ? main : findAgent(agents, m.parentAgentId, (x) => this.realId(x));
-      if (parent === undefined || parent === t) continue;
-      const c = live.find((x) => x.thread === parent && !claimed.has(x) && (m.toolUseId !== null ? x.callId === m.toolUseId : suffix(t, x)));
-      if (c === undefined) continue;
-      claimed.add(c);
-      want.set(t, c);
+    const { changed, touched } = state.links.settle();
+    if (changed.length === 0 && touched.length === 0) return;
+    const calls = new Set<Call>();
+    for (const t of changed) {
+      const old = t.link;
+      if (old !== null && old.child === t) {
+        old.child = null;
+        calls.add(old);
+      }
     }
-    for (const t of agents) {
-      if (t.meta !== null) continue;
-      const c = live.find((x) => x.thread !== t && !claimed.has(x) && suffix(t, x));
-      if (c === undefined) continue;
-      claimed.add(c);
-      want.set(t, c);
+    for (const t of changed) {
+      t.link = state.links.linkOf(t);
+      if (t.link !== null) {
+        t.link.child = t;
+        calls.add(t.link);
+      }
     }
-    for (const c of state.dispatches) c.child = null;
-    for (const t of agents) {
-      t.link = want.get(t) ?? null;
-      if (t.link !== null) t.link.child = t;
-    }
-    for (const c of live) this.refresh(state, c.thread, c.nf, ctx, changes);
-    for (const t of agents) this.placeFirst(state, t, changes);
+    for (const t of touched) if (t.link !== null) calls.add(t.link);
+    for (const c of calls) this.refresh(state, c.thread, c.nf, ctx, changes);
+    for (const t of touched) this.placeFirst(state, t, changes);
   }
 
   /** The thread's first node hangs off its dispatch node (a spawn edge), or off nothing. */
@@ -1096,15 +1077,12 @@ export class QwenNormalizer implements AgentNormalizer {
       for (const nf of rec.nodes) {
         this.removeNode(state, nf.id, changes);
         const call = nf.call;
-        if (call !== null && call.dispatch) {
-          state.dispatches.delete(call);
-          state.dispatchByNode.delete(nf.id);
-        }
+        if (call !== null && call.dispatch) state.dispatchByNode.delete(nf.id);
       }
     }
     // The sidecar is another file: it stays, and so does the link until the links are recomputed.
     Object.assign(t, this.blankThread(t.key, t.stem), { meta: t.meta, link: t.link });
-    state.linksDirty = true;
+    if (t.stem !== null) state.links.setThread(t, linkInfo(t)); // its id is decided again by its first record
   }
 
   // ---- session ----
@@ -1165,9 +1143,16 @@ function dispatchTitle(call: Call): string {
   return child?.meta?.agentType ?? child?.agentName ?? call.label ?? call.name;
 }
 
-/** The agent thread whose id is `id` (reference 5.3: `parentAgentId`): by its records' / sidecar's id, else its file name form. */
-function findAgent(agents: readonly Thread[], id: string, realId: (t: Thread) => string): Thread | undefined {
-  return agents.find((t) => realId(t) === id) ?? agents.find((t) => t.stem === id.replace(/[^a-zA-Z0-9_-]/g, '_'));
+/** What an agent thread's link depends on: its id (records', else sidecar's, else file's) and its valid sidecar. */
+function linkInfo(t: Thread): LinkInfo {
+  const m = t.meta;
+  return { realId: t.recordId ?? m?.agentId ?? t.stem!, sidecar: m === null ? null : { toolUseId: m.toolUseId, parentAgentId: m.parentAgentId } };
+}
+
+/** The order of dispatch calls for linking: main thread first, then agent threads by key; chain order; part order. */
+function callOrder(a: Call, b: Call): number {
+  if (a.thread !== b.thread) return a.thread.key < b.thread.key ? -1 : 1;
+  return a.thread.chain.indexOf(a.nf.rec.uuid) - b.thread.chain.indexOf(b.nf.rec.uuid) || a.nf.rec.nodes.indexOf(a.nf) - b.nf.rec.nodes.indexOf(b.nf);
 }
 
 /**

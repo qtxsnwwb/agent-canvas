@@ -118,20 +118,16 @@ describe('Qwen Code', () => {
   const spaced = (log: Log): RawEvent[] =>
     qwenEvents(log.lines.map((l, i) => JSON.stringify({ ...(JSON.parse(l) as object), timestamp: isoOf(T0 + (i + 1) * 40_000) })));
 
-  test('a "Turn failed" that leaves with an abandoned branch and returns with it: 出错中断 once for that turn result', () => {
+  test('accepted: a hand-made rejoin of an abandoned branch onto the chain notifies again, as for the Buddy origins', () => {
+    // No Qwen Code operation produces this (format reference 4.3: a rewind re-roots onto an earlier point of the live
+    // chain and the old branch never returns); spec 8 accepts the second notification rather than guard against it in
+    // the shared engine. A rewind back into the turn makes the session running; a record hung by hand off the old
+    // turn_result makes it idle again with the same "Turn failed": the engine sees a new run ending in an error.
     const log = new Log();
     const ids = turn(log, 1, 'error');
-    log.rewindTo(ids.a!); // back into the turn (as a restore of a tool answer does): running again, the failed node goes
-    log.add((env) => sessionModel('openai', env), { parent: ids.t! }); // a record hanging off the abandoned branch
-    expect(feed(spaced(log))).toEqual(['error']);
-  });
-
-  test('a completed turn whose turn_result leaves and returns: 跑完了 once for that turn result', () => {
-    const log = new Log();
-    const ids = turn(log, 1);
     log.rewindTo(ids.a!);
     log.add((env) => sessionModel('openai', env), { parent: ids.t! });
-    expect(feed(spaced(log))).toEqual(['finished']);
+    expect(feed(spaced(log))).toEqual(['error', 'error']);
   });
 
   test('a turn re-run after a rewind into it (new work, a new turn_result) notifies again', () => {

@@ -133,7 +133,7 @@ Qwen Code 平时只追加，但“删除消息组”会整个替换文件（说�
 - 缓存读取 = `cachedContentTokenCount`。
 - 输入 = max(0, `promptTokenCount` − `cachedContentTokenCount`)。缓存写入没有存盘，无法单列。
 - 输出：设 `derived = totalTokenCount − promptTokenCount`。`totalTokenCount > 0` 且 `candidates ≤ derived ≤ candidates + thoughts` 时取 `derived`；否则认证方式是 OpenAI 兼容、OpenAI Responses 或 Qwen OAuth 时取 `candidates`，其余取 `candidates + thoughts`。
-- 认证方式不在回复记录上：取当前分支上此前最近的 `session_model` 记录或提问记录的 `executionContext.authType`；都没有时按“其余”处理。
+- 认证方式不在回复记录上：取当前分支上此前最近的 `session_model` 记录或提问记录的 `executionContext.authType`；都没有时按“其余”处理。子代理的记录上没有认证方式，所以子代理线程的用量一律按“其余”处理；借用主线的认证方式会让结果取决于文件读到的先后。
 - 一条回复记录是一次模型回复，用量记在它的第一个显示节点上；不需要去重键。`ui_telemetry` 里重复的数字不计。
 - `/branch` 复制出来的会话带着原会话的用量，跨会话相加时会重复。手册注明。
 
@@ -156,6 +156,7 @@ Qwen Code 平时只追加，但“删除消息组”会整个替换文件（说�
 - 归属看路径：`subagents/<会话 id>/agent-*.jsonl` 是该会话的子代理线程。线程的 id 取记录里的 `agentId`（文件名是它的有损形式）；读到记录之前用文件名里的。
 - 连到派发节点：说明文件的 `toolUseId` 等于 `agent` 调用的 `functionCall.id`。`parentAgentId` 为 null 时在主线里找，否则在那个子代理的线程里找（嵌套）。
 - 没有说明文件时：`agentId` 以 `-<调用 id>` 结尾，按这个后缀去对还没有连上线程的 `agent` 调用。对不上时线程挂在会话下，不连线。
+- 有有效说明文件、但它的 `toolUseId` 对不上任何调用时，线程不连线：后缀规则只用于没有有效说明文件的线程。
 - 说明文件先到或后到、线程先到或后到，结果相同。
 - 线程里的 `agent_bootstrap`（分叉式子代理继承来的整段上下文）不显示。
 - 子代理的回复分成多条记录（一条带文字和用量，之后每个工具调用各一条）：各自成节点，用量只出现一次，不需要合并。
@@ -178,6 +179,7 @@ Qwen Code 平时只追加，但“删除消息组”会整个替换文件（说�
 - 是 `turn_result`：空闲。`state` 为 `error` 时在这一轮里加一个“Turn failed”系统节点（带 `error` 的文字），为 `cancelled` 时加“Interrupted”；它们随分支移除和恢复。于是“跑完了”“出错中断”通知都有效。
 - 文件里从来没有 `turn_result`（较早的版本不写）：有提问就一直是运行中，与上一批的 WorkBuddy 相同。手册注明。
 - 文件被重写后按新内容重新推导。
+- 已被丢弃的分支如果重新回到当前分支上（Qwen Code 的任何操作都不会这样做），它的结果会再通知一次；这一点接受，与 WorkBuddy / CodeBuddy 相同。
 
 ## 9. 各功能里的表现
 

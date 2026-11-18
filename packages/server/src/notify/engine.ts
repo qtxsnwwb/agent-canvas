@@ -154,19 +154,7 @@ interface SessionState {
   subagentNodes: Set<string> | null;
   /** A "finished" waiting out the grace period. */
   held: Held | null;
-  /** Time (ms) of the newest main-thread node seen added; null: none seen. */
-  newestMainMs: number | null;
-  /** The current run added a main-thread node newer than any seen before it (Qwen Code: see FRESH_RUN_ORIGINS). */
-  runFresh: boolean;
 }
-
-/**
- * Origins whose session status follows a live branch of a tree (Qwen Code, spec 8): a rewind back into a turn makes
- * the session running again and a record rejoining the abandoned branch makes it idle again, with the same turn result
- * (its "Turn failed" node re-added, with its old time). For them a run notifies "finished" / "出错中断" only when it
- * added a main-thread node newer than every one seen before it (new work); a run made only of nodes coming back does not.
- */
-const FRESH_RUN_ORIGINS: ReadonlySet<Origin> = new Set(['qwen']);
 
 /** "5 秒", "3 分 20 秒", "3 分钟", "1 小时 5 分". */
 export function formatDuration(ms: number): string {
@@ -246,8 +234,6 @@ export class NotificationEngine {
     /** Main-thread prompt times and subagent node ids of sessions not known yet (created by this batch's upsert). */
     const prompts = new Map<string, number>();
     const subagentsOfNew = new Map<string, Set<string>>();
-    /** Session id -> time of the newest main-thread node added in this batch. */
-    const newest = new Map<string, number>();
     const mark = (sessionId: string, at: number): void => {
       if (!Number.isFinite(at)) at = now;
       markers.set(sessionId, Math.max(markers.get(sessionId) ?? at, at));
@@ -268,8 +254,6 @@ export class NotificationEngine {
             } else if (state.session.origin === 'cursor') (state.subagentNodes ??= new Set()).add(n.id);
             break;
           }
-          const nodeMs = ms(n.timestamp);
-          if (Number.isFinite(nodeMs)) newest.set(n.sessionId, Math.max(newest.get(n.sessionId) ?? nodeMs, nodeMs));
           if (n.kind === 'prompt') {
             const t = ms(n.timestamp);
             if (Number.isFinite(t)) {
@@ -299,33 +283,19 @@ export class NotificationEngine {
       const state = this.sessions.get(id);
       if (state !== undefined) state.pendingError = Math.max(state.pendingError ?? at, at);
     }
-    /** Known sessions that got a main-thread node newer than any seen before this batch. */
-    const fresh = new Set<string>();
-    for (const [id, at] of newest) {
-      const state = this.sessions.get(id);
-      if (state === undefined || (state.newestMainMs !== null && at <= state.newestMainMs)) continue;
-      fresh.add(id);
-      state.newestMainMs = at;
-    }
     for (const session of upserts.values()) {
       const state = this.sessions.get(session.id);
       if (state === undefined) {
         this.prime(session, prompts.get(session.id) ?? null, now, subagentsOfNew.get(session.id) ?? null);
-        this.sessions.get(session.id)!.newestMainMs = newest.get(session.id) ?? null;
         continue;
       }
-      this.transition(state, session, now, out, fresh.has(session.id));
+      this.transition(state, session, now, out);
     }
     // Markers of sessions that were not running before this batch and are not now (their turn already ended, possibly
     // with a "finished" held): a leave-running transition above has consumed its own.
     for (const id of markers.keys()) {
       const state = this.sessions.get(id);
-      if (state === undefined || state.pendingError === null || RUNNING.has(state.session.status)) continue;
-      if (FRESH_RUN_ORIGINS.has(state.session.origin) && !fresh.has(id)) {
-        state.pendingError = null; // a turn result coming back with its branch, not a new one
-        continue;
-      }
-      this.lateError(state, now, out);
+      if (state !== undefined && state.pendingError !== null && !RUNNING.has(state.session.status)) this.lateError(state, now, out);
     }
     return out;
   }
@@ -507,13 +477,10 @@ export class NotificationEngine {
       lastSent: {},
       subagentNodes: session.origin === 'cursor' ? subagentNodes : null,
       held: null,
-      newestMainMs: null,
-      runFresh: true,
     });
   }
 
-  /** `fresh`: this batch added a main-thread node newer than any seen before it. */
-  private transition(state: SessionState, next: Session, now: number, out: EngineNotification[], fresh: boolean): void {
+  private transition(state: SessionState, next: Session, now: number, out: EngineNotification[]): void {
     const prev = state.session.status;
     state.session = next;
     state.seenAt = now;
@@ -528,18 +495,15 @@ export class NotificationEngine {
       state.errorHandled = false;
       // A marker of the previous turn that never settled is not about this run.
       state.pendingError = null;
-      state.runFresh = fresh;
-    } else if (isRunning && fresh) state.runFresh = true;
+    }
     const trigger = ms(next.lastActivityAt);
     if (status === 'awaiting_permission' && prev !== 'awaiting_permission') {
       const n = this.emit(state, 'permission', trigger, now, null);
       if (n !== null) out.push(n);
     }
     if (wasRunning && !isRunning) {
-      // A run of nodes coming back only (FRESH_RUN_ORIGINS) ends on a turn result already decided: nothing.
-      if (FRESH_RUN_ORIGINS.has(next.origin) && !state.runFresh && !fresh) state.pendingError = null;
       // A turn with a marker is an error turn: "出错中断" (when recent), never "finished".
-      else if (state.pendingError !== null) this.settleError(state, now, out);
+      if (state.pendingError !== null) this.settleError(state, now, out);
       else if (!state.errorHandled && FINISHED.has(status) && state.runStart !== null) {
         const duration = Math.max(0, now - state.runStart);
         const settings = this.readSettings();
