@@ -288,6 +288,23 @@ describe('the same conversation under another root or profile', () => {
     expect(s.status()).toMatchObject({ duplicateSessions: 1 });
   });
 
+  test('the copy read follows the configured order of the roots, not the order paths sort in (which differs between path separators)', async () => {
+    // `DoubaoWork\` sorts before `Doubao\`, but `Doubao/` before `DoubaoWork/`: each configuration is checked both ways.
+    for (const [first, second] of [[work, app], [app, work]] as const) {
+      await fs.rm(tmp, { recursive: true, force: true, maxRetries: 10 });
+      await write(agentFile(first, MAIN, 'trajectory.jsonl'), body([user('the copy of the first root')]));
+      await write(agentFile(second, MAIN, 'trajectory.jsonl'), body([user('the copy of the second root')]));
+      const { store, pipeline } = await ingestAll(cfg([first, second]));
+      const s = doubaoOf(pipeline);
+      const text = JSON.stringify(view(store, CONV));
+      expect(text).toContain('the copy of the first root');
+      expect(text).not.toContain('the copy of the second root');
+      expect(s.mainSessionOf(s.keyOf(agentFile(first, MAIN, 'trajectory.jsonl'))!)).toBe(CONV);
+      expect(s.mainSessionOf(s.keyOf(agentFile(second, MAIN, 'trajectory.jsonl'))!)).toBeNull();
+      expect(s.status()).toMatchObject({ duplicateSessions: 1 });
+    }
+  });
+
   test('a copy already stored wins after a restart, even when the other root lists first', async () => {
     await writeExample(app);
     const store = open();

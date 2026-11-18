@@ -195,6 +195,23 @@ export class DoubaoFileSource implements FileSource {
       this.claims.delete(conv);
       this.duplicates.delete(conv);
     }
+    // A conversation nobody holds is claimed here, in listing order (roots as configured, then profile, then
+    // namespace; a copy already stored first). The pipeline classifies files in the order their absolute paths sort,
+    // and that order differs between path separators (`DoubaoWork\` before `Doubao\`, `Doubao/` before `DoubaoWork/`):
+    // left to classification, the copy read would depend on the platform.
+    for (const [loc, l] of listed) {
+      if (l.main === null) continue;
+      const conv = loc.slice(loc.lastIndexOf('/') + 1);
+      if (this.claims.has(conv)) continue;
+      let holder = loc;
+      for (const other of this.copies.get(conv) ?? []) {
+        if (listed.has(other) && this.storedMain(other, conv)) {
+          holder = other;
+          break;
+        }
+      }
+      this.claims.set(conv, holder);
+    }
     const timed: { conv: string; loc: string; hasTime: boolean }[] = [];
     const seen = new Set<string>();
     for (const t of threads) {
