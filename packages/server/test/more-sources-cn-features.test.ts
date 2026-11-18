@@ -230,7 +230,8 @@ const cnConfig = (d: Dirs, o: Partial<Config> = {}): Config =>
     deepseekDir: d.deepseekDir,
     workbuddyDirs: d.workbuddyDirs,
     codebuddyDir: d.codebuddyDir,
-    doubaoDirs: d.doubaoDirs, qwenDir: null,
+    doubaoDirs: d.doubaoDirs,
+    qwenDir: null,
     ...o,
   });
 

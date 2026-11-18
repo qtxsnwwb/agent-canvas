@@ -139,6 +139,20 @@ test('四个新来源的附加行：每个读取的目录、运行环境不支�
   ]);
 });
 
+test('Qwen Code：托管会话（不读）的个数有时出一行警告；为 0 或服务端没发时不出行', () => {
+  const q = { dir: '/h/.qwen/projects', present: true, reading: true, sessionCount: 5 };
+  expect(fileSourceDetailLines({ ...q, unsupportedSessions: 2 })).toEqual([
+    { text: '托管会话（格式不支持，没有读取）：2 个', warn: true },
+  ]);
+  expect(fileSourceDetailLines({ ...q, unsupportedSessions: 0 })).toEqual([]);
+  expect(fileSourceDetailLines(q)).toEqual([]);
+  expect(fileSourceDirLine('qwen', q)).toBe('Qwen Code 会话目录：/h/.qwen/projects（存在）');
+  // The block is shown once the directory exists, after 豆包 (ORIGINS order).
+  const d: Diagnostics = { ...base, sources: { gemini: off, grok: off, copilot: off, ...newOff, doubao: { ...off, present: true, dir: '/h/d' }, qwen: { ...q, unsupportedSessions: 1 } } };
+  expect(fileSourceBlocks(d).map((b) => b.origin)).toEqual(['doubao', 'qwen']);
+  expect(fileSourceBlocks(d)[1]).toMatchObject({ unsupportedSessions: 1, sessionCount: 5 });
+});
+
 test('DeepSeek 在不支持解压的 Node 上：目录行说明原因，不说“启动后才出现”', () => {
   const s = { dir: '/h/.dsh/sessions', present: true, reading: false, sessionCount: 0, unavailable: '需要 Node 22.15 或更高' };
   // The reason is said once, in the warning line below it (Task 8 review M4).
@@ -164,6 +178,7 @@ test('遮蔽：四个新来源的目录、每个根和不可用原因都被遮�
   };
   const out = maskDiagnostics(d, m);
   expect(JSON.stringify(out.sources)).not.toContain('dev42');
+  expect(out.sources?.qwen.dir).toContain('.qwen');
   expect(out.sources?.deepseek).toMatchObject({ legacyFiles: 1, present: true, reading: false });
   expect(out.sources?.workbuddy).toMatchObject({ duplicateSessions: 1, sessionCount: 1 });
   expect(out.sources?.codebuddy.sessionCount).toBe(2);

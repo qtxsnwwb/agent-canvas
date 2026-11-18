@@ -1,14 +1,16 @@
 import { describe, expect, test } from 'vitest';
 import { LiveChain, type ChainRecord } from '../src/normalize/qwen-chain.js';
 
-// The live chain (docs/formats/qwen-code.md 4.2 / 4.5, spec section 5). Every expectation is the whole-file rule of
-// the format reference, computed here independently: leaf = the last physical conversation record that is not a
-// fragment, walked through parentUuid (first occurrence decides) until null, a parent not in the file, or a record
-// already visited; reversed.
+// The live chain (docs/formats/qwen-code.md 4.2 / 4.5, spec section 5). Every expectation is a whole-file walk computed
+// here independently of the class. It is the reference's rule (4.2 steps 2-5) with one change of ours: a fragment (a
+// later line with a uuid already seen) never moves the leaf. So the leaf is the last physical conversation record whose
+// uuid is new, where the reference takes the uuid of the last conversation line even when that line is a fragment of an
+// earlier record. The walk goes through parentUuid (first occurrence decides) until null, a parent not in the file, or
+// a record already visited; reversed.
 
 const r = (uuid: string, parentUuid: string | null, conversation = true): ChainRecord => ({ uuid, parentUuid, conversation });
 
-/** The whole-file rule over a list of records, written without the class (reference 4.2 steps 2-5). */
+/** The whole-file walk over a list of records, written without the class (reference 4.2 steps 2-5; fragments never lead). */
 function wholeFile(records: readonly ChainRecord[]): string[] {
   const parent = new Map<string, string | null>();
   let leaf: string | null = null;

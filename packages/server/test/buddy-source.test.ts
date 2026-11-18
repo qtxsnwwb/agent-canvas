@@ -66,7 +66,8 @@ const cfg = (o: { workbuddyDirs?: string[]; codebuddyDir?: string | null } = {})
     deepseekDir: null,
     workbuddyDirs: o.workbuddyDirs ?? [wb, wbAi],
     codebuddyDir: o.codebuddyDir === undefined ? cb : o.codebuddyDir,
-    doubaoDirs: [], qwenDir: null,
+    doubaoDirs: [],
+    qwenDir: null,
   });
 const open = (): Store => {
   const s = openStore(':memory:');

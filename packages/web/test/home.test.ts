@@ -133,6 +133,17 @@ test('showOriginFilter：只有 Cursor 的项目也提供筛选；parseOriginFil
   expect(filterEmptyMessage([mixed('a', ['claude'])], 'cursor')).toBe('没有 Cursor 的项目');
 });
 
+test('Qwen Code：有它的项目时才提供筛选，筛选只留含它的项目；没有它的数据时选它退回全部', () => {
+  const ps = [mixed('a', ['claude']), mixed('b', ['claude', 'qwen']), mixed('c', ['qwen'])];
+  expect(showOriginFilter([mixed('a', ['claude']), mixed('b', ['qwen'])])).toBe(true);
+  expect(parseOriginFilter('qwen')).toBe('qwen');
+  expect(effectiveOriginFilter('qwen', ps)).toBe('qwen');
+  expect(effectiveOriginFilter('qwen', [mixed('a', ['claude']), mixed('b', ['codex'])])).toBe('all');
+  expect(visibleProjects(ps, 'qwen').map((p) => p.id)).toEqual(['b', 'c']);
+  expect(filterEmptyMessage([mixed('a', ['claude'])], 'qwen')).toBe('没有 Qwen Code 的项目');
+  expect(originLook('qwen')).toEqual({ label: 'Qwen Code', className: 'origin-qwen' });
+});
+
 test('projectTitle: the directory name; a Cursor project without a directory is "Cursor（未知目录）" (M4)', async () => {
   const { projectTitle, CURSOR_UNKNOWN_DIR_NAME } = await import('../src/home');
   expect(projectTitle({ id: 'D--work-app', cwd: 'D:\\work\\app' })).toBe('app');

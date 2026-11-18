@@ -2,7 +2,7 @@
 
 > 这里是完整的参考说明。想快速上手请看[项目首页](../README.md)。
 
-agent-canvas 是一个本地服务：它读取 Claude Code 的 transcript 文件、OpenAI Codex 的会话文件和 Cursor 的本地数据库，以及 Gemini CLI、Grok、GitHub Copilot CLI、DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作的会话文件（这七个未经真实数据核对），并接收 hook 事件，在固定的本地网址上用网页展示每个会话正在做什么。各种工具的会话用同一套页面展示（见下文“Codex”“Cursor”“Gemini CLI、Grok、Copilot CLI”“DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作”）。
+agent-canvas 是一个本地服务：它读取 Claude Code 的 transcript 文件、OpenAI Codex 的会话文件和 Cursor 的本地数据库，以及 Gemini CLI、Grok、GitHub Copilot CLI、DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作、Qwen Code 的会话文件（这八个未经真实数据核对），并接收 hook 事件，在固定的本地网址上用网页展示每个会话正在做什么。各种工具的会话用同一套页面展示（见下文“Codex”“Cursor”“Gemini CLI、Grok、Copilot CLI”“DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作”“Qwen Code”）。
 每个会话显示为一张实时更新的画布。默认的“概览”视角只画骨架（每个轮次一张卡片，下面挂它派出的子代理），选中一个轮次或子代理，它的执行过程在下方以瀑布图列出。另有逐步、拓扑、因果、复盘四个视角（见下文“画布”）。首页可以检索会话，诊断页给出服务和 hooks 的运行情况。
 
 ## 从 claude-canvas 升级
@@ -371,9 +371,63 @@ node packages/server/dist/cli.js hooks uninstall --cursor    # 只移除本安�
 
 - **千问办公**：2026 年 11 月起改存数据库，新格式没有公开资料，等真实数据。
 - **TRAE CLI**：记录的写法随版本变化，只有一个第三方工具作依据，等真实数据。
-- **Qwen Code**：以后另做。
 - **CodeBuddy 的 IDE 插件**：是另一种格式，不读。
 - 上面四个工具的 hooks；DeepSeek Harness 第 4 版以前的会话文件；豆包的普通聊天和云电脑上的任务（见“限制”）。
+
+## Qwen Code
+
+**这个来源未经真实数据核对。** 开发机上没有 Qwen Code（阿里的命令行编码代理），读法完全依据它的开源代码（`QwenLM/qwen-code` 标签 `v0.27.4`）。依据和每条结论的出处写在格式说明 [`docs/formats/qwen-code.md`](./formats/qwen-code.md) 里，末尾列出了只有真实数据才能确定的问题。测试用的全是按这份说明自造的样例，测试通过只说明实现与对源码的理解一致，不说明与真实文件一致。觉得哪里不对时，先打开诊断页看 Qwen Code 一栏（见下文“诊断页”）。
+
+### 从哪里读
+
+读 Qwen Code“运行时目录”下的 `projects`，默认是 `~/.qwen/projects`：
+
+| 文件 | 是什么 |
+| --- | --- |
+| `projects/<项目名>/chats/<会话 id>.jsonl` | 会话的主线 |
+| `projects/<项目名>/chats/<会话 id>.title.json` | 会话的标题 |
+| `projects/<项目名>/chats/archive/` 下的同名文件 | 归档的会话 |
+| `projects/<项目名>/subagents/<会话 id>/agent-*.jsonl` 和同名的 `.meta.json` | 子代理的线程和它的说明 |
+
+- 运行时目录取第一个有的：本程序的 `AGENT_CANVAS_QWEN_DIR`、Qwen Code 自己的 `QWEN_RUNTIME_DIR`、`QWEN_HOME`、默认的 `~/.qwen`。三个变量都指向 `projects` 的上一层；开头的 `~` 是主目录，相对路径按启动本服务时的工作目录解析。`AGENT_CANVAS_QWEN_DIR` 设为空字符串表示不读取 Qwen Code。
+- **在 Qwen Code 的设置里改过输出目录的**（`advanced.runtimeOutputDir`）：本服务不读 Qwen Code 的设置，需要自己用 `AGENT_CANVAS_QWEN_DIR` 指过去。设的是绝对路径时就指向它；设的是相对路径（例如 `.qwen`）时，Qwen Code 在每个仓库里各放一份，本服务只能读其中一个，把 `AGENT_CANVAS_QWEN_DIR` 设成那个仓库下的这个目录（例如 `D:\work\app\.qwen`），其他仓库的不会自动找。
+- 和其他只读会话文件的来源一样：服务启动时 `projects` 目录存在才读取并持续监视；不存在时跳过，不报错、不创建任何东西；**服务运行期间才出现的，重启服务后才读取**。对这个目录只读，从不写入。
+- 只读上表里的文件。主线文件名必须是 32 到 36 个十六进制字符或连字符（Qwen Code 自己的规则），别的名字不读。`workflows/`、`tmp/` 下的文件，`.runtime.json`、`.worktree.json`、`.pr.json`、`.jsonl.stream` 都不读。
+- 会话被归档（移到 `chats/archive/`）或取消归档时，这里看到的还是同一个会话，不重读、不重复，也不会显示为“源文件已删除”。两处同时有同一个会话时读 `chats/` 下的。
+
+### 显示什么
+
+- 和其他来源一样显示为会话：提问、回复、思考、工具调用及结果、子代理线程、标题、模型、工作目录、token 用量，以及上下文压缩的位置。检索、统计、按文件看、异常（包括“消耗异常高”）、导出与遮蔽照常工作；首页、检索、统计、文件页、异常页的来源筛选里有一项“Qwen Code”，有会话才出现。
+- 来源标记是本项目自己画的字母 Q，不是 Qwen Code 的标志。
+- 会话 id 就是 Qwen Code 自己的会话 id。
+- **项目**：按记录里的工作目录归，和同一目录下的 Claude Code、Codex、DeepSeek 等会话在同一个项目里。Qwen Code 给目录起的名字（有损的编码）不用。工作目录在 `<仓库>/.qwen/worktrees/` 下时（Qwen Code 的工作树），项目取那个仓库，会话的工作目录本身照原样显示。同一个目录只差大小写的写法，和 DeepSeek、WorkBuddy、CodeBuddy 一起按上一节“项目与目录的大小写”处理。
+- **提问**：按 Qwen Code 自己显示的文字（它在发给模型的文字后面加的钩子上下文、引用文件的内容不显示）；显示出来的文字为空的提问仍是一条提问。后台任务完成、定时任务这类系统发来的消息显示为系统节点。斜杠命令（不隐藏的）显示为一个系统节点，内容是命令本身。
+- **回复**：思考、文字、工具调用按顺序分别显示；图片显示为 `[image]`。模型取每次回复记下的模型。
+- **工具调用**：结果按调用 id 配对（没有 id 时按工具名配同一条回复里的调用）；出错的标为失败，被取消的标为失败并注明取消；没有结果的调用显示为执行中。
+- **上下文压缩**显示为一个系统节点“上下文已压缩”，带压缩前后的 token 数，压缩前的内容继续显示。
+- **标题**依次取：文件里最后一条改标题的记录（不管它在不在当前分支上）；标题文件，仅当它是手动或自动起的；第一条提问。
+- **子代理**：`subagents/<会话 id>/` 下的线程归到这个会话，按说明文件连到派出它的那次 `agent` 调用（嵌套的子代理连到它的父代理线程里的调用）；没有说明文件时按线程 id 末尾的调用 id 连；对不上时线程挂在会话下，不连线。说明文件、线程、主线谁先被读到，结果都一样。分叉式子代理继承来的整段上下文不显示。
+- **用量**：缓存读取 = `cachedContentTokenCount`；新输入 = `promptTokenCount − cachedContentTokenCount`（缓存写入没有存下来，分不出来）；输出照 Qwen Code 自己的算法，在“总数 − 提示”和“候选”“候选 + 思考”之间取，取法和这次会话用的认证方式有关。
+- **会话状态**：只看主线的当前分支。最后是一条提问时为运行中；最后是一轮的结果记录（`turn_result`）时为空闲；这一轮出错时加一个“Turn failed”系统节点，被取消时加“Interrupted”，两种都发“出错中断”。“跑完了”照常。
+- 用 `/branch` 复制出来的会话、另开的子会话，都显示为独立的会话。
+
+### 限制
+
+- **未经真实数据核对**（见本节开头）。依据是 `v0.27.4` 的源码，见 [`docs/formats/qwen-code.md`](./formats/qwen-code.md)。
+- **没有 hooks**：不为 Qwen Code 安装任何 hook，没有“等待权限确认”“等待输入”这类实时状态。会话状态只靠会话文件推断，延迟几秒；超过 15 分钟没有新内容的“运行中”显示为“长时间无活动”。
+- **不写一轮结果记录的版本**：较早的 Qwen Code 不写 `turn_result`。这样的会话有提问就一直是运行中（和 WorkBuddy、CodeBuddy 没写结束记录时一样），“跑完了”“出错中断”都不会发；“卡住了”打开时，会话停下后超过阈值会提醒一次。
+- **托管会话不读**：文件开头是托管会话记录的，不显示，在诊断页计数“托管会话（格式不支持，没有读取）”；它的子代理文件也不读。
+- **0.4.0 以前的旧文件不读**（`tmp/<哈希>/chats/session-*.json`），也不计数。
+- **回退之后只显示当前分支**：Qwen Code 回退（`/rewind`）、改写后重发、删除消息组之后，被放弃的分支上的节点移除。**被放弃的分支上的用量不再计入统计**，虽然那些调用实际发生过。当前分支按 Qwen Code 自己的规则求：从文件里最后一条对话记录往回走；走到文件里没有的父记录时停下，更早的记录不显示（诊断页的未识别记录里计为 `qwen:history-gap`）。
+- **`/branch` 复制出来的会话带着原会话的内容和用量**：跨会话相加（统计页的总量、按项目、按来源）时，复制过来的那部分会重复计算。
+- 一个节点被放弃之后，线程里又出现了很多后来的内容（超过约 26 万个字符的详情），它才回到当前分支时，节点照常显示，但内容可能标为读不出（和 WorkBuddy、CodeBuddy 相同）。被放弃的分支回到当前分支时（Qwen Code 的操作不会这样做），它的结果可能再通知一次。
+- **同一个 id 的多行**（Qwen Code 当前版本不写，较早或其他写入者可能写）：只有回复会合并成一条；其他记录的这种后续行忽略，在诊断页的未识别记录里计为 `qwen:fragment-ignored`。
+- **子代理的用量**：子代理的记录上没有认证方式，输出一律按“认证方式未知”的那一种算法换算，可能和 Qwen Code 自己算的不同。子代理的说明文件写着一个对不上任何调用的派发 id 时，这个线程挂在会话下，不连线（不再按线程 id 末尾去猜）。
+- **按文件看**：没有逐个核对 Qwen Code 各工具的参数名。按保守的对照表认：工具名里有 `write` 的算写，有 `edit` 或 `replace` 的算改，有 `read` 的算读（例如 `read_file`、`write_file`、`replace`、`edit`，名字未经核对）；路径参数依次试 `file_path`、`absolute_path`、`path`。其他工具（命令行、搜索、子代理等）不算文件操作。
+- **找会话的工作目录时，超过 64 KiB 的行跳过**（例如一条很长的压缩历史）：这时项目取自后面的记录。
+- 文件被重写（例如删除消息组）后整个重新存一遍、会话重新推导；旧的那份不回收；一次去掉很多节点时服务会短暂不响应。这几条和上一节一样，见“DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作”一节“限制”里的“文件被重写”。文件一时打不开不算重写，下次扫描再读。
+- Qwen Code 的钩子、`workflows/`、`tmp/`、按项目各放一份的输出目录（见上）都不读。
+- **从 0.3.0 退回 0.2.0**：存过 Qwen Code 的会话之后，再用 0.2.0 打开同一个数据库，没有测试过。
 
 ## 按文件看
 
@@ -409,7 +463,7 @@ node packages/server/dist/cli.js hooks uninstall --cursor    # 只移除本安�
 | 新建 | ⚠️ `Write` 分不清新建还是覆盖，统一显示为“写入” | ✅ | ⚠️ 分不清，算作“改” |
 | 删除 | ❌ 没有专用工具 | ✅ | ✅ `delete_file` |
 
-Gemini CLI（`read_file`、`write_file`、`replace` 等）、Grok（`read_file`、`write`、`search_replace`、`apply_patch` 等）、Copilot CLI（`view`、`create`、`edit`、`apply_patch`）的读、写、改工具同样计入；它们的工具名和参数名取自公开资料，未经真实数据核对。DeepSeek、WorkBuddy、CodeBuddy、豆包的对照表是按常见写法猜的，同样未经核对，具体认哪些名字见“DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作”一节的“限制”。
+Gemini CLI（`read_file`、`write_file`、`replace` 等）、Grok（`read_file`、`write`、`search_replace`、`apply_patch` 等）、Copilot CLI（`view`、`create`、`edit`、`apply_patch`）的读、写、改工具同样计入；它们的工具名和参数名取自公开资料，未经真实数据核对。DeepSeek、WorkBuddy、CodeBuddy、豆包、Qwen Code 的对照表是按常见写法猜的，同样未经核对，具体认哪些名字见“DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作”和“Qwen Code”两节的“限制”。
 
 ## 统计
 
@@ -439,7 +493,7 @@ token 的三类：
 
 - 两家原始记录里的“输入”含义不同（Claude Code 的不含缓存读取，Codex 的包含），所以这里拆开再归类，否则两边的数字没法比。会话页和复盘视角里的 token 用的是同一套分类。
 - Cursor 的数据库不记录每一步的 token（计数全为 0），所以 Cursor 的 token 显示为“—”。
-- Gemini CLI、Grok、Copilot CLI 的归类方法和限制（Copilot CLI 只有会话总用量）见“Gemini CLI、Grok、Copilot CLI”一节。
+- Gemini CLI、Grok、Copilot CLI 的归类方法和限制（Copilot CLI 只有会话总用量）见“Gemini CLI、Grok、Copilot CLI”一节；DeepSeek、WorkBuddy、CodeBuddy、豆包的见“DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作”一节，Qwen Code 的见“Qwen Code”一节（`/branch` 复制出来的会话跨会话相加时会重复计算）。
 - 不换算成金额：各家的价格和套餐不同。
 - 工具名按各来源自己的叫法显示，不跨来源合并（`Bash`、`exec`、`run_terminal_command_v2` 不是同一个东西）。各来源的对比用的是每轮中位时长、每轮平均调用数、失败率这类不依赖名字的指标。
 - “最慢的 10 次调用”每一行可以点开那个会话（目前不会自动定位到那一步）。“最常失败的工具”里调用不足 5 次的不上榜。
@@ -560,15 +614,15 @@ token 的三类：
 | 出错中断 | ✅ 用户中断；接口报错需要装 hooks 才看得出来 | ✅ | ⚠️ 只有中止时正好有工具在运行才看得出来，否则会被当成“跑完了” |
 | 卡住了 | ✅ | ✅ | ✅ |
 
-只读会话文件的七个来源没有 hooks，都没有“等你确认权限”；其余几种按会话文件判断，晚几秒，能不能用取决于文件里有没有一轮结束和出错的记号：
+只读会话文件的八个来源没有 hooks，都没有“等你确认权限”；其余几种按会话文件判断，晚几秒，能不能用取决于文件里有没有一轮结束和出错的记号：
 
-| | Gemini CLI | Grok | Copilot CLI | DeepSeek | WorkBuddy、CodeBuddy | 豆包 |
-| --- | --- | --- | --- | --- | --- | --- |
-| 跑完了 | ✅ | ❌ 会话一直是运行中 | ❌ 会话只有运行中和已结束 | ✅ | ⚠️ 只在工具写了一轮结束的记录时 | ❌ 同 Grok |
-| 出错中断 | ❌ 文件里没有出错的记号 | ❌ | ⚠️ 被中断的一轮，只在中断后两分钟内会话退出时 | ✅ 出错、被中止、中断 | ⚠️ 只在结束记录带错误时 | ❌ |
-| 卡住了 | ✅ | ⚠️ 会话停下后超过阈值都会提醒一次 | ⚠️ 同 Grok，直到会话退出 | ✅ | 写了结束记录时 ✅，否则同 Grok | ⚠️ 同 Grok（“停下”按文件不再出现新行算） |
+| | Gemini CLI | Grok | Copilot CLI | DeepSeek | WorkBuddy、CodeBuddy | 豆包 | Qwen Code |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 跑完了 | ✅ | ❌ 会话一直是运行中 | ❌ 会话只有运行中和已结束 | ✅ | ⚠️ 只在工具写了一轮结束的记录时 | ❌ 同 Grok | ⚠️ 只在 Qwen Code 写了一轮的结果记录时（较早的版本不写） |
+| 出错中断 | ❌ 文件里没有出错的记号 | ❌ | ⚠️ 被中断的一轮，只在中断后两分钟内会话退出时 | ✅ 出错、被中止、中断 | ⚠️ 只在结束记录带错误时 | ❌ | ⚠️ 出错、被取消；同样只在写了结果记录时 |
+| 卡住了 | ✅ | ⚠️ 会话停下后超过阈值都会提醒一次 | ⚠️ 同 Grok，直到会话退出 | ✅ | 写了结束记录时 ✅，否则同 Grok | ⚠️ 同 Grok（“停下”按文件不再出现新行算） | 写了结果记录时 ✅，否则同 Grok |
 
-“原地打转”“失败扎堆”在这些来源上都照常。细节见“Gemini CLI、Grok、Copilot CLI”和“DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作”两节的“限制”。
+“原地打转”“失败扎堆”在这些来源上都照常。细节见“Gemini CLI、Grok、Copilot CLI”“DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作”“Qwen Code”三节的“限制”。
 
 ## Hooks（可选）
 
@@ -619,11 +673,12 @@ agent-canvas 没有运行时，HTTP hook 连接失败会立刻报错，而 Claud
 - 数据库：文件大小；数据库整理（压缩旧数据）的进度；回收空间是否完成，被跳过时说明原因和补救办法；检索索引是已建好、正在建（已建 / 总数）还是失败（下次启动自动重试）；有损坏的数据时给出条数。详见下文“数据库的大小与整理”。
 - Hooks：是否收到过 hook、最近一次收到的时间（超过 10 分钟没有收到时提示）；每个事件收到的次数和最近一次的时间；以及 14 个事件中哪些从未收到过（装了 hooks 但某些事件一直没出现，通常只是还没有触发它的操作，例如 `PermissionDenied`）。Codex 会话目录存在（即使还没有 Codex 会话）或有 Codex 数据时按来源分成 Claude Code 和 Codex 两部分（只装了 Claude Code 的机器上不出现 Codex）；Codex 一栏先显示一行 Codex 会话目录及它是否存在，再按它自己的 11 个事件计算从未收到的事件；一个 Codex hook 都没收到时提示 Codex hooks 尚未安装或尚未在 Codex 里确认信任。
 - Hooks 一栏的最后一行是“被丢弃的外来 hook 调用”：自服务启动以来（重启后归零），Grok、Copilot CLI 调用了为 Claude Code / Cursor 安装的 hook、被服务认出并丢弃的次数（见“钩子串扰”）。
-- Gemini CLI、Grok、Copilot CLI、DeepSeek、WorkBuddy、CodeBuddy、豆包：目录存在、已有会话或读到未识别记录时，各有一栏：读取的目录及它是否存在（目录在服务启动之后才出现时显示“存在，但……尚未读取”，重启服务后读取）、会话数、该来源的未识别记录（类型以 `gemini:`、`grok:`、`copilot:`、`deepseek:`、`workbuddy:`、`codebuddy:`、`doubao:` 开头，同样也列在下面的总表里）。这些来源未经真实数据核对，显示不对时先看这里。后四个来源的一栏按情况多出几行：
+- Gemini CLI、Grok、Copilot CLI、DeepSeek、WorkBuddy、CodeBuddy、豆包、Qwen Code：目录存在、已有会话或读到未识别记录时，各有一栏：读取的目录及它是否存在（目录在服务启动之后才出现时显示“存在，但……尚未读取”，重启服务后读取）、会话数、该来源的未识别记录（类型以 `gemini:`、`grok:`、`copilot:`、`deepseek:`、`workbuddy:`、`codebuddy:`、`doubao:`、`qwen:` 开头，同样也列在下面的总表里）。这些来源未经真实数据核对，显示不对时先看这里。后五个来源的一栏按情况多出几行：
   - 有几个读取的目录时（WorkBuddy 的两个根、豆包的两个变体）：“读取的目录 1：……（存在 / 不存在）”逐个列出。
   - DeepSeek：“有其他格式版本文件（不读）的会话目录：N 个”；Node 不支持解压时，目录行写“存在，但无法读取，原因见下”，下面一行警告“无法读取：需要 Node 22.15 或更高”。
   - WorkBuddy、CodeBuddy、豆包：“在另一个目录或配置里重复出现、只读了一份的会话：N 个”。
   - 豆包：“时间只能取自文件修改时间的线程：N 个”“没有主代理或有多个主代理、没有读取的对话：N 个”。
+  - Qwen Code：有托管会话时，一行警告“托管会话（格式不支持，没有读取）：N 个”；没有时不出这一行。
 - 导入失败：读取或处理失败的文件、错误信息和时间。
 - 未识别的记录类型：每种类型的次数和一条样例（样例可能含对话内容，展开后才显示）。
 - 文件读取进度：已记录的文件总数和尚未读完的文件（已读 / 总字节）。Codex 文件的路径以 `codex:` 开头，前面带 Codex 标记（导入失败一节同样）。
@@ -643,6 +698,7 @@ agent-canvas 没有运行时，HTTP hook 连接失败会立刻报错，而 Claud
 | `AGENT_CANVAS_WORKBUDDY_DIR` | `$WORKBUDDY_CONFIG_DIR`，否则 `~/.workbuddy` 和 `~/.workbuddy-ai` 两个都读 | WorkBuddy 的目录，只能设一个（读其中的 `projects`）；空字符串表示不读取 |
 | `AGENT_CANVAS_CODEBUDDY_DIR` | `$CODEBUDDY_CONFIG_DIR`，否则 `~/.codebuddy` | CodeBuddy Code 的目录（读其中的 `projects`）；空字符串表示不读取 |
 | `AGENT_CANVAS_DOUBAO_DIR` | Windows：`%LOCALAPPDATA%\DoubaoWork\User Data` 和 `%LOCALAPPDATA%\Doubao\User Data`；macOS：`~/Library/Application Support/DoubaoWork` 和 `…/Doubao`；其他系统没有 | 豆包工作的“User Data”这一层目录，只能设一个；空字符串表示不读取 |
+| `AGENT_CANVAS_QWEN_DIR` | `$QWEN_RUNTIME_DIR`，否则 `$QWEN_HOME`，否则 `~/.qwen` | Qwen Code 的运行时目录（读其中的 `projects`）；开头的 `~` 是主目录，相对路径按服务的工作目录解析；空字符串表示不读取 |
 | `AGENT_CANVAS_SETTINGS_FILE` | `~/.claude/settings.json` | `hooks install` / `hooks uninstall` 修改的 settings 文件 |
 | `AGENT_CANVAS_CODEX_HOOKS_FILE` | `~/.codex/hooks.json` | `hooks install --codex` / `hooks uninstall --codex` 修改的文件 |
 | `AGENT_CANVAS_CURSOR_HOOKS_FILE` | `~/.cursor/hooks.json` | `hooks install --cursor` / `hooks uninstall --cursor` 修改的文件 |
@@ -711,6 +767,7 @@ agent-canvas compact          # 从源码运行时：node packages/server/dist/c
 - Cursor：会话很长（上万步）时，第一次导入需要一段时间，在后台进行。
 - Gemini CLI、Grok、Copilot CLI：读法按公开资料写成，**未经真实数据核对**；各自的限制见上文“Gemini CLI、Grok、Copilot CLI”一节。
 - DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作：同样按公开资料写成，**未经真实数据核对**；DeepSeek 只读第 4 版文件且需要 Node 22.15 或更高，WorkBuddy / CodeBuddy 只显示当前分支，豆包没有用量、模型、思考和工作目录。详见上文“DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作”一节。
+- Qwen Code：按 `v0.27.4` 的开源代码写成，**未经真实数据核对**；只显示当前分支，托管会话和 0.4.0 以前的文件不读，`/branch` 复制出来的会话跨会话相加时用量重复。详见上文“Qwen Code”一节。
 
 ## 开发
 

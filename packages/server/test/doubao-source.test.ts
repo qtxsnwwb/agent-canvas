@@ -50,7 +50,8 @@ const cfg = (doubaoDirs: string[] = [work, app]): Config =>
     deepseekDir: null,
     workbuddyDirs: [],
     codebuddyDir: null,
-    doubaoDirs, qwenDir: null,
+    doubaoDirs,
+    qwenDir: null,
   });
 const open = (): Store => {
   const s = openStore(':memory:');

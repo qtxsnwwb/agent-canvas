@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { FILE_ONLY_ORIGINS, ORIGINS } from '@agent-canvas/shared';
-import { loadConfig } from '../src/config.js';
+import { loadConfig, userPath } from '../src/config.js';
 import { KEY_PREFIXES, originOfKey } from '../src/sources/source.js';
 import { sourceDirsOf } from '../src/sources/dirs.js';
 
@@ -48,6 +48,19 @@ describe('qwenDir', () => {
     expect(loadConfig({ [name]: '~/a/b' }).qwenDir).toBe(path.join(home, 'a', 'b'));
     // A ~ that is not followed by a separator names a directory of that name, resolved like any relative path.
     expect(loadConfig({ [name]: '~other' }).qwenDir).toBe(path.resolve('~other'));
+  });
+
+  test('~\\ is the home directory on Windows only; elsewhere it is a relative path like any other (review Minor)', () => {
+    expect(userPath('~\\qwen-data', 'C:\\Users\\dev', 'win32')).toBe(path.join('C:\\Users\\dev', 'qwen-data'));
+    expect(userPath('~\\qwen-data', '/home/dev', 'linux')).toBe(path.resolve('~\\qwen-data'));
+    expect(userPath('~\\qwen-data', '/home/dev', 'darwin')).toBe(path.resolve('~\\qwen-data'));
+    // ~/ and a bare ~ on every platform.
+    for (const platform of ['win32', 'linux', 'darwin'] as const) {
+      expect(userPath('~', '/home/dev', platform), platform).toBe('/home/dev');
+      expect(userPath('~/q', '/home/dev', platform), platform).toBe(path.join('/home/dev', 'q'));
+    }
+    // Through loadConfig, on the platform the tests run on.
+    expect(loadConfig({ QWEN_HOME: '~\\q' }).qwenDir).toBe(process.platform === 'win32' ? path.join(home, 'q') : path.resolve('~\\q'));
   });
 
   test.each(['AGENT_CANVAS_QWEN_DIR', 'QWEN_RUNTIME_DIR', 'QWEN_HOME'])('%s: a relative path resolves against the working directory', (name) => {
