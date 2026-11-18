@@ -393,6 +393,27 @@ export function buddyTouches(toolName: string, input: unknown): RawTouch[] {
   return [];
 }
 
+// ---- Qwen Code ----
+
+/** Path arguments of a Qwen Code tool call, tried in this order (spec 9; unverified names). */
+const QWEN_PATH_KEYS = ['file_path', 'absolute_path', 'path'];
+
+/**
+ * The file a Qwen Code tool call names (spec 9, a conservative table, unverified against the product's tools): the
+ * action by the tool name (`write` -> write; `edit` / `replace` -> edit; `read` -> read; any other tool names no
+ * file), the path by the first path argument present (QWEN_PATH_KEYS order). Arguments that are not an object name none.
+ */
+export function qwenTouches(toolName: string, args: unknown): RawTouch[] {
+  const name = toolName.toLowerCase();
+  const action: FileAction | null = name.includes('write') ? 'write' : name.includes('edit') || name.includes('replace') ? 'edit' : name.includes('read') ? 'read' : null;
+  if (action === null || !isObject(args)) return [];
+  for (const key of QWEN_PATH_KEYS) {
+    const path = stringField(args, key);
+    if (path !== null) return [{ path, action }];
+  }
+  return [];
+}
+
 // ---- Doubao Work ----
 
 /**

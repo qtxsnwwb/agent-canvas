@@ -88,8 +88,8 @@ function usageOf(tokens: unknown): Usage | null {
   return { inputTokens: Math.max(0, num(tokens.input) - cached), cachedInputTokens: cached, outputTokens: num(tokens.output) + num(tokens.thoughts) };
 }
 
-/** A call's result: `functionResponse.response.output`, else `.error`, of its result parts (joined when several). */
-function outputOf(result: unknown): unknown {
+/** A call's result: `functionResponse.response.output`, else `.error`, of its result parts (joined when several). Also used by the Qwen Code normalizer. */
+export function outputOf(result: unknown): unknown {
   if (result === undefined || result === null) return undefined;
   if (typeof result === 'string') return result;
   const outs: unknown[] = [];
@@ -111,7 +111,8 @@ function callStatus(status: unknown): 'running' | 'succeeded' | 'failed' {
   return 'running';
 }
 
-function toolSummary(args: unknown): string {
+/** One-line summary of a call's arguments: the first known path / command / query argument, else the first string one. Also used by the Qwen Code normalizer. */
+export function toolSummary(args: unknown): string {
   if (!isObject(args)) return args === undefined || args === null ? '' : summarize(args);
   for (const k of SUMMARY_KEYS) {
     const v = str(args[k]);

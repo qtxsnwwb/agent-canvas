@@ -9,6 +9,7 @@ import { DoubaoNormalizer } from './doubao.js';
 import { GeminiNormalizer } from './gemini.js';
 import { GrokNormalizer } from './grok.js';
 import { Normalizer } from './normalizer.js';
+import { QwenNormalizer } from './qwen.js';
 import type { AgentNormalizer, BatchItem, BatchResult, NormalizeResult } from './types.js';
 
 /** How to make a fresh normalizer for each origin; null = that origin has none (its raw events are stored only). */
@@ -27,8 +28,7 @@ export const NORMALIZER_FACTORIES: NormalizerFactories = {
   workbuddy: () => new BuddyNormalizer('workbuddy'),
   codebuddy: () => new BuddyNormalizer('codebuddy'),
   doubao: () => new DoubaoNormalizer(),
-  // Filled by the task that adds its normalizer (plan qwen-code, Task 2).
-  qwen: null,
+  qwen: () => new QwenNormalizer(),
 };
 
 const originOf = (event: RawEvent): Origin => event.origin ?? 'claude';
