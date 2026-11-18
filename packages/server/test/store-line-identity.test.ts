@@ -58,7 +58,7 @@ describe('store dedupe hash', () => {
   }
 });
 
-test('only the Grok, DeepSeek, WorkBuddy, CodeBuddy and Doubao sources identify lines by offset', async () => {
+test('only the Grok, DeepSeek, WorkBuddy, CodeBuddy, Doubao and Qwen Code sources identify lines by offset', async () => {
   const dirs = { codex: path.join(tmp, 'codex'), gemini: path.join(tmp, 'gemini'), grok: path.join(tmp, 'grok'), copilot: path.join(tmp, 'copilot') };
   await fs.mkdir(dirs.codex, { recursive: true });
   await fs.mkdir(path.join(dirs.gemini, 'tmp'), { recursive: true });
@@ -68,9 +68,10 @@ test('only the Grok, DeepSeek, WorkBuddy, CodeBuddy and Doubao sources identify 
   await fs.mkdir(path.join(tmp, 'workbuddy', 'projects'), { recursive: true });
   await fs.mkdir(path.join(tmp, 'codebuddy', 'projects'), { recursive: true });
   await fs.mkdir(path.join(tmp, 'doubao'), { recursive: true });
+  await fs.mkdir(path.join(tmp, 'qwen', 'projects'), { recursive: true });
   const config = loadConfig(
     {},
-    { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: dirs.codex, deepseekDir: path.join(tmp, 'dsh'), workbuddyDirs: [path.join(tmp, 'workbuddy')], codebuddyDir: path.join(tmp, 'codebuddy'), doubaoDirs: [path.join(tmp, 'doubao')], qwenDir: null, geminiDir: dirs.gemini, grokDir: dirs.grok, copilotDir: dirs.copilot, cursorDbPath: path.join(tmp, 'state.vscdb') },
+    { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: dirs.codex, deepseekDir: path.join(tmp, 'dsh'), workbuddyDirs: [path.join(tmp, 'workbuddy')], codebuddyDir: path.join(tmp, 'codebuddy'), doubaoDirs: [path.join(tmp, 'doubao')], qwenDir: path.join(tmp, 'qwen'), geminiDir: dirs.gemini, grokDir: dirs.grok, copilotDir: dirs.copilot, cursorDbPath: path.join(tmp, 'state.vscdb') },
   );
   // zstd: true so the DeepSeek source exists whatever this Node has (it reads nothing here).
   const sources = fileSources(config, undefined, { zstd: true });
@@ -84,6 +85,7 @@ test('only the Grok, DeepSeek, WorkBuddy, CodeBuddy and Doubao sources identify 
     ['workbuddy', 'offset'],
     ['codebuddy', 'offset'],
     ['doubao', 'offset'],
+    ['qwen', 'offset'],
   ]);
   // Cursor is polled: its records go through the content-only hash (no file offsets at all).
   expect(pollSources(config).map((s) => 'lineIdentity' in s)).toEqual([false]);

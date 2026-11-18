@@ -33,6 +33,7 @@ import { isExistingDir, sourceDirOf, sourceDirsOf } from './sources/dirs.js';
 import { CopilotFileSource } from './sources/copilot/source.js';
 import { DeepSeekFileSource } from './sources/deepseek/source.js';
 import { DoubaoFileSource } from './sources/doubao/source.js';
+import { QwenFileSource } from './sources/qwen/source.js';
 import { zstdAvailable } from './sources/deepseek/zstd-frames.js';
 import { GeminiFileSource } from './sources/gemini/source.js';
 import { GrokFileSource } from './sources/grok/source.js';
@@ -163,10 +164,10 @@ export function fileSources(config: Config, store?: Store, caps: { zstd: boolean
   // Grok Build: likewise, only when <grokDir>/sessions exists at start.
   const grokSessions = sourceDirOf(config, 'grok');
   if (isExistingDir(grokSessions)) sources.push(new GrokFileSource(grokSessions!, store ? storeLookup(store, config.projectsDir) : undefined));
-  // DeepSeek, WorkBuddy and CodeBuddy share one project-id resolver: the first spelling of a directory that any of them
-  // meets (after the ids in the store and Claude Code's project directories, which still win) is the one all of them
-  // use, so one directory in two letter cases is one project even when two of them meet it in the same first scan. The
-  // older sources keep their own resolvers, unchanged. (Doubao Work has a fixed project.)
+  // DeepSeek, WorkBuddy, CodeBuddy and Qwen Code share one project-id resolver: the first spelling of a directory that
+  // any of them meets (after the ids in the store and Claude Code's project directories, which still win) is the one
+  // all of them use, so one directory in two letter cases is one project even when two of them meet it in the same
+  // first scan. The older sources keep their own resolvers, unchanged. (Doubao Work has a fixed project.)
   const cnLookup = store ? storeLookup(store, config.projectsDir) : undefined;
   const cnProjects = new ProjectIdResolver(() => cnLookup?.knownProjectIds() ?? []);
   // DeepSeek Harness: only when <deepseekDir>/sessions exists at start and node:zlib has zstd (Node >= 22.15).
@@ -182,6 +183,9 @@ export function fileSources(config: Config, store?: Store, caps: { zstd: boolean
   // profiles' `.sessions` directories are found below each root (a profile that appears later: by the full scan).
   const doubaoRoots = sourceDirsOf(config, 'doubao').filter((d) => isExistingDir(d));
   if (doubaoRoots.length > 0) sources.push(new DoubaoFileSource(doubaoRoots, store ? storeLookup(store, config.projectsDir) : undefined));
+  // Qwen Code: only when <qwenDir>/projects exists at start; shares the resolver above (spec 3.3).
+  const qwenProjects = sourceDirsOf(config, 'qwen')[0] ?? null;
+  if (isExistingDir(qwenProjects)) sources.push(new QwenFileSource(qwenProjects!, store ? storeLookup(store, config.projectsDir) : undefined, cnProjects));
   return sources;
 }
 
