@@ -32,14 +32,14 @@ afterEach(async () => {
   await fs.rm(tmp, { recursive: true, force: true, maxRetries: 10 });
 });
 
-type NewDirs = Pick<Config, 'deepseekDir' | 'workbuddyDirs' | 'codebuddyDir' | 'doubaoDirs'>;
-const NEW_OFF: NewDirs = { deepseekDir: null, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [] };
+type NewDirs = Pick<Config, 'deepseekDir' | 'workbuddyDirs' | 'codebuddyDir' | 'doubaoDirs' | 'qwenDir'>;
+const NEW_OFF: NewDirs = { deepseekDir: null, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [], qwenDir: null };
 function configFor(dirs: { geminiDir: string | null; grokDir: string | null; copilotDir: string | null } & Partial<NewDirs>): Config {
   const n = { ...NEW_OFF, ...dirs };
-  return loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, cursorDbPath: null, geminiDir: dirs.geminiDir, grokDir: dirs.grokDir, copilotDir: dirs.copilotDir, deepseekDir: n.deepseekDir, workbuddyDirs: n.workbuddyDirs, codebuddyDir: n.codebuddyDir, doubaoDirs: n.doubaoDirs });
+  return loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, cursorDbPath: null, geminiDir: dirs.geminiDir, grokDir: dirs.grokDir, copilotDir: dirs.copilotDir, deepseekDir: n.deepseekDir, workbuddyDirs: n.workbuddyDirs, codebuddyDir: n.codebuddyDir, doubaoDirs: n.doubaoDirs, qwenDir: n.qwenDir });
 }
 const OFF = { dir: null, present: false, reading: false, sessionCount: 0 };
-const NEW_SOURCES_OFF = { deepseek: OFF, workbuddy: OFF, codebuddy: OFF, doubao: OFF };
+const NEW_SOURCES_OFF = { deepseek: OFF, workbuddy: OFF, codebuddy: OFF, doubao: OFF, qwen: OFF };
 async function serve(config: Config): Promise<{ app: FastifyInstance; pipeline: Pipeline }> {
   const store = openStore(':memory:');
   stores.push(store);
@@ -132,4 +132,19 @@ test('the four more sources configured but absent: the directories they would re
   // A second root that exists makes the source present (stat only).
   await fs.mkdir(path.join(at('.workbuddy-ai'), 'projects'), { recursive: true });
   expect((await diagnostics(app)).sources?.workbuddy).toMatchObject({ present: true, reading: false, dirs: [{ present: false }, { present: true }] });
+});
+
+test('Qwen Code with no directory: the entry exists, absent, not read, no sessions', async () => {
+  const { app } = await serve(configFor({ geminiDir: null, grokDir: null, copilotDir: null }));
+  expect((await diagnostics(app)).sources?.qwen).toEqual({ dir: null, present: false, reading: false, sessionCount: 0 });
+});
+
+test('Qwen Code configured but absent: <qwenDir>/projects, not present, not read; nothing created', async () => {
+  const qwenDir = path.join(tmp, '.qwen');
+  const { app } = await serve(configFor({ geminiDir: null, grokDir: null, copilotDir: null, qwenDir }));
+  expect((await diagnostics(app)).sources?.qwen).toEqual({ dir: path.join(qwenDir, 'projects'), present: false, reading: false, sessionCount: 0 });
+  await expect(fs.stat(qwenDir)).rejects.toThrow();
+  // The directory appearing later makes it present (stat only), not read.
+  await fs.mkdir(path.join(qwenDir, 'projects'), { recursive: true });
+  expect((await diagnostics(app)).sources?.qwen).toEqual({ dir: path.join(qwenDir, 'projects'), present: true, reading: false, sessionCount: 0 });
 });

@@ -6,11 +6,11 @@ import { expect, test } from 'vitest';
 import { loadConfig } from '../src/config.js';
 
 // Guard: no test may reach the real directories of Gemini CLI, Grok, Copilot CLI, DeepSeek Harness, WorkBuddy, CodeBuddy
-// Code or Doubao Work (plans more-sources and more-sources-cn, Global Constraints).
+// Code, Doubao Work or Qwen Code (plans more-sources, more-sources-cn and qwen-code, Global Constraints).
 
-const TOOL_KEYS = ['geminiDir', 'grokDir', 'copilotDir', 'deepseekDir', 'workbuddyDirs', 'codebuddyDir', 'doubaoDirs'] as const;
+const TOOL_KEYS = ['geminiDir', 'grokDir', 'copilotDir', 'deepseekDir', 'workbuddyDirs', 'codebuddyDir', 'doubaoDirs', 'qwenDir'] as const;
 /** Tests of the resolution rules themselves: they read the resolved paths, never the directories. */
-const RESOLUTION_TESTS = new Set(['config.test.ts', 'config-more-sources.test.ts', 'config-more-sources-cn.test.ts', 'no-real-tool-dirs.test.ts']);
+const RESOLUTION_TESTS = new Set(['config.test.ts', 'config-more-sources.test.ts', 'config-more-sources-cn.test.ts', 'config-qwen.test.ts', 'no-real-tool-dirs.test.ts']);
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const home = path.resolve(os.homedir()).toLowerCase();
 const underHome = (p: string | null | readonly string[]): boolean =>
@@ -33,7 +33,7 @@ function loadConfigCalls(src: string): string[] {
   return out;
 }
 
-test('every loadConfig in the tests either reads process.env (guarded by the vitest env) or overrides all seven tool dirs', () => {
+test('every loadConfig in the tests either reads process.env (guarded by the vitest env) or overrides all eight tool dirs', () => {
   const offenders: string[] = [];
   for (const file of fs.readdirSync(testDir).filter((f) => f.endsWith('.ts') && !RESOLUTION_TESTS.has(f))) {
     for (const args of loadConfigCalls(fs.readFileSync(path.join(testDir, file), 'utf8'))) {
@@ -65,6 +65,7 @@ test('the release scripts start the CLI with every tool directory off and a temp
     Object.assign(process.env, {
       DSH_HOME: path.join(tmp, 'x-dsh'), WORKBUDDY_CONFIG_DIR: path.join(tmp, 'x-wb'), CODEBUDDY_CONFIG_DIR: path.join(tmp, 'x-cb'),
       GEMINI_CLI_HOME: path.join(tmp, 'x-gem'), GROK_HOME: path.join(tmp, 'x-grok'), COPILOT_HOME: path.join(tmp, 'x-cop'),
+      QWEN_RUNTIME_DIR: path.join(tmp, 'x-qwen-rt'), QWEN_HOME: path.join(tmp, 'x-qwen'),
       LOCALAPPDATA: path.join(tmp, 'x-local'),
     });
     // ...and the caller's environment did not turn any tool off (the Vitest env does).
@@ -95,7 +96,7 @@ test('the release scripts start the CLI with every tool directory off and a temp
 
 test('configs built as tests build them resolve no tool dir under the real home', () => {
   const fromEnv = loadConfig(process.env);
-  const fromTest = loadConfig({}, { projectsDir: path.join(os.tmpdir(), 'p'), dataDir: path.join(os.tmpdir(), 'd'), geminiDir: null, grokDir: null, copilotDir: null, deepseekDir: null, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [] });
+  const fromTest = loadConfig({}, { projectsDir: path.join(os.tmpdir(), 'p'), dataDir: path.join(os.tmpdir(), 'd'), geminiDir: null, grokDir: null, copilotDir: null, deepseekDir: null, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [], qwenDir: null });
   for (const c of [fromEnv, fromTest]) for (const k of TOOL_KEYS) expect(underHome(c[k]), k).toBe(false);
   // Without the overrides they would: this is what the guard above prevents.
   expect(TOOL_KEYS.some((k) => underHome(loadConfig({})[k]))).toBe(true);

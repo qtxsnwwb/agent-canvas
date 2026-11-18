@@ -29,6 +29,7 @@ const SOURCE_SUBDIR: Record<FileOnlyOrigin, string> = {
   workbuddy: 'projects',
   codebuddy: 'projects',
   doubao: '',
+  qwen: 'projects',
 };
 
 /** The single-directory file-only origins that sourceDirOf answers for (the three added by the more-sources plan). */
@@ -53,16 +54,18 @@ function toolDirsOf(config: Pick<Config, ToolDirKey>, origin: FileOnlyOrigin): r
     case 'workbuddy': return config.workbuddyDirs;
     case 'codebuddy': return [config.codebuddyDir];
     case 'doubao': return config.doubaoDirs;
+    case 'qwen': return [config.qwenDir];
   }
 }
 
 /** The Config keys naming the file-only tools' directories. */
-export type ToolDirKey = 'geminiDir' | 'grokDir' | 'copilotDir' | 'deepseekDir' | 'workbuddyDirs' | 'codebuddyDir' | 'doubaoDirs';
+export type ToolDirKey = 'geminiDir' | 'grokDir' | 'copilotDir' | 'deepseekDir' | 'workbuddyDirs' | 'codebuddyDir' | 'doubaoDirs' | 'qwenDir';
 
 /**
  * Every directory the source of a file-only origin reads, in configured order: `<geminiDir>/tmp`, `<grokDir>/sessions`,
  * `<copilotDir>/session-state`, `<deepseekDir>/sessions`, each `<workbuddyDir>/projects`, `<codebuddyDir>/projects`,
- * each Doubao "User Data" directory itself. Empty when that origin is disabled. Never created or read here.
+ * each Doubao "User Data" directory itself, `<qwenDir>/projects`. Empty when that origin is disabled. Never created or
+ * read here.
  */
 export function sourceDirsOf(config: Pick<Config, ToolDirKey>, origin: FileOnlyOrigin): string[] {
   const sub = SOURCE_SUBDIR[origin];

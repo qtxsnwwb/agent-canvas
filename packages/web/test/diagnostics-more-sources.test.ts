@@ -19,7 +19,7 @@ const base: Diagnostics = {
 };
 const off = { dir: null, present: false, reading: false, sessionCount: 0 };
 /** The four origins of plan more-sources-cn, not configured. */
-const newOff = { deepseek: off, workbuddy: off, codebuddy: off, doubao: off };
+const newOff = { deepseek: off, workbuddy: off, codebuddy: off, doubao: off, qwen: off };
 const rec = (recordType: string, count = 1) => ({ recordType, count, sample: '' });
 
 test('originUnknownRecords：按来源前缀分开，互不混入，也不混入 Cursor 的', () => {
@@ -139,6 +139,26 @@ test('四个新来源的附加行：每个读取的目录、运行环境不支�
   ]);
 });
 
+test('Qwen Code：托管会话（不读）的个数出一行，为 0 时也出（不警告）；服务端没发时不出行；重复的会话照常出行', () => {
+  const q = { dir: '/h/.qwen/projects', present: true, reading: true, sessionCount: 5 };
+  expect(fileSourceDetailLines({ ...q, unsupportedSessions: 2 })).toEqual([
+    { text: '托管会话（格式不支持，没有读取）：2 个', warn: true },
+  ]);
+  expect(fileSourceDetailLines({ ...q, unsupportedSessions: 0 })).toEqual([
+    { text: '托管会话（格式不支持，没有读取）：0 个', warn: false },
+  ]);
+  expect(fileSourceDetailLines(q)).toEqual([]);
+  expect(fileSourceDetailLines({ ...q, unsupportedSessions: 0, duplicateSessions: 1 })).toEqual([
+    { text: '在另一个目录或配置里重复出现、只读了一份的会话：1 个', warn: false },
+    { text: '托管会话（格式不支持，没有读取）：0 个', warn: false },
+  ]);
+  expect(fileSourceDirLine('qwen', q)).toBe('Qwen Code 会话目录：/h/.qwen/projects（存在）');
+  // The block is shown once the directory exists, after 豆包 (ORIGINS order).
+  const d: Diagnostics = { ...base, sources: { gemini: off, grok: off, copilot: off, ...newOff, doubao: { ...off, present: true, dir: '/h/d' }, qwen: { ...q, unsupportedSessions: 1 } } };
+  expect(fileSourceBlocks(d).map((b) => b.origin)).toEqual(['doubao', 'qwen']);
+  expect(fileSourceBlocks(d)[1]).toMatchObject({ unsupportedSessions: 1, sessionCount: 5 });
+});
+
 test('DeepSeek 在不支持解压的 Node 上：目录行说明原因，不说“启动后才出现”', () => {
   const s = { dir: '/h/.dsh/sessions', present: true, reading: false, sessionCount: 0, unavailable: '需要 Node 22.15 或更高' };
   // The reason is said once, in the warning line below it (Task 8 review M4).
@@ -159,12 +179,15 @@ test('遮蔽：四个新来源的目录、每个根和不可用原因都被遮�
       workbuddy: { dir: '/home/dev42/.workbuddy/projects', present: true, reading: true, sessionCount: 1, duplicateSessions: 1, dirs: [{ dir: '/home/dev42/.workbuddy/projects', present: true }, { dir: '/home/dev42/.workbuddy-ai/projects', present: true }] },
       codebuddy: { dir: '/home/dev42/.codebuddy/projects', present: true, reading: true, sessionCount: 2 },
       doubao: { dir: '/home/dev42/Library/Application Support/DoubaoWork', present: true, reading: true, sessionCount: 3, mtimeFallbacks: 1, unknownSessions: 2, duplicateSessions: 0 },
+      qwen: { dir: '/home/dev42/.qwen/projects', present: true, reading: true, sessionCount: 4, unsupportedSessions: 1 },
     },
   };
   const out = maskDiagnostics(d, m);
   expect(JSON.stringify(out.sources)).not.toContain('dev42');
+  expect(out.sources?.qwen.dir).toContain('.qwen');
   expect(out.sources?.deepseek).toMatchObject({ legacyFiles: 1, present: true, reading: false });
   expect(out.sources?.workbuddy).toMatchObject({ duplicateSessions: 1, sessionCount: 1 });
   expect(out.sources?.codebuddy.sessionCount).toBe(2);
   expect(out.sources?.doubao).toMatchObject({ mtimeFallbacks: 1, unknownSessions: 2, duplicateSessions: 0 });
+  expect(out.sources?.qwen).toMatchObject({ unsupportedSessions: 1, sessionCount: 4, present: true, reading: true });
 });

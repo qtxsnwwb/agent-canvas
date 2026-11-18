@@ -6,7 +6,7 @@
 
 <p align="center">
   Agent Canvas 是一个跑在你本机的小服务。<br/>
-  它读取 Claude Code、OpenAI Codex、Cursor 的会话记录（Gemini CLI、Grok、GitHub Copilot CLI、DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作也能读，尚未经真实数据核对），在浏览器里实时画出每个会话的来龙去脉：<br/>
+  它读取 Claude Code、OpenAI Codex、Cursor 的会话记录（Gemini CLI、Grok、GitHub Copilot CLI、DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作、Qwen Code 也能读，尚未经真实数据核对），在浏览器里实时画出每个会话的来龙去脉：<br/>
   问了什么、调了哪些工具、派了哪些子代理、哪一步慢、哪一步失败。
 </p>
 
@@ -20,6 +20,7 @@
   <img src="https://img.shields.io/badge/Cursor-%E2%9C%93-14B8A6" alt="Cursor"/>
   <img src="https://img.shields.io/badge/Gemini%20CLI%20%C2%B7%20Grok%20%C2%B7%20Copilot%20CLI-%E6%9C%AA%E6%A0%B8%E5%AF%B9-lightgrey" alt="Gemini CLI · Grok · Copilot CLI：未核对"/>
   <img src="https://img.shields.io/badge/DeepSeek%20%C2%B7%20WorkBuddy%20%C2%B7%20CodeBuddy%20%C2%B7%20%E8%B1%86%E5%8C%85-%E6%9C%AA%E6%A0%B8%E5%AF%B9-lightgrey" alt="DeepSeek · WorkBuddy · CodeBuddy · 豆包：未核对"/>
+  <img src="https://img.shields.io/badge/Qwen%20Code-%E6%9C%AA%E6%A0%B8%E5%AF%B9-lightgrey" alt="Qwen Code：未核对"/>
   <img src="https://img.shields.io/badge/%E6%95%B0%E6%8D%AE-%E5%8F%AA%E5%9C%A8%E6%9C%AC%E6%9C%BA-2EA44F" alt="数据只在本机"/>
 </p>
 
@@ -49,7 +50,7 @@
 主线派出的子代理挂在对应的轮次下面，可以展开看它内部的每一步；后台运行的子代理会一直跟到它真正结束。
 
 ### 🧩 多种工具，一个页面
-Claude Code、Codex、Cursor 的会话放在一起，Gemini CLI、Grok、Copilot CLI、DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作的也能放进来（这七个还没用真实数据核对过，见手册的 [Gemini CLI、Grok、Copilot CLI](./docs/manual.md#gemini-cligrokcopilot-cli) 和 [DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作](./docs/manual.md#deepseek-harnessworkbuddycodebuddy-code豆包工作)）。同一个工作目录下的会话归到同一个项目，每个会话带来源标记，首页可以按来源筛选。
+Claude Code、Codex、Cursor 的会话放在一起，Gemini CLI、Grok、Copilot CLI、DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作、Qwen Code 的也能放进来（这八个还没用真实数据核对过，见手册的 [Gemini CLI、Grok、Copilot CLI](./docs/manual.md#gemini-cligrokcopilot-cli)、[DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作](./docs/manual.md#deepseek-harnessworkbuddycodebuddy-code豆包工作) 和 [Qwen Code](./docs/manual.md#qwen-code)）。同一个工作目录下的会话归到同一个项目，每个会话带来源标记，首页可以按来源筛选。
 
 ### ⚡ 接近实时
 只靠会话文件就能工作，延迟几秒。装上 hooks 之后状态变化在 1 秒内到达，还能看到“正在等你确认权限”。
@@ -211,7 +212,20 @@ agent-canvas hooks install --cursor
 | “消耗异常高”检测 | ✅ | ✅ | ✅ | ❌ 不参与 |
 | hooks、实时状态、等待权限确认 | ❌ 不做 | ❌ 不做 | ❌ 不做 | ❌ 不做 |
 
-DeepSeek Harness 需要 Node 22.15 或更高（更早的 Node 上这个来源不启动，诊断页会写明）。豆包的普通聊天和在云电脑上执行的任务本机不留记录，读不到。千问办公、TRAE CLI、Qwen Code、CodeBuddy 的 IDE 插件不支持。细节和限制见[使用手册 · DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作](./docs/manual.md#deepseek-harnessworkbuddycodebuddy-code豆包工作)。
+DeepSeek Harness 需要 Node 22.15 或更高（更早的 Node 上这个来源不启动，诊断页会写明）。豆包的普通聊天和在云电脑上执行的任务本机不留记录，读不到。千问办公、TRAE CLI、CodeBuddy 的 IDE 插件不支持。细节和限制见[使用手册 · DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作](./docs/manual.md#deepseek-harnessworkbuddycodebuddy-code豆包工作)。
+
+还有 Qwen Code（阿里的命令行编码代理），同样只读会话文件、**未经真实数据核对**（读法依据它 `v0.27.4` 的开源代码，见 [`docs/formats/qwen-code.md`](./docs/formats/qwen-code.md)）：
+
+| 能力 | Qwen Code |
+|------|:---------:|
+| 数据来源 | 会话文件 `~/.qwen/projects`（或 `$QWEN_RUNTIME_DIR`、`$QWEN_HOME` 下的 `projects`） |
+| 轮次、工具调用、回复、思考、子代理 | ⚠️ 未核对，回退后只显示当前分支 |
+| token 用量 | ⚠️ 每次回复；`/branch` 复制出来的会话跨会话相加时重复 |
+| “消耗异常高”检测 | ✅ |
+| 跑完了、出错中断 | ⚠️ 只在 Qwen Code 写了一轮的结果记录时（较早的版本不写，会话一直是运行中） |
+| hooks、实时状态、等待权限确认 | ❌ 不做 |
+
+托管会话和 0.4.0 以前的旧文件不读。细节和限制见[使用手册 · Qwen Code](./docs/manual.md#qwen-code)。
 
 | 平台 | 状态 |
 |------|------|
@@ -227,6 +241,7 @@ flowchart LR
   C["Cursor<br/>state.vscdb"] -->|只读轮询| S
   G["Gemini CLI · Grok · Copilot CLI<br/>~/.gemini · ~/.grok · ~/.copilot"] -->|会话文件| S
   N["DeepSeek · WorkBuddy · CodeBuddy · 豆包<br/>~/.dsh · ~/.workbuddy · ~/.codebuddy · 豆包的数据目录"] -->|会话文件| S
+  Q["Qwen Code<br/>~/.qwen/projects"] -->|会话文件| S
   A -.->|hooks（可选）| S
   B -.->|hooks（可选）| S
   C -.->|hooks（可选）| S
@@ -234,7 +249,7 @@ flowchart LR
   S -->|WebSocket| W["浏览器里的画布"]
 ```
 
-服务监视 Claude Code、Codex（以及 Gemini CLI、Grok、Copilot CLI、DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作）的会话文件，每隔几秒只读地查一次 Cursor 的本地数据库，把各来源的记录归一成同一种图（节点和边），存进本地数据库，再通过 WebSocket 推给页面。原始记录也一并保存，升级后可以据此重新推导，不需要重新导入。
+服务监视 Claude Code、Codex（以及 Gemini CLI、Grok、Copilot CLI、DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作、Qwen Code）的会话文件，每隔几秒只读地查一次 Cursor 的本地数据库，把各来源的记录归一成同一种图（节点和边），存进本地数据库，再通过 WebSocket 推给页面。原始记录也一并保存，升级后可以据此重新推导，不需要重新导入。
 
 ## ⚙️ 配置
 
@@ -252,6 +267,7 @@ flowchart LR
 | `AGENT_CANVAS_WORKBUDDY_DIR` | `~/.workbuddy` 和 `~/.workbuddy-ai`（或 `$WORKBUDDY_CONFIG_DIR`） | WorkBuddy 的目录（只能设一个）；设为空字符串表示不读取 |
 | `AGENT_CANVAS_CODEBUDDY_DIR` | `~/.codebuddy`（或 `$CODEBUDDY_CONFIG_DIR`） | CodeBuddy Code 的目录；设为空字符串表示不读取 |
 | `AGENT_CANVAS_DOUBAO_DIR` | 豆包工作和豆包应用的数据目录（按平台，见手册） | 豆包工作的“User Data”这一层目录（只能设一个）；设为空字符串表示不读取 |
+| `AGENT_CANVAS_QWEN_DIR` | `~/.qwen`（或 `$QWEN_RUNTIME_DIR`，再或 `$QWEN_HOME`） | Qwen Code 的运行时目录（读其中的 `projects`）；设为空字符串表示不读取 |
 | `AGENT_CANVAS_DATA_DIR` | `~/.agent-canvas` | 数据目录（数据库 `data.db`） |
 
 完整列表见[使用手册 · 数据与环境变量](./docs/manual.md#数据与环境变量)。
@@ -260,7 +276,7 @@ flowchart LR
 
 - 只监听 `127.0.0.1`，不对局域网开放；来自非本机页面的请求会被拒绝。
 - 没有账号、没有遥测、不联网。
-- 对会话文件只读，从不往 Gemini CLI、Grok、Copilot CLI、DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包的目录写任何东西；Cursor 的数据库只读打开，只做按主键的短查询，从不写入。只有你主动运行 `hooks install` 时，才会修改 Claude Code、Codex 或 Cursor 的配置文件，并且先备份。
+- 对会话文件只读，从不往 Gemini CLI、Grok、Copilot CLI、DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包、Qwen Code 的目录写任何东西；Cursor 的数据库只读打开，只做按主键的短查询，从不写入。只有你主动运行 `hooks install` 时，才会修改 Claude Code、Codex 或 Cursor 的配置文件，并且先备份。
 - 数据库里是你的对话和工具输出的明文，请像对待对话记录本身一样对待数据目录。
 
 ## 📚 文档
@@ -274,7 +290,8 @@ flowchart LR
 - [通知](./docs/manual.md#通知)：六种提醒的判定、设置、各来源的差别
 - [Gemini CLI、Grok、Copilot CLI](./docs/manual.md#gemini-cligrokcopilot-cli)：读哪里、显示什么、各自的限制（未经真实数据核对）
 - [DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作](./docs/manual.md#deepseek-harnessworkbuddycodebuddy-code豆包工作)：读哪里、显示什么、各自的限制、不支持的工具（未经真实数据核对）
-- [格式说明](./docs/formats/)：这四个工具的会话文件格式和每条结论的出处
+- [Qwen Code](./docs/manual.md#qwen-code)：读哪里（含改过输出目录时怎么指过去）、显示什么、限制（未经真实数据核对）
+- [格式说明](./docs/formats/)：后加的这些工具的会话文件格式和每条结论的出处
 - [诊断页](./docs/manual.md#诊断页)：页面右上角的“诊断”，看导入进度、hook 是否收到、未识别的记录
 - [已知限制](./docs/manual.md#已知限制)
 
@@ -297,7 +314,7 @@ pnpm release                            # 在 release/ 里生成要发布到 npm
 
 每个 PR 和 `main` 上的每次推送都会在 Linux 和 Windows 上自动运行类型检查、构建、全套测试和发布包检查（`.github/workflows/ci.yml`）。
 
-发版：把根目录 `package.json` 的 `version` 改成新版本号并合并到 `main`，然后推送同名标签（版本 `0.2.0` 对应标签 `v0.2.0`）。`.github/workflows/release.yml` 会核对标签与版本号、重跑全部检查、发布到 npm，并在 GitHub 上建一个 Release。发布用的是 npm 的可信发布（OIDC），仓库里不保存任何 npm 令牌。
+发版：把根目录 `package.json` 的 `version` 改成新版本号并合并到 `main`，然后推送同名标签（版本 `0.3.0` 对应标签 `v0.3.0`）。`.github/workflows/release.yml` 会核对标签与版本号、重跑全部检查、发布到 npm，并在 GitHub 上建一个 Release。发布用的是 npm 的可信发布（OIDC），仓库里不保存任何 npm 令牌。
 
 可信发布要在 npmjs.com 上这个包的 Settings → Trusted Publisher 里配置一次：选 GitHub Actions，填仓库 `qtxsnwwb/agent-canvas` 和工作流文件名 `release.yml`，并在 Allowed actions 里勾选 **Allow npm publish**。新建的可信发布者默认只允许暂存发布（`npm stage publish`），不勾这一项，工作流会在发布那一步报 `OIDC permission denied for this action`。
 
@@ -305,4 +322,4 @@ pnpm release                            # 在 release/ 里生成要发布到 npm
 
 [MIT](./LICENSE)
 
-Claude、Claude Code、Codex、OpenAI、Cursor、Gemini、Grok、GitHub Copilot、DeepSeek、WorkBuddy、CodeBuddy、豆包等名称和标志是各自所有者的商标。界面里用它们只是为了标明会话来自哪个工具（Gemini CLI、Grok、Copilot CLI、DeepSeek、WorkBuddy、CodeBuddy、豆包用的是本项目自绘的字母标记，不是它们的标志）；本项目与这些公司没有隶属或合作关系，这些标志也不在 MIT 许可的范围内。
+Claude、Claude Code、Codex、OpenAI、Cursor、Gemini、Grok、GitHub Copilot、DeepSeek、WorkBuddy、CodeBuddy、豆包、Qwen 等名称和标志是各自所有者的商标。界面里用它们只是为了标明会话来自哪个工具（Gemini CLI、Grok、Copilot CLI、DeepSeek、WorkBuddy、CodeBuddy、豆包、Qwen Code 用的是本项目自绘的字母标记，不是它们的标志）；本项目与这些公司没有隶属或合作关系，这些标志也不在 MIT 许可的范围内。

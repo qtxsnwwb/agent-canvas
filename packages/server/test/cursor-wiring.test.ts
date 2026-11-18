@@ -37,7 +37,7 @@ test('the test environment never points at the real Cursor database', () => {
 });
 
 function pipelineWith(store: Store, source: CursorSource): Pipeline {
-  const config = loadConfig({}, { deepseekDir: null, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [], geminiDir: null, grokDir: null, copilotDir: null, projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, cursorDbPath: fx.dbPath });
+  const config = loadConfig({}, { deepseekDir: null, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [], qwenDir: null, geminiDir: null, grokDir: null, copilotDir: null, projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, cursorDbPath: fx.dbPath });
   return new Pipeline(store, config, { sources: [new ClaudeFileSource(config.projectsDir)], pollSources: [source] });
 }
 
@@ -72,8 +72,8 @@ test('through a real pipeline: stored once as cursor raw events; a restarted sou
 
 test('pollSources: a CursorSource when cursorDbPath is set, none when it is null', () => {
   const base = { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null };
-  expect(pollSources(loadConfig({}, { ...base, deepseekDir: null, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [], geminiDir: null, grokDir: null, copilotDir: null, cursorDbPath: null }))).toEqual([]);
-  const [source] = pollSources(loadConfig({}, { ...base, deepseekDir: null, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [], geminiDir: null, grokDir: null, copilotDir: null, cursorDbPath: fx.dbPath }));
+  expect(pollSources(loadConfig({}, { ...base, deepseekDir: null, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [], qwenDir: null, geminiDir: null, grokDir: null, copilotDir: null, cursorDbPath: null }))).toEqual([]);
+  const [source] = pollSources(loadConfig({}, { ...base, deepseekDir: null, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [], qwenDir: null, geminiDir: null, grokDir: null, copilotDir: null, cursorDbPath: fx.dbPath }));
   expect(source).toBeInstanceOf(CursorSource);
 });
 

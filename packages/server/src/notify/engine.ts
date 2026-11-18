@@ -81,6 +81,7 @@ const ORIGIN_LABEL: Record<Origin, string> = {
   workbuddy: 'WorkBuddy',
   codebuddy: 'CodeBuddy',
   doubao: '豆包',
+  qwen: 'Qwen Code',
 };
 const KIND_LABEL: Record<NotificationKind, string> = {
   permission: '等你确认权限',
@@ -101,8 +102,8 @@ export const ANOMALY_SEEN_MAX_SESSIONS = 10_000;
 /**
  * Hooks that by themselves say the current turn failed or was interrupted (main thread): Claude Code `StopFailure`,
  * Codex `Interrupt`, Cursor `stop` whose `status` is `error` or `aborted`. Codex `Stop` carries no failure field. The
- * origins without hooks (Gemini CLI, Grok Build, Copilot CLI, DeepSeek Harness, WorkBuddy, CodeBuddy Code, Doubao Work)
- * never have one.
+ * origins without hooks (Gemini CLI, Grok Build, Copilot CLI, DeepSeek Harness, WorkBuddy, CodeBuddy Code, Doubao Work,
+ * Qwen Code) never have one.
  */
 export function isErrorHook(origin: Origin, eventName: string, payload: Readonly<Record<string, unknown>> | null): boolean {
   switch (origin) {
@@ -119,6 +120,7 @@ export function isErrorHook(origin: Origin, eventName: string, payload: Readonly
     case 'workbuddy':
     case 'codebuddy':
     case 'doubao':
+    case 'qwen':
       return false; // no hooks
   }
 }

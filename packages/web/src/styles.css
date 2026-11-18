@@ -55,6 +55,10 @@
   --doubao-soft: #f2e8d4;
   --doubao-edge: #dcc49a;
   --doubao-ink: #764000;
+  /* Qwen Code an electric violet (the badge family of its series colour; text on its background >= 4.5:1). */
+  --qwen-soft: #ecd6ff;
+  --qwen-edge: #c99cff;
+  --qwen-ink: #6300b0;
   /* Origins as chart series (stats page): the badge families, stepped against the dataviz palette validator on the
      white card surface (lightness band, chroma, colour-blind and normal-vision separation, 3:1 contrast). With all ten,
      neighbouring pairs (the stacking order) pass; over all pairs colour-blind separation is at warning level (below),
@@ -76,6 +80,14 @@
   --series-workbuddy: #00a52d;
   --series-codebuddy: #c369ff;
   --series-doubao: #963c00;
+  /* Qwen Code. What was validated: the adjacent-pair checks over the eleven in ORIGINS order pass (豆包 to Qwen Code
+     CVD ΔE > 8). Adjacency in ORIGINS order is not what a chart shows, though: a stack holds only the origins that have
+     data, so any two may be neighbours. Over all pairs, every pair is >= 15 for normal vision (worst: DeepSeek, 15.1);
+     the worst colour-blind pair is Codex under deutan, 5.99, against a 6.0 floor. No colour added to the ten above
+     keeps every pair over that floor (a full sRGB search, plan qwen-code Task 5). Identity never rests on colour alone:
+     charts have a legend and a tooltip naming each row, badges carry the origin's mark, and bars carry its label. A
+     teal, the first choice, read as grey and sat 9.9 from Gemini CLI. */
+  --series-qwen: #9400ff;
   --chart-grid: #f0ebf6;
   --chart-axis: #d6cde6;
   --font: "Microsoft YaHei UI", "PingFang SC", "Hiragino Sans GB", system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -182,6 +194,7 @@ pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
 .origin-workbuddy { --origin-bg: var(--workbuddy-soft); --origin-edge: var(--workbuddy-edge); --origin-fg: var(--workbuddy-ink); }
 .origin-codebuddy { --origin-bg: var(--codebuddy-soft); --origin-edge: var(--codebuddy-edge); --origin-fg: var(--codebuddy-ink); }
 .origin-doubao { --origin-bg: var(--doubao-soft); --origin-edge: var(--doubao-edge); --origin-fg: var(--doubao-ink); }
+.origin-qwen { --origin-bg: var(--qwen-soft); --origin-edge: var(--qwen-edge); --origin-fg: var(--qwen-ink); }
 .origin-icon { flex: none; }
 .origin-badge-dot { padding: 0; width: 18px; height: 18px; justify-content: center; }
 .origin-dots { display: inline-flex; gap: 4px; }
@@ -199,6 +212,7 @@ pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
 .view-switch[aria-label="来源"] button[aria-pressed="true"][data-origin="workbuddy"] { background: var(--workbuddy-soft); color: var(--workbuddy-ink); }
 .view-switch[aria-label="来源"] button[aria-pressed="true"][data-origin="codebuddy"] { background: var(--codebuddy-soft); color: var(--codebuddy-ink); }
 .view-switch[aria-label="来源"] button[aria-pressed="true"][data-origin="doubao"] { background: var(--doubao-soft); color: var(--doubao-ink); }
+.view-switch[aria-label="来源"] button[aria-pressed="true"][data-origin="qwen"] { background: var(--qwen-soft); color: var(--qwen-ink); }
 
 /* Session page: a one-line info bar, then the canvas filling the rest of the viewport. */
 .session-loading { padding: 12px 18px; }

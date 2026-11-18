@@ -29,6 +29,7 @@ const ORIGIN_LABELS: Record<Origin, string> = {
   workbuddy: 'WorkBuddy',
   codebuddy: 'CodeBuddy',
   doubao: '豆包',
+  qwen: 'Qwen Code',
 };
 const STATUS_LABELS: Record<NodeStatus, string> = {
   running: '运行中',

@@ -51,6 +51,7 @@ const cfg = (doubaoDirs: string[] = [work, app]): Config =>
     workbuddyDirs: [],
     codebuddyDir: null,
     doubaoDirs,
+    qwenDir: null,
   });
 const open = (): Store => {
   const s = openStore(':memory:');

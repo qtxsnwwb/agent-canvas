@@ -43,7 +43,7 @@ describe('file routes', () => {
   const apply = (changes: Change[]) => store.applyChanges(changes);
   beforeEach(async () => {
     tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-api-files-'));
-    config = loadConfig({}, { deepseekDir: null, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [], geminiDir: null, grokDir: null, copilotDir: null, projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), cursorDbPath: null });
+    config = loadConfig({}, { deepseekDir: null, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [], qwenDir: null, geminiDir: null, grokDir: null, copilotDir: null, projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), cursorDbPath: null });
     await fs.mkdir(config.projectsDir, { recursive: true });
     store = openStore(':memory:');
     pipeline = new Pipeline(store, config);

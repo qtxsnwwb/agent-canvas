@@ -87,7 +87,7 @@ describe('ClaudeFileSource', () => {
   });
 
   test('键属于哪个来源由前缀决定：Claude 的键不带前缀，Codex 的键以 codex: 开头', () => {
-    expect(KEY_PREFIXES).toEqual({ claude: '', codex: 'codex:', cursor: 'cursor:', gemini: 'gemini:', grok: 'grok:', copilot: 'copilot:', deepseek: 'deepseek:', workbuddy: 'workbuddy:', codebuddy: 'codebuddy:', doubao: 'doubao:' });
+    expect(KEY_PREFIXES).toEqual({ claude: '', codex: 'codex:', cursor: 'cursor:', gemini: 'gemini:', grok: 'grok:', copilot: 'copilot:', deepseek: 'deepseek:', workbuddy: 'workbuddy:', codebuddy: 'codebuddy:', doubao: 'doubao:', qwen: 'qwen:' });
     expect(originOfKey('doubao:x/y.jsonl')).toBe('doubao');
     expect(originOfKey('deepseek:x/session.v4.jsonl.zstd')).toBe('deepseek');
     expect(originOfKey('proj/abc.jsonl')).toBe('claude');
@@ -140,7 +140,7 @@ describe('pipeline 与来源', () => {
 
   beforeEach(async () => {
     tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-pipeline-origin-'));
-    config = loadConfig({}, { deepseekDir: null, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [], geminiDir: null, grokDir: null, copilotDir: null, projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, cursorDbPath: null });
+    config = loadConfig({}, { deepseekDir: null, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [], qwenDir: null, geminiDir: null, grokDir: null, copilotDir: null, projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, cursorDbPath: null });
     codexDir = path.join(tmp, 'codex');
     await fs.mkdir(config.projectsDir, { recursive: true });
     await fs.mkdir(codexDir, { recursive: true });

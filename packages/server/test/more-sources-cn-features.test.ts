@@ -231,6 +231,7 @@ const cnConfig = (d: Dirs, o: Partial<Config> = {}): Config =>
     workbuddyDirs: d.workbuddyDirs,
     codebuddyDir: d.codebuddyDir,
     doubaoDirs: d.doubaoDirs,
+    qwenDir: null,
     ...o,
   });
 
@@ -422,8 +423,8 @@ describe('the six older origins are unchanged by the four new directories', () =
 
       const base = { projectsDir, dataDir: path.join(tmp, 'data'), codexSessionsDir, cursorDbPath: fx.dbPath };
       const cursor = () => [new CursorSource({ dbPath: fx.dbPath, now: () => NOW, timers: NO_TIMERS })];
-      const without = await serve(loadConfig({}, { ...base, geminiDir: d.geminiDir, grokDir: d.grokDir, copilotDir: d.copilotDir, deepseekDir: null, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [] }), cursor());
-      const withNew = await serve(loadConfig({}, { ...base, geminiDir: d.geminiDir, grokDir: d.grokDir, copilotDir: d.copilotDir, deepseekDir: d.deepseekDir, workbuddyDirs: d.workbuddyDirs, codebuddyDir: d.codebuddyDir, doubaoDirs: d.doubaoDirs }), cursor());
+      const without = await serve(loadConfig({}, { ...base, geminiDir: d.geminiDir, grokDir: d.grokDir, copilotDir: d.copilotDir, deepseekDir: null, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [], qwenDir: null }), cursor());
+      const withNew = await serve(loadConfig({}, { ...base, geminiDir: d.geminiDir, grokDir: d.grokDir, copilotDir: d.copilotDir, deepseekDir: d.deepseekDir, workbuddyDirs: d.workbuddyDirs, codebuddyDir: d.codebuddyDir, doubaoDirs: d.doubaoDirs, qwenDir: null }), cursor());
       expect(without.pipeline.ingestFailures()).toEqual([]);
       expect(withNew.pipeline.ingestFailures()).toEqual([]);
       // Not vacuous: the new sources are really read, and some share the older ones' project.

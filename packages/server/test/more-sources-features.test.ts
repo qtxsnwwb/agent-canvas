@@ -115,7 +115,7 @@ describe('the three new origins in projects, search, stats and export', () => {
   test('one session each: projects with their origin, content search, stats totals, Markdown export', async () => {
     const d = dirs();
     await writeNewSources(d);
-    const config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, cursorDbPath: null, deepseekDir: d.deepseekDir, workbuddyDirs: d.workbuddyDirs, codebuddyDir: d.codebuddyDir, doubaoDirs: d.doubaoDirs, geminiDir: d.geminiDir, grokDir: d.grokDir, copilotDir: d.copilotDir });
+    const config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, cursorDbPath: null, deepseekDir: d.deepseekDir, workbuddyDirs: d.workbuddyDirs, codebuddyDir: d.codebuddyDir, doubaoDirs: d.doubaoDirs, qwenDir: null, geminiDir: d.geminiDir, grokDir: d.grokDir, copilotDir: d.copilotDir });
     const { app, pipeline, store } = await serve(config);
     expect(pipeline.ingestFailures()).toEqual([]);
     expect(store.diagnostics().unknownRecords).toEqual([]);
@@ -199,7 +199,7 @@ describe('the three new origins in projects, search, stats and export', () => {
         }),
       ]));
     }
-    const config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, cursorDbPath: null, deepseekDir: d.deepseekDir, workbuddyDirs: d.workbuddyDirs, codebuddyDir: d.codebuddyDir, doubaoDirs: d.doubaoDirs, geminiDir: d.geminiDir, grokDir: null, copilotDir: d.copilotDir });
+    const config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, cursorDbPath: null, deepseekDir: d.deepseekDir, workbuddyDirs: d.workbuddyDirs, codebuddyDir: d.codebuddyDir, doubaoDirs: d.doubaoDirs, qwenDir: null, geminiDir: d.geminiDir, grokDir: null, copilotDir: d.copilotDir });
     const { app, pipeline, store } = await serve(config);
     expect(pipeline.ingestFailures()).toEqual([]);
     expect(store.listProjects(NOW).map((p) => [p.id, p.sessionCount, p.origins]).sort()).toEqual([
@@ -273,8 +273,8 @@ describe('Claude Code, Codex and Cursor are unchanged by the new origins', () =>
       await writeNewSources(d, { gemini: cwd, grok: cwd, copilot: cwd });
 
       const base = { projectsDir, dataDir: path.join(tmp, 'data'), codexSessionsDir, cursorDbPath: fx.dbPath };
-      const without = await serve(loadConfig({}, { ...base, deepseekDir: null, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [], geminiDir: null, grokDir: null, copilotDir: null }), [new CursorSource({ dbPath: fx.dbPath, now: () => NOW, timers: NO_TIMERS })]);
-      const withNew = await serve(loadConfig({}, { ...base, deepseekDir: d.deepseekDir, workbuddyDirs: d.workbuddyDirs, codebuddyDir: d.codebuddyDir, doubaoDirs: d.doubaoDirs, geminiDir: d.geminiDir, grokDir: d.grokDir, copilotDir: d.copilotDir }), [new CursorSource({ dbPath: fx.dbPath, now: () => NOW, timers: NO_TIMERS })]);
+      const without = await serve(loadConfig({}, { ...base, deepseekDir: null, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [], qwenDir: null, geminiDir: null, grokDir: null, copilotDir: null }), [new CursorSource({ dbPath: fx.dbPath, now: () => NOW, timers: NO_TIMERS })]);
+      const withNew = await serve(loadConfig({}, { ...base, deepseekDir: d.deepseekDir, workbuddyDirs: d.workbuddyDirs, codebuddyDir: d.codebuddyDir, doubaoDirs: d.doubaoDirs, qwenDir: null, geminiDir: d.geminiDir, grokDir: d.grokDir, copilotDir: d.copilotDir }), [new CursorSource({ dbPath: fx.dbPath, now: () => NOW, timers: NO_TIMERS })]);
       // The new sources are really there.
       expect(withNew.store.listProjects(NOW).find((p) => p.id === project)?.origins).toEqual(['claude', 'codex', 'cursor', 'gemini', 'grok', 'copilot']);
       expect(without.store.listProjects(NOW).find((p) => p.id === project)?.origins).toEqual(['claude', 'codex', 'cursor']);
@@ -340,7 +340,7 @@ describe('one directory, one project (final review M-6)', () => {
       await copilotSession('cop-posix', `${posix}/`);
       await copilotSession('cop-plain', cwd);
       await copilotSession('cop-other', `${other}\\`);
-      const config = loadConfig({}, { projectsDir, dataDir: path.join(tmp, 'data'), codexSessionsDir, cursorDbPath: fx.dbPath, deepseekDir: d.deepseekDir, workbuddyDirs: d.workbuddyDirs, codebuddyDir: d.codebuddyDir, doubaoDirs: d.doubaoDirs, geminiDir: d.geminiDir, grokDir: d.grokDir, copilotDir: d.copilotDir });
+      const config = loadConfig({}, { projectsDir, dataDir: path.join(tmp, 'data'), codexSessionsDir, cursorDbPath: fx.dbPath, deepseekDir: d.deepseekDir, workbuddyDirs: d.workbuddyDirs, codebuddyDir: d.codebuddyDir, doubaoDirs: d.doubaoDirs, qwenDir: null, geminiDir: d.geminiDir, grokDir: d.grokDir, copilotDir: d.copilotDir });
       const { store, pipeline } = await serve(config, [new CursorSource({ dbPath: fx.dbPath, now: () => NOW, timers: NO_TIMERS })]);
       expect(pipeline.ingestFailures()).toEqual([]);
       const projects = store.listProjects(NOW).map((p) => [p.id, p.sessionCount, p.origins]).sort();

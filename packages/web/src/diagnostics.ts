@@ -66,6 +66,7 @@ export const EXPECTED_HOOK_EVENTS_BY_ORIGIN: Record<Origin, readonly string[]> =
   workbuddy: [],
   codebuddy: [],
   doubao: [],
+  qwen: [],
 };
 
 /**
@@ -160,7 +161,8 @@ export function cursorHooks(d: Diagnostics): OriginHooks {
 }
 
 /**
- * Unknown records of a file-only origin (Gemini CLI, Grok Build, Copilot CLI, DeepSeek, WorkBuddy, CodeBuddy, 豆包):
+ * Unknown records of a file-only origin (Gemini CLI, Grok Build, Copilot CLI, DeepSeek, WorkBuddy, CodeBuddy, 豆包,
+ * Qwen Code):
  * their normalizers report every type as `<origin>:<type>`.
  */
 export function originUnknownRecords(d: Diagnostics, origin: FileOnlyOrigin): Diagnostics['unknownRecords'] {
@@ -206,8 +208,9 @@ export function fileSourceDirLine(origin: FileOnlyOrigin, s: FileSourceStatus): 
  * (plan more-sources-cn; a field the server does not send gives no line, so Gemini CLI / Grok / Copilot CLI show none):
  * each folder read when there are several (WorkBuddy, Doubao Work), why the source cannot run (DeepSeek on a Node
  * without zstd), session directories with a format version not read (DeepSeek), sessions found again under another
- * root or profile (WorkBuddy, CodeBuddy, Doubao Work), threads timed by file modification time and conversations not
- * read for want of a single main agent (Doubao Work). `warn`: worth a look (shown as a warning).
+ * root, profile or project folder (WorkBuddy, CodeBuddy, Doubao Work, Qwen Code), threads timed by file modification time and conversations not
+ * read for want of a single main agent (Doubao Work), managed sessions not read (Qwen Code).
+ * `warn`: worth a look (shown as a warning).
  */
 export function fileSourceDetailLines(s: FileSourceStatus): { text: string; warn: boolean }[] {
   const out: { text: string; warn: boolean }[] = [];
@@ -217,6 +220,7 @@ export function fileSourceDetailLines(s: FileSourceStatus): { text: string; warn
   if (s.duplicateSessions !== undefined) out.push({ text: `在另一个目录或配置里重复出现、只读了一份的会话：${s.duplicateSessions} 个`, warn: false });
   if (s.mtimeFallbacks !== undefined) out.push({ text: `时间只能取自文件修改时间的线程：${s.mtimeFallbacks} 个`, warn: s.mtimeFallbacks > 0 });
   if (s.unknownSessions !== undefined) out.push({ text: `没有主代理或有多个主代理、没有读取的对话：${s.unknownSessions} 个`, warn: s.unknownSessions > 0 });
+  if (s.unsupportedSessions !== undefined) out.push({ text: `托管会话（格式不支持，没有读取）：${s.unsupportedSessions} 个`, warn: s.unsupportedSessions > 0 });
   return out;
 }
 

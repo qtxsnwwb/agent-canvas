@@ -135,9 +135,9 @@ function UnknownList({ records }: { records: DiagnosticsData['unknownRecords'] }
 }
 
 /**
- * A file-only origin (Gemini CLI, Grok Build, Copilot CLI, DeepSeek, WorkBuddy, CodeBuddy, 豆包): directory, the lines
- * of fileSourceDetailLines, session count and the unknown records. These are read from files only (no hooks, no
- * waiting states) and their formats were not checked against real data.
+ * A file-only origin (Gemini CLI, Grok Build, Copilot CLI, DeepSeek, WorkBuddy, CodeBuddy, 豆包, Qwen Code): directory,
+ * the lines of fileSourceDetailLines, session count and the unknown records. These are read from files only (no hooks,
+ * no waiting states) and their formats were not checked against real data.
  */
 function FileSourceSection({ block }: { block: FileSourceBlock }) {
   return (

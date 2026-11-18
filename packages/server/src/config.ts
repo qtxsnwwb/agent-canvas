@@ -36,6 +36,12 @@ export interface Config {
    * else defaultDoubaoDirs(). Empty = not read.
    */
   doubaoDirs: readonly string[];
+  /**
+   * Qwen Code's runtime base (`AGENT_CANVAS_QWEN_DIR`, else `$QWEN_RUNTIME_DIR`, else `$QWEN_HOME`, else `~/.qwen`; in
+   * the three variables a leading `~` is the home directory and a relative path resolves against the working
+   * directory); null = not read. Its source reads `<qwenDir>/projects`.
+   */
+  qwenDir: string | null;
   dataDir: string;
   dbPath: string;
   host: '127.0.0.1';
@@ -111,25 +117,47 @@ function resolveToolDirs(
   return fallback();
 }
 
+/** How resolveToolDir turns a variable's value into the directory (default for both: the value as given). */
+interface ToolDirReading {
+  /** For the value of one of the tool's own variables. */
+  fromToolVar?: (value: string) => string;
+  /** For the value of our variable. */
+  fromOwnVar?: (value: string) => string;
+}
+
 /**
  * A tool directory, first hit wins: the explicit override (null included) → our variable `ownVar` (the empty string:
- * null, the tool is not read) → the tool's own variable `toolVar` (unset or empty: skipped), through `fromToolVar` →
- * `fallback` (under the home directory).
+ * null, the tool is not read), through `reading.fromOwnVar` → the tool's own variables `toolVars` in order (each unset or
+ * empty: skipped), through `reading.fromToolVar` → `fallback` (under the home directory).
  */
 function resolveToolDir(
   override: string | null | undefined,
   env: NodeJS.ProcessEnv,
   ownVar: string,
-  toolVar: string,
-  fromToolVar: (value: string) => string,
+  toolVars: string | readonly string[],
   fallback: string,
+  reading: ToolDirReading = {},
 ): string | null {
+  const { fromToolVar = (v: string) => v, fromOwnVar = (v: string) => v } = reading;
   if (override !== undefined) return override;
   const own = env[ownVar];
-  if (own !== undefined) return own === '' ? null : own;
-  const tool = env[toolVar];
-  if (tool !== undefined && tool !== '') return fromToolVar(tool);
+  if (own !== undefined) return own === '' ? null : fromOwnVar(own);
+  for (const toolVar of typeof toolVars === 'string' ? [toolVars] : toolVars) {
+    const tool = env[toolVar];
+    if (tool !== undefined && tool !== '') return fromToolVar(tool);
+  }
   return fallback;
+}
+
+/**
+ * A directory named the way Qwen Code reads its own variables: a leading `~` (alone, or followed by `/`, or on Windows
+ * by `\`, the separators of the platform) is `home`, a relative path resolves against the working directory, an
+ * absolute one is kept as given. Exported for tests (`platform` lets them try the other platforms).
+ */
+export function userPath(value: string, home: string, platform: NodeJS.Platform = process.platform): string {
+  if (value === '~') return home;
+  if (value.startsWith('~/') || (platform === 'win32' && value.startsWith('~\\'))) return path.join(home, value.slice(2));
+  return path.isAbsolute(value) ? value : path.resolve(value);
 }
 
 /** Explicit overrides win over environment variables, which win over defaults. */
@@ -155,16 +183,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, overrides: Part
           ? null
           : cursorEnv;
   const home = os.homedir();
-  const geminiDir = resolveToolDir(overrides.geminiDir, env, 'AGENT_CANVAS_GEMINI_DIR', 'GEMINI_CLI_HOME', (v) => path.join(v, '.gemini'), path.join(home, '.gemini'));
-  const grokDir = resolveToolDir(overrides.grokDir, env, 'AGENT_CANVAS_GROK_DIR', 'GROK_HOME', (v) => v, path.join(home, '.grok'));
-  const copilotDir = resolveToolDir(overrides.copilotDir, env, 'AGENT_CANVAS_COPILOT_DIR', 'COPILOT_HOME', (v) => v, path.join(home, '.copilot'));
-  const deepseekDir = resolveToolDir(overrides.deepseekDir, env, 'AGENT_CANVAS_DSH_DIR', 'DSH_HOME', (v) => v, path.join(home, '.dsh'));
+  const geminiDir = resolveToolDir(overrides.geminiDir, env, 'AGENT_CANVAS_GEMINI_DIR', 'GEMINI_CLI_HOME', path.join(home, '.gemini'), { fromToolVar: (v) => path.join(v, '.gemini') });
+  const grokDir = resolveToolDir(overrides.grokDir, env, 'AGENT_CANVAS_GROK_DIR', 'GROK_HOME', path.join(home, '.grok'));
+  const copilotDir = resolveToolDir(overrides.copilotDir, env, 'AGENT_CANVAS_COPILOT_DIR', 'COPILOT_HOME', path.join(home, '.copilot'));
+  const deepseekDir = resolveToolDir(overrides.deepseekDir, env, 'AGENT_CANVAS_DSH_DIR', 'DSH_HOME', path.join(home, '.dsh'));
   const workbuddyDirs = resolveToolDirs(overrides.workbuddyDirs, env, 'AGENT_CANVAS_WORKBUDDY_DIR', 'WORKBUDDY_CONFIG_DIR', () => [
     path.join(home, '.workbuddy'),
     path.join(home, '.workbuddy-ai'),
   ]);
-  const codebuddyDir = resolveToolDir(overrides.codebuddyDir, env, 'AGENT_CANVAS_CODEBUDDY_DIR', 'CODEBUDDY_CONFIG_DIR', (v) => v, path.join(home, '.codebuddy'));
+  const codebuddyDir = resolveToolDir(overrides.codebuddyDir, env, 'AGENT_CANVAS_CODEBUDDY_DIR', 'CODEBUDDY_CONFIG_DIR', path.join(home, '.codebuddy'));
   const doubaoDirs = resolveToolDirs(overrides.doubaoDirs, env, 'AGENT_CANVAS_DOUBAO_DIR', null, () => defaultDoubaoDirs(process.platform, env, home));
+  const qwenPath = (v: string): string => userPath(v, home);
+  const qwenDir = resolveToolDir(overrides.qwenDir, env, 'AGENT_CANVAS_QWEN_DIR', ['QWEN_RUNTIME_DIR', 'QWEN_HOME'], path.join(home, '.qwen'), { fromToolVar: qwenPath, fromOwnVar: qwenPath });
   return {
     host: '127.0.0.1',
     port: 4317,
@@ -183,6 +213,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, overrides: Part
     workbuddyDirs,
     codebuddyDir,
     doubaoDirs,
+    qwenDir,
     dataDir,
     dbPath: overrides.dbPath ?? path.join(dataDir, 'data.db'),
   };
