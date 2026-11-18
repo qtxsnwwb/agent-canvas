@@ -269,7 +269,7 @@ node packages/server/dist/cli.js hooks uninstall --cursor    # 只移除本安�
 
 ## DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作
 
-**这四个来源未经真实数据核对。** 开发机上没有这四个工具，读法完全依据公开资料：DeepSeek Harness 的开源代码，腾讯发布的 CodeBuddy Code 安装包里的类型定义和几个第三方读取工具，以及一个解析过豆包工作文件的第三方工具。依据和每条结论的出处写在三份格式说明里：[`docs/formats/deepseek-harness.md`](./formats/deepseek-harness.md)、[`docs/formats/buddy-family.md`](./formats/buddy-family.md)（WorkBuddy 与 CodeBuddy Code）、[`docs/formats/doubao-work.md`](./formats/doubao-work.md)。测试用的全是按这些说明自造的样例，测试通过只说明实现与对资料的理解一致，不说明与真实文件一致。豆包工作只有一个第三方工具作依据，是其中最可能与真实文件不符的。觉得哪里不对时，先打开诊断页看该来源一栏（见下文“诊断页”）。
+**这四个来源未经真实数据核对。** 开发机上没有这四个工具，读法完全依据公开资料：DeepSeek Harness 的开源代码，腾讯发布的 CodeBuddy Code 安装包里的类型定义和几个第三方读取工具，以及一个解析过豆包工作文件的第三方工具。依据和每条结论的出处写在三份格式说明里：[`docs/formats/deepseek-harness.md`](./formats/deepseek-harness.md)、[`docs/formats/buddy-family.md`](./formats/buddy-family.md)（WorkBuddy 与 CodeBuddy Code）、[`docs/formats/doubao-work.md`](./formats/doubao-work.md)。测试用的全是按这些说明自造的样例，测试通过只说明实现与对资料的理解一致，不说明与真实文件一致。DeepSeek Harness 是例外：2026-11-18 用一个真实会话核对过（单轮对话、思考、网页搜索工具、正常结束），显示的文字、工具的输入输出和状态、时间、标题、工作目录、用量与文件逐项一致，文件里没有不认识的记录；子代理、分叉、压缩、出错或中断的一轮、读写文件的工具仍只有源码作依据。豆包工作只有一个第三方工具作依据，是其中最可能与真实文件不符的。觉得哪里不对时，先打开诊断页看该来源一栏（见下文“诊断页”）。
 
 ### 从哪里读
 
@@ -322,7 +322,7 @@ node packages/server/dist/cli.js hooks uninstall --cursor    # 只移除本安�
 
 ### 限制
 
-- **未经真实数据核对**（见本节开头）。另外，[规格](./superpowers/specs/2026-11-17-more-sources-cn-design.md)第 9 节和三份格式说明的末尾列出了只有真实数据才能确定的问题，例如 Windows 上 DeepSeek 桌面应用的主目录是否就是 `~/.dsh`、WorkBuddy 的用量在磁盘上的实际形状、豆包 `assignment.md` 的时间格式。
+- **未经真实数据核对**（见本节开头；DeepSeek Harness 只核对过一个会话）。另外，[规格](./superpowers/specs/2026-11-17-more-sources-cn-design.md)第 9 节和三份格式说明的末尾列出了只有真实数据才能确定的问题，例如 DeepSeek 界面上的删除、编辑、回退在磁盘上做了什么、WorkBuddy 的用量在磁盘上的实际形状、豆包 `assignment.md` 的时间格式。
 - **没有 hooks**：不为这四个工具安装任何 hook，也就没有“等待权限确认”“等待输入”这类实时状态，“等你确认权限”的通知不会出现。会话状态只靠会话文件推断，延迟几秒，只看主线（子代理线程不影响）；超过 15 分钟没有新内容的“运行中”显示为“长时间无活动”。各来源的差别：
   - **DeepSeek**：文件里每一轮都有开始和结束的记录。一轮进行中为运行中，结束后为空闲。因此“跑完了”照常；一轮以出错、被中止或中断结束时发“出错中断”；“卡住了”只在一轮进行中长时间没有动静时提醒。分叉出来的会话里复制过来的历史不算（读到分叉点之前一直是空闲），回放它不会发通知。
   - **WorkBuddy、CodeBuddy**：按资料，工具在一轮结束时可能写一条结束记录（`turn-metrics` 或 `acp-terminal-state`），但两者都是可选的、取决于运行它的宿主。**写了的**：读到它变为空闲，下一条提问又变为运行中，“跑完了”照常；`acp-terminal-state` 带错误时这一轮显示“Turn failed”并发“出错中断”（只带停止原因、不带错误的，只当正常结束）。只认当前分支上的结束记录，被回退掉的分支上的不算。后台任务的 `turn-metrics` 不算一轮结束。**从没写过的**：和 Grok 一样，会话一直是运行中，没有“跑完了”“出错中断”；“卡住了”打开时，会话停下后超过阈值会提醒一次，分不清是做完了还是卡住了。
@@ -769,7 +769,7 @@ agent-canvas compact          # 从源码运行时：node packages/server/dist/c
 - Cursor hooks 的载荷字段和 Windows 上的调用方式取自官方文档，还没有用真实的 Cursor 核对过。
 - Cursor：会话很长（上万步）时，第一次导入需要一段时间，在后台进行。
 - Gemini CLI、Grok、Copilot CLI：读法按公开资料写成，**未经真实数据核对**；各自的限制见上文“Gemini CLI、Grok、Copilot CLI”一节。
-- DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作：同样按公开资料写成，**未经真实数据核对**；DeepSeek 只读第 4 版文件且需要 Node 22.15 或更高，WorkBuddy / CodeBuddy 只显示当前分支，豆包没有用量、模型、思考和工作目录。详见上文“DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作”一节。
+- DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作：同样按公开资料写成，**未经真实数据核对**（DeepSeek Harness 用一个真实会话核对过，范围见该节开头）；DeepSeek 只读第 4 版文件且需要 Node 22.15 或更高，WorkBuddy / CodeBuddy 只显示当前分支，豆包没有用量、模型、思考和工作目录。详见上文“DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作”一节。
 - Qwen Code：按 `v0.27.4` 的开源代码写成，**未经真实数据核对**；只显示当前分支，托管会话和 0.4.0 以前的文件不读，`/branch` 复制出来的会话跨会话相加时用量重复。详见上文“Qwen Code”一节。
 
 ## 开发
