@@ -4,7 +4,7 @@ import path from 'node:path';
 import { normaliseCwd } from '../cursor/project.js';
 import { readGuardedLines } from '../guarded-reader.js';
 import { ProjectIdResolver } from '../project-ids.js';
-import { isPromise, KEY_PREFIXES, type FileClass, type FileSource, type MaybePromise } from '../source.js';
+import { isPromise, KEY_PREFIXES, type FileClass, type FileSource, type MaybePromise, type SourceRead } from '../source.js';
 
 const CHATS = 'chats';
 const ARCHIVE = 'archive';
@@ -19,9 +19,16 @@ const SESSION_ID = /^[0-9a-fA-F-]{32,36}$/;
 const AGENT_STEM = /^[A-Za-z0-9_-]+$/;
 /** `<repo>/.qwen/worktrees/<x>[/…]`, either separator (reference 1.2; spec 3.3). */
 const WORKTREE = /^(.*?)([\\/])\.qwen[\\/]worktrees[\\/]+[^\\/]+(?:[\\/].*)?$/;
-/** Bytes of a session file's head looked at to classify it (spec 3.4). */
-export const QWEN_HEAD_BYTES = 64 * 1024;
+/**
+ * Longest line the classification looks at (spec 3.3): a longer one (a first prompt carrying `@`-referenced files) is
+ * passed over without being held; the next record carries the same `cwd`.
+ */
+export const QWEN_LINE_MAX = 64 * 1024;
+/** Most bytes one classification attempt reads; the next attempt goes on from where it stopped. */
+export const QWEN_SCAN_BUDGET = 4 * 1024 * 1024;
+const CHUNK = 64 * 1024;
 const MANAGED_HEADER = 'managed_session_header_v1';
+const MANAGED_PREFIX = 'managed_session_';
 /** The owner record that may precede a managed header (reference 4.6): it does not decide a session's class. */
 const EXECUTION_ENGINE = 'session_execution_engine';
 const RECORD_TYPES = new Set(['user', 'assistant', 'tool_result', 'system']);
@@ -53,13 +60,30 @@ type Shape =
   | { kind: 'session' | 'title'; proj: string; sid: string; name: string; archived: boolean }
   | { kind: 'agent' | 'agent_meta'; proj: string; sid: string; name: string; stem: string };
 
-/** Why a session file was last found unclassifiable: its size and modification time then. */
-interface Unplaced {
+/**
+ * Where the search of a session file not classified yet stopped. Every byte is examined once: the next attempt goes on
+ * from `next`, with the incomplete last line's bytes (at most QWEN_LINE_MAX) held here, or passing over the rest of an
+ * over-long one.
+ */
+interface Search {
+  /** Bytes of the file consumed so far. */
+  next: number;
+  /** The incomplete line read so far (empty while skipping). */
+  held: Buffer[];
+  heldBytes: number;
+  /** `next` is inside a line longer than QWEN_LINE_MAX: pass over the rest of it. */
+  skipping: boolean;
+  /**
+   * The first-record rule (spec 3.4, reference 4.6): `start` before any record, `engine` after a leading
+   * `session_execution_engine` record, `decided` once the first record (after it) was neither a managed header nor that.
+   */
+  first: 'start' | 'engine' | 'decided';
+  /** Size and modification time the last attempt saw (an unchanged file is not opened again). */
   size: number;
   mtimeMs: number;
-  /** The head was full (QWEN_HEAD_BYTES of it seen): only a rewrite to a shorter file makes it worth reading again. */
-  exhausted: boolean;
 }
+
+const newSearch = (): Search => ({ next: 0, held: [], heldBytes: 0, skipping: false, first: 'start', size: -1, mtimeMs: -1 });
 
 /**
  * Qwen Code's session files (spec 2, 3; format reference 1, 4.4, 4.6, 5.2), under `<qwenDir>/projects`:
@@ -74,12 +98,13 @@ interface Unplaced {
  *   it); `agent-<x>.meta.json`: its sidecar.
  * - Everything else (`.runtime.json`, `.worktree.json`, `.pr.json`, `.jsonl.stream`, `workflows/`, `tmp/`) is not ours.
  *
- * A session's project (spec 3.3) comes from the head of its main file (at most QWEN_HEAD_BYTES, complete lines only):
- * the `cwd` of the first valid record of the session (a `session_execution_engine` record alone does not decide), as
- * `qwenProjectDir` of it, through the resolver shared with DeepSeek / WorkBuddy / CodeBuddy. A head holding a
- * `managed_session_header_v1` record is a managed session (spec 3.4): nothing of it is read (title and subagent files
- * neither) and it is counted in status().unsupportedSessions (once per session key, however often it is seen; no longer
- * once its file is gone). The project directory name is never decoded. Subagent files and sidecars take their session's
+ * A session's project (spec 3.3) is the `cwd` of the first valid record of the session in its main file that is not
+ * longer than QWEN_LINE_MAX (every record carries the same `cwd`; a longer line is passed over unread, see Search), as
+ * `qwenProjectDir` of it, through the resolver shared with DeepSeek / WorkBuddy / CodeBuddy. A file whose first record
+ * (after one optional `session_execution_engine` record) is `managed_session_header_v1` is a managed session (spec 3.4):
+ * nothing of it is read (title and subagent files neither) and it is counted in status().unsupportedSessions (once per
+ * session key, however often it is seen; no longer once its file is gone). A header anywhere later does not count, so an
+ * incremental read and a fresh one agree. The project directory name is never decoded. Subagent files and sidecars take their session's
  * class; while the session cannot be told yet (no valid record), neither can they. Classes are cached per key, and taken
  * from the stored raw events when there are any. Nothing is ever written under the tool directory.
  */
@@ -90,7 +115,9 @@ export class QwenFileSource implements FileSource {
   readonly watchDepth = 3;
   /** Lines are told apart by their byte offset: the file is appended to, and a message-group deletion is a rewrite. */
   readonly lineIdentity = 'offset' as const;
-  readonly readLines = readGuardedLines;
+  /** readGuardedLines, except that a file gone at the path read keeps its offset (see readMoved). */
+  readonly readLines = (absPath: string, fromOffset: number, maxBytes: number, state: string | null): Promise<SourceRead> =>
+    this.readMoved(absPath, fromOffset, maxBytes, state);
   private readonly prefix = KEY_PREFIXES.qwen;
   private readonly lookup: QwenLookup;
   private readonly resolver: ProjectIdResolver;
@@ -98,8 +125,10 @@ export class QwenFileSource implements FileSource {
   private readonly classes = new Map<string, FileClass>();
   /** Session-file keys of managed sessions. */
   private readonly managed = new Set<string>();
-  /** Session-file key -> what the last look at its head found (nothing that decides). */
-  private readonly unplaced = new Map<string, Unplaced>();
+  /** Session-file key -> where the search of a file not classified yet stopped. */
+  private readonly searches = new Map<string, Search>();
+  /** Session-file key -> the classification attempt in progress (one at a time per file: it moves its Search on). */
+  private readonly attempts = new Map<string, Promise<FileClass | null>>();
 
   /**
    * `projects`: the project-id resolver shared with the other sources of plan more-sources-cn (fileSources), so one
@@ -151,9 +180,7 @@ export class QwenFileSource implements FileSource {
   }
 
   keyOf(absPath: string): string | null {
-    const rel = path.relative(this.rootDir, absPath);
-    if (rel === '' || path.isAbsolute(rel) || rel === '..' || rel.startsWith(`..${path.sep}`)) return null;
-    const shape = shapeOfParts(rel.split(/[\\/]+/));
+    const shape = this.shapeOfPath(absPath);
     if (shape === null) return null;
     // Both copies present: the one in chats/ is the key's file; the archived one is not read.
     if ((shape.kind === 'session' || shape.kind === 'title') && shape.archived && exists(this.chatsPath(shape))) return null;
@@ -207,6 +234,32 @@ export class QwenFileSource implements FileSource {
 
   // ---------------------------------------------------------------- internals
 
+  /** The file a path names below the projects directory, from the path alone. */
+  private shapeOfPath(absPath: string): Shape | null {
+    const rel = path.relative(this.rootDir, absPath);
+    if (rel === '' || path.isAbsolute(rel) || rel === '..' || rel.startsWith(`..${path.sep}`)) return null;
+    return shapeOfParts(rel.split(/[\\/]+/));
+  }
+
+  /**
+   * readGuardedLines at `absPath`; when the file is gone there (moved between the pipeline's stat and this read, or
+   * deleted), read once more where its key leads now (it may have just been archived or unarchived), else answer the
+   * offset given, no lines, no rewrite. readGuardedLines answers offset 0 for a missing file, which the pipeline would
+   * store: the next read would then start at 0 without the guard, and a rewrite made meanwhile (a deleted last message
+   * group) would go unnoticed for good.
+   */
+  private async readMoved(absPath: string, fromOffset: number, maxBytes: number, state: string | null): Promise<SourceRead> {
+    const res = await readGuardedLines(absPath, fromOffset, maxBytes, state);
+    if (!vanished(res, absPath, fromOffset)) return res;
+    const shape = this.shapeOfPath(absPath);
+    const now = shape === null ? null : this.pathOf(this.keyFor(shape));
+    if (now !== null && now !== absPath) {
+      const moved = await readGuardedLines(now, fromOffset, maxBytes, state);
+      if (!vanished(moved, now, fromOffset)) return moved;
+    }
+    return { lines: [], newOffset: fromOffset, truncated: false };
+  }
+
   private keyFor(shape: Shape): string {
     const rel = shape.kind === 'session' || shape.kind === 'title' ? `${CHATS}/${shape.name}` : `${SUBAGENTS}/${shape.sid}/${shape.name}`;
     return `${this.prefix}${shape.proj}/${rel}`;
@@ -233,15 +286,20 @@ export class QwenFileSource implements FileSource {
     return this.remember(key, { kind: 'session', projectId: stored.projectId, sessionId: sid });
   }
 
-  /** A main thread: known, managed (null), or decided by its head (null while nothing in it decides). */
+  /** A main thread: known, managed (null), or decided by searching its file (null while nothing in it decides). */
   private classifySession(key: string, sid: string): MaybePromise<FileClass | null> {
     const known = this.known(key, sid);
     if (known !== null) return known;
     if (this.managed.has(key)) return null;
-    return this.readHead(key, sid);
+    const running = this.attempts.get(key);
+    if (running !== undefined) return running;
+    const attempt = this.searchFile(key, sid).finally(() => this.attempts.delete(key));
+    this.attempts.set(key, attempt);
+    return attempt;
   }
 
-  private async readHead(key: string, sid: string): Promise<FileClass | null> {
+  /** One attempt (at most QWEN_SCAN_BUDGET bytes) of the search of a session file, from where the last one stopped. */
+  private async searchFile(key: string, sid: string): Promise<FileClass | null> {
     const file = this.pathOf(key)!;
     let st: fs.Stats;
     try {
@@ -249,27 +307,24 @@ export class QwenFileSource implements FileSource {
     } catch {
       return null;
     }
-    const was = this.unplaced.get(key);
-    if (was !== undefined && was.size === st.size && was.mtimeMs === st.mtimeMs) return null;
-    if (was?.exhausted === true && st.size >= was.size) return null;
-    let lines: string[];
+    let search = this.searches.get(key);
+    if (search !== undefined && search.size === st.size && search.mtimeMs === st.mtimeMs && search.next >= st.size) return null;
+    // Found shorter than what was consumed: rewritten, searched again from the start.
+    if (search === undefined || st.size < search.next) this.searches.set(key, (search = newSearch()));
+    search.size = st.size;
+    search.mtimeMs = st.mtimeMs;
+    let verdict: Verdict;
     try {
-      lines = await headLines(file, QWEN_HEAD_BYTES);
+      verdict = await searchLines(file, search, sid);
     } catch {
-      return null;
+      return null; // unreadable now: the next attempt goes on from where this one was before it
     }
-    const verdict = inspectHead(lines, sid);
+    if (verdict === null) return null;
+    this.searches.delete(key);
     if (verdict === MANAGED) {
-      this.unplaced.delete(key);
       this.managed.add(key);
       return null;
     }
-    if (verdict === null) {
-      this.unplaced.set(key, { size: st.size, mtimeMs: st.mtimeMs, exhausted: st.size >= QWEN_HEAD_BYTES });
-      return null;
-    }
-    this.unplaced.delete(key);
-    // Classified meanwhile by another call (the same answer): keep the first.
     return this.classes.get(key) ?? this.remember(key, { kind: 'session', projectId: this.project(verdict.cwd), sessionId: sid });
   }
 
@@ -319,26 +374,99 @@ function shapeOfParts(parts: readonly string[]): Shape | null {
   return null;
 }
 
+type Verdict = typeof MANAGED | { cwd: string } | null;
+
 /**
- * What a session file's head says: MANAGED when it holds a managed-session header; else the `cwd` of the first valid
- * record of the session (not a `session_execution_engine` record); null when nothing decides yet.
+ * One attempt of the search (see Search), reading from `search.next` to at most QWEN_SCAN_BUDGET bytes further, in
+ * CHUNK slices; moves `search` on. A line longer than QWEN_LINE_MAX is passed over without being held. Memory: one
+ * chunk plus at most QWEN_LINE_MAX held bytes. On a read error `search` is left as it was.
  */
-function inspectHead(lines: readonly string[], sid: string): typeof MANAGED | { cwd: string } | null {
-  let cwd: string | null = null;
-  for (const text of lines) {
-    let rec: unknown;
-    try {
-      rec = JSON.parse(text);
-    } catch {
-      continue;
+async function searchLines(file: string, search: Search, sid: string): Promise<Verdict> {
+  const handle = await fsp.open(file, 'r');
+  try {
+    const size = (await handle.stat()).size;
+    const s: Search = { ...search, held: [...search.held] };
+    const end = Math.min(size, s.next + QWEN_SCAN_BUDGET);
+    const buf = Buffer.alloc(CHUNK);
+    let verdict: Verdict = null;
+    let pos = s.next;
+    scan: while (pos < end) {
+      const { bytesRead } = await handle.read(buf, 0, Math.min(CHUNK, end - pos), pos);
+      if (bytesRead <= 0) break;
+      const chunk = buf.subarray(0, bytesRead);
+      let i = 0;
+      while (i < bytesRead) {
+        const nl = chunk.indexOf(10, i);
+        const stop = nl === -1 ? bytesRead : nl;
+        if (!s.skipping) {
+          if (s.heldBytes + (stop - i) > QWEN_LINE_MAX) {
+            s.skipping = true;
+            s.held = [];
+            s.heldBytes = 0;
+            // A managed header is a small wrapper record: an over-long first record is not one, the file is plain.
+            if (s.first !== 'decided') s.first = 'decided';
+          } else if (stop > i) {
+            s.held.push(Buffer.from(chunk.subarray(i, stop)));
+            s.heldBytes += stop - i;
+          }
+        }
+        if (nl === -1) break;
+        if (!s.skipping) verdict = examine(Buffer.concat(s.held, s.heldBytes).toString('utf8'), s, sid);
+        s.held = [];
+        s.heldBytes = 0;
+        s.skipping = false;
+        i = nl + 1;
+        if (verdict !== null) {
+          pos += i;
+          break scan;
+        }
+      }
+      pos += bytesRead;
     }
-    if (typeof rec !== 'object' || rec === null || Array.isArray(rec)) continue;
-    const r = rec as Record<string, unknown>;
-    if (r.subtype === MANAGED_HEADER) return MANAGED;
-    if (cwd !== null || !isValidRecord(r, sid) || r.subtype === EXECUTION_ENGINE) continue;
-    if (typeof r.cwd === 'string' && r.cwd.trim() !== '') cwd = r.cwd;
+    s.next = pos;
+    Object.assign(search, s);
+    return verdict;
+  } finally {
+    await handle.close();
   }
-  return cwd === null ? null : { cwd };
+}
+
+/**
+ * One complete line (not over-long): MANAGED when it is the file's first record (after one optional leading
+ * `session_execution_engine` record) and a managed-session header; `{ cwd }` when it is a valid record of the session
+ * with a `cwd` (neither an engine record nor a managed wrapper); null otherwise. Moves the first-record rule on.
+ */
+function examine(line: string, s: Search, sid: string): Verdict {
+  const text = line.endsWith('\r') ? line.slice(0, -1) : line;
+  if (text.trim() === '') return null;
+  let rec: unknown;
+  try {
+    rec = JSON.parse(text);
+  } catch {
+    rec = null;
+  }
+  const r = typeof rec === 'object' && rec !== null && !Array.isArray(rec) ? (rec as Record<string, unknown>) : null;
+  if (s.first !== 'decided') {
+    if (r?.subtype === MANAGED_HEADER) return MANAGED;
+    if (s.first === 'start' && r?.subtype === EXECUTION_ENGINE) {
+      s.first = 'engine';
+      return null;
+    }
+    s.first = 'decided';
+  }
+  if (r === null || !isValidRecord(r, sid) || r.subtype === EXECUTION_ENGINE) return null;
+  if (typeof r.subtype === 'string' && r.subtype.startsWith(MANAGED_PREFIX)) return null;
+  return typeof r.cwd === 'string' && r.cwd.trim() !== '' ? { cwd: r.cwd } : null;
+}
+
+/**
+ * Whether readGuardedLines found no file: it then answers offset 0, no lines, no rewrite. For an existing file an offset
+ * above 0 gives a rewrite or a position at or past it, so above 0 that answer means the file is missing; at 0 it is
+ * checked.
+ */
+function vanished(res: SourceRead, absPath: string, fromOffset: number): boolean {
+  if (res.lines.length > 0 || res.newOffset !== 0 || res.truncated) return false;
+  return fromOffset > 0 || !exists(absPath);
 }
 
 /** A record the normaliser would take (spec 4): string uuid, the file's session, a string or null parent, a known type. */
@@ -346,38 +474,15 @@ function isValidRecord(r: Record<string, unknown>, sid: string): boolean {
   return typeof r.uuid === 'string' && r.sessionId === sid && (typeof r.parentUuid === 'string' || r.parentUuid === null) && RECORD_TYPES.has(r.type as string);
 }
 
-/** The complete lines within the first `limit` bytes of a file. */
-async function headLines(file: string, limit: number): Promise<string[]> {
-  const handle = await fsp.open(file, 'r');
-  try {
-    const buf = Buffer.alloc(limit);
-    let done = 0;
-    while (done < limit) {
-      const { bytesRead } = await handle.read(buf, done, limit - done, done);
-      if (bytesRead === 0) break;
-      done += bytesRead;
-    }
-    const head = buf.subarray(0, done);
-    const end = head.lastIndexOf(10);
-    if (end === -1) return [];
-    return head
-      .subarray(0, end)
-      .toString('utf8')
-      .split('\n')
-      .map((l) => (l.endsWith('\r') ? l.slice(0, -1) : l));
-  } finally {
-    await handle.close();
-  }
-}
-
 /** A directory name: not empty, not `.` or `..`, no path syntax. */
 function validName(s: string): boolean {
   return s !== '' && s !== '.' && s !== '..' && !/[\\/:]/.test(s);
 }
 
+/** Whether `p` is a file now (no exception for a missing one: keyOf asks this for every archived path). */
 function exists(p: string): boolean {
   try {
-    return fs.statSync(p).isFile();
+    return fs.statSync(p, { throwIfNoEntry: false })?.isFile() ?? false;
   } catch {
     return false;
   }

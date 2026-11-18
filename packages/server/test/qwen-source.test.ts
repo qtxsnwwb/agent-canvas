@@ -1,12 +1,11 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, test } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { fileSources } from '../src/cli.js';
 import { loadConfig, type Config } from '../src/config.js';
 import { Pipeline } from '../src/pipeline.js';
-import { readGuardedLines } from '../src/sources/guarded-reader.js';
-import { QwenFileSource, qwenProjectDir, type QwenLookup } from '../src/sources/qwen/source.js';
+import { QWEN_SCAN_BUDGET, QwenFileSource, qwenProjectDir, type QwenLookup } from '../src/sources/qwen/source.js';
 import { openStore, type Store } from '../src/store/store.js';
 import { CWD as BUDDY_CWD, exampleMain, SID as BUDDY_SID } from './buddy-fixtures.js';
 import { exampleSession, line, Log, SID, system } from './qwen-fixtures.js';
@@ -36,6 +35,7 @@ beforeEach(async () => {
   projects = path.join(qwen, 'projects');
 });
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const p of pipelines.splice(0)) {
     await p.close();
     await p.idle();
@@ -89,11 +89,11 @@ describe('files and keys', () => {
     expect(s.rootDir).toBe(projects);
     expect(s.watchDepth).toBe(3);
     expect(s.lineIdentity).toBe('offset');
-    expect(s.readLines).toBe(readGuardedLines);
+    expect(typeof s.readLines).toBe('function'); // readGuardedLines, wrapped (a file gone at the path read keeps its offset)
     expect(s.status()).toEqual({ unsupportedSessions: 0 });
   });
 
-  test('each kind of file has its key; the key leads back to the file', async () => {
+  test('each kind of file has its key; the key leads back to the file', () => {
     const s = new QwenFileSource(projects);
     const cases: [string, string][] = [
       [mainAt(), mainKey()],
@@ -108,7 +108,7 @@ describe('files and keys', () => {
     }
   });
 
-  test('an archived session and its title have the keys of their place in chats/', async () => {
+  test('an archived session and its title have the keys of their place in chats/', () => {
     const s = new QwenFileSource(projects);
     expect(s.keyOf(archiveAt(`${SID}.jsonl`))).toBe(mainKey());
     expect(s.keyOf(archiveAt(`${SID}.title.json`))).toBe(`qwen:${QP}/chats/${SID}.title.json`);
@@ -349,12 +349,126 @@ describe('managed sessions (spec 3.4; reference 4.6)', () => {
     expect(s.status()).toEqual({ unsupportedSessions: 0 });
   });
 
-  test('only the first 64 KiB are looked at', async () => {
-    const pad = JSON.stringify({ note: 'x'.repeat(70 * 1024) });
-    await write(mainAt(), body([pad, managedHeader(), ...sessionLines()]));
+  test('only the first record decides (after one optional session_execution_engine record): a header later is plain, incrementally or read fresh', async () => {
+    // Incremental: a plain session read, then a header line appended.
+    await write(mainAt(), body(sessionLines()));
     const s = new QwenFileSource(projects);
-    expect(await s.classify(mainKey())).toBeNull(); // no complete line within the head
+    expect(await s.classify(mainKey())).toMatchObject({ projectId: PROJECT_ID });
+    await fs.appendFile(mainAt(), body([managedHeader()]));
+    expect(await s.classify(mainKey())).toMatchObject({ projectId: PROJECT_ID });
     expect(s.status()).toEqual({ unsupportedSessions: 0 });
+    // Fresh: the same file read by a new source.
+    const t = new QwenFileSource(projects);
+    expect(await t.classify(mainKey())).toEqual({ kind: 'session', projectId: PROJECT_ID, sessionId: SID });
+    expect(t.status()).toEqual({ unsupportedSessions: 0 });
+    // Two engine records, then a header: the header is not the first record after one engine record.
+    await write(mainAt(SID2), body([engineRecord(SID2), engineRecord(SID2), managedHeader(SID2), ...sessionLines({ sid: SID2 })]));
+    expect(await t.classify(mainKey(SID2))).toMatchObject({ sessionId: SID2 });
+    expect(t.status()).toEqual({ unsupportedSessions: 0 });
+  });
+
+  test('an over-long first record cannot be a managed header: the file is plain', async () => {
+    const long = JSON.stringify({ note: 'x'.repeat(70 * 1024) });
+    await write(mainAt(), body([long, managedHeader(), ...sessionLines()]));
+    const s = new QwenFileSource(projects);
+    expect(await s.classify(mainKey())).toEqual({ kind: 'session', projectId: PROJECT_ID, sessionId: SID });
+    expect(s.status()).toEqual({ unsupportedSessions: 0 });
+  });
+});
+
+describe('long lines (spec 3.3: no bound on the cwd search; 64 KiB per line)', () => {
+  /** Bytes read through fs/promises handles of `file` (the head search's reads). */
+  function countReads(file: string): { bytes: number } {
+    const seen = { bytes: 0 };
+    const real = fs.open.bind(fs);
+    vi.spyOn(fs, 'open').mockImplementation((async (...args: Parameters<typeof fs.open>) => {
+      const handle = await real(...args);
+      if (path.resolve(String(args[0])) === path.resolve(file)) {
+        const read = handle.read.bind(handle) as (...a: unknown[]) => Promise<{ bytesRead: number }>;
+        (handle as { read: unknown }).read = async (...a: unknown[]) => {
+          const r = await read(...a);
+          seen.bytes += r.bytesRead;
+          return r;
+        };
+      }
+      return handle;
+    }) as typeof fs.open);
+    return seen;
+  }
+  /** A first prompt of 100 KiB (as with `@`-referenced files), then a small reply. */
+  function longFirst(messageFirst: boolean): string[] {
+    const log = new Log();
+    log.prompt(`look at this\n${'x'.repeat(100 * 1024)}`);
+    log.add((env) => line('assistant', undefined, env, { message: { role: 'model', parts: [{ text: 'small reply' }] } }));
+    if (!messageFirst) return log.lines;
+    return log.lines.map((l) => {
+      const { message, ...rest } = JSON.parse(l) as Record<string, unknown>;
+      return JSON.stringify({ message, ...rest });
+    });
+  }
+
+  for (const messageFirst of [false, true]) {
+    test(`a 100 KiB first prompt then a small reply: classified from the reply (${messageFirst ? 'message first' : 'envelope first'}) and shown through the pipeline`, async () => {
+      const lines = longFirst(messageFirst);
+      expect(Buffer.byteLength(lines[0]!)).toBeGreaterThan(100 * 1024);
+      await write(mainAt(), body(lines));
+      const s = new QwenFileSource(projects);
+      expect(await s.classify(mainKey())).toEqual({ kind: 'session', projectId: PROJECT_ID, sessionId: SID });
+      const store = openStore(':memory:');
+      stores.push(store);
+      const config = cfg();
+      const pipeline = new Pipeline(store, config, { sources: fileSources(config, store) });
+      pipelines.push(pipeline);
+      await pipeline.scanAll();
+      await pipeline.idle();
+      expect(pipeline.ingestFailures()).toEqual([]);
+      expect(store.getSession(SID)).toMatchObject({ origin: 'qwen', projectId: PROJECT_ID });
+      expect(store.rawForSessionAfter(SID, 0, 100).length).toBe(2);
+    });
+  }
+
+  test('only over-long lines so far: null; classified once a short line arrives; nothing examined is read again', async () => {
+    const lines = longFirst(false);
+    const first = body([lines[0]!, lines[0]!]); // two over-long lines
+    await write(mainAt(), first);
+    const reads = countReads(mainAt());
+    const s = new QwenFileSource(projects);
+    expect(await s.classify(mainKey())).toBeNull();
+    expect(reads.bytes).toBe(Buffer.byteLength(first));
+    // Unchanged: nothing is read again.
+    expect(await s.classify(mainKey())).toBeNull();
+    expect(reads.bytes).toBe(Buffer.byteLength(first));
+    // A partial over-long line: skipped as far as it goes, not read again later.
+    const partial = `{"note":"${'y'.repeat(80 * 1024)}`;
+    await fs.appendFile(mainAt(), partial);
+    expect(await s.classify(mainKey())).toBeNull();
+    const afterPartial = reads.bytes;
+    expect(afterPartial).toBe(Buffer.byteLength(first) + Buffer.byteLength(partial));
+    const tail = `"}\n${lines[1]!}\n`;
+    await fs.appendFile(mainAt(), tail);
+    expect(await s.classify(mainKey())).toEqual({ kind: 'session', projectId: PROJECT_ID, sessionId: SID });
+    expect(reads.bytes - afterPartial).toBe(Buffer.byteLength(tail));
+  });
+
+  test('one attempt reads at most QWEN_SCAN_BUDGET bytes; the next goes on from there', async () => {
+    const long = JSON.stringify({ note: 'z'.repeat(QWEN_SCAN_BUDGET + 1024) });
+    const rest = sessionLines();
+    await write(mainAt(), body([long, ...rest]));
+    const reads = countReads(mainAt());
+    const s = new QwenFileSource(projects);
+    expect(await s.classify(mainKey())).toBeNull();
+    expect(reads.bytes).toBeLessThanOrEqual(QWEN_SCAN_BUDGET);
+    expect(await s.classify(mainKey())).toEqual({ kind: 'session', projectId: PROJECT_ID, sessionId: SID });
+    expect(reads.bytes).toBeLessThanOrEqual(Buffer.byteLength(body([long, ...rest])));
+    expect(reads.bytes).toBeGreaterThanOrEqual(Buffer.byteLength(body([long, rest[0]!])));
+  });
+
+  test('a file found shorter than where the search stopped is searched again from the start', async () => {
+    await write(mainAt(), body([JSON.stringify({ note: 'x'.repeat(70 * 1024) })]));
+    const s = new QwenFileSource(projects);
+    expect(await s.classify(mainKey())).toBeNull();
+    await write(mainAt(), body(sessionLines({ cwd: '/srv/again' })));
+    expect(await s.classify(mainKey())).toMatchObject({ projectId: '-srv-again' });
   });
 });
 

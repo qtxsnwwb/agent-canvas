@@ -71,7 +71,7 @@ Qwen Code 平时只追加，但“删除消息组”会整个替换文件（说�
 
 ### 3.4 托管会话
 
-来源给主线文件分类时看它开头的记录（最多 64 KiB）：其中有 `managed_session_header_v1` 记录的，是托管会话，不读，计入诊断的 `unsupportedSessions`（`FileSourceStatus` 新增的可选项）。它的子代理文件也不读。
+来源给主线文件分类时看它的第一条记录（前面可以有一条 `session_execution_engine` 记录）：是 `managed_session_header_v1` 记录的，是托管会话，不读，计入诊断的 `unsupportedSessions`（`FileSourceStatus` 新增的可选项）。它的子代理文件也不读。
 
 ## 4. 记录到节点
 

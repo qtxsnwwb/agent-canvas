@@ -252,7 +252,7 @@ describe('Qwen Code end to end', () => {
   });
 
   test('both copies present: the chats/ one is read, an event for the archived one reads nothing', async () => {
-    const main = await writeSession();
+    await writeSession();
     const store = open();
     const p = newPipeline(store);
     await scan(p);
@@ -268,7 +268,8 @@ describe('Qwen Code end to end', () => {
     await scan(p);
     expect(rawCount(store)).toBe(count);
     expect(full(store, SID)).toEqual(before);
-    expect(main.log.lines.length).toBeGreaterThan(0);
+    expect(JSON.stringify(full(store, SID))).not.toContain('only in the stale archived copy');
+    expect(store.getSession(SID)?.title).toBe('Find the callers');
   });
 
   test('the main file deleted for real: source-deleted; back: not', async () => {
@@ -326,6 +327,47 @@ describe('Qwen Code end to end', () => {
       for (const u of t.second) expect(Object.keys(after.nodes).some((id) => id.includes(`:${u}:`)), u).toBe(true);
       expect(after).toEqual(await fresh());
       expect(after.session?.sourceDeleted).toBe(false);
+    });
+  }
+
+  for (const gone of ['moved to chats/archive/', 'deleted'] as const) {
+    test(`the file ${gone} between the pipeline's stat and the read: the offset is kept, and a later deletion of the last group is still seen`, async () => {
+      const t = twoTurns();
+      const firstTurn = t.all.slice(0, 2);
+      await write(mainAt(), body(firstTurn));
+      const store = open();
+      const p = newPipeline(store);
+      await scan(p);
+      // The second turn is appended; just before the reader opens the file it goes away.
+      await fs.appendFile(mainAt(), body(t.all.slice(2)));
+      const real = fs.open.bind(fs);
+      let armed = true;
+      vi.spyOn(fs, 'open').mockImplementation((async (...args: Parameters<typeof fs.open>) => {
+        if (armed && path.resolve(String(args[0])) === path.resolve(mainAt())) {
+          armed = false;
+          if (gone === 'deleted') await fs.rm(mainAt());
+          else {
+            await fs.mkdir(path.dirname(archivedMainAt()), { recursive: true });
+            await fs.rename(mainAt(), archivedMainAt());
+          }
+        }
+        return real(...args);
+      }) as typeof fs.open);
+      await p.ingestFile(mainAt());
+      await p.idle();
+      expect(armed).toBe(false);
+      const fullSize = Buffer.byteLength(body(t.all));
+      // Moved: read at its new place. Deleted: nothing read, the offset kept (not reset to 0).
+      expect(store.getOffset(mainKey())).toBe(gone === 'deleted' ? Buffer.byteLength(body(firstTurn)) : fullSize);
+      // The last message group is deleted (the file is replaced by its first turn), wherever the file now is.
+      const at = gone === 'deleted' ? mainAt() : archivedMainAt();
+      await write(at, body(firstTurn));
+      await p.ingestFile(at);
+      await scan(p);
+      expect(p.ingestFailures()).toEqual([]);
+      const after = full(store, SID)!;
+      for (const u of t.second) expect(Object.keys(after.nodes).some((id) => id.includes(`:${u}:`)), u).toBe(false);
+      expect(after).toEqual(await fresh());
     });
   }
 
