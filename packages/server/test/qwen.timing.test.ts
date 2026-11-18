@@ -4,7 +4,7 @@ import { describe, expect, test } from 'vitest';
 import type { Change } from '@agent-canvas/shared';
 import { QwenNormalizer } from '../src/normalize/qwen.js';
 import type { RawEvent } from '../src/store/store.js';
-import { fcall, Log, PROJECT, qwenEvents, rewindRecord, SID, text, thought, turnResult, usageMeta } from './qwen-fixtures.js';
+import { agentEvents, fcall, Log, PROJECT, qwenEvents, rewindRecord, SID, T0, text, thought, turnResult, usageMeta } from './qwen-fixtures.js';
 
 // Timing- and memory-sensitive (Review Focus 2 and 5 of the plan): long Qwen Code sessions with many re-roots far
 // back are applied in pages, as the pipeline does. Appending is O(1) per record and a re-root costs the records it
@@ -163,4 +163,65 @@ describe('Qwen normalizer: a 60,000-record session', () => {
     console.log(`[qwen timing] held with 16 B outputs ${(small / 1e6).toFixed(1)} MB, with 4 KB outputs ${(large / 1e6).toFixed(1)} MB (${(extra / 1e6).toFixed(0)} MB more output read)`);
     expect(large - small).toBeLessThan(extra / 10);
   }, 120_000);
+});
+
+describe('Qwen normalizer: one very long line (Review Focus 5)', () => {
+  const BIG = 8 * 1024 * 1024;
+
+  /**
+   * Applies `big()` (one line of about 8 MB, built inside so nothing outside holds it) after a small session and a
+   * small subagent thread; returns the time it took and the heap the normalizer holds afterwards beyond what it held
+   * before (both after a forced collection).
+   */
+  function measure(big: (log: { main: Log; agent: Log }) => RawEvent): { ms: number; held: number; lineChars: number } {
+    const gc = gcFn();
+    const main = new Log();
+    turn(main, 0, 'ok');
+    const agent = new Log({ prefix: 'c', t0: T0 + 100_000, agent: { agentId: 'fork-call_0' } });
+    agent.prompt('go', { payload: null, parts: [text('go')] });
+    const n = new QwenNormalizer();
+    apply(n, [...qwenEvents(main.lines), ...agentEvents('fork-call_0', agent.lines)]);
+    gc();
+    const before = process.memoryUsage().heapUsed;
+    let ev: RawEvent | null = big({ main, agent });
+    const lineChars = ev.source === 'transcript' ? ev.line.length : 0;
+    const t0 = performance.now();
+    const r = n.apply(ev, PROJECT);
+    const ms = performance.now() - t0;
+    expect(r.unknownRecordType).toBeUndefined();
+    ev = null;
+    main.lines.length = 0;
+    agent.lines.length = 0;
+    gc();
+    const held = process.memoryUsage().heapUsed - before;
+    expect(n.hasSession(SID)).toBe(true);
+    return { ms, held, lineChars };
+  }
+
+  const nextEvent = (log: Log, events: (lines: string[], o: { startOffset: number }) => RawEvent[]): RawEvent => {
+    const before = log.lines.slice(0, -1).reduce((s, l) => s + Buffer.byteLength(l) + 1, 0);
+    return events([log.lines[log.lines.length - 1]!], { startOffset: before })[0]!;
+  };
+
+  test('an 8 MB agent_bootstrap line: applied within the bound; its history is not kept', () => {
+    const r = measure(({ agent }) => {
+      agent.sys('agent_bootstrap', { kind: 'fork', history: [{ role: 'user', parts: [text('h'.repeat(BIG))] }] });
+      return nextEvent(agent, (lines, o) => agentEvents('fork-call_0', lines, o));
+    });
+    console.log(`[qwen timing] 8 MB agent_bootstrap line: ${r.ms.toFixed(1)} ms, held afterwards ${(r.held / 1e6).toFixed(2)} MB`);
+    expect(r.lineChars).toBeGreaterThan(BIG);
+    expect(r.ms).toBeLessThan(gapBound(1_000));
+    expect(r.held).toBeLessThan(1_000_000);
+  }, 60_000);
+
+  test('an 8 MB chat_compression line: applied within the bound; the compressed history is not kept', () => {
+    const r = measure(({ main }) => {
+      main.sys('chat_compression', { info: { originalTokenCount: 900_000, newTokenCount: 20_000, compressionStatus: 1 }, compressedHistory: [{ role: 'user', parts: [text('c'.repeat(BIG))] }] });
+      return nextEvent(main, (lines, o) => qwenEvents(lines, o));
+    });
+    console.log(`[qwen timing] 8 MB chat_compression line: ${r.ms.toFixed(1)} ms, held afterwards ${(r.held / 1e6).toFixed(2)} MB`);
+    expect(r.lineChars).toBeGreaterThan(BIG);
+    expect(r.ms).toBeLessThan(gapBound(1_000));
+    expect(r.held).toBeLessThan(1_000_000);
+  }, 60_000);
 });

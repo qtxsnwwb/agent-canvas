@@ -200,13 +200,36 @@ export interface AddOpts {
   ms?: number;
 }
 
-/** Appends records the way the recorder does (reference 4.1). */
+/** What every record of a subagent file carries (reference 5.2); `agentId: null` leaves the field out. */
+export interface AgentFields {
+  agentId: string | null;
+  agentName?: string | null;
+}
+
+/**
+ * A line as a subagent file holds it (reference 5.2): the envelope plus agentId, agentName, agentColor, isSidechain;
+ * no `model` and no `provenance`.
+ */
+export function asAgentLine(l: string, a: AgentFields): string {
+  const obj = JSON.parse(l) as Obj;
+  delete obj.model;
+  delete obj.provenance;
+  return JSON.stringify({
+    ...obj,
+    ...(a.agentId !== null ? { agentId: a.agentId } : {}),
+    ...(a.agentName !== null ? { agentName: a.agentName ?? 'Explore' } : {}),
+    agentColor: 'blue',
+    isSidechain: true,
+  });
+}
+
+/** Appends records the way the recorder does (reference 4.1); with `agent`, as the subagent transcript writer does (5.2). */
 export class Log {
   readonly lines: string[] = [];
   /** The recorder's tail (lastRecordUuid). */
   tail: string | null = null;
   private n = 0;
-  constructor(readonly opts: { prefix?: string; sessionId?: string; t0?: number } = {}) {}
+  constructor(readonly opts: { prefix?: string; sessionId?: string; t0?: number; agent?: AgentFields } = {}) {}
 
   /** The uuid the next record will get. */
   peek(): string {
@@ -222,7 +245,8 @@ export class Log {
     const ms = o.ms ?? this.now();
     this.n += 1;
     const env: Envelope = { uuid, parentUuid: o.parent === undefined ? this.tail : o.parent, sessionId: this.opts.sessionId ?? SID, timestamp: isoOf(ms) };
-    this.lines.push(build(env));
+    const l = build(env);
+    this.lines.push(this.opts.agent === undefined ? l : asAgentLine(l, this.opts.agent));
     if (o.advance !== false) this.tail = uuid;
     return uuid;
   }
@@ -270,6 +294,71 @@ export function qwenEvents(lines: readonly string[], opts: { sessionId?: string;
     offset += Buffer.byteLength(l) + 1;
     return e;
   });
+}
+
+/** The file-name form of an agent id (reference 5.2: every character outside [a-zA-Z0-9_-] becomes `_`). */
+export const agentStem = (agentId: string): string => agentId.replace(/[^a-zA-Z0-9_-]/g, '_');
+
+/** The raw events of a subagent file `agent-<stem>.jsonl`; the event's agent id is the stem (the source's form). */
+export function agentEvents(stem: string, lines: readonly string[], opts: { sessionId?: string; startOffset?: number } = {}): RawEvent[] {
+  return qwenEvents(lines, { ...opts, agentId: stem });
+}
+
+/** A whole-file sidecar as the pipeline delivers it: a meta raw event (agent sidecar with `agentStem`, else the title sidecar). */
+export function metaEvent(payload: string, o: { agentStem?: string; sessionId?: string } = {}): RawEvent {
+  const sid = o.sessionId ?? SID;
+  const stem = o.agentStem ?? null;
+  return {
+    source: 'meta',
+    origin: 'qwen',
+    file: stem === null ? `qwen:${PROJECT}/chats/${sid}.title.json` : `qwen:${PROJECT}/subagents/${sid}/agent-${stem}.meta.json`,
+    sessionId: sid,
+    agentId: stem,
+    payload,
+  };
+}
+
+/** `<sessionId>.title.json` (reference 1.4). */
+export const titleSidecar = (displayName: unknown, source: unknown): string => JSON.stringify({ version: 1, displayName, source, updatedAt: '2026-11-16T09:12:44.512Z' });
+
+/** `agent-<id>.meta.json` (reference 5.2 `AgentMeta`); a field given as undefined is left out. */
+export function agentMeta(o: { agentId: string; agentType?: string; toolUseId?: string; parentAgentId?: string | null; model?: string }): string {
+  return JSON.stringify({
+    agentId: o.agentId,
+    ...(o.agentType !== undefined ? { agentType: o.agentType } : {}),
+    description: 'Find callers',
+    parentSessionId: SID,
+    ...(o.toolUseId !== undefined ? { toolUseId: o.toolUseId } : {}),
+    parentAgentId: o.parentAgentId === undefined ? null : o.parentAgentId,
+    createdAt: '2026-11-16T09:20:00.000Z',
+    status: 'completed',
+    isBackgrounded: false,
+    ...(o.model !== undefined ? { model: o.model } : {}),
+    lastUpdatedAt: '2026-11-16T09:21:12.000Z',
+  });
+}
+
+/** An `agent` call's arguments (reference 5.1). */
+export const agentArgs = (subagentType?: string): Obj => ({ description: 'Find callers', prompt: 'Find every caller of uploadChunk', ...(subagentType !== undefined ? { subagent_type: subagentType } : {}) });
+
+/** The `agent` tool's recorded result display (reference 5.1, `AgentResultDisplay`). */
+export const agentResultDisplay = (name: string): Obj => ({ type: 'task_execution', subagentName: name, taskDescription: 'Find callers', taskPrompt: 'Find every caller', status: 'completed', result: 'src/a.ts', toolCalls: [] });
+
+/**
+ * A subagent transcript of reference 5.2 (in its records' order): the launching prompt, a round (thinking, text,
+ * usage, agentRunId / agentRound), one record per tool call, the call's result without `status`, a tool-lifecycle
+ * telemetry record, a final round. `t0` should fall after the dispatch call's time.
+ */
+export function agentThread(agentId: string, o: { agentName?: string | null; t0?: number; prefix?: string; withId?: boolean } = {}): { log: Log; ids: Record<string, string> } {
+  const log = new Log({ prefix: o.prefix ?? 'c', t0: o.t0 ?? T0 + 100_000, agent: { agentId: o.withId === false ? null : agentId, agentName: o.agentName } });
+  const ids: Record<string, string> = {};
+  ids.p = log.prompt('Find every caller of uploadChunk', { payload: null, parts: [text('Find every caller of uploadChunk')] });
+  ids.a1 = log.add((env) => line('assistant', undefined, env, { message: { role: 'model', parts: [thought('Searching first.'), text('Let me grep.')] }, usageMetadata: usageMeta(5120, 64), agentRunId: '7d', agentRound: 1 }));
+  ids.c1 = log.add((env) => line('assistant', undefined, env, { message: { role: 'model', parts: [fcall('grep_search', { pattern: 'uploadChunk' }, 'call_c1')] } }));
+  ids.r1 = log.result('grep_search', 'src/a.ts:12: uploadChunk(', { id: 'call_c1', noStatus: true });
+  ids.tel = log.sys('ui_telemetry', { uiEvent: { 'event.name': 'tool_lifecycle' } });
+  ids.a2 = log.add((env) => line('assistant', undefined, env, { message: { role: 'model', parts: [text('One caller: src/a.ts:12.')] }, usageMetadata: usageMeta(5300, 20), agentRunId: '7d', agentRound: 2 }));
+  return { log, ids };
 }
 
 /**

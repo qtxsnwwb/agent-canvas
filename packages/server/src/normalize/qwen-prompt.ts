@@ -21,7 +21,7 @@ function isHookPart(p: unknown): boolean {
   return p.text.startsWith(HOOK_OPEN) && p.text.trimEnd().endsWith(HOOK_CLOSE);
 }
 
-/** Text parts joined (thought parts left out) and the number of non-text parts. */
+/** Text parts joined (thought parts left out) and the number of media parts (reference 2.2: inlineData, fileData). */
 function collect(parts: readonly unknown[]): { text: string; images: number } {
   let text = '';
   let images = 0;
@@ -29,12 +29,12 @@ function collect(parts: readonly unknown[]): { text: string; images: number } {
     if (!isObject(p)) continue;
     if (typeof p.text === 'string') {
       if (p.thought !== true) text += p.text;
-    } else images += 1;
+    } else if (isObject(p.inlineData) || isObject(p.fileData)) images += 1;
   }
   return { text, images };
 }
 
-/** Reference 3.4 / spec 4.3. `images` = count of non-text parts kept. */
+/** Reference 3.4 / spec 4.3. `images` = count of media parts kept (an empty or unknown part is not one). */
 export function promptText(rec: unknown): { text: string; images: number } {
   if (!isObject(rec)) return { text: '', images: 0 };
   const parts = partsOf(rec);

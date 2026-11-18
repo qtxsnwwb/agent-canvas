@@ -32,8 +32,10 @@ import {
   T0,
   text,
   thought,
+  toolResult,
   turnResult,
   usageMeta,
+  userPrompt,
 } from './qwen-fixtures.js';
 
 // The Qwen Code normalizer, main threads (spec 4, 5, 7, 8; docs/formats/qwen-code.md 2-4, 6). Expectations come
@@ -728,6 +730,76 @@ describe('qwenTouches (spec 9, conservative, unverified tool names)', () => {
     expect(qwenTouches('glob', { path: 'src' })).toEqual([]);
     expect(qwenTouches('write_file', 'not an object')).toEqual([]);
     expect(qwenTouches('write_file', { file_path: '' })).toEqual([]);
+  });
+});
+
+describe('fragments the normalizer cannot merge (reference 3.3: same-uuid lines are fragments of one record)', () => {
+  test('a later fragment of a user, tool_result or system record adds nothing and is counted', () => {
+    const log = new Log();
+    const p = log.prompt('go');
+    const a = log.reply([fcall('t', {}, 'k')]);
+    const r = log.result('t', 'first output', { id: 'k' });
+    const s = log.add((env) => slashCommand('/compress', env));
+    log.add((env) => userPrompt('go, again', env), { uuid: p, parent: null, advance: false });
+    log.add((env) => toolResult('t', 'second output', env, { id: 'k' }), { uuid: r, parent: a, advance: false });
+    log.add((env) => slashCommand('/other', env), { uuid: s, parent: r, advance: false });
+    const f = run(ev(log));
+    expect(f.unknown).toEqual(['qwen:fragment-ignored', 'qwen:fragment-ignored', 'qwen:fragment-ignored']);
+    expect(ids(f)).toEqual([N(p, 'prompt'), N(a, 'call:k'), N(s, 'command')]);
+    expect(f.details.get(N(p, 'prompt'))).toEqual({ text: 'go' });
+    expect(f.details.get(N(a, 'call:k'))?.output).toBe('first output');
+  });
+});
+
+describe('the first-prompt title (reference 6, rule 3)', () => {
+  test('the first user record without subtype, a mod prompt included: its displayText', () => {
+    const log = new Log();
+    log.prompt('mod text', { provenance: 'mod_prompt', payload: { displayText: 'from a mod', hookContext: '', mod: 'm' } });
+    log.prompt('typed later');
+    expect(run(ev(log)).session?.title).toBe('from a mod');
+  });
+
+  test('displayText whenever the key exists (an empty one skips to the next prompt, whatever the parts say); else the first text part', () => {
+    const log = new Log();
+    log.add((env) => notification('a notice is not a prompt', env));
+    log.prompt('', { payload: { displayText: '' }, parts: [text('the parts say something')] });
+    log.prompt('ignored', { payload: { mod: 'x' }, parts: [text('first part'), text(' second part')] });
+    expect(run(ev(log)).session?.title).toBe('first part');
+  });
+});
+
+describe('non-text parts (spec 4.1: images are [image]; other shapes show nothing)', () => {
+  test('inlineData and fileData are [image]; an empty part or one with only unknown keys shows nothing', () => {
+    const log = new Log();
+    log.prompt('go');
+    const a = log.reply([{}, { somethingNew: 1 }, { thoughtSignature: 's', somethingNew: 2 }, image(), { fileData: { mimeType: 'image/png', fileUri: 'gs://x' } }, text('end')]);
+    const f = run(ev(log));
+    expect(ids(f).slice(1)).toEqual([N(a, 'text:3'), N(a, 'text:4'), N(a, 'text:5')]);
+    expect(f.details.get(N(a, 'text:4'))).toMatchObject({ text: '[image]' });
+    const q = new Log();
+    const p = q.prompt('ignored', { payload: null, parts: [text('look'), {}, { somethingNew: 1 }, image()] });
+    expect(run(ev(q)).details.get(N(p, 'prompt'))).toEqual({ text: 'look\n[image]' });
+  });
+});
+
+describe('git branch (reference 2.1: gitBranch on every record)', () => {
+  test('the latest main-thread record that names one; subagent records do not move it', () => {
+    const log = new Log();
+    log.prompt('go');
+    log.reply([text('a')]);
+    log.reply([text('b')]);
+    const lines = log.lines.map((l, i) => {
+      const o = JSON.parse(l) as Record<string, unknown>;
+      if (i === 1) o.gitBranch = 'feature/x';
+      if (i === 2) delete o.gitBranch;
+      return JSON.stringify(o);
+    });
+    const f = run(qwenEvents(lines));
+    expect(f.session?.gitBranch).toBe('feature/x');
+    const sub = new Log({ prefix: 'c', agent: { agentId: 'Explore-call_b7' } });
+    sub.prompt('x', { payload: null, parts: [text('x')] });
+    const other = sub.lines.map((l) => l.replace('"gitBranch":"main"', '"gitBranch":"elsewhere"'));
+    expect(run([...qwenEvents(lines), ...qwenEvents(other, { agentId: 'Explore-call_b7' })]).session?.gitBranch).toBe('feature/x');
   });
 });
 
