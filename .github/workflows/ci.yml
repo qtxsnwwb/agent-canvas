@@ -35,6 +35,12 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm build
+      # The DeepSeek Harness container tests skip themselves on a Node without zstd (the product feature-detects it); CI
+      # must run them, so a runner Node without node:zlib zstd fails here instead of passing with them skipped.
+      - name: Node has node:zlib zstd (DeepSeek tests must run)
+        shell: bash
+        run: |
+          node -e "if (typeof require('node:zlib').zstdDecompressSync !== 'function') { console.error('CI needs a Node with node:zlib zstdDecompressSync (22.15 or later): ' + process.version + ' has none, so the DeepSeek Harness tests would be skipped'); process.exit(1) } console.log('node:zlib zstd present on ' + process.version)"
       - run: pnpm test
         env:
           # Wall-clock bounds measured on a developer machine, scaled for a shared runner (pipeline.timing.test.ts).

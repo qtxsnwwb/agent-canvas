@@ -27,12 +27,17 @@ import { NORMALIZER_VERSION_KEY, Pipeline, REBUILD_FLAG } from './pipeline.js';
 import { ClaudeFileSource } from './sources/claude.js';
 import { storeLookup } from './sources/codex/lookup.js';
 import { CodexFileSource } from './sources/codex/source.js';
+import { BuddyFileSource, buddyRootsOf } from './sources/buddy/source.js';
 import { CursorSource } from './sources/cursor/source.js';
-import { isExistingDir, sourceDirOf } from './sources/dirs.js';
+import { isExistingDir, sourceDirOf, sourceDirsOf } from './sources/dirs.js';
 import { CopilotFileSource } from './sources/copilot/source.js';
+import { DeepSeekFileSource } from './sources/deepseek/source.js';
+import { DoubaoFileSource } from './sources/doubao/source.js';
+import { zstdAvailable } from './sources/deepseek/zstd-frames.js';
 import { GeminiFileSource } from './sources/gemini/source.js';
 import { GrokFileSource } from './sources/grok/source.js';
 import type { PollSource } from './sources/poll.js';
+import { ProjectIdResolver } from './sources/project-ids.js';
 import type { FileSource } from './sources/source.js';
 import { startWatcher } from './sources/transcript/watcher.js';
 import { AnomaliesService } from './anomalies/service.js';
@@ -139,10 +144,13 @@ export const PACKAGE_NAME = '@qtxsnwwb/agent-canvas';
 /**
  * The session-file directories read for this configuration: Claude Code's projects directory, and Codex's sessions
  * directory, Gemini CLI's `tmp`, Copilot CLI's `session-state` and Grok Build's `sessions` when they name an existing directory (otherwise that
- * origin is skipped silently). `store` lets the
+ * origin is skipped silently), and DeepSeek Harness's `sessions` likewise when this Node has zstd (`caps.zstd`, default
+ * zstdAvailable(); without it the source is not created and diagnostics say why), and one source each for WorkBuddy
+ * and CodeBuddy Code holding every root whose `projects` exists (none when no root does), and one for Doubao Work
+ * holding every existing root. `store` lets the
  * Codex source place files from their stored raw events (files that are gone, restarts) without reading them.
  */
-export function fileSources(config: Config, store?: Store): FileSource[] {
+export function fileSources(config: Config, store?: Store, caps: { zstd: boolean } = { zstd: zstdAvailable() }): FileSource[] {
   const sources: FileSource[] = [new ClaudeFileSource(config.projectsDir)];
   const codexDir = config.codexSessionsDir;
   if (isExistingDir(codexDir)) sources.push(new CodexFileSource(codexDir!, store ? storeLookup(store, config.projectsDir) : undefined));
@@ -155,6 +163,25 @@ export function fileSources(config: Config, store?: Store): FileSource[] {
   // Grok Build: likewise, only when <grokDir>/sessions exists at start.
   const grokSessions = sourceDirOf(config, 'grok');
   if (isExistingDir(grokSessions)) sources.push(new GrokFileSource(grokSessions!, store ? storeLookup(store, config.projectsDir) : undefined));
+  // DeepSeek, WorkBuddy and CodeBuddy share one project-id resolver: the first spelling of a directory that any of them
+  // meets (after the ids in the store and Claude Code's project directories, which still win) is the one all of them
+  // use, so one directory in two letter cases is one project even when two of them meet it in the same first scan. The
+  // older sources keep their own resolvers, unchanged. (Doubao Work has a fixed project.)
+  const cnLookup = store ? storeLookup(store, config.projectsDir) : undefined;
+  const cnProjects = new ProjectIdResolver(() => cnLookup?.knownProjectIds() ?? []);
+  // DeepSeek Harness: only when <deepseekDir>/sessions exists at start and node:zlib has zstd (Node >= 22.15).
+  const dshSessions = sourceDirsOf(config, 'deepseek')[0] ?? null;
+  if (caps.zstd && isExistingDir(dshSessions)) sources.push(new DeepSeekFileSource(config.deepseekDir!, store ? storeLookup(store, config.projectsDir) : undefined, cnProjects));
+  // WorkBuddy (both default roots, or the one override) and CodeBuddy Code: one source per origin holding each root
+  // whose <dir>/projects exists at start; none when no root exists. Labels are given over every configured root.
+  for (const origin of ['workbuddy', 'codebuddy'] as const) {
+    const roots = buddyRootsOf(origin === 'workbuddy' ? config.workbuddyDirs : [config.codebuddyDir]).filter((r) => isExistingDir(path.join(r.dir, 'projects')));
+    if (roots.length > 0) sources.push(new BuddyFileSource(origin, roots, store ? storeLookup(store, config.projectsDir) : undefined, cnProjects));
+  }
+  // Doubao Work: one source holding every "User Data"-level root that exists at start; none when no root does. Its
+  // profiles' `.sessions` directories are found below each root (a profile that appears later: by the full scan).
+  const doubaoRoots = sourceDirsOf(config, 'doubao').filter((d) => isExistingDir(d));
+  if (doubaoRoots.length > 0) sources.push(new DoubaoFileSource(doubaoRoots, store ? storeLookup(store, config.projectsDir) : undefined));
   return sources;
 }
 

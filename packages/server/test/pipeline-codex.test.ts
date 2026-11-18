@@ -26,7 +26,7 @@ beforeEach(async () => {
   tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-pipeline-two-origins-'));
   config = loadConfig(
     {},
-    { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: path.join(tmp, 'codex', 'sessions'), geminiDir: null, grokDir: null, copilotDir: null },
+    { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: path.join(tmp, 'codex', 'sessions'), deepseekDir: null, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [], geminiDir: null, grokDir: null, copilotDir: null },
   );
   cwd = path.join(tmp, 'work', 'app');
   project = cwd.replace(/[^A-Za-z0-9]/g, '-');

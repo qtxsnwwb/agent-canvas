@@ -80,19 +80,62 @@ function transcript() {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** Starts `node <cli> start --port 0` on temp directories; resolves with its URL once it listens. */
-function startServer(cli, tmp, nodeModulesHint) {
-  const env = {
+/**
+ * Every variable that names a tool directory this service reads, besides Claude Code's projects directory (which the
+ * scripts point at a temp directory). Set to the empty string, each turns its tool off: nothing is read from the real
+ * Codex, Cursor, Gemini CLI, Grok, Copilot CLI, DeepSeek Harness, WorkBuddy, CodeBuddy or Doubao directories, including
+ * the ones whose defaults do not come from the home directory (Cursor's `%APPDATA%`, Doubao's `%LOCALAPPDATA%`) or that
+ * the tools' own variables (`DSH_HOME`, `WORKBUDDY_CONFIG_DIR`, ...) would name.
+ */
+export const TOOL_DIR_VARS = [
+  'AGENT_CANVAS_CODEX_DIR',
+  'AGENT_CANVAS_CURSOR_DB',
+  'AGENT_CANVAS_GEMINI_DIR',
+  'AGENT_CANVAS_GROK_DIR',
+  'AGENT_CANVAS_COPILOT_DIR',
+  'AGENT_CANVAS_DSH_DIR',
+  'AGENT_CANVAS_WORKBUDDY_DIR',
+  'AGENT_CANVAS_CODEBUDDY_DIR',
+  'AGENT_CANVAS_DOUBAO_DIR',
+];
+
+/**
+ * The environment for a CLI process these scripts start: the caller's environment with every tool directory turned
+ * off (TOOL_DIR_VARS), the data and projects directories under `tmp`, and a home directory (`HOME` / `USERPROFILE`)
+ * under `tmp`, created here.
+ */
+export function isolatedServerEnv(tmp, extra = {}) {
+  const home = path.join(tmp, 'home');
+  fs.mkdirSync(home, { recursive: true });
+  return {
     ...process.env,
+    ...Object.fromEntries(TOOL_DIR_VARS.map((name) => [name, ''])),
     AGENT_CANVAS_DATA_DIR: path.join(tmp, 'data'),
     AGENT_CANVAS_PROJECTS_DIR: path.join(tmp, 'projects'),
-    AGENT_CANVAS_CODEX_DIR: '',
-    AGENT_CANVAS_CURSOR_DB: '',
-    AGENT_CANVAS_STATS_WARMUP: '0',
-    HOME: path.join(tmp, 'home'),
-    USERPROFILE: path.join(tmp, 'home'),
+    HOME: home,
+    USERPROFILE: home,
+    ...extra,
   };
-  fs.mkdirSync(env.HOME, { recursive: true });
+}
+
+/** What a server's diagnostics show that it may read besides the projects directory (an empty list when nothing). */
+export function toolSourceProblems(diagnostics) {
+  const problems = [];
+  if (diagnostics.codex?.sessionsDir !== null) problems.push(`codex: ${diagnostics.codex?.sessionsDir}`);
+  if (diagnostics.cursor?.dbPath !== null) problems.push(`cursor: ${diagnostics.cursor?.dbPath}`);
+  const sources = diagnostics.sources ?? {};
+  const origins = ['gemini', 'grok', 'copilot', 'deepseek', 'workbuddy', 'codebuddy', 'doubao'];
+  for (const origin of origins) {
+    const s = sources[origin];
+    if (s === undefined) problems.push(`${origin}: missing from the diagnostics`);
+    else if (s.dir !== null || s.present || s.reading || (s.dirs ?? []).length > 0) problems.push(`${origin}: ${JSON.stringify(s)}`);
+  }
+  return problems;
+}
+
+/** Starts `node <cli> start --port 0` on temp directories; resolves with its URL once it listens. */
+function startServer(cli, tmp, nodeModulesHint) {
+  const env = isolatedServerEnv(tmp, { AGENT_CANVAS_STATS_WARMUP: '0' });
   const child = spawn(process.execPath, [cli, 'start', '--port', '0'], { env, stdio: ['ignore', 'pipe', 'pipe'], cwd: nodeModulesHint ?? tmp });
   let out = '';
   const url = new Promise((resolve, reject) => {
@@ -165,6 +208,11 @@ export async function exportSynthetic({ cli, log = console.log }) {
     const base = await server.url;
     const port = Number(new URL(base).port);
     if (port === 4317) throw new Error('the server took port 4317');
+    // The server reads no tool directory but the temp projects directory.
+    const diag = await (await fetch(`${base}/api/diagnostics`)).json();
+    const reads = toolSourceProblems(diag);
+    if (reads.length > 0) throw new Error(`the server would read real tool directories:\n  ${reads.join('\n  ')}`);
+    log(`isolation: codex, cursor and ${Object.keys(diag.sources).length} file sources disabled (no directory, not present, not reading)`);
     // Wait for the transcript to be read.
     const deadline = Date.now() + 30_000;
     for (;;) {

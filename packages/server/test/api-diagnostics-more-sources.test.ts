@@ -32,9 +32,14 @@ afterEach(async () => {
   await fs.rm(tmp, { recursive: true, force: true, maxRetries: 10 });
 });
 
-function configFor(dirs: { geminiDir: string | null; grokDir: string | null; copilotDir: string | null }): Config {
-  return loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, cursorDbPath: null, geminiDir: dirs.geminiDir, grokDir: dirs.grokDir, copilotDir: dirs.copilotDir });
+type NewDirs = Pick<Config, 'deepseekDir' | 'workbuddyDirs' | 'codebuddyDir' | 'doubaoDirs'>;
+const NEW_OFF: NewDirs = { deepseekDir: null, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [] };
+function configFor(dirs: { geminiDir: string | null; grokDir: string | null; copilotDir: string | null } & Partial<NewDirs>): Config {
+  const n = { ...NEW_OFF, ...dirs };
+  return loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, cursorDbPath: null, geminiDir: dirs.geminiDir, grokDir: dirs.grokDir, copilotDir: dirs.copilotDir, deepseekDir: n.deepseekDir, workbuddyDirs: n.workbuddyDirs, codebuddyDir: n.codebuddyDir, doubaoDirs: n.doubaoDirs });
 }
+const OFF = { dir: null, present: false, reading: false, sessionCount: 0 };
+const NEW_SOURCES_OFF = { deepseek: OFF, workbuddy: OFF, codebuddy: OFF, doubao: OFF };
 async function serve(config: Config): Promise<{ app: FastifyInstance; pipeline: Pipeline }> {
   const store = openStore(':memory:');
   stores.push(store);
@@ -54,6 +59,7 @@ test('not configured: dir null, not present, no sessions', async () => {
     gemini: { dir: null, present: false, reading: false, sessionCount: 0 },
     grok: { dir: null, present: false, reading: false, sessionCount: 0 },
     copilot: { dir: null, present: false, reading: false, sessionCount: 0 },
+    ...NEW_SOURCES_OFF,
   });
 });
 
@@ -64,6 +70,7 @@ test('configured but absent: the directory the source would read, not present, n
     gemini: { dir: path.join(dirs.geminiDir, 'tmp'), present: false, reading: false, sessionCount: 0 },
     grok: { dir: path.join(dirs.grokDir, 'sessions'), present: false, reading: false, sessionCount: 0 },
     copilot: { dir: path.join(dirs.copilotDir, 'session-state'), present: false, reading: false, sessionCount: 0 },
+    ...NEW_SOURCES_OFF,
   });
   for (const d of Object.values(dirs)) await expect(fs.stat(d)).rejects.toThrow();
 });
@@ -80,6 +87,7 @@ test('a Gemini CLI directory with one session: present, one session; the others 
     gemini: { dir: path.join(geminiDir, 'tmp'), present: true, reading: true, sessionCount: 1 },
     grok: { dir: null, present: false, reading: false, sessionCount: 0 },
     copilot: { dir: null, present: false, reading: false, sessionCount: 0 },
+    ...NEW_SOURCES_OFF,
   });
   // The masked answer keeps the block (the dir is a path, masked by the page, not by the server).
   const masked = (await app.inject({ method: 'GET', url: '/api/diagnostics?mask=1' })).json() as Diagnostics;
@@ -95,4 +103,33 @@ test('a source directory that appears after start: present, but not read until a
   // After a restart (a new pipeline built from the same config) the source exists and is read.
   const { app: restarted } = await serve(configFor({ geminiDir: null, grokDir: null, copilotDir }));
   expect((await diagnostics(restarted)).sources?.copilot).toMatchObject({ present: true, reading: true });
+});
+
+test('the four more sources (DeepSeek, WorkBuddy, CodeBuddy, Doubao) with no directories: each entry exists, absent, not read, no sessions', async () => {
+  const { app } = await serve(configFor({ geminiDir: null, grokDir: null, copilotDir: null }));
+  const sources = (await diagnostics(app)).sources;
+  for (const origin of ['deepseek', 'workbuddy', 'codebuddy', 'doubao'] as const) expect(sources?.[origin], origin).toEqual(OFF);
+});
+
+test('the four more sources configured but absent: the directories they would read, not present; every root listed when there are several; nothing created', async () => {
+  const at = (n: string): string => path.join(tmp, n);
+  const { app } = await serve(configFor({
+    geminiDir: null, grokDir: null, copilotDir: null,
+    deepseekDir: at('.dsh'), workbuddyDirs: [at('.workbuddy'), at('.workbuddy-ai')], codebuddyDir: at('.codebuddy'), doubaoDirs: [at('DoubaoWork'), at('Doubao')],
+  }));
+  const sources = (await diagnostics(app)).sources;
+  expect(sources?.deepseek).toEqual({ dir: path.join(at('.dsh'), 'sessions'), present: false, reading: false, sessionCount: 0 });
+  expect(sources?.codebuddy).toEqual({ dir: path.join(at('.codebuddy'), 'projects'), present: false, reading: false, sessionCount: 0 });
+  expect(sources?.workbuddy).toEqual({
+    dir: path.join(at('.workbuddy'), 'projects'), present: false, reading: false, sessionCount: 0,
+    dirs: [{ dir: path.join(at('.workbuddy'), 'projects'), present: false }, { dir: path.join(at('.workbuddy-ai'), 'projects'), present: false }],
+  });
+  expect(sources?.doubao).toEqual({
+    dir: at('DoubaoWork'), present: false, reading: false, sessionCount: 0,
+    dirs: [{ dir: at('DoubaoWork'), present: false }, { dir: at('Doubao'), present: false }],
+  });
+  for (const n of ['.dsh', '.workbuddy', '.workbuddy-ai', '.codebuddy', 'DoubaoWork', 'Doubao']) await expect(fs.stat(at(n))).rejects.toThrow();
+  // A second root that exists makes the source present (stat only).
+  await fs.mkdir(path.join(at('.workbuddy-ai'), 'projects'), { recursive: true });
+  expect((await diagnostics(app)).sources?.workbuddy).toMatchObject({ present: true, reading: false, dirs: [{ present: false }, { present: true }] });
 });

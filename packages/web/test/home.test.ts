@@ -121,7 +121,7 @@ test('heroTotals：项目数随筛选；会话数只在都准确时给出，否�
 test('ORIGIN_LOOK：两个来源各有名字和不同的类名', () => {
   expect(originLook('claude')).toEqual({ label: 'Claude Code', className: 'origin-claude' });
   expect(originLook('codex')).toEqual({ label: 'Codex', className: 'origin-codex' });
-  expect(ORIGIN_FILTER_OPTIONS.map((o) => [o.value, o.label])).toEqual([['all', '全部'], ['claude', 'Claude Code'], ['codex', 'Codex'], ['cursor', 'Cursor'], ['gemini', 'Gemini CLI'], ['grok', 'Grok'], ['copilot', 'Copilot CLI']]);
+  expect(ORIGIN_FILTER_OPTIONS.map((o) => [o.value, o.label])).toEqual([['all', '全部'], ['claude', 'Claude Code'], ['codex', 'Codex'], ['cursor', 'Cursor'], ['gemini', 'Gemini CLI'], ['grok', 'Grok'], ['copilot', 'Copilot CLI'], ['deepseek', 'DeepSeek'], ['workbuddy', 'WorkBuddy'], ['codebuddy', 'CodeBuddy'], ['doubao', '豆包']]);
 });
 
 test('showOriginFilter：只有 Cursor 的项目也提供筛选；parseOriginFilter 认 cursor', () => {
@@ -140,4 +140,12 @@ test('projectTitle: the directory name; a Cursor project without a directory is 
   expect(CURSOR_UNKNOWN_DIR_NAME).toBe('Cursor（未知目录）');
   expect(projectTitle({ id: 'cursor-unknown', cwd: null })).toBe('Cursor（未知目录）');
   expect(projectTitle({ id: 'D--work-app', cwd: null })).toBe('D--work-app');
+});
+
+test('projectTitle: 豆包工作的固定项目（没有工作目录）显示为“豆包工作”', async () => {
+  const { projectTitle } = await import('../src/home');
+  expect(projectTitle({ id: 'doubao-work', cwd: null })).toBe('豆包工作');
+  // Only that id without a directory: a project with a directory keeps its directory name.
+  expect(projectTitle({ id: 'doubao-work', cwd: '/home/dev/doubao-work' })).toBe('doubao-work');
+  expect(projectTitle({ id: 'doubao-work-2', cwd: null })).toBe('doubao-work-2');
 });

@@ -45,7 +45,7 @@ async function statsOf(sessions: Record<string, string[]>): Promise<StatsRespons
     await fs.mkdir(path.dirname(file), { recursive: true });
     await fs.writeFile(file, lines.map((l) => `${l}\n`).join(''));
   }
-  const config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, cursorDbPath: null, geminiDir: null, grokDir: null, copilotDir });
+  const config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, cursorDbPath: null, deepseekDir: null, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [], geminiDir: null, grokDir: null, copilotDir });
   await fs.mkdir(config.projectsDir, { recursive: true });
   store = openStore(':memory:');
   pipeline = new Pipeline(store, config, { sources: fileSources(config, store) });

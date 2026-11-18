@@ -2,7 +2,7 @@
 
 > 这里是完整的参考说明。想快速上手请看[项目首页](../README.md)。
 
-agent-canvas 是一个本地服务：它读取 Claude Code 的 transcript 文件、OpenAI Codex 的会话文件和 Cursor 的本地数据库，以及 Gemini CLI、Grok、GitHub Copilot CLI 的会话文件（这三个未经真实数据核对），并接收 hook 事件，在固定的本地网址上用网页展示每个会话正在做什么。各种工具的会话用同一套页面展示（见下文“Codex”“Cursor”“Gemini CLI、Grok、Copilot CLI”）。
+agent-canvas 是一个本地服务：它读取 Claude Code 的 transcript 文件、OpenAI Codex 的会话文件和 Cursor 的本地数据库，以及 Gemini CLI、Grok、GitHub Copilot CLI、DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作的会话文件（这七个未经真实数据核对），并接收 hook 事件，在固定的本地网址上用网页展示每个会话正在做什么。各种工具的会话用同一套页面展示（见下文“Codex”“Cursor”“Gemini CLI、Grok、Copilot CLI”“DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作”）。
 每个会话显示为一张实时更新的画布。默认的“概览”视角只画骨架（每个轮次一张卡片，下面挂它派出的子代理），选中一个轮次或子代理，它的执行过程在下方以瀑布图列出。另有逐步、拓扑、因果、复盘四个视角（见下文“画布”）。首页可以检索会话，诊断页给出服务和 hooks 的运行情况。
 
 ## 从 claude-canvas 升级
@@ -17,7 +17,7 @@ agent-canvas 是一个本地服务：它读取 Claude Code 的 transcript 文件
 
 ## 环境要求
 
-- Node ≥ 22
+- Node ≥ 22（读取 DeepSeek Harness 的会话需要 Node 22.15 或更高，见“DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作”）
 - 从源码运行时还需要 pnpm（可选：没有全局安装时用 `npx --yes pnpm@10` 代替 `pnpm`）
 
 ## 安装与启动
@@ -256,7 +256,7 @@ node packages/server/dist/cli.js hooks uninstall --cursor    # 只移除本安�
 
 ### 限制
 
-- **没有 hooks**：不为这三个工具安装任何 hook，也就没有“等待权限确认”“等待输入”这类实时状态，“等待确认”类通知不会出现。会话状态只靠会话文件推断（运行中、空闲；Copilot CLI 正常退出后为已结束；超过 15 分钟没有活动的“运行中”显示为“长时间无活动”），延迟几秒。
+- **没有 hooks**：不为这三个工具安装任何 hook，也就没有“等待权限确认”“等待输入”这类实时状态，“等待确认”类通知不会出现。会话状态只靠会话文件推断，延迟几秒：Gemini CLI 为运行中或空闲；Copilot CLI 为运行中，正常退出后为已结束；Grok 的文件里没有一轮结束的记号，会话一直是运行中。超过 15 分钟没有活动的“运行中”显示为“长时间无活动”。各种通知在这三个来源上能不能用，见“通知”一节末尾的表。
 - **Gemini CLI**：Gemini 默认把 30 天以前的会话文件自动删掉，被删的会话在这里显示为“源文件已删除”，已采集的内容仍可看。旧版的整份 `.json` 会话照样读取（超过 64 MB 的不读，记在诊断页的“导入失败”里）；同一会话同时有新旧两种文件时只读新的。一个 Gemini 会话在活跃期间（最近有新内容、正在被读）在内存里约占会话文件大小的两倍，移出内存后释放；几百 MB 的会话文件会相应占用内存。统计里 `cached` 记为缓存读取，思考用的 token（`thoughts`）计入输出。
 - **Grok**：一段很长的回复（或思考）显示为几个连续的节点，每满约 4,000 个字符接着一个新节点，内容不缺。token 用量来自每轮结束的记录（新输入 = `inputTokens + cacheCreationTokens`，缓存读取 = `cachedReadTokens`，输出 = `outputTokens + reasoningTokens`，对应关系是推测的），记在该轮最后一个回复节点上；一条用量记录都没有的 Grok 会话不参与“消耗异常高”的判断。
 - **Copilot CLI**：只有整个会话的总用量，记在会话结束（`session.shutdown`）那一步上，不能按轮看 token。统计里这份总量算在会话退出的那一刻（按日统计时算在退出那一天），退出这一步不算任何轮次的一部分：一轮只算到它最后一个步骤，不会因为 CLI 开着几个小时才退出而被拉长。恢复会话（`session.resume`）之后没有新提示就继续做的事，算作单独的一轮。Copilot 会话不参与“消耗异常高”的判断（另外三类异常照常）。一个会话退出多次时，后一次只计比前一次多出来的部分，宁可少算也不多算。几个子代理同时运行时，分不清哪个线程属于哪次派发的，那几个线程挂在会话下，不连到派发的那一步。Copilot 自己修复会话文件时删掉的记录，这里已经显示过的步骤仍然保留。
@@ -266,6 +266,114 @@ node packages/server/dist/cli.js hooks uninstall --cursor    # 只移除本安�
 ### 钩子串扰
 
 按公开资料，Grok 和 Copilot CLI 会读取 Claude Code（和 Cursor）的 hook 配置，因此可能调用我们为 Claude Code / Cursor 安装的 hook，但发来的内容是它们自己的格式。**它们实际会不会调用、发来什么，没有核对过。** 服务认出这种调用后直接丢弃（不存、不建会话），并在诊断页的 Hooks 一栏计数“被丢弃的外来 hook 调用”。这个数从服务启动时算起，重启后归零；不为 0 说明这次运行期间发生过这种情况，不影响数据，也不需要处理。
+
+## DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作
+
+**这四个来源未经真实数据核对。** 开发机上没有这四个工具，读法完全依据公开资料：DeepSeek Harness 的开源代码，腾讯发布的 CodeBuddy Code 安装包里的类型定义和几个第三方读取工具，以及一个解析过豆包工作文件的第三方工具。依据和每条结论的出处写在三份格式说明里：[`docs/formats/deepseek-harness.md`](./formats/deepseek-harness.md)、[`docs/formats/buddy-family.md`](./formats/buddy-family.md)（WorkBuddy 与 CodeBuddy Code）、[`docs/formats/doubao-work.md`](./formats/doubao-work.md)。测试用的全是按这些说明自造的样例，测试通过只说明实现与对资料的理解一致，不说明与真实文件一致。豆包工作只有一个第三方工具作依据，是其中最可能与真实文件不符的。觉得哪里不对时，先打开诊断页看该来源一栏（见下文“诊断页”）。
+
+### 从哪里读
+
+每个来源的位置取第一个有的：本程序的环境变量、工具自己的环境变量、默认位置。和 Gemini CLI 等三个来源一样：服务启动时目录存在才读取并持续监视；不存在时跳过，不报错、不创建任何东西；**服务运行期间才出现的目录（包括 WorkBuddy 的第二个根、豆包的第二个变体），重启服务后才读取**。对这些目录只读，从不写入。
+
+| 来源 | 读取的文件 | 改位置 |
+| --- | --- | --- |
+| DeepSeek Harness（`dsh`，命令行、网页界面、桌面应用共用一套数据） | `~/.dsh/sessions/<项目键>/<会话目录>/session.v4.jsonl.zstd` | `AGENT_CANVAS_DSH_DIR`（指向 dsh 的主目录，`sessions` 的上一层）；没设时用 dsh 自己的 `DSH_HOME` |
+| WorkBuddy（腾讯，桌面办公代理） | `~/.workbuddy` 和 `~/.workbuddy-ai` **两个根都读**，各自的 `projects/<项目名>/<会话 id>.jsonl`，子代理在 `<会话 id>/subagents/agent-*.jsonl` | `AGENT_CANVAS_WORKBUDDY_DIR`（一个目录，取代两个默认根）；没设时用 WorkBuddy 自己的 `WORKBUDDY_CONFIG_DIR`（一个目录） |
+| CodeBuddy Code（腾讯，命令行） | `~/.codebuddy/projects/` 下，布局同 WorkBuddy | `AGENT_CANVAS_CODEBUDDY_DIR`；没设时用 CodeBuddy 自己的 `CODEBUDDY_CONFIG_DIR` |
+| 豆包工作（字节，独立客户端，以及豆包桌面应用里的“工作任务”模式） | 两个变体都读：Windows `%LOCALAPPDATA%\DoubaoWork\User Data`（独立客户端）和 `%LOCALAPPDATA%\Doubao\User Data`（豆包应用）；macOS `~/Library/Application Support/DoubaoWork` 和 `…/Doubao`。其下每个配置（`Default`、`Profile 1`、`Profile 2`……）的 `.doubaowork` 或 `.doubao` 里的 `agent_mode/workspace/.sessions/<对话 id>/agents/<代理>/system/` 下的 `trajectory.jsonl` 和 `assignment.md` | `AGENT_CANVAS_DOUBAO_DIR`（一个“User Data”这一层的目录，取代两个变体）；豆包没有自己的变量。Linux 没有客户端，也没有默认位置 |
+
+- 四个变量设为空字符串都表示不读取该来源。
+- 只读上表里的文件。DeepSeek 目录里的附件、锁文件和其他版本的会话文件，WorkBuddy 的 `workbuddy.db`、`traces/` 和 `.meta.json`，豆包配置目录里的其他东西（`board.md`、`memory/`、附件、浏览器数据等）都不读。豆包的监视范围比读取的范围宽：每个 `.sessions` 目录往下四层的文件和目录（包括对话里的 `board.md`、`memory/`、附件）都会被列出、查看大小和时间，但不打开；`.sessions` 以外的东西不监视。
+- 同一个会话在 WorkBuddy 的两个根里都有，或同一个豆包对话出现在两个变体、两个配置里时，只读一份（已经存过的那份，否则先读到的那份），另一份在诊断页计数。
+- 豆包的配置目录里，后来新建的配置由每隔一段时间的全量扫描发现，不必重启。
+
+### 显示什么
+
+- 和其他来源一样显示为会话：提问、回复、工具调用及结果、子代理线程、标题，以及该工具记下的思考、模型、工作目录和 token 用量（豆包没有后四样，见下）。检索、统计、按文件看、异常、导出与遮蔽照常工作；首页、检索、统计、文件页、异常页的来源筛选里各有一项（名称：DeepSeek、WorkBuddy、CodeBuddy、豆包），有会话才出现。
+- 来源标记是本项目自己画的字母（D、W、B、O），不是这些产品的标志。
+- 会话按工作目录归到项目：DeepSeek、WorkBuddy、CodeBuddy 的会话和同一目录下的 Claude Code、Codex 等会话在同一个项目里。工具给目录起的名字（各自的有损编码）不用，工作目录一律取自记录。
+- **DeepSeek**：
+  - 只有用户自己输入的消息算提问；工具注入的上下文不显示。一条消息里的几段文字之间换行。
+  - 回复、思考、工具调用分别显示；工具结果按调用配对，出错的标为失败。
+  - 上下文压缩显示为一个系统节点，压缩前的内容继续显示。一轮以出错结束时显示“Turn failed”，被中止时显示“Interrupted”，这一轮还在运行的调用标为失败。
+  - 标题取 dsh 写下的最后一个标题，没有时取第一条提问。
+  - 会话在中途切换工作目录时，显示的工作目录随之更新；所属的项目仍按会话开始时的目录。
+  - 子代理是单独的会话文件，这里显示为根会话里的线程（多级子代理都挂在根会话下），并连到派出它的那次调用上；对不上时线程挂在会话下，不连线。子代理文件先于父会话被读到时先等着，读到父会话后再挂上。派给外部后端（例如 Codex）的子代理没有本地文件，只显示那次调用。
+  - 分叉出来的会话是独立的会话，前面带着从原会话复制过来的那一段，照常显示，两个会话之间不建关联。以分叉方式启动的子代理，线程开头同样带着父会话历史的副本。
+  - 已归档的会话照常显示（归档状态存在别处，不读）。
+  - 用量：新输入 = `inputTokens + cacheWriteTokens`，缓存读取 = `cacheReadTokens`，输出 = `outputTokens`（按资料已含思考，不再另加）。一条回复没有可显示的内容（只有图片，或中断后为空）时，它的用量加到同一线程里前面最近的一个可以记用量的节点上；线程里前面还没有这样的节点（例如子代理的第一条回复）时，留到这个线程下一条有内容的回复上；线程到最后都没有这样的回复时，这份用量丢失，不计入统计。
+- **WorkBuddy、CodeBuddy Code**（同一个引擎写出的同一种格式，读法相同）：
+  - 只有人输入的文字算提问：客户端包在外面的提示、只含提醒或本地命令的段，以及引擎标为非人输入的消息都不显示。
+  - 回复、思考、工具调用及结果分别显示；结果状态不是“完成”的标为失败。
+  - 标题依次取：用户自己起的标题、自动生成的标题、话题，各取最后一条；都没有时取第一条提问。
+  - 模型取每次回复记下的模型；记的是 `auto` 而会话里出现过具体模型时，显示具体的那个。
+  - 子代理按目录归属（`<会话 id>/subagents/` 下的文件是该会话的线程，子代理的子代理归到根会话），并按父会话里派发工具的结果连到那次调用；没有这个信息时线程挂在会话下，不连线。
+  - 上下文压缩显示为系统节点，压缩前的内容继续显示；`/clear` 显示为一个系统节点。
+  - 一轮结束的记录（`turn-metrics`、`acp-terminal-state`）不显示为节点；`acp-terminal-state` 带错误时显示一个“Turn failed”系统节点。
+  - WorkBuddy 会给会话建以时间命名的工作目录（形如 `2026-10-27-13-46-52`，只认这一种形式）：这时项目取它的上一级目录，会话的工作目录本身照原样显示。只对 WorkBuddy 这样做。
+  - 回退和“改写后重发”：只显示当前分支（见“限制”）。
+- **豆包工作**：
+  - 一个 `.sessions/<对话 id>` 目录是一个会话。名字以 `m_` 开头的代理目录是主代理，其余代理是子代理线程，按 `create_agent` 调用的结果连到那次调用上；解析不出时线程挂在会话下。
+  - 提问去掉开头的系统提醒；回复和工具调用照常显示，工具结果按调用 id 配对。
+  - 标题：文件里没有可靠的标题，取第一条提问。
+  - 时间：文件的每一行都不带时间。每一轮的时间取主代理（子代理线程取它自己的）`assignment.md` 里对应需求的标题行上的时间，一轮里的节点都用这个时间，先后按文件里的顺序。需求的时间解析不出、`assignment.md` 不在或超过 2 MiB 时，退而用 `trajectory.jsonl` 的修改时间（诊断页计数）。
+  - 第一条需求在 `trajectory.jsonl` 里没有对应的用户行时，用 `assignment.md` 里第一条需求的文字补一个提问节点。
+  - 项目：文件里没有工作目录，**所有豆包会话归入同一个固定的项目“豆包工作”**。
+
+### 限制
+
+- **未经真实数据核对**（见本节开头）。另外，[规格](./superpowers/specs/2026-11-17-more-sources-cn-design.md)第 9 节和三份格式说明的末尾列出了只有真实数据才能确定的问题，例如 Windows 上 DeepSeek 桌面应用的主目录是否就是 `~/.dsh`、WorkBuddy 的用量在磁盘上的实际形状、豆包 `assignment.md` 的时间格式。
+- **没有 hooks**：不为这四个工具安装任何 hook，也就没有“等待权限确认”“等待输入”这类实时状态，“等你确认权限”的通知不会出现。会话状态只靠会话文件推断，延迟几秒，只看主线（子代理线程不影响）；超过 15 分钟没有新内容的“运行中”显示为“长时间无活动”。各来源的差别：
+  - **DeepSeek**：文件里每一轮都有开始和结束的记录。一轮进行中为运行中，结束后为空闲。因此“跑完了”照常；一轮以出错、被中止或中断结束时发“出错中断”；“卡住了”只在一轮进行中长时间没有动静时提醒。分叉出来的会话里复制过来的历史不算（读到分叉点之前一直是空闲），回放它不会发通知。
+  - **WorkBuddy、CodeBuddy**：按资料，工具在一轮结束时可能写一条结束记录（`turn-metrics` 或 `acp-terminal-state`），但两者都是可选的、取决于运行它的宿主。**写了的**：读到它变为空闲，下一条提问又变为运行中，“跑完了”照常；`acp-terminal-state` 带错误时这一轮显示“Turn failed”并发“出错中断”（只带停止原因、不带错误的，只当正常结束）。只认当前分支上的结束记录，被回退掉的分支上的不算。后台任务的 `turn-metrics` 不算一轮结束。**从没写过的**：和 Grok 一样，会话一直是运行中，没有“跑完了”“出错中断”；“卡住了”打开时，会话停下后超过阈值会提醒一次，分不清是做完了还是卡住了。
+  - **豆包**：文件里没有一轮结束的记号，和 Grok 一样一直是运行中，通知的情况也一样。行本身不带时间，会话的“最近活动”取每次读到新行时 `trajectory.jsonl` 的修改时间（节点的时间仍是需求的时间，见下）：一轮做得再久，只要还在写新行，就不算“长时间无活动”，也不会发“卡住了”；不再写新行超过阈值后才提醒。
+  - “原地打转”“失败扎堆”在四个来源上都照常。
+- **文件被重写**（四个来源都是）：
+  - 只有文件变短、或已读部分开头或结尾的字节变了（DeepSeek 另加续读的位置上不是一个帧的开头）才认作重写；文件中间改了而两头没变，发现不了。
+  - 认作重写后整个文件重新存一遍、会话重新推导。旧的那份留在数据库里，不删除，`agent-canvas compact` 也不回收（Grok 的重写也是这样）；豆包的 `assignment.md` 每变一次也整份存一次。所以数据库会随文件被重写的次数和豆包的轮数增长。
+  - 一次回退或重写去掉几万个节点时（例如把一个 6 万行的 CodeBuddy 会话回退到很早的一条提问），服务会有一两秒不响应（一次测量约 1.7 秒）。只在那一次，数据不受影响。
+- 文件一时打不开或读不了（Windows 上工具正在写、杀毒或备份软件占着）不算重写：这次什么也不读，诊断页“导入失败”里短暂出现一条，下次扫描（约 3 秒后）再读，读到后这一条自动消失。
+- **项目与目录的大小写**：DeepSeek、WorkBuddy、CodeBuddy 三者之间，同一个目录只差大小写的写法归同一个项目（数据库里已有的项目和 Claude Code 的项目优先，否则以先遇到的写法为准）。但这三个来源与 Codex、Gemini CLI、Grok、Copilot CLI 第一次一起导入、又没有对应的 Claude Code 项目时，仍可能分成只差大小写的两个项目（以前的来源之间本来就是这样）。分开后不会自动合并。
+- **从 0.2.0 退回 0.1.1**：存过这四个来源的会话之后，再用 0.1.1 打开同一个数据库，没有测试过。
+- **DeepSeek Harness**：
+  - **只读第 4 版的会话文件**（`session.v4.jsonl.zstd`）。只有更早版本文件的会话目录不读；旁边出现比 4 更高版本的文件时，只跳过那个文件，第 4 版照常读。这两种目录都计入诊断页的“有其他格式版本文件（不读）的会话目录”。
+  - **需要 Node 22.15 或更高**：解压用的是 Node 自带的 zstd（22.15 起才有，标为实验性）。更早的 Node 上这个来源不启动，诊断页写明“需要 Node 22.15 或更高”。本项目声明的最低版本仍是 Node 22。
+  - 文件中间有损坏时，读到损坏处为止，后面的内容不显示；损坏处之后变成可读的内容（例如工具修复了文件）会接着读。一帧解压后超过 64 MiB 的也当作损坏处理（dsh 写的一帧是一批追加的行，远小于这个数）。
+  - 以分叉方式启动的会话和子代理，开头显示复制过来的历史（见上）。从分叉出来的会话再分叉出来的会话，在文件还在读的过程中可能短暂把复制来的轮次当成自己的，读完后正确。
+  - “需要 Node 22.15 或更高”只在诊断页显示，启动时控制台不提示。
+  - 用量里的输出是否对所有模型都已含思考，按资料推断，未核对。
+- **WorkBuddy、CodeBuddy Code**：
+  - **回退或“改写后重发”之后只显示当前分支**，被放弃的分支上的节点移除。**被放弃的分支上的用量不再计入统计**，虽然那些调用实际发生过。
+  - 用量的换算**未经真实数据核对**：同一次回复的用量在文件里会出现在好几行上，按回复 id 只算一份（取最大的那份）；提示词数里已经含缓存时（OpenAI 式的字段），新输入 = 提示词数 − 缓存读取；否则（输入不含缓存，Anthropic 式），新输入 = 输入 + 缓存写入；输出含思考。认哪些字段名、哪种形状对应哪种上游，按引擎的类型定义推断，几个第三方工具在这一点上互相矛盾。
+  - 一个节点被放弃之后，线程里又出现了很多后来的内容（超过约 26 万个字符的详情），它才回到当前分支时，节点照常显示，但内容可能标为读不出（服务只在内存里留着最近这么多的详情）。
+  - 文件里没有任何一行带父节点 id 时，即使有回退标记也全部显示；找当前分支时遇到文件里没有的父节点，放弃挑选、全部显示，并在诊断页的未识别记录里计为 `workbuddy:dangling-parent` / `codebuddy:dangling-parent`。这两条是本项目的读法，不是对产品的描述（见格式说明第 7 节）。
+  - 被截断或中止的工具调用（草稿）显示为失败。标题不随分支变化。派发子代理的工具按名字 `Task`、`Agent` 认，名字是推测的。
+  - **工作目录必须出现在会话文件的前 16 MiB 里**，否则这个会话不读（子代理文件等它的主文件）。
+  - 文件名不是 UUID 的主会话文件、文件名不以 `agent-` 开头的子代理文件不读，也不在任何地方计数。
+  - 一轮不是由显示出来的提问开始时（引擎标为非人输入的消息、只有图片的提问等），这一轮进行中会话显示为空闲，结束时也没有“跑完了”。一条带错误的结束记录，到达时就在被放弃的分支上的，不显示“Turn failed”，那条分支后来回到当前分支也一样。
+  - 会话目录在服务运行期间才出现的根（例如 WorkBuddy 的第二个根），重启后才读取。
+- **豆包工作**：
+  - **没有思考、模型、token 用量和工作目录**，这些地方留空；统计里豆包没有 token，不参与“消耗异常高”的判断（另外三类异常照常）。
+  - 标题取第一条提问；所有会话在一个固定的项目“豆包工作”下。
+  - 时间按需求逐轮取自 `assignment.md`，一轮里的节点时间相同，所以看不出一轮里每一步的耗时；工具调用没有耗时。只能用文件修改时间的线程在诊断页计数；这种线程的节点时间是第一次读到文件开头时的修改时间，以后不变。会话的“最近活动”另取每次读到新行时文件的修改时间（见上文“没有 hooks”）。
+  - 一条需求超过 64 KiB 时，保留它的位置和时间（后面各轮的时间不受影响），文字只留前 64 KiB，末尾加“…”；它要补作第一条提问时，用的就是截短的文字。
+  - 文件里没有一轮结束的信号：没有结果的工具调用一直显示为执行中。
+  - **普通聊天和在云电脑上执行的任务在本机不留记录，读不到。**
+  - 一个对话目录里没有或有多个 `m_` 开头的主代理目录时，这个对话不读，在诊断页计数。
+  - 代理之间互发的消息没有资料，不处理。
+- **按文件看**：四个来源的工具名和参数名对照表都**未经核对**（三份格式说明都没有给出参数名的可靠证据），按常见写法保守地认：
+  - DeepSeek：读 `read`、`read_file`、`view`；写 `write`、`write_file`、`create`、`create_file`；改 `edit`、`edit_file`、`multi_edit`、`str_replace`、`replace`、`search_replace`、`apply_patch`；删 `delete`、`delete_file`、`remove_file`。路径参数依次试 `path`、`file_path`、`filePath`、`file`、`target_file`、`filename`；`apply_patch` 没有路径参数时取补丁文本里的文件。格式说明只证实了 `bash` 和 `subagent` 两个工具名。
+  - WorkBuddy、CodeBuddy：读 `Read`、`read_file`；写 `Write`、`write_file`、`write_to_file`、`create_file`；改 `Edit`、`MultiEdit`、`NotebookEdit`、`edit_file`、`replace_in_file`、`search_replace`、`str_replace`；删 `Delete`、`delete_file`。路径参数依次试 `file_path`、`filePath`、`path`、`notebook_path`、`target_file`、`file`、`filename`。
+  - 豆包：`Read`、`Write`、`Edit` 这三个工具名出自格式说明，参数名是猜的（依次试 `file_path`、`filePath`、`path`、`file`、`target_file`、`filename`）。没有工作目录，相对路径按原样显示。
+  - 对照表之外的工具（命令行、搜索、子代理等）不算文件操作，仍显示名字、输入和输出。
+
+### 不支持的
+
+- **千问办公**：2026 年 11 月起改存数据库，新格式没有公开资料，等真实数据。
+- **TRAE CLI**：记录的写法随版本变化，只有一个第三方工具作依据，等真实数据。
+- **Qwen Code**：以后另做。
+- **CodeBuddy 的 IDE 插件**：是另一种格式，不读。
+- 上面四个工具的 hooks；DeepSeek Harness 第 4 版以前的会话文件；豆包的普通聊天和云电脑上的任务（见“限制”）。
 
 ## 按文件看
 
@@ -301,7 +409,7 @@ node packages/server/dist/cli.js hooks uninstall --cursor    # 只移除本安�
 | 新建 | ⚠️ `Write` 分不清新建还是覆盖，统一显示为“写入” | ✅ | ⚠️ 分不清，算作“改” |
 | 删除 | ❌ 没有专用工具 | ✅ | ✅ `delete_file` |
 
-Gemini CLI（`read_file`、`write_file`、`replace` 等）、Grok（`read_file`、`write`、`search_replace`、`apply_patch` 等）、Copilot CLI（`view`、`create`、`edit`、`apply_patch`）的读、写、改工具同样计入；它们的工具名和参数名取自公开资料，未经真实数据核对。
+Gemini CLI（`read_file`、`write_file`、`replace` 等）、Grok（`read_file`、`write`、`search_replace`、`apply_patch` 等）、Copilot CLI（`view`、`create`、`edit`、`apply_patch`）的读、写、改工具同样计入；它们的工具名和参数名取自公开资料，未经真实数据核对。DeepSeek、WorkBuddy、CodeBuddy、豆包的对照表是按常见写法猜的，同样未经核对，具体认哪些名字见“DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作”一节的“限制”。
 
 ## 统计
 
@@ -452,7 +560,15 @@ token 的三类：
 | 出错中断 | ✅ 用户中断；接口报错需要装 hooks 才看得出来 | ✅ | ⚠️ 只有中止时正好有工具在运行才看得出来，否则会被当成“跑完了” |
 | 卡住了 | ✅ | ✅ | ✅ |
 
-Gemini CLI、Grok、Copilot CLI 没有 hooks：没有“等你确认权限”，其余几种按会话文件判断，晚几秒。
+只读会话文件的七个来源没有 hooks，都没有“等你确认权限”；其余几种按会话文件判断，晚几秒，能不能用取决于文件里有没有一轮结束和出错的记号：
+
+| | Gemini CLI | Grok | Copilot CLI | DeepSeek | WorkBuddy、CodeBuddy | 豆包 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 跑完了 | ✅ | ❌ 会话一直是运行中 | ❌ 会话只有运行中和已结束 | ✅ | ⚠️ 只在工具写了一轮结束的记录时 | ❌ 同 Grok |
+| 出错中断 | ❌ 文件里没有出错的记号 | ❌ | ⚠️ 被中断的一轮，只在中断后两分钟内会话退出时 | ✅ 出错、被中止、中断 | ⚠️ 只在结束记录带错误时 | ❌ |
+| 卡住了 | ✅ | ⚠️ 会话停下后超过阈值都会提醒一次 | ⚠️ 同 Grok，直到会话退出 | ✅ | 写了结束记录时 ✅，否则同 Grok | ⚠️ 同 Grok（“停下”按文件不再出现新行算） |
+
+“原地打转”“失败扎堆”在这些来源上都照常。细节见“Gemini CLI、Grok、Copilot CLI”和“DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作”两节的“限制”。
 
 ## Hooks（可选）
 
@@ -503,7 +619,11 @@ agent-canvas 没有运行时，HTTP hook 连接失败会立刻报错，而 Claud
 - 数据库：文件大小；数据库整理（压缩旧数据）的进度；回收空间是否完成，被跳过时说明原因和补救办法；检索索引是已建好、正在建（已建 / 总数）还是失败（下次启动自动重试）；有损坏的数据时给出条数。详见下文“数据库的大小与整理”。
 - Hooks：是否收到过 hook、最近一次收到的时间（超过 10 分钟没有收到时提示）；每个事件收到的次数和最近一次的时间；以及 14 个事件中哪些从未收到过（装了 hooks 但某些事件一直没出现，通常只是还没有触发它的操作，例如 `PermissionDenied`）。Codex 会话目录存在（即使还没有 Codex 会话）或有 Codex 数据时按来源分成 Claude Code 和 Codex 两部分（只装了 Claude Code 的机器上不出现 Codex）；Codex 一栏先显示一行 Codex 会话目录及它是否存在，再按它自己的 11 个事件计算从未收到的事件；一个 Codex hook 都没收到时提示 Codex hooks 尚未安装或尚未在 Codex 里确认信任。
 - Hooks 一栏的最后一行是“被丢弃的外来 hook 调用”：自服务启动以来（重启后归零），Grok、Copilot CLI 调用了为 Claude Code / Cursor 安装的 hook、被服务认出并丢弃的次数（见“钩子串扰”）。
-- Gemini CLI、Grok、Copilot CLI：目录存在、已有会话或读到未识别记录时，各有一栏：读取的目录及它是否存在（目录在服务启动之后才出现时显示“存在，但……尚未读取”，重启服务后读取）、会话数、该来源的未识别记录（类型以 `gemini:`、`grok:`、`copilot:` 开头，同样也列在下面的总表里）。这三个来源未经真实数据核对，显示不对时先看这里。
+- Gemini CLI、Grok、Copilot CLI、DeepSeek、WorkBuddy、CodeBuddy、豆包：目录存在、已有会话或读到未识别记录时，各有一栏：读取的目录及它是否存在（目录在服务启动之后才出现时显示“存在，但……尚未读取”，重启服务后读取）、会话数、该来源的未识别记录（类型以 `gemini:`、`grok:`、`copilot:`、`deepseek:`、`workbuddy:`、`codebuddy:`、`doubao:` 开头，同样也列在下面的总表里）。这些来源未经真实数据核对，显示不对时先看这里。后四个来源的一栏按情况多出几行：
+  - 有几个读取的目录时（WorkBuddy 的两个根、豆包的两个变体）：“读取的目录 1：……（存在 / 不存在）”逐个列出。
+  - DeepSeek：“有其他格式版本文件（不读）的会话目录：N 个”；Node 不支持解压时，目录行写“存在，但无法读取，原因见下”，下面一行警告“无法读取：需要 Node 22.15 或更高”。
+  - WorkBuddy、CodeBuddy、豆包：“在另一个目录或配置里重复出现、只读了一份的会话：N 个”。
+  - 豆包：“时间只能取自文件修改时间的线程：N 个”“没有主代理或有多个主代理、没有读取的对话：N 个”。
 - 导入失败：读取或处理失败的文件、错误信息和时间。
 - 未识别的记录类型：每种类型的次数和一条样例（样例可能含对话内容，展开后才显示）。
 - 文件读取进度：已记录的文件总数和尚未读完的文件（已读 / 总字节）。Codex 文件的路径以 `codex:` 开头，前面带 Codex 标记（导入失败一节同样）。
@@ -519,6 +639,10 @@ agent-canvas 没有运行时，HTTP hook 连接失败会立刻报错，而 Claud
 | `AGENT_CANVAS_GEMINI_DIR` | `$GEMINI_CLI_HOME/.gemini`，否则 `~/.gemini` | Gemini CLI 的目录（读其中的 `tmp`）；空字符串表示不读取 |
 | `AGENT_CANVAS_GROK_DIR` | `$GROK_HOME`，否则 `~/.grok` | Grok 的目录（读其中的 `sessions`）；空字符串表示不读取 |
 | `AGENT_CANVAS_COPILOT_DIR` | `$COPILOT_HOME`，否则 `~/.copilot` | Copilot CLI 的目录（读其中的 `session-state`）；空字符串表示不读取 |
+| `AGENT_CANVAS_DSH_DIR` | `$DSH_HOME`，否则 `~/.dsh` | DeepSeek Harness 的主目录（读其中的 `sessions`）；空字符串表示不读取 |
+| `AGENT_CANVAS_WORKBUDDY_DIR` | `$WORKBUDDY_CONFIG_DIR`，否则 `~/.workbuddy` 和 `~/.workbuddy-ai` 两个都读 | WorkBuddy 的目录，只能设一个（读其中的 `projects`）；空字符串表示不读取 |
+| `AGENT_CANVAS_CODEBUDDY_DIR` | `$CODEBUDDY_CONFIG_DIR`，否则 `~/.codebuddy` | CodeBuddy Code 的目录（读其中的 `projects`）；空字符串表示不读取 |
+| `AGENT_CANVAS_DOUBAO_DIR` | Windows：`%LOCALAPPDATA%\DoubaoWork\User Data` 和 `%LOCALAPPDATA%\Doubao\User Data`；macOS：`~/Library/Application Support/DoubaoWork` 和 `…/Doubao`；其他系统没有 | 豆包工作的“User Data”这一层目录，只能设一个；空字符串表示不读取 |
 | `AGENT_CANVAS_SETTINGS_FILE` | `~/.claude/settings.json` | `hooks install` / `hooks uninstall` 修改的 settings 文件 |
 | `AGENT_CANVAS_CODEX_HOOKS_FILE` | `~/.codex/hooks.json` | `hooks install --codex` / `hooks uninstall --codex` 修改的文件 |
 | `AGENT_CANVAS_CURSOR_HOOKS_FILE` | `~/.cursor/hooks.json` | `hooks install --cursor` / `hooks uninstall --cursor` 修改的文件 |
@@ -586,6 +710,7 @@ agent-canvas compact          # 从源码运行时：node packages/server/dist/c
 - Cursor hooks 的载荷字段和 Windows 上的调用方式取自官方文档，还没有用真实的 Cursor 核对过。
 - Cursor：会话很长（上万步）时，第一次导入需要一段时间，在后台进行。
 - Gemini CLI、Grok、Copilot CLI：读法按公开资料写成，**未经真实数据核对**；各自的限制见上文“Gemini CLI、Grok、Copilot CLI”一节。
+- DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作：同样按公开资料写成，**未经真实数据核对**；DeepSeek 只读第 4 版文件且需要 Node 22.15 或更高，WorkBuddy / CodeBuddy 只显示当前分支，豆包没有用量、模型、思考和工作目录。详见上文“DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作”一节。
 
 ## 开发
 

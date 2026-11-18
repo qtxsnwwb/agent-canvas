@@ -1,8 +1,11 @@
 import { ORIGINS, type Origin } from '@agent-canvas/shared';
 import type { RawEvent } from '../store/store.js';
+import { BuddyNormalizer } from './buddy.js';
 import { CodexNormalizer } from './codex.js';
 import { CopilotNormalizer } from './copilot.js';
 import { CursorNormalizer } from './cursor.js';
+import { DeepSeekNormalizer } from './deepseek.js';
+import { DoubaoNormalizer } from './doubao.js';
 import { GeminiNormalizer } from './gemini.js';
 import { GrokNormalizer } from './grok.js';
 import { Normalizer } from './normalizer.js';
@@ -19,6 +22,11 @@ export const NORMALIZER_FACTORIES: NormalizerFactories = {
   gemini: () => new GeminiNormalizer(),
   grok: () => new GrokNormalizer(),
   copilot: () => new CopilotNormalizer(),
+  // Filled by the tasks that add their normalizers (plan more-sources-cn).
+  deepseek: () => new DeepSeekNormalizer(),
+  workbuddy: () => new BuddyNormalizer('workbuddy'),
+  codebuddy: () => new BuddyNormalizer('codebuddy'),
+  doubao: () => new DoubaoNormalizer(),
 };
 
 const originOf = (event: RawEvent): Origin => event.origin ?? 'claude';

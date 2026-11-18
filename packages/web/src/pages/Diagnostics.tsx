@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import type { Diagnostics as DiagnosticsData, Origin } from '@agent-canvas/shared';
 import { api } from '../client';
 import {
-  codexDirLine, createPoller, cursorBlockVisible, cursorDbLine, cursorHooks, cursorPollLine, cursorUnknownRecords, fileOrigin, fileSourceBlocks, fileSourceDirLine, foreignHooksLine, formatAge, hookState, hooksByOrigin, summarizeDiagnostics, truncateSample, FILES_BEHIND_MAX,
+  codexDirLine, createPoller, cursorBlockVisible, cursorDbLine, cursorHooks, cursorPollLine, cursorUnknownRecords, fileOrigin, fileSourceBlocks, fileSourceDetailLines, fileSourceDirLine, foreignHooksLine, formatAge, hookState, hooksByOrigin, summarizeDiagnostics, truncateSample, FILES_BEHIND_MAX,
   type FileSourceBlock, type OriginHooks,
 } from '../diagnostics';
 import { useMask } from '../MaskContext';
@@ -135,14 +135,16 @@ function UnknownList({ records }: { records: DiagnosticsData['unknownRecords'] }
 }
 
 /**
- * Gemini CLI, Grok Build or Copilot CLI: directory, session count and the unknown records. These are read from files
- * only (no hooks, no waiting states) and their formats were not checked against real data.
+ * A file-only origin (Gemini CLI, Grok Build, Copilot CLI, DeepSeek, WorkBuddy, CodeBuddy, 豆包): directory, the lines
+ * of fileSourceDetailLines, session count and the unknown records. These are read from files only (no hooks, no
+ * waiting states) and their formats were not checked against real data.
  */
 function FileSourceSection({ block }: { block: FileSourceBlock }) {
   return (
     <section>
       <h2><OriginBadge origin={block.origin} /></h2>
       <p>{fileSourceDirLine(block.origin, block)}</p>
+      {fileSourceDetailLines(block).map((line) => <p key={line.text} className={line.warn ? 'diag-warn' : undefined}>{line.text}</p>)}
       <p>会话数：{block.sessionCount}</p>
       <p className="muted">只读会话文件，没有 hook，不显示“等待确认”等实时状态。格式未经真实数据核对：显示不对时先看下面的未识别记录</p>
       <h3>未识别的记录</h3>

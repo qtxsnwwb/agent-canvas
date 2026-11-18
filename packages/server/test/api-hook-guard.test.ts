@@ -25,7 +25,7 @@ beforeEach(async () => {
     dataDir: path.join(tmp, 'data'),
     codexSessionsDir: null,
     cursorDbPath: null,
-    geminiDir: null,
+    deepseekDir: null, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [], geminiDir: null,
     grokDir: null,
     copilotDir: null,
   });

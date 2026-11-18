@@ -281,6 +281,156 @@ export function grokTouches(toolName: string | null, kind: string | null, rawInp
   return [];
 }
 
+// ---- DeepSeek Harness ----
+
+/**
+ * DeepSeek Harness tool names taken as file tools (spec section 10 item 16). The format reference evidences `bash` and
+ * `subagent` only: this table is a conservative guess at common names, unverified against a real session.
+ */
+const DEEPSEEK_TOOLS: Record<string, FileAction> = {
+  read: 'read',
+  read_file: 'read',
+  view: 'read',
+  write: 'write',
+  write_file: 'write',
+  create: 'write',
+  create_file: 'write',
+  edit: 'edit',
+  edit_file: 'edit',
+  multi_edit: 'edit',
+  str_replace: 'edit',
+  replace: 'edit',
+  search_replace: 'edit',
+  apply_patch: 'edit',
+  delete: 'delete',
+  delete_file: 'delete',
+  remove_file: 'delete',
+};
+/** Path arguments, tried in this order (unverified names). */
+const DEEPSEEK_PATH_KEYS = ['path', 'file_path', 'filePath', 'file', 'target_file', 'filename'];
+/** Where an `apply_patch` call may carry its patch text when it names no path (unverified names). */
+const DEEPSEEK_PATCH_KEYS = ['input', 'patch'];
+
+/**
+ * The file a DeepSeek Harness tool call names (DEEPSEEK_TOOLS): the first path argument present (DEEPSEEK_PATH_KEYS
+ * order); `input` given as a JSON string (the model's raw arguments) is parsed first, and arguments that do not parse
+ * name no file. An `apply_patch` call without a path argument: the files of its patch text.
+ */
+export function deepseekTouches(toolName: string, input: unknown): RawTouch[] {
+  const action = Object.hasOwn(DEEPSEEK_TOOLS, toolName) ? DEEPSEEK_TOOLS[toolName] : undefined;
+  if (action === undefined) return [];
+  let parsed: unknown = input;
+  if (typeof input === 'string') {
+    try {
+      parsed = JSON.parse(input);
+    } catch {
+      return toolName === 'apply_patch' ? applyPatchTouches(input) : [];
+    }
+  }
+  if (!isObject(parsed)) return [];
+  for (const key of DEEPSEEK_PATH_KEYS) {
+    const path = stringField(parsed, key);
+    if (path !== null) return [{ path, action }];
+  }
+  if (toolName !== 'apply_patch') return [];
+  for (const key of DEEPSEEK_PATCH_KEYS) {
+    const v = parsed[key];
+    if (typeof v === 'string') return applyPatchTouches(v);
+  }
+  return [];
+}
+
+// ---- WorkBuddy / CodeBuddy Code ----
+
+/**
+ * File tools of the Buddy engine by name (spec section 10 item 16). The format reference (docs/formats/buddy-family.md)
+ * evidences the tool name `Bash` (its example records) and an Agent tool whose name and argument keys it lists as open
+ * (section 10 item 4); it records no file tool and no path argument. This table is therefore a conservative guess,
+ * unverified on real transcripts: the Claude-Code-style names (`Read`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`
+ * with `file_path` / `notebook_path`: a code review found them in the engine package, but the format reference does not
+ * record them), plus the snake_case names of the CodeBuddy IDE family.
+ */
+const BUDDY_TOOLS: Record<string, FileAction> = {
+  Read: 'read',
+  read_file: 'read',
+  Write: 'write',
+  write_file: 'write',
+  write_to_file: 'write',
+  create_file: 'write',
+  Edit: 'edit',
+  MultiEdit: 'edit',
+  NotebookEdit: 'edit',
+  edit_file: 'edit',
+  replace_in_file: 'edit',
+  search_replace: 'edit',
+  str_replace: 'edit',
+  Delete: 'delete',
+  delete_file: 'delete',
+};
+/** Path arguments, tried in this order (unverified names). */
+const BUDDY_PATH_KEYS = ['file_path', 'filePath', 'path', 'notebook_path', 'target_file', 'file', 'filename'];
+
+/**
+ * The file a Buddy tool call names (BUDDY_TOOLS): the first path argument present (BUDDY_PATH_KEYS order); `input`
+ * given as a JSON string (the call's raw `arguments`) is parsed first, and arguments that do not parse name no file.
+ */
+export function buddyTouches(toolName: string, input: unknown): RawTouch[] {
+  const action = Object.hasOwn(BUDDY_TOOLS, toolName) ? BUDDY_TOOLS[toolName] : undefined;
+  if (action === undefined) return [];
+  let parsed: unknown = input;
+  if (typeof input === 'string') {
+    try {
+      parsed = JSON.parse(input);
+    } catch {
+      return [];
+    }
+  }
+  if (!isObject(parsed)) return [];
+  for (const key of BUDDY_PATH_KEYS) {
+    const path = stringField(parsed, key);
+    if (path !== null) return [{ path, action }];
+  }
+  return [];
+}
+
+// ---- Doubao Work ----
+
+/**
+ * File tools of Doubao Work by name (spec section 10 item 16): the format reference evidences the names `Read`, `Write`
+ * and `Edit` (besides `Bash`, `PowerShell`, `Wait`, `create_agent`, `present_files`, which name no file here) but none
+ * of their argument names, so the path arguments are a conservative guess, unverified.
+ */
+const DOUBAO_TOOLS: Record<string, FileAction> = {
+  Read: 'read',
+  Write: 'write',
+  Edit: 'edit',
+};
+/** Path arguments, tried in this order (unverified names). */
+const DOUBAO_PATH_KEYS = ['file_path', 'filePath', 'path', 'file', 'target_file', 'filename'];
+
+/**
+ * The file a Doubao Work tool call names (DOUBAO_TOOLS): the first path argument present (DOUBAO_PATH_KEYS order);
+ * `arguments` given as a JSON string is parsed first, and arguments that do not parse to an object name no file.
+ */
+export function doubaoTouches(toolName: string, input: unknown): RawTouch[] {
+  const action = Object.hasOwn(DOUBAO_TOOLS, toolName) ? DOUBAO_TOOLS[toolName] : undefined;
+  if (action === undefined) return [];
+  let parsed: unknown = input;
+  if (typeof input === 'string') {
+    try {
+      parsed = JSON.parse(input);
+    } catch {
+      return [];
+    }
+  }
+  if (!isObject(parsed)) return [];
+  for (const key of DOUBAO_PATH_KEYS) {
+    const path = stringField(parsed, key);
+    if (path !== null) return [{ path, action }];
+  }
+  return [];
+}
+
 // ---- Codex ----
 
 const BEGIN = '*** Begin Patch';

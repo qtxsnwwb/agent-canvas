@@ -32,7 +32,7 @@ const open = (): Store => {
 };
 const newPipeline = (store: Store, c: Config = config): Pipeline => new Pipeline(store, c, { sources: fileSources(c, store) });
 const cfg = (dir: string | null): Config =>
-  loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, geminiDir: null, grokDir: null, copilotDir: dir });
+  loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, deepseekDir: null, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [], geminiDir: null, grokDir: null, copilotDir: dir });
 function view(store: Store, sessionId: string) {
   const g: GraphSnapshot | null = store.getGraph(sessionId);
   if (g === null) return null;

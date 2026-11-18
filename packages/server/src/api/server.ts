@@ -3,6 +3,7 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import fastifyStatic from '@fastify/static';
 import fastifyWebsocket from '@fastify/websocket';
 import {
+  FILE_ONLY_ORIGINS,
   ORIGINS,
   SEARCH_DEFAULT_LIMIT,
   SEARCH_MAX_LIMIT,
@@ -26,7 +27,8 @@ import { cursorHookConversationId, cursorHookWorkspaceRoot, sanitizeCursorHookPa
 import { NORMALIZER_VERSION } from '../normalize/version.js';
 import type { NotificationService } from '../notify/service.js';
 import type { Pipeline } from '../pipeline.js';
-import { isExistingDir, sourceDirOf } from '../sources/dirs.js';
+import { isExistingDir, sourceDirsOf } from '../sources/dirs.js';
+import { DSH_UNAVAILABLE, zstdAvailable } from '../sources/deepseek/zstd-frames.js';
 import { KEY_PREFIXES } from '../sources/source.js';
 import { storageStatus, type StorageDiagnostics } from '../store/migrate-storage.js';
 import { SAMPLE_MAX, type Store } from '../store/store.js';
@@ -157,15 +159,31 @@ function isFile(file: string | null): boolean {
   }
 }
 
-/** Diagnostics.sources: each file-only origin's directory (stat only, never read) and its stored session count. */
+/**
+ * Diagnostics.sources: each file-only origin's directory (stat only, never read) and its stored session count. `dir` is
+ * the first directory the source reads (null when disabled), `present` whether any of them exists now; `dirs` lists
+ * each of them when there are several (WorkBuddy, Doubao Work). What a running source reports through `status()` is
+ * merged over that.
+ */
 function fileOnlySources(config: Config, store: Store, pipeline: Pipeline): Record<FileOnlyOrigin, FileSourceStatus> {
   const counts = store.sessionCountsByOrigin();
-  const reading = new Set(pipeline.fileSources().map((s) => s.origin));
-  const one = (origin: FileOnlyOrigin): FileSourceStatus => {
-    const dir = sourceDirOf(config, origin);
-    return { dir, present: isExistingDir(dir), reading: reading.has(origin), sessionCount: counts[origin] ?? 0 };
-  };
-  return { gemini: one('gemini'), grok: one('grok'), copilot: one('copilot') };
+  const running = new Map(pipeline.fileSources().map((s) => [s.origin, s] as const));
+  const out = {} as Record<FileOnlyOrigin, FileSourceStatus>;
+  for (const origin of FILE_ONLY_ORIGINS) {
+    const dirs = sourceDirsOf(config, origin).map((dir) => ({ dir, present: isExistingDir(dir) }));
+    const source = running.get(origin);
+    out[origin] = {
+      dir: dirs[0]?.dir ?? null,
+      present: dirs.some((d) => d.present),
+      reading: source !== undefined,
+      sessionCount: counts[origin] ?? 0,
+      ...(dirs.length > 1 ? { dirs } : {}),
+      ...(source?.status?.() ?? {}),
+      // DeepSeek on a Node without zstd: the directory is there but the source was not created (fileSources).
+      ...(origin === 'deepseek' && source === undefined && dirs.some((d) => d.present) && !zstdAvailable() ? { unavailable: DSH_UNAVAILABLE } : {}),
+    };
+  }
+  return out;
 }
 
 /** Whether the path names an existing directory (only stat'ed, never read). */

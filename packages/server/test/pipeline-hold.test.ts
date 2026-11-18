@@ -28,7 +28,7 @@ const turns = async (n = 20): Promise<void> => {
 
 beforeEach(async () => {
   tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-pipeline-hold-'));
-  config = loadConfig({}, { geminiDir: null, grokDir: null, copilotDir: null, projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), cursorDbPath: null });
+  config = loadConfig({}, { deepseekDir: null, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [], geminiDir: null, grokDir: null, copilotDir: null, projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), cursorDbPath: null });
   await fs.mkdir(path.join(config.projectsDir, 'proj'), { recursive: true });
   dbFile = path.join(tmp, 'data.db');
   store = openStore(dbFile);
