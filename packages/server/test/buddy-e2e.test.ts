@@ -64,7 +64,7 @@ const cfg = (): Config =>
     deepseekDir: null,
     workbuddyDirs: [wb, wbAi],
     codebuddyDir: cb,
-    doubaoDirs: [],
+    doubaoDirs: [], qwenDir: null,
   });
 const open = (): Store => {
   const s = openStore(':memory:');

@@ -121,7 +121,7 @@ test('heroTotals：项目数随筛选；会话数只在都准确时给出，否�
 test('ORIGIN_LOOK：两个来源各有名字和不同的类名', () => {
   expect(originLook('claude')).toEqual({ label: 'Claude Code', className: 'origin-claude' });
   expect(originLook('codex')).toEqual({ label: 'Codex', className: 'origin-codex' });
-  expect(ORIGIN_FILTER_OPTIONS.map((o) => [o.value, o.label])).toEqual([['all', '全部'], ['claude', 'Claude Code'], ['codex', 'Codex'], ['cursor', 'Cursor'], ['gemini', 'Gemini CLI'], ['grok', 'Grok'], ['copilot', 'Copilot CLI'], ['deepseek', 'DeepSeek'], ['workbuddy', 'WorkBuddy'], ['codebuddy', 'CodeBuddy'], ['doubao', '豆包']]);
+  expect(ORIGIN_FILTER_OPTIONS.map((o) => [o.value, o.label])).toEqual([['all', '全部'], ['claude', 'Claude Code'], ['codex', 'Codex'], ['cursor', 'Cursor'], ['gemini', 'Gemini CLI'], ['grok', 'Grok'], ['copilot', 'Copilot CLI'], ['deepseek', 'DeepSeek'], ['workbuddy', 'WorkBuddy'], ['codebuddy', 'CodeBuddy'], ['doubao', '豆包'], ['qwen', 'Qwen Code']]);
 });
 
 test('showOriginFilter：只有 Cursor 的项目也提供筛选；parseOriginFilter 认 cursor', () => {

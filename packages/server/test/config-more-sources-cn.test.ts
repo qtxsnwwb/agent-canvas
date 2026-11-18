@@ -148,8 +148,8 @@ describe('nothing is created on disk', () => {
 
 describe('the shared lists', () => {
   test('the four origins, their key prefixes, file-only and cost exclusion (Doubao Work has no usage)', () => {
-    expect(ORIGINS.slice(6)).toEqual(['deepseek', 'workbuddy', 'codebuddy', 'doubao']);
-    expect(FILE_ONLY_ORIGINS).toEqual(['gemini', 'grok', 'copilot', 'deepseek', 'workbuddy', 'codebuddy', 'doubao']);
+    expect(ORIGINS.slice(6)).toEqual(['deepseek', 'workbuddy', 'codebuddy', 'doubao', 'qwen']);
+    expect(FILE_ONLY_ORIGINS).toEqual(['gemini', 'grok', 'copilot', 'deepseek', 'workbuddy', 'codebuddy', 'doubao', 'qwen']);
     expect(COST_EXCLUDED_ORIGINS).toEqual(['copilot', 'doubao']);
     for (const o of ['deepseek', 'workbuddy', 'codebuddy', 'doubao'] as const) {
       expect(KEY_PREFIXES[o]).toBe(`${o}:`);

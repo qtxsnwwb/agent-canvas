@@ -66,6 +66,7 @@ export const EXPECTED_HOOK_EVENTS_BY_ORIGIN: Record<Origin, readonly string[]> =
   workbuddy: [],
   codebuddy: [],
   doubao: [],
+  qwen: [],
 };
 
 /**

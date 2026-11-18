@@ -20,6 +20,8 @@ const LETTER_MARKS = {
   workbuddy: `${TILE}M5.5 6h2.4l1.3 7.6L10.9 6h2.2l1.7 7.6L16.1 6h2.4L16 18h-2.3L12 10.9 10.3 18H8z`,
   codebuddy: `${TILE}M7 6h6a3 3 0 0 1 2.2 5A3.2 3.2 0 0 1 13.6 18H7zM9.5 8.3V11h3a1.35 1.35 0 0 0 0-2.7zM9.5 13.2v2.5H13a1.25 1.25 0 0 0 0-2.5z`,
   doubao: `${TILE}M12 6.5a5.5 5.5 0 1 0 0 11a5.5 5.5 0 1 0 0-11zM12 9a3 3 0 1 1 0 6a3 3 0 1 1 0-6z`,
+  // Provisional Q (a ring and a tail) until plan qwen-code, Task 5.
+  qwen: `${TILE}M11.5 6.5a5 5 0 1 0 0 10a5 5 0 1 0 0-10zM11.5 8.9a2.6 2.6 0 1 1 0 5.2a2.6 2.6 0 1 1 0-5.2zM15 16.2L16.2 15l2.3 2.3l-1.2 1.2z`,
 } as const;
 
 /**
@@ -39,6 +41,7 @@ export const ORIGIN_MARKS: Readonly<Record<Origin, { viewBox: string; path: stri
   workbuddy: { viewBox: '0 0 24 24', path: LETTER_MARKS.workbuddy, fillRule: 'evenodd' },
   codebuddy: { viewBox: '0 0 24 24', path: LETTER_MARKS.codebuddy, fillRule: 'evenodd' },
   doubao: { viewBox: '0 0 24 24', path: LETTER_MARKS.doubao, fillRule: 'evenodd' },
+  qwen: { viewBox: '0 0 24 24', path: LETTER_MARKS.qwen, fillRule: 'evenodd' },
 };
 
 function OriginIcon({ origin }: { origin: Origin }) {

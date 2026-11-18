@@ -46,7 +46,7 @@ const open = (): Store => {
   return s;
 };
 const cfg = (dir: string | null): Config =>
-  loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, cursorDbPath: null, geminiDir: null, grokDir: null, copilotDir: null, deepseekDir: dir, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [] });
+  loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, cursorDbPath: null, geminiDir: null, grokDir: null, copilotDir: null, deepseekDir: dir, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [], qwenDir: null });
 const newPipeline = (store: Store, c: Config = config): Pipeline => {
   const p = new Pipeline(store, c, { sources: fileSources(c, store, { zstd: true }) });
   pipelines.push(p);

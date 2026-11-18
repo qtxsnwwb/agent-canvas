@@ -27,6 +27,8 @@ export const NORMALIZER_FACTORIES: NormalizerFactories = {
   workbuddy: () => new BuddyNormalizer('workbuddy'),
   codebuddy: () => new BuddyNormalizer('codebuddy'),
   doubao: () => new DoubaoNormalizer(),
+  // Filled by the task that adds its normalizer (plan qwen-code, Task 2).
+  qwen: null,
 };
 
 const originOf = (event: RawEvent): Origin => event.origin ?? 'claude';

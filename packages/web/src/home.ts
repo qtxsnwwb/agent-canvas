@@ -12,6 +12,8 @@ export const ORIGIN_LOOK: Record<Origin, { label: string; className: string }> =
   workbuddy: { label: 'WorkBuddy', className: 'origin-workbuddy' },
   codebuddy: { label: 'CodeBuddy', className: 'origin-codebuddy' },
   doubao: { label: '豆包', className: 'origin-doubao' },
+  // Provisional colours (styles.css) until plan qwen-code, Task 5.
+  qwen: { label: 'Qwen Code', className: 'origin-qwen' },
 };
 
 export function originLook(origin: Origin): { label: string; className: string } {

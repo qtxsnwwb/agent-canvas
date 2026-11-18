@@ -70,7 +70,7 @@ test('only the Grok, DeepSeek, WorkBuddy, CodeBuddy and Doubao sources identify 
   await fs.mkdir(path.join(tmp, 'doubao'), { recursive: true });
   const config = loadConfig(
     {},
-    { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: dirs.codex, deepseekDir: path.join(tmp, 'dsh'), workbuddyDirs: [path.join(tmp, 'workbuddy')], codebuddyDir: path.join(tmp, 'codebuddy'), doubaoDirs: [path.join(tmp, 'doubao')], geminiDir: dirs.gemini, grokDir: dirs.grok, copilotDir: dirs.copilot, cursorDbPath: path.join(tmp, 'state.vscdb') },
+    { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: dirs.codex, deepseekDir: path.join(tmp, 'dsh'), workbuddyDirs: [path.join(tmp, 'workbuddy')], codebuddyDir: path.join(tmp, 'codebuddy'), doubaoDirs: [path.join(tmp, 'doubao')], qwenDir: null, geminiDir: dirs.gemini, grokDir: dirs.grok, copilotDir: dirs.copilot, cursorDbPath: path.join(tmp, 'state.vscdb') },
   );
   // zstd: true so the DeepSeek source exists whatever this Node has (it reads nothing here).
   const sources = fileSources(config, undefined, { zstd: true });

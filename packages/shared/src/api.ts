@@ -75,18 +75,18 @@ export interface Diagnostics {
   /**
    * The file sources without hooks, read only when their directory exists at start (spec more-sources 4.2): dir = the
    * directory read (`<geminiDir>/tmp`, `<grokDir>/sessions`, `<copilotDir>/session-state`, `<deepseekDir>/sessions`,
-   * `<workbuddyDir>/projects`, `<codebuddyDir>/projects`, a Doubao "User Data" directory; the first when there are
-   * several; null when the origin is disabled), present = it (any of them) exists now (stat only), reading = the source
-   * was created at start (the directory existed then; one that appeared later is read after a restart), sessionCount =
-   * that origin's stored sessions. Absent from servers before it existed; the four origins added by more-sources-cn
-   * are absent from servers before them.
+   * `<workbuddyDir>/projects`, `<codebuddyDir>/projects`, a Doubao "User Data" directory, `<qwenDir>/projects`; the
+   * first when there are several; null when the origin is disabled), present = it (any of them) exists now (stat only),
+   * reading = the source was created at start (the directory existed then; one that appeared later is read after a
+   * restart), sessionCount = that origin's stored sessions. Absent from servers before it existed; the four origins
+   * added by more-sources-cn, and qwen, are absent from servers before them.
    */
   sources?: Record<FileOnlyOrigin, FileSourceStatus>;
 }
 
 /** The origins read from files only (no hooks, no live waiting states). */
-export type FileOnlyOrigin = 'gemini' | 'grok' | 'copilot' | 'deepseek' | 'workbuddy' | 'codebuddy' | 'doubao';
-export const FILE_ONLY_ORIGINS: readonly FileOnlyOrigin[] = ['gemini', 'grok', 'copilot', 'deepseek', 'workbuddy', 'codebuddy', 'doubao'];
+export type FileOnlyOrigin = 'gemini' | 'grok' | 'copilot' | 'deepseek' | 'workbuddy' | 'codebuddy' | 'doubao' | 'qwen';
+export const FILE_ONLY_ORIGINS: readonly FileOnlyOrigin[] = ['gemini', 'grok', 'copilot', 'deepseek', 'workbuddy', 'codebuddy', 'doubao', 'qwen'];
 export interface FileSourceStatus {
   dir: string | null;
   present: boolean;
@@ -108,6 +108,8 @@ export interface FileSourceStatus {
   mtimeFallbacks?: number;
   /** doubao: conversations not read because they have no main agent (`m_…` directory) or several. */
   unknownSessions?: number;
+  /** qwen: sessions whose file is a managed-session container, not read. */
+  unsupportedSessions?: number;
 }
 
 /**

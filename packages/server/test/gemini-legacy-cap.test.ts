@@ -33,7 +33,7 @@ async function ingest(content: string, legacyMaxBytes: number): Promise<void> {
   await fs.mkdir(path.dirname(file), { recursive: true });
   await fs.writeFile(path.join(gemTmp, 'demo-app', '.project_root'), '/home/dev/demo-app');
   await fs.writeFile(file, content);
-  const config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, cursorDbPath: null, deepseekDir: null, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [], geminiDir, grokDir: null, copilotDir: null });
+  const config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, cursorDbPath: null, deepseekDir: null, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [], qwenDir: null, geminiDir, grokDir: null, copilotDir: null });
   await fs.mkdir(config.projectsDir, { recursive: true });
   store = openStore(':memory:');
   const sources = fileSources(config, store).filter((s) => !(s instanceof GeminiFileSource));

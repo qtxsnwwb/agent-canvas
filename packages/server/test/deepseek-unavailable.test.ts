@@ -28,7 +28,7 @@ afterEach(async () => {
 });
 
 async function diagnosticsFor(deepseekDir: string | null): Promise<Diagnostics> {
-  const config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, cursorDbPath: null, geminiDir: null, grokDir: null, copilotDir: null, deepseekDir, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [] });
+  const config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, cursorDbPath: null, geminiDir: null, grokDir: null, copilotDir: null, deepseekDir, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [], qwenDir: null });
   const store = openStore(':memory:');
   cleanup.push(() => store.close());
   const sources = fileSources(config, store);

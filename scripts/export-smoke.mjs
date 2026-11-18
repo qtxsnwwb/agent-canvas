@@ -83,9 +83,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 /**
  * Every variable that names a tool directory this service reads, besides Claude Code's projects directory (which the
  * scripts point at a temp directory). Set to the empty string, each turns its tool off: nothing is read from the real
- * Codex, Cursor, Gemini CLI, Grok, Copilot CLI, DeepSeek Harness, WorkBuddy, CodeBuddy or Doubao directories, including
- * the ones whose defaults do not come from the home directory (Cursor's `%APPDATA%`, Doubao's `%LOCALAPPDATA%`) or that
- * the tools' own variables (`DSH_HOME`, `WORKBUDDY_CONFIG_DIR`, ...) would name.
+ * Codex, Cursor, Gemini CLI, Grok, Copilot CLI, DeepSeek Harness, WorkBuddy, CodeBuddy, Doubao or Qwen Code directories,
+ * including the ones whose defaults do not come from the home directory (Cursor's `%APPDATA%`, Doubao's `%LOCALAPPDATA%`)
+ * or that the tools' own variables (`DSH_HOME`, `WORKBUDDY_CONFIG_DIR`, `QWEN_RUNTIME_DIR`, ...) would name.
  */
 export const TOOL_DIR_VARS = [
   'AGENT_CANVAS_CODEX_DIR',
@@ -97,6 +97,7 @@ export const TOOL_DIR_VARS = [
   'AGENT_CANVAS_WORKBUDDY_DIR',
   'AGENT_CANVAS_CODEBUDDY_DIR',
   'AGENT_CANVAS_DOUBAO_DIR',
+  'AGENT_CANVAS_QWEN_DIR',
 ];
 
 /**
@@ -124,7 +125,7 @@ export function toolSourceProblems(diagnostics) {
   if (diagnostics.codex?.sessionsDir !== null) problems.push(`codex: ${diagnostics.codex?.sessionsDir}`);
   if (diagnostics.cursor?.dbPath !== null) problems.push(`cursor: ${diagnostics.cursor?.dbPath}`);
   const sources = diagnostics.sources ?? {};
-  const origins = ['gemini', 'grok', 'copilot', 'deepseek', 'workbuddy', 'codebuddy', 'doubao'];
+  const origins = ['gemini', 'grok', 'copilot', 'deepseek', 'workbuddy', 'codebuddy', 'doubao', 'qwen'];
   for (const origin of origins) {
     const s = sources[origin];
     if (s === undefined) problems.push(`${origin}: missing from the diagnostics`);

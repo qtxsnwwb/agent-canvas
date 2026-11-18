@@ -40,8 +40,8 @@ test('新来源的标志：自造的简单图形（圆角方块里一个字母�
   expect(new Set(['gemini', 'grok', 'copilot'].map((o) => ORIGIN_MARKS[o as 'gemini'].path)).size).toBe(3);
 });
 
-test('来源筛选列出全部十个来源（加“全部”）', () => {
-  expect(ORIGIN_FILTER_OPTIONS.map((o) => o.value)).toEqual(['all', 'claude', 'codex', 'cursor', 'gemini', 'grok', 'copilot', 'deepseek', 'workbuddy', 'codebuddy', 'doubao']);
+test('来源筛选列出全部十一个来源（加“全部”）', () => {
+  expect(ORIGIN_FILTER_OPTIONS.map((o) => o.value)).toEqual(['all', 'claude', 'codex', 'cursor', 'gemini', 'grok', 'copilot', 'deepseek', 'workbuddy', 'codebuddy', 'doubao', 'qwen']);
   for (const origin of ORIGINS) expect(parseOriginFilter(origin)).toBe(origin);
 });
 

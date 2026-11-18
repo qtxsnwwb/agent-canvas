@@ -60,6 +60,7 @@ export const KEY_PREFIXES: Readonly<Record<Origin, string>> = {
   workbuddy: 'workbuddy:',
   codebuddy: 'codebuddy:',
   doubao: 'doubao:',
+  qwen: 'qwen:',
 };
 
 /** The origin a store key belongs to: the one whose prefix is the longest that matches. */

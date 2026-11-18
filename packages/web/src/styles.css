@@ -55,6 +55,10 @@
   --doubao-soft: #f2e8d4;
   --doubao-edge: #dcc49a;
   --doubao-ink: #764000;
+  /* Qwen Code: a provisional teal until its colours are chosen (plan qwen-code, Task 5). */
+  --qwen-soft: #dff1ee;
+  --qwen-edge: #a8d6cf;
+  --qwen-ink: #11615a;
   /* Origins as chart series (stats page): the badge families, stepped against the dataviz palette validator on the
      white card surface (lightness band, chroma, colour-blind and normal-vision separation, 3:1 contrast). With all ten,
      neighbouring pairs (the stacking order) pass; over all pairs colour-blind separation is at warning level (below),
@@ -76,6 +80,8 @@
   --series-workbuddy: #00a52d;
   --series-codebuddy: #c369ff;
   --series-doubao: #963c00;
+  /* Provisional (plan qwen-code, Task 5 validates it with the other ten). */
+  --series-qwen: #2a8f86;
   --chart-grid: #f0ebf6;
   --chart-axis: #d6cde6;
   --font: "Microsoft YaHei UI", "PingFang SC", "Hiragino Sans GB", system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -182,6 +188,7 @@ pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
 .origin-workbuddy { --origin-bg: var(--workbuddy-soft); --origin-edge: var(--workbuddy-edge); --origin-fg: var(--workbuddy-ink); }
 .origin-codebuddy { --origin-bg: var(--codebuddy-soft); --origin-edge: var(--codebuddy-edge); --origin-fg: var(--codebuddy-ink); }
 .origin-doubao { --origin-bg: var(--doubao-soft); --origin-edge: var(--doubao-edge); --origin-fg: var(--doubao-ink); }
+.origin-qwen { --origin-bg: var(--qwen-soft); --origin-edge: var(--qwen-edge); --origin-fg: var(--qwen-ink); }
 .origin-icon { flex: none; }
 .origin-badge-dot { padding: 0; width: 18px; height: 18px; justify-content: center; }
 .origin-dots { display: inline-flex; gap: 4px; }
@@ -199,6 +206,7 @@ pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
 .view-switch[aria-label="来源"] button[aria-pressed="true"][data-origin="workbuddy"] { background: var(--workbuddy-soft); color: var(--workbuddy-ink); }
 .view-switch[aria-label="来源"] button[aria-pressed="true"][data-origin="codebuddy"] { background: var(--codebuddy-soft); color: var(--codebuddy-ink); }
 .view-switch[aria-label="来源"] button[aria-pressed="true"][data-origin="doubao"] { background: var(--doubao-soft); color: var(--doubao-ink); }
+.view-switch[aria-label="来源"] button[aria-pressed="true"][data-origin="qwen"] { background: var(--qwen-soft); color: var(--qwen-ink); }
 
 /* Session page: a one-line info bar, then the canvas filling the rest of the viewport. */
 .session-loading { padding: 12px 18px; }

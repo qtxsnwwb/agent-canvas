@@ -166,7 +166,7 @@ beforeEach(async () => {
       deepseekDir: null,
       workbuddyDirs: [],
       codebuddyDir: null,
-      doubaoDirs: [],
+      doubaoDirs: [], qwenDir: null,
     },
   );
   dbFile = path.join(tmp, 'store.sqlite');

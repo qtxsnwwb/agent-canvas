@@ -268,7 +268,7 @@ describe.skipIf(!HAS_ZSTD)('DeepSeekFileSource: classification', () => {
 
 describe('fileSources: the DeepSeek source', () => {
   const configFor = (deepseekDir: string | null) =>
-    loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, cursorDbPath: null, geminiDir: null, grokDir: null, copilotDir: null, deepseekDir, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [] });
+    loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, cursorDbPath: null, geminiDir: null, grokDir: null, copilotDir: null, deepseekDir, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [], qwenDir: null });
 
   test('created when <home>/sessions exists and zstd is available', () => {
     const sources = fileSources(configFor(home), undefined, { zstd: true });
@@ -293,7 +293,7 @@ describe('fileSources: the DeepSeek source', () => {
 
 describe.skipIf(!HAS_ZSTD)('through the pipeline (raw lines as stored)', () => {
   test('lines stored by ordinal under the root session; appends go on; a rewrite stores a new generation', async () => {
-    const config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, cursorDbPath: null, geminiDir: null, grokDir: null, copilotDir: null, deepseekDir: home, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [] });
+    const config = loadConfig({}, { projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), codexSessionsDir: null, cursorDbPath: null, geminiDir: null, grokDir: null, copilotDir: null, deepseekDir: home, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [], qwenDir: null });
     const store = openStore(':memory:');
     const pipeline = new Pipeline(store, config, { sources: fileSources(config, store, { zstd: true }) });
     try {

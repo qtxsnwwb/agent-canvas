@@ -19,7 +19,7 @@ const base: Diagnostics = {
 };
 const off = { dir: null, present: false, reading: false, sessionCount: 0 };
 /** The four origins of plan more-sources-cn, not configured. */
-const newOff = { deepseek: off, workbuddy: off, codebuddy: off, doubao: off };
+const newOff = { deepseek: off, workbuddy: off, codebuddy: off, doubao: off, qwen: off };
 const rec = (recordType: string, count = 1) => ({ recordType, count, sample: '' });
 
 test('originUnknownRecords：按来源前缀分开，互不混入，也不混入 Cursor 的', () => {
@@ -159,6 +159,7 @@ test('遮蔽：四个新来源的目录、每个根和不可用原因都被遮�
       workbuddy: { dir: '/home/dev42/.workbuddy/projects', present: true, reading: true, sessionCount: 1, duplicateSessions: 1, dirs: [{ dir: '/home/dev42/.workbuddy/projects', present: true }, { dir: '/home/dev42/.workbuddy-ai/projects', present: true }] },
       codebuddy: { dir: '/home/dev42/.codebuddy/projects', present: true, reading: true, sessionCount: 2 },
       doubao: { dir: '/home/dev42/Library/Application Support/DoubaoWork', present: true, reading: true, sessionCount: 3, mtimeFallbacks: 1, unknownSessions: 2, duplicateSessions: 0 },
+      qwen: { dir: '/home/dev42/.qwen/projects', present: true, reading: true, sessionCount: 4, unsupportedSessions: 1 },
     },
   };
   const out = maskDiagnostics(d, m);
@@ -167,4 +168,5 @@ test('遮蔽：四个新来源的目录、每个根和不可用原因都被遮�
   expect(out.sources?.workbuddy).toMatchObject({ duplicateSessions: 1, sessionCount: 1 });
   expect(out.sources?.codebuddy.sessionCount).toBe(2);
   expect(out.sources?.doubao).toMatchObject({ mtimeFallbacks: 1, unknownSessions: 2, duplicateSessions: 0 });
+  expect(out.sources?.qwen).toMatchObject({ unsupportedSessions: 1, sessionCount: 4, present: true, reading: true });
 });

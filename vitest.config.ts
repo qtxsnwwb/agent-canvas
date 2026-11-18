@@ -28,8 +28,8 @@ export default defineConfig({
     testTimeout: 5_000 * TIMING_SCALE,
     hookTimeout: 10_000 * TIMING_SCALE,
     // Never the real Cursor database: a test that wants one passes a temp path (cursorDbPath override or stubbed env).
-    // Never the real Gemini CLI / Grok / Copilot CLI / DeepSeek Harness / WorkBuddy / CodeBuddy Code / Doubao Work
-    // directories either (start() reads process.env): a test that wants one passes a temp dir.
+    // Never the real Gemini CLI / Grok / Copilot CLI / DeepSeek Harness / WorkBuddy / CodeBuddy Code / Doubao Work /
+    // Qwen Code directories either (start() reads process.env): a test that wants one passes a temp dir.
     // No stats warm-up in start() unless a test asks for it (StartOptions.statsWarmup).
     env: {
       AGENT_CANVAS_CURSOR_DB: '',
@@ -40,6 +40,7 @@ export default defineConfig({
       AGENT_CANVAS_WORKBUDDY_DIR: '',
       AGENT_CANVAS_CODEBUDDY_DIR: '',
       AGENT_CANVAS_DOUBAO_DIR: '',
+      AGENT_CANVAS_QWEN_DIR: '',
       AGENT_CANVAS_STATS_WARMUP: '0',
     },
     projects: [
