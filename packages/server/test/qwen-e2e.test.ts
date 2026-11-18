@@ -433,6 +433,146 @@ describe('Qwen Code end to end', () => {
     }
   });
 
+  describe('one session id under two project folders (spec 3.5)', () => {
+    /** A copy of a project folder: `home-u-app-copy` (sorts before `home-u-app\` with `\`, after `home-u-app/` with `/`). */
+    const COPY = 'home-u-app-copy';
+    const copyAt = (...parts: string[]): string => path.join(projects, COPY, ...parts);
+    /** The live session (two turns) in QP, and a stale copy (its first turn) with its own title and subagent file. */
+    async function writeBoth(): Promise<Log> {
+      const log = new Log();
+      log.prompt('first question');
+      log.reply([text('First answer.')]);
+      const stale = [...log.lines];
+      log.prompt('second question');
+      log.reply([text('Second answer.')]);
+      await write(mainAt(), body(log.lines));
+      await write(titleAt(), titleSidecar('Live title', 'manual'));
+      await write(copyAt('chats', `${SID}.jsonl`), body(stale));
+      await write(copyAt('chats', `${SID}.title.json`), titleSidecar('Stale title', 'manual'));
+      await write(copyAt('subagents', SID, `agent-${AGENT}.jsonl`), body(agentLines()));
+      await write(copyAt('subagents', SID, `agent-${AGENT}.meta.json`), metaBody());
+      return log;
+    }
+    const qwenStatus = (p: Pipeline): Record<string, unknown> => p.fileSources().find((s) => s.origin === 'qwen')!.status!();
+    /** A pipeline whose full scans list files in the given order. */
+    function ordered(store: Store, dir: 'asc' | 'desc'): Pipeline {
+      const p = newPipeline(store);
+      const real = p.listFiles.bind(p);
+      vi.spyOn(p, 'listFiles').mockImplementation(async () => {
+        const files = await real();
+        return dir === 'asc' ? files : [...files].reverse();
+      });
+      return p;
+    }
+    /** The view of the live copy alone, read fresh. */
+    async function liveOnly(): Promise<ReturnType<typeof full>> {
+      const saved = path.join(tmp, 'saved-copy');
+      await fs.rename(path.join(projects, COPY), saved);
+      const want = await fresh();
+      await fs.rename(saved, path.join(projects, COPY));
+      return want;
+    }
+
+    for (const dir of ['asc', 'desc'] as const) {
+      test(`the live copy is read (smallest folder name), the other copy, its title and subagent files are not (${dir}); after an append, a restart and a rebuild still`, { timeout: 60_000 }, async () => {
+        const log = await writeBoth();
+        const want = await liveOnly();
+        expect(want!.session.title).toBe('Live title');
+        const store = open();
+        const p = ordered(store, dir);
+        await scan(p);
+        expect(p.ingestFailures()).toEqual([]);
+        expect(full(store, SID)).toEqual(want);
+        expect(Object.values(full(store, SID)!.nodes).some((n) => n.agentId !== null)).toBe(false);
+        expect(qwenStatus(p)).toMatchObject({ duplicateSessions: 1 });
+        const rows = rawCount(store);
+
+        log.prompt('third question');
+        await fs.appendFile(mainAt(), body(log.lines.slice(-1)));
+        await p.ingestFile(mainAt());
+        await scan(p);
+        const now = full(store, SID)!;
+        expect(now).toEqual(await liveOnly());
+        expect(JSON.stringify(now)).toContain('second question');
+        expect(rawCount(store)).toBe(rows + 1);
+
+        const again = ordered(store, dir === 'asc' ? 'desc' : 'asc');
+        await scan(again);
+        expect(full(store, SID)).toEqual(now);
+        expect(qwenStatus(again)).toMatchObject({ duplicateSessions: 1 });
+        again.rebuild();
+        expect(full(store, SID)).toEqual(now);
+        expect(store.getSession(SID)?.sourceDeleted).toBe(false);
+      });
+    }
+
+    test('a copy already stored wins over a smaller folder name', async () => {
+      // Only the copy exists at first: it is read and stored.
+      const log = new Log();
+      log.prompt('only in the copy');
+      await write(copyAt('chats', `${SID}.jsonl`), body(log.lines));
+      const store = open();
+      await scan(newPipeline(store));
+      // A second folder with a smaller name appears; after a restart the stored copy still wins.
+      const other = new Log();
+      other.prompt('in the smaller folder');
+      await write(mainAt(), body(other.lines));
+      const p = newPipeline(store);
+      await scan(p);
+      expect(JSON.stringify(full(store, SID))).toContain('only in the copy');
+      expect(JSON.stringify(full(store, SID))).not.toContain('in the smaller folder');
+      expect(qwenStatus(p)).toMatchObject({ duplicateSessions: 1 });
+    });
+
+    test('the owner’s file really gone: the other copy takes over at the next listing, not flagged source-deleted', async () => {
+      await writeBoth();
+      const store = open();
+      const p = newPipeline(store);
+      await scan(p);
+      await fs.rm(mainAt());
+      await fs.rm(titleAt());
+      await scan(p);
+      expect(p.ingestFailures()).toEqual([]);
+      expect(store.getSession(SID)?.sourceDeleted).toBe(false);
+      const now = full(store, SID)!;
+      expect(JSON.stringify(now)).toContain('first question');
+      expect(JSON.stringify(now)).not.toContain('second question');
+      expect(now.session.title).toBe('Stale title');
+      expect(qwenStatus(p)).toMatchObject({ duplicateSessions: 0 });
+      // Every copy gone: flagged.
+      await fs.rm(path.join(projects, COPY), { recursive: true });
+      await scan(p);
+      expect(store.getSession(SID)?.sourceDeleted).toBe(true);
+    });
+
+    test('a duplicate appearing later through a watcher event before any listing is not read, and counted once', async () => {
+      await writeSession();
+      const store = open();
+      const p = newPipeline(store);
+      await scan(p);
+      const before = full(store, SID);
+      const rows = rawCount(store);
+      const stale = new Log();
+      stale.prompt('a stale copy');
+      await write(copyAt('chats', `${SID}.jsonl`), body(stale.lines));
+      await write(copyAt('subagents', SID, `agent-${AGENT}.jsonl`), body(agentLines()));
+      await p.ingestFile(copyAt('chats', `${SID}.jsonl`));
+      await p.ingestFile(copyAt('subagents', SID, `agent-${AGENT}.jsonl`));
+      await p.idle();
+      expect(rawCount(store)).toBe(rows);
+      expect(full(store, SID)).toEqual(before);
+      expect(qwenStatus(p)).toMatchObject({ duplicateSessions: 1 });
+      for (let i = 0; i < 3; i++) {
+        await scan(p);
+        expect(qwenStatus(p)).toMatchObject({ duplicateSessions: 1 });
+      }
+      const restarted = newPipeline(store);
+      await scan(restarted);
+      expect(qwenStatus(restarted)).toMatchObject({ duplicateSessions: 1 });
+      expect(full(store, SID)).toEqual(before);
+    });
+  });
+
   test('the same tree listed in ascending and in descending order gives the same result', { timeout: 60_000 }, async () => {
     await writeSession();
     // An archived session with a title, a session in both places, a managed one.
@@ -468,7 +608,7 @@ describe('Qwen Code end to end', () => {
       });
     }
     expect(results[0]!.views[3]).toBeNull();
-    expect(results[0]!.diag).toEqual({ unsupportedSessions: 1 });
+    expect(results[0]!.diag).toEqual({ unsupportedSessions: 1, duplicateSessions: 0 });
     expect(JSON.stringify(results[0]!.views[2])).not.toContain('stale');
     expect(results[1]).toEqual(results[0]);
   });

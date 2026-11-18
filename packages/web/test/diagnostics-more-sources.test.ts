@@ -139,13 +139,19 @@ test('四个新来源的附加行：每个读取的目录、运行环境不支�
   ]);
 });
 
-test('Qwen Code：托管会话（不读）的个数有时出一行警告；为 0 或服务端没发时不出行', () => {
+test('Qwen Code：托管会话（不读）的个数出一行，为 0 时也出（不警告）；服务端没发时不出行；重复的会话照常出行', () => {
   const q = { dir: '/h/.qwen/projects', present: true, reading: true, sessionCount: 5 };
   expect(fileSourceDetailLines({ ...q, unsupportedSessions: 2 })).toEqual([
     { text: '托管会话（格式不支持，没有读取）：2 个', warn: true },
   ]);
-  expect(fileSourceDetailLines({ ...q, unsupportedSessions: 0 })).toEqual([]);
+  expect(fileSourceDetailLines({ ...q, unsupportedSessions: 0 })).toEqual([
+    { text: '托管会话（格式不支持，没有读取）：0 个', warn: false },
+  ]);
   expect(fileSourceDetailLines(q)).toEqual([]);
+  expect(fileSourceDetailLines({ ...q, unsupportedSessions: 0, duplicateSessions: 1 })).toEqual([
+    { text: '在另一个目录或配置里重复出现、只读了一份的会话：1 个', warn: false },
+    { text: '托管会话（格式不支持，没有读取）：0 个', warn: false },
+  ]);
   expect(fileSourceDirLine('qwen', q)).toBe('Qwen Code 会话目录：/h/.qwen/projects（存在）');
   // The block is shown once the directory exists, after 豆包 (ORIGINS order).
   const d: Diagnostics = { ...base, sources: { gemini: off, grok: off, copilot: off, ...newOff, doubao: { ...off, present: true, dir: '/h/d' }, qwen: { ...q, unsupportedSessions: 1 } } };

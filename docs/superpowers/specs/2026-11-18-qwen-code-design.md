@@ -64,7 +64,7 @@ Qwen Code 平时只追加，但“删除消息组”会整个替换文件（说�
 
 ### 3.3 项目归属
 
-- 工作目录取自记录的 `cwd`（每条记录都有）。来源在第一次给文件分类时读它的第一条有效记录。
+- 工作目录取自记录的 `cwd`（每条记录都有，值都一样）。来源给文件分类时从头往后找：超过 64 KiB 的行跳过、不读进内存，取第一条不超过 64 KiB 的有效记录；还没有这样的记录时会话暂不分类、不显示。每个字节只看一次，下次从上次停下的地方接着找。
 - 工作目录落在 `<仓库>/.qwen/worktrees/` 之下时，项目取 `<仓库>`（Qwen Code 自己也把它们算作同一个项目）；会话的工作目录照原样显示。
 - 项目 id 用 `ProjectIdResolver.forCwd`，与 DeepSeek、WorkBuddy、CodeBuddy 共用同一个解析器（上一批设计 10.23）。
 - 子代理文件的项目跟它的会话走。
@@ -72,6 +72,10 @@ Qwen Code 平时只追加，但“删除消息组”会整个替换文件（说�
 ### 3.4 托管会话
 
 来源给主线文件分类时看它的第一条记录（前面可以有一条 `session_execution_engine` 记录）：是 `managed_session_header_v1` 记录的，是托管会话，不读，计入诊断的 `unsupportedSessions`（`FileSourceStatus` 新增的可选项）。它的子代理文件也不读。
+
+### 3.5 同一个会话 id 出现在两个项目目录下
+
+Qwen Code 自己不会这样写；用户复制了 `projects/` 下的一个项目目录时会出现。一个会话 id 只归一个项目目录，只读它的文件（主线、标题文件、`subagents/<会话 id>/` 下的文件）；其余目录里的这几样都不读，在诊断的 `duplicateSessions` 里计数（每个多出来的目录算一个）。归属在列目录时决定，不取决于路径排序或分类的先后：已经存进数据库的那一份优先；都没存过时，取目录名按字符编码（逐个 UTF-16 码元）比较最小的。归属者的主线文件还在就一直归它；它真的不见了，下次列目录时由仍在的另一份接手，会话不标“源文件已删除”。同一个目录里 `chats/` 和 `chats/archive/` 是同一个键（3.1），不算重复。
 
 ## 4. 记录到节点
 
@@ -133,7 +137,7 @@ Qwen Code 平时只追加，但“删除消息组”会整个替换文件（说�
 - 缓存读取 = `cachedContentTokenCount`。
 - 输入 = max(0, `promptTokenCount` − `cachedContentTokenCount`)。缓存写入没有存盘，无法单列。
 - 输出：设 `derived = totalTokenCount − promptTokenCount`。`totalTokenCount > 0` 且 `candidates ≤ derived ≤ candidates + thoughts` 时取 `derived`；否则认证方式是 OpenAI 兼容、OpenAI Responses 或 Qwen OAuth 时取 `candidates`，其余取 `candidates + thoughts`。
-- 认证方式不在回复记录上：取当前分支上此前最近的 `session_model` 记录或提问记录的 `executionContext.authType`；都没有时按“其余”处理。子代理的记录上没有认证方式，所以子代理线程的用量一律按“其余”处理；借用主线的认证方式会让结果取决于文件读到的先后。
+- 认证方式不在回复记录上：取当前分支上此前最近的 `session_model` 记录或提问记录的 `executionContext.authType`；都没有时按“其余”处理。子代理线程只用它自己当前分支上找到的认证方式（同样取 `session_model` 记录或提问记录的 `executionContext.authType`），不借用主线的：借用会让结果取决于文件读到的先后。说明 5.2 列出的子代理记录都不带认证方式，所以实际上按“其余”处理。
 - 一条回复记录是一次模型回复，用量记在它的第一个显示节点上；不需要去重键。`ui_telemetry` 里重复的数字不计。
 - `/branch` 复制出来的会话带着原会话的用量，跨会话相加时会重复。手册注明。
 
@@ -162,6 +166,7 @@ Qwen Code 平时只追加，但“删除消息组”会整个替换文件（说�
 - 子代理的回复分成多条记录（一条带文字和用量，之后每个工具调用各一条）：各自成节点，用量只出现一次，不需要合并。
 - 模型取说明文件的 `model`；节点的标题取 `agentType`，没有时取记录的 `agentName`，再没有取调用参数的 `subagent_type`。
 - 后台子代理完成时主线里的通知记录照 4.1 显示为系统节点。
+- 子代理线程里带 `externalInputKind`（`message` 或 `notification`）的 `user` 记录是送进运行中子代理的消息（说明 5.2），显示为系统节点，标题分别是 Message、Notification，不是提问。
 
 `parent_session` 记录标的是“子会话”（另一个完整的会话文件），不是子代理；子会话显示为独立的会话。
 
@@ -186,7 +191,7 @@ Qwen Code 平时只追加，但“删除消息组”会整个替换文件（说�
 - 按文件视图：没有逐个核对过 Qwen Code 各工具的参数名。按保守的对照表实现（`file_path`、`absolute_path`、`path` 依次尝试；写入类工具按名字里的 `write`、`edit`、`replace` 判断），手册标明未经核对。
 - 异常检测：有用量，参与“消耗异常高”。
 - 导出、遮蔽、检索：照常。
-- 诊断页的 `sources` 增加 `qwen`：目录、是否存在、是否在读、会话数、`unsupportedSessions`。
+- 诊断页的 `sources` 增加 `qwen`：目录、是否存在、是否在读、会话数、`unsupportedSessions`、`duplicateSessions`（3.5）。
 
 ## 10. 对现有部分的改动
 

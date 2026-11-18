@@ -104,7 +104,15 @@ const newSearch = (): Search => ({ next: 0, held: [], heldBytes: 0, skipping: fa
  * (after one optional `session_execution_engine` record) is `managed_session_header_v1` is a managed session (spec 3.4):
  * nothing of it is read (title and subagent files neither) and it is counted in status().unsupportedSessions (once per
  * session key, however often it is seen; no longer once its file is gone). A header anywhere later does not count, so an
- * incremental read and a fresh one agree. The project directory name is never decoded. Subagent files and sidecars take their session's
+ * incremental read and a fresh one agree.
+ *
+ * One session id under two project folders (spec 3.5; Qwen Code never writes that, a copied project folder does): one
+ * folder owns the session id and only its files (session, title, subagent files and sidecars) are read; the other
+ * copies are not read and are counted in status().duplicateSessions. The owner is decided while listing, never by
+ * classification order or by the order paths sort in: a copy already stored wins, else the folder name that is
+ * smallest in plain code-unit order. It stays the owner while its session file is listed; once it is gone, another
+ * listed copy takes over at the next listing (the session is not flagged source-deleted). The project directory name
+ * is never decoded. Subagent files and sidecars take their session's
  * class; while the session cannot be told yet (no valid record), neither can they. Classes are cached per key, and taken
  * from the stored raw events when there are any. Nothing is ever written under the tool directory.
  */
@@ -127,6 +135,10 @@ export class QwenFileSource implements FileSource {
   private readonly managed = new Set<string>();
   /** Session-file key -> where the search of a file not classified yet stopped. */
   private readonly searches = new Map<string, Search>();
+  /** Session id -> the project folder that owns it (spec 3.5). */
+  private readonly owners = new Map<string, string>();
+  /** `<folder>\0<session id>` of each copy of a session not read because another folder owns the id. */
+  private duplicates = new Set<string>();
   /** Session-file key -> the classification attempt in progress (one at a time per file: it moves its Search on). */
   private readonly attempts = new Map<string, Promise<FileClass | null>>();
 
@@ -140,15 +152,24 @@ export class QwenFileSource implements FileSource {
     this.resolver = projects ?? new ProjectIdResolver(() => this.lookup.knownProjectIds());
   }
 
-  /** Managed sessions seen (and still listed): recognised, not shown. */
-  status(): { unsupportedSessions: number } {
-    return { unsupportedSessions: this.managed.size };
+  /** Managed sessions seen (and still listed), recognised and not shown; copies of a session id owned by another folder. */
+  status(): { unsupportedSessions: number; duplicateSessions: number } {
+    return { unsupportedSessions: this.managed.size, duplicateSessions: this.duplicates.size };
   }
 
   /** Every file of the source (sorted); a session or title in both `chats/` and `chats/archive/` only once, from `chats/`. */
   async listFiles(): Promise<string[]> {
     const out: string[] = [];
     const sessionKeys = new Set<string>();
+    /** Session id -> the folders whose `chats/` or `chats/archive/` holds its session file. */
+    const copies = new Map<string, Set<string>>();
+    const noteCopy = (shape: Shape): void => {
+      if (shape.kind !== 'session') return;
+      sessionKeys.add(this.keyFor(shape));
+      let folders = copies.get(shape.sid);
+      if (folders === undefined) copies.set(shape.sid, (folders = new Set()));
+      folders.add(shape.proj);
+    };
     for (const proj of await names(this.rootDir, 'dir')) {
       if (!validName(proj)) continue;
       const chats = path.join(this.rootDir, proj, CHATS);
@@ -157,13 +178,13 @@ export class QwenFileSource implements FileSource {
         const shape = chatShape(proj, name, false);
         if (shape === null) continue;
         inChats.add(name);
-        if (shape.kind === 'session') sessionKeys.add(this.keyFor(shape));
+        noteCopy(shape);
         out.push(path.join(chats, name));
       }
       for (const name of await names(path.join(chats, ARCHIVE), 'file')) {
         const shape = chatShape(proj, name, true);
         if (shape === null || inChats.has(name)) continue;
-        if (shape.kind === 'session') sessionKeys.add(this.keyFor(shape));
+        noteCopy(shape);
         out.push(path.join(chats, ARCHIVE, name));
       }
       const subagents = path.join(this.rootDir, proj, SUBAGENTS);
@@ -174,8 +195,10 @@ export class QwenFileSource implements FileSource {
         }
       }
     }
-    // A managed session whose file is gone is no longer counted.
+    // A managed session whose file is gone is no longer counted; the search state of a file gone is dropped.
     for (const key of [...this.managed]) if (!sessionKeys.has(key)) this.managed.delete(key);
+    for (const key of [...this.searches.keys()]) if (!sessionKeys.has(key)) this.searches.delete(key);
+    this.decideOwners(copies);
     return out.sort();
   }
 
@@ -200,7 +223,7 @@ export class QwenFileSource implements FileSource {
   classify(key: string): MaybePromise<FileClass | null> {
     const shape = this.shapeOfKey(key);
     if (shape === null) return null;
-    if (shape.kind === 'session') return this.classifySession(key, shape.sid);
+    if (shape.kind === 'session') return this.classifySession(key, shape.proj, shape.sid);
     const sessionKey = `${this.prefix}${shape.proj}/${CHATS}/${shape.sid}${JSONL}`;
     const kind = shape.kind;
     const agentId = 'stem' in shape ? shape.stem : undefined;
@@ -209,7 +232,7 @@ export class QwenFileSource implements FileSource {
       const { projectId, sessionId } = session;
       return agentId === undefined ? { kind, projectId, sessionId } : { kind, projectId, sessionId, agentId };
     };
-    const session = this.classifySession(sessionKey, shape.sid);
+    const session = this.classifySession(sessionKey, shape.proj, shape.sid);
     return isPromise(session) ? session.then(derive) : derive(session);
   }
 
@@ -225,10 +248,15 @@ export class QwenFileSource implements FileSource {
     return this.known(`${this.prefix}${shape.proj}/${CHATS}/${shape.sid}${JSONL}`, shape.sid)?.projectId ?? null;
   }
 
-  /** The session of a main-thread key whose class is known (a managed session has none). */
+  /**
+   * The session of a main-thread key whose class is known (a managed session has none), when its folder owns the session
+   * id: a copy that lost it, or an owner that another copy took over from, does not mark the session source-deleted.
+   */
   mainSessionOf(key: string): string | null {
     const shape = this.shapeOfKey(key);
     if (shape?.kind !== 'session') return null;
+    const owner = this.owners.get(shape.sid);
+    if (owner !== undefined && owner !== shape.proj) return null;
     return this.known(key, shape.sid)?.sessionId ?? null;
   }
 
@@ -286,8 +314,57 @@ export class QwenFileSource implements FileSource {
     return this.remember(key, { kind: 'session', projectId: stored.projectId, sessionId: sid });
   }
 
-  /** A main thread: known, managed (null), or decided by searching its file (null while nothing in it decides). */
-  private classifySession(key: string, sid: string): MaybePromise<FileClass | null> {
+  /**
+   * The owner of each session id listed (spec 3.5): the current owner while its session file is listed; else a listed
+   * copy already stored; else the folder whose name is smallest in plain code-unit order (Array.prototype.sort's default
+   * comparison, the same on every platform; never the order absolute paths sort in, which differs between `\` and `/`).
+   * Every other listed copy is a duplicate. An id no longer listed anywhere is forgotten (mainSessionOf then answers from
+   * the stored class, so its session is flagged source-deleted as usual).
+   */
+  private decideOwners(copies: ReadonlyMap<string, ReadonlySet<string>>): void {
+    const duplicates = new Set<string>();
+    for (const sid of [...this.owners.keys()]) if (!copies.has(sid)) this.owners.delete(sid);
+    for (const [sid, folders] of copies) {
+      let owner = this.owners.get(sid);
+      if (owner === undefined || !folders.has(owner)) {
+        const byName = [...folders].sort();
+        owner = byName.find((proj) => this.isStoredSession(proj, sid)) ?? byName[0]!;
+        this.owners.set(sid, owner);
+      }
+      for (const proj of folders) if (proj !== owner) duplicates.add(`${proj}\u0000${sid}`);
+    }
+    this.duplicates = duplicates;
+  }
+
+  /** Whether the main thread of `sid` in folder `proj` has stored raw events. */
+  private isStoredSession(proj: string, sid: string): boolean {
+    const stored = this.lookup.storedFile(`${this.prefix}${proj}/${CHATS}/${sid}${JSONL}`);
+    return stored !== null && stored.agentId === null && stored.sessionId === sid;
+  }
+
+  /**
+   * Whether folder `proj` owns session id `sid`. An id no listing has decided yet (a file met through a watcher event
+   * first) is taken by the first folder whose session file exists or is stored; a folder that does not own it is
+   * counted as a duplicate copy.
+   */
+  private owns(key: string, proj: string, sid: string): boolean {
+    const owner = this.owners.get(sid);
+    if (owner === proj) return true;
+    if (owner === undefined) {
+      if (!exists(this.pathOf(key)!) && !this.isStoredSession(proj, sid)) return false;
+      this.owners.set(sid, proj);
+      return true;
+    }
+    this.duplicates.add(`${proj}\u0000${sid}`);
+    return false;
+  }
+
+  /**
+   * A main thread: not read when another folder owns its session id; else known, managed (null), or decided by
+   * searching its file (null while nothing in it decides).
+   */
+  private classifySession(key: string, proj: string, sid: string): MaybePromise<FileClass | null> {
+    if (!this.owns(key, proj, sid)) return null;
     const known = this.known(key, sid);
     if (known !== null) return known;
     if (this.managed.has(key)) return null;

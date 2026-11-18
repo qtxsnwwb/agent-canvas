@@ -80,11 +80,13 @@
   --series-workbuddy: #00a52d;
   --series-codebuddy: #c369ff;
   --series-doubao: #963c00;
-  /* Qwen Code: with the eleven in ORIGINS order the validator passes (adjacent pairs as above; 豆包 to Qwen Code CVD
-     ΔE > 8). Over all pairs no colour can be added to the ten above without one pair under the CVD floor (a full
-     sRGB search, plan qwen-code Task 5): this one keeps every pair >= 15 for normal vision (worst: DeepSeek, 15.1) and
-     its worst colour-blind pair is Codex under deutan, 5.99 (just under 6), so with both in one chart the legend, the
-     tooltip and the gaps carry the difference. A teal, the first choice, read as grey and sat 9.9 from Gemini CLI. */
+  /* Qwen Code. What was validated: the adjacent-pair checks over the eleven in ORIGINS order pass (豆包 to Qwen Code
+     CVD ΔE > 8). Adjacency in ORIGINS order is not what a chart shows, though: a stack holds only the origins that have
+     data, so any two may be neighbours. Over all pairs, every pair is >= 15 for normal vision (worst: DeepSeek, 15.1);
+     the worst colour-blind pair is Codex under deutan, 5.99, against a 6.0 floor. No colour added to the ten above
+     keeps every pair over that floor (a full sRGB search, plan qwen-code Task 5). Identity never rests on colour alone:
+     charts have a legend and a tooltip naming each row, badges carry the origin's mark, and bars carry its label. A
+     teal, the first choice, read as grey and sat 9.9 from Gemini CLI. */
   --series-qwen: #9400ff;
   --chart-grid: #f0ebf6;
   --chart-axis: #d6cde6;

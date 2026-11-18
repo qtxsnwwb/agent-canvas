@@ -90,7 +90,7 @@ describe('files and keys', () => {
     expect(s.watchDepth).toBe(3);
     expect(s.lineIdentity).toBe('offset');
     expect(typeof s.readLines).toBe('function'); // readGuardedLines, wrapped (a file gone at the path read keeps its offset)
-    expect(s.status()).toEqual({ unsupportedSessions: 0 });
+    expect(s.status()).toEqual({ unsupportedSessions: 0, duplicateSessions: 0 });
   });
 
   test('each kind of file has its key; the key leads back to the file', () => {
@@ -319,7 +319,7 @@ describe('managed sessions (spec 3.4; reference 4.6)', () => {
         const files = await s.listFiles();
         const classes = await Promise.all(files.map((f) => s.classify(s.keyOf(f)!)));
         expect(classes.filter((c) => c !== null).map((c) => c!.sessionId)).toEqual([SID2]);
-        expect(s.status()).toEqual({ unsupportedSessions: 1 });
+        expect(s.status()).toEqual({ unsupportedSessions: 1, duplicateSessions: 0 });
       }
       expect(s.mainSessionOf(mainKey())).toBeNull();
     });
@@ -329,10 +329,10 @@ describe('managed sessions (spec 3.4; reference 4.6)', () => {
     await write(mainAt(), body([engineRecord()]));
     const s = new QwenFileSource(projects);
     expect(await s.classify(mainKey())).toBeNull();
-    expect(s.status()).toEqual({ unsupportedSessions: 0 });
+    expect(s.status()).toEqual({ unsupportedSessions: 0, duplicateSessions: 0 });
     await fs.appendFile(mainAt(), body(sessionLines()));
     expect(await s.classify(mainKey())).toEqual({ kind: 'session', projectId: PROJECT_ID, sessionId: SID });
-    expect(s.status()).toEqual({ unsupportedSessions: 0 });
+    expect(s.status()).toEqual({ unsupportedSessions: 0, duplicateSessions: 0 });
   });
 
   test('archived, it is still one session; deleted, it is no longer counted', async () => {
@@ -343,10 +343,10 @@ describe('managed sessions (spec 3.4; reference 4.6)', () => {
     await fs.rename(mainAt(), archiveAt(`${SID}.jsonl`));
     await s.listFiles();
     expect(await s.classify(mainKey())).toBeNull();
-    expect(s.status()).toEqual({ unsupportedSessions: 1 });
+    expect(s.status()).toEqual({ unsupportedSessions: 1, duplicateSessions: 0 });
     await fs.rm(archiveAt(`${SID}.jsonl`));
     await s.listFiles();
-    expect(s.status()).toEqual({ unsupportedSessions: 0 });
+    expect(s.status()).toEqual({ unsupportedSessions: 0, duplicateSessions: 0 });
   });
 
   test('only the first record decides (after one optional session_execution_engine record): a header later is plain, incrementally or read fresh', async () => {
@@ -356,15 +356,15 @@ describe('managed sessions (spec 3.4; reference 4.6)', () => {
     expect(await s.classify(mainKey())).toMatchObject({ projectId: PROJECT_ID });
     await fs.appendFile(mainAt(), body([managedHeader()]));
     expect(await s.classify(mainKey())).toMatchObject({ projectId: PROJECT_ID });
-    expect(s.status()).toEqual({ unsupportedSessions: 0 });
+    expect(s.status()).toEqual({ unsupportedSessions: 0, duplicateSessions: 0 });
     // Fresh: the same file read by a new source.
     const t = new QwenFileSource(projects);
     expect(await t.classify(mainKey())).toEqual({ kind: 'session', projectId: PROJECT_ID, sessionId: SID });
-    expect(t.status()).toEqual({ unsupportedSessions: 0 });
+    expect(t.status()).toEqual({ unsupportedSessions: 0, duplicateSessions: 0 });
     // Two engine records, then a header: the header is not the first record after one engine record.
     await write(mainAt(SID2), body([engineRecord(SID2), engineRecord(SID2), managedHeader(SID2), ...sessionLines({ sid: SID2 })]));
     expect(await t.classify(mainKey(SID2))).toMatchObject({ sessionId: SID2 });
-    expect(t.status()).toEqual({ unsupportedSessions: 0 });
+    expect(t.status()).toEqual({ unsupportedSessions: 0, duplicateSessions: 0 });
   });
 
   test('an over-long first record cannot be a managed header: the file is plain', async () => {
@@ -372,7 +372,7 @@ describe('managed sessions (spec 3.4; reference 4.6)', () => {
     await write(mainAt(), body([long, managedHeader(), ...sessionLines()]));
     const s = new QwenFileSource(projects);
     expect(await s.classify(mainKey())).toEqual({ kind: 'session', projectId: PROJECT_ID, sessionId: SID });
-    expect(s.status()).toEqual({ unsupportedSessions: 0 });
+    expect(s.status()).toEqual({ unsupportedSessions: 0, duplicateSessions: 0 });
   });
 });
 
@@ -461,6 +461,20 @@ describe('long lines (spec 3.3: no bound on the cwd search; 64 KiB per line)', (
     expect(await s.classify(mainKey())).toEqual({ kind: 'session', projectId: PROJECT_ID, sessionId: SID });
     expect(reads.bytes).toBeLessThanOrEqual(Buffer.byteLength(body([long, ...rest])));
     expect(reads.bytes).toBeGreaterThanOrEqual(Buffer.byteLength(body([long, rest[0]!])));
+  });
+
+  test('the search state of a file that is no longer listed is dropped', async () => {
+    await write(mainAt(), body([JSON.stringify({ note: 'x'.repeat(70 * 1024) })]));
+    const s = new QwenFileSource(projects);
+    await s.listFiles();
+    expect(await s.classify(mainKey())).toBeNull();
+    const searches = (s as unknown as { searches: Map<string, unknown> }).searches;
+    expect(searches.size).toBe(1);
+    await s.listFiles();
+    expect(searches.size).toBe(1); // still listed: kept
+    await fs.rm(mainAt());
+    await s.listFiles();
+    expect(searches.size).toBe(0);
   });
 
   test('a file found shorter than where the search stopped is searched again from the start', async () => {
