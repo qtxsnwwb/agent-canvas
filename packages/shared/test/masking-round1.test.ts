@@ -264,17 +264,6 @@ test('自定义词：重叠的命中合并，不留下半个词', () => {
   expect(m(['custom'], ['abc', 'bcd']).mask('xabcdx')).toBe(`x${ph('custom', 1)}x`);
 });
 
-test('自定义词：100 个 200 字符的词、1 MB 最坏输入，线性时间', () => {
-  const terms = Array.from({ length: 100 }, (_, i) => 'a'.repeat(101 + i));
-  const masker = m(['custom'], terms);
-  const text = 'a'.repeat(1024 * 1024);
-  const t0 = performance.now();
-  const out = masker.mask(text);
-  const ms = performance.now() - t0;
-  expect(out).toBe(ph('custom', 1));
-  expect(ms).toBeLessThan(300);
-});
-
 test('maskValue：__proto__ 和 constructor 作为普通键保留', () => {
   const input = JSON.parse('{"__proto__": {"x": 1}, "constructor": "c", "a": 2}') as Record<string, unknown>;
   const out = m().maskValue(input) as Record<string, unknown>;

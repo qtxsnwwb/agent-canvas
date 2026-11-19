@@ -9,10 +9,13 @@ const packagesDir = fileURLToPath(new URL('./packages/', import.meta.url));
 const TIMING = '**/*.timing.test.ts';
 
 /**
+ * The default per-test timeout is a hang detector, not an assertion about speed: the wall-clock bounds tests assert
+ * are written where they are tested, in the timing project. It is 20 s (Vitest's default is 5 s): tests that open and
+ * migrate a file database, start a child process or run a pipeline over a temp directory took more than 5 s whenever
+ * the machine was busy (several suites or agents at once), and failed although nothing was wrong.
+ *
  * CI sets AGENT_CANVAS_TIMING_SCALE (see .github/workflows): a shared runner is several times slower than a developer
- * machine, most of all its disk. The default per-test timeout grows by that factor there (tests that open and migrate a
- * file database took more than 5 s on GitHub's Windows runner); unset, it is Vitest's default. A timeout is not an
- * assertion: the wall-clock bounds tests assert are scaled where they are written (pipeline.timing.test.ts).
+ * machine, most of all its disk. The timeouts and the timing project's bounds grow by that factor there.
  */
 const TIMING_SCALE = Math.max(1, Number(process.env.AGENT_CANVAS_TIMING_SCALE) || 1);
 
@@ -25,8 +28,8 @@ export default defineConfig({
     },
   },
   test: {
-    testTimeout: 5_000 * TIMING_SCALE,
-    hookTimeout: 10_000 * TIMING_SCALE,
+    testTimeout: 20_000 * TIMING_SCALE,
+    hookTimeout: 30_000 * TIMING_SCALE,
     // Never the real Cursor database: a test that wants one passes a temp path (cursorDbPath override or stubbed env).
     // Never the real Gemini CLI / Grok / Copilot CLI / DeepSeek Harness / WorkBuddy / CodeBuddy Code / Doubao Work /
     // Qwen Code directories either (start() reads process.env): a test that wants one passes a temp dir.

@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import { createMasker } from '../src/index.js';
+import { createMasker, MASK_TYPE_LABELS } from '../src/index.js';
 
 // Moved from masking.test.ts into the timing project (single fork, after the others, retried): under full-suite load
 // the three phases of one case could exceed vitest's default 5 s test timeout although each phase stays far under its
@@ -100,4 +100,20 @@ test.each([
   expect(t1 - t0).toBeLessThan(3000);
   expect(t2 - t1).toBeLessThan(3000);
   expect(t3 - t2).toBeLessThan(3000);
+});
+
+/** CI's shared runners are several times slower: the bounds grow by AGENT_CANVAS_TIMING_SCALE there (see vitest.config.ts). */
+const TIMING_SCALE = Math.max(1, Number(process.env.AGENT_CANVAS_TIMING_SCALE) || 1);
+
+// Moved from masking-round1.test.ts: a wall-clock bound belongs in the timing project (alone in one fork, after the
+// others, retried). Among the ordinary tests it failed whenever the machine was busy. A quadratic match takes minutes.
+test('自定义词：100 个 200 字符的词、1 MB 最坏输入，线性时间', () => {
+  const terms = Array.from({ length: 100 }, (_, i) => 'a'.repeat(101 + i));
+  const masker = createMasker({ categories: ['custom'], customTerms: terms });
+  const text = 'a'.repeat(1024 * 1024);
+  const t0 = performance.now();
+  const out = masker.mask(text);
+  const ms = performance.now() - t0;
+  expect(out).toBe(`‹已遮蔽·${MASK_TYPE_LABELS.custom}#1›`);
+  expect(ms).toBeLessThan(300 * TIMING_SCALE);
 });
