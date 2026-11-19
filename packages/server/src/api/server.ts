@@ -50,6 +50,8 @@ export const CATCHUP_CHUNK = 1000;
 /** A socket whose unsent data exceeds this is too slow to keep up and is terminated. */
 export const MAX_BUFFERED_BYTES = 16 * 1024 * 1024;
 const RESERVED_PREFIXES = ['/api', '/ws', '/hooks'];
+/** Longest path parameter the router accepts (session ids, project ids, node ids). */
+const MAX_PARAM_LENGTH = 8192;
 
 interface Connection {
   send(message: ServerMessage): void;
@@ -252,7 +254,10 @@ export function buildServer(deps: {
   files.shareReadsWith(stats);
   const exports = deps.exports ?? new ExportService({ store, dataDir: config.dataDir });
   const learned = new LearnedValuesService(store);
-  const app = Fastify();
+  // The router refuses a path parameter longer than maxParamLength (default 100) as if the route did not exist. Node
+  // ids are built from the tools' own ids — a subagent's node carries two session ids and a call id — and are often
+  // longer, so their details answered 404 (or 414). Node's own limit on the request line still bounds the length.
+  const app = Fastify({ routerOptions: { maxParamLength: MAX_PARAM_LENGTH } });
   const connections = new Set<Connection>();
   /** Hook calls dropped by the foreign-payload guard since the server was built (Diagnostics.foreignHooksDropped). */
   let foreignHooksDropped = 0;

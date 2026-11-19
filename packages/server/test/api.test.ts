@@ -355,6 +355,25 @@ describe('http api', () => {
     });
   });
 
+  test('id 超过 100 个字符的节点也能取到详情（路由的参数长度上限默认是 100，子代理节点的 id 常常更长）', async () => {
+    const long = 'call_' + 'x'.repeat(400);
+    await writeSession('proj/s1.jsonl', [
+      userPrompt('u1', null, 'hello'),
+      assistantBlock('a1', 'u1', { type: 'tool_use', id: long, name: 'Read', input: {} }),
+      toolResult('r1', 'a1', long, 'long id body'),
+    ]);
+    await pipeline.ingestFile(abs('proj/s1.jsonl'));
+    const res = await get(`/api/sessions/s1/nodes/${encodeURIComponent(`tool:${long}`)}`);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().output).toBe('long id body');
+    // A long id that names nothing is the route's own 404, not the catch-all's.
+    const none = await get(`/api/sessions/s1/nodes/${'y'.repeat(400)}`);
+    expect(none.statusCode).toBe(404);
+    expect(none.json()).toEqual({ error: 'node not found' });
+    // A long session id reaches its route too.
+    expect((await get(`/api/sessions/${'s'.repeat(300)}/graph`)).json()).toEqual({ error: 'session not found' });
+  });
+
   test('id 中含有 % 的节点按字面解析，不返回 500', async () => {
     await writeSession('proj/s1.jsonl', [
       userPrompt('u1', null, 'hello'),
