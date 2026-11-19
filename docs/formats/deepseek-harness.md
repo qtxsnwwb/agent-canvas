@@ -1,7 +1,7 @@
 # DeepSeek Harness (`dsh`) session files — on-disk format, verified against raw source
 
 Date: 2026-11-17. Method: raw file text only (raw.githubusercontent.com and one streamed
-source archive), no installation, no file from a real user machine.
+source archive), no installation, no file from a real user machine (one real file was compared later, see "Checked against one real file").
 
 **Pin:** `deepseek-ai/deepseek-harness` commit `39163dd30f703a79079e2d2446545cff3c453738`
 (master head, 2026-11-13, "sync 0.2.2-rc.3 back to master"). The release tag
@@ -830,6 +830,42 @@ for v0-v2 show header-level metadata and a "format too old, open it once in dsh"
 
 ---
 
+
+## Checked against one real file (2026-11-18)
+
+One real session written on Windows (one turn: a prompt, five model responses with reasoning,
+four `web_search` calls, a final text, `turn/end` completed; 48 lines in 25 frames, 85 KB
+compressed, 283 KB decoded) was decoded with a decoder written separately from the product's
+reader and compared with what the product shows for it. Prompt text, the five reasoning texts,
+each call's name, arguments, output and status, the final text, every node time (to the
+millisecond), the title, the working directory, the session id and the usage of each response
+were equal. No record type outside this document occurred. The harness version that wrote the
+file was not recorded. What that file settles, by the number of the open question below:
+
+- **1.** On Node 25.2 `zlib.zstdDecompressSync(wholeFile)` returns the first frame only (the
+  header line) and does not throw. The frame walk is mandatory.
+- **3.** Every event after the header has `type`, `seq`, `time`, `data` in that order; some
+  also carry `surfaceOp` or `sourceEventSeqs`. No `ignorable` was seen.
+- **4.** The session id is `session-<uuid>` (44 characters) in the header, and the session
+  directory has the same name. The project directory was the working directory with every
+  separator and the drive colon turned into `-`, wrapped in `--` on both sides.
+- **5.** (partly) On this machine the files were under `%USERPROFILE%\.dsh` with no `DSH_HOME`
+  set. Which surface wrote them was not recorded.
+- **6.** (partly) In all five responses `totalTokens = inputTokens + cacheReadTokens +
+  cacheWriteTokens + outputTokens`, so `inputTokens` excludes cache reads; `cacheWriteTokens`
+  was 0 every time. Whether `outputTokens` includes reasoning cannot be told from the file.
+- **7.** The longest line was 43 KB (an assistant row with its embedded stream); the
+  `request/header` row was 33 KB.
+
+Also seen: three of the four `user/message` rows were injected (`source.kind` of
+`runtime-context`, `skill-catalog`, `time-context`), one was typed (`user`); the title was set
+twice (`source.kind` `fallback`, then `provider`); the row types
+`session-log-deepseek/delivery-accepted`, `session/title-llm-request`, `request/context`,
+`agent/inbox/spliced`, `permission/preset`, `sandbox/mode`, `approval/policy` occur in an
+ordinary session.
+
+Not covered by that file: subagents, forks, compaction, a turn that fails or is interrupted,
+file-reading and file-writing tools, more than one turn, questions 2 and 8-12.
 
 ## Open questions that only a real file can settle
 

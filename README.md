@@ -6,7 +6,7 @@
 
 <p align="center">
   Agent Canvas 是一个跑在你本机的小服务。<br/>
-  它读取 Claude Code、OpenAI Codex、Cursor 的会话记录（Gemini CLI、Grok、GitHub Copilot CLI、DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作、Qwen Code 也能读，尚未经真实数据核对），在浏览器里实时画出每个会话的来龙去脉：<br/>
+  它读取 Claude Code、OpenAI Codex、Cursor 的会话记录（Gemini CLI、Grok、GitHub Copilot CLI、DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作、Qwen Code 也能读，尚未经真实数据核对，其中 DeepSeek Harness 只核对过一个真实会话），在浏览器里实时画出每个会话的来龙去脉：<br/>
   问了什么、调了哪些工具、派了哪些子代理、哪一步慢、哪一步失败。
 </p>
 
@@ -201,7 +201,7 @@ agent-canvas hooks install --cursor
 
 这三个工具的会话目录在服务启动之后才出现的（通常是装好后第一次使用时），要重启服务才会读取。显示不对时先看诊断页里该来源的“未识别的记录”。细节和各自的限制见[使用手册 · Gemini CLI、Grok、Copilot CLI](./docs/manual.md#gemini-cligrokcopilot-cli)。
 
-还有四个国内的工具，同样只读会话文件、**未经真实数据核对**（开发机上没有这些工具，读法依据开源代码、安装包里的类型定义和第三方读取工具，依据写在 [`docs/formats/`](./docs/formats/) 里）：
+还有四个国内的工具，同样只读会话文件、**未经真实数据核对**（读法依据开源代码、安装包里的类型定义和第三方读取工具，依据写在 [`docs/formats/`](./docs/formats/) 里；DeepSeek Harness 在 2026-11-18 用一个真实会话核对过，范围见手册）：
 
 | 能力 | DeepSeek Harness | WorkBuddy | CodeBuddy Code | 豆包工作 |
 |------|:----------------:|:---------:|:--------------:|:--------:|
