@@ -288,6 +288,8 @@ export async function openLiveSession(
         epoch = msg.epoch;
       } else if (msg.type === 'resync') {
         if (msg.sessionId === sessionId) resync();
+      } else if (msg.type !== 'changes') {
+        // not for a session's graph
       } else if (buffered !== null) {
         buffered.push(...msg.changes);
       } else if (apply(msg.changes)) {
