@@ -10,11 +10,19 @@ export interface SessionMarks {
   lastPromptAt: string | null;
   /** Latest error marker (node or hook) at or after lastPromptAt. */
   errorAt: string | null;
-  /** Latest error marker node at or after lastPromptAt; `text`: its summary, else its title. */
-  errorNode: { id: string; text: string } | null;
+  /**
+   * The marker errorAt was taken from. A node: its id, `text` its summary, else its title. A hook: id null, `text` its
+   * reason (explain.ts hookErrorText).
+   */
+  errorMarker: { id: string | null; text: string } | null;
+  /**
+   * The marker ends the turn whatever main-thread nodes are later: a Cursor call failed because the conversation was
+   * aborted (its end is where the next bubble starts, and those bubbles were written before the abort).
+   */
+  errorEndsTurn: boolean;
   /**
    * The node (main thread or a subagent's) whose status is awaiting_permission, at or after lastPromptAt; the latest one
-   * when there are several. `text`: tool name and summary.
+   * when there are several. `text`: tool name and what it is about to do (explain.ts permissionText).
    */
   waitingNode: { id: string; timestamp: string; text: string } | null;
   /** The main thread's latest node; `text`: its title. */
@@ -36,7 +44,8 @@ export function cutExplanation(text: string | null | undefined): string | null {
 /**
  * The session's attention item now, or null (spec 3, plan Global Constraints). In priority order:
  * - awaiting_permission -> `permission` since the waiting node (else the last main-thread node);
- * - idle / awaiting_input with an error marker no main-thread node is later than -> `error` since the marker;
+ * - idle / awaiting_input with an error marker no main-thread node is later than (or a Cursor aborted call:
+ *   errorEndsTurn) -> `error` since the marker;
  * - running and quiet for more than `stuckMinutes` (since the later of the last main-thread node and
  *   Session.lastActivityAt, as the notification engine) -> `stuck` since the last main-thread node;
  * - idle / awaiting_input -> `finished` since the last main-thread node.
@@ -69,8 +78,10 @@ export function decideAttention(m: SessionMarks, nowMs: number, stuckMinutes: nu
     case 'awaiting_input':
       // The turn ended with the error only when nothing came after the marker on the main thread (spec 3 "以出错或中断
       // 结束"): a main thread that went on without a new prompt (a background task's completion) and stopped is finished.
-      if (m.errorAt !== null && !(Date.parse(lastAt) > Date.parse(m.errorAt))) {
-        return item('error', m.errorAt, m.errorNode?.text ?? null, m.errorNode?.id ?? last?.id ?? null);
+      // Except a Cursor aborted call (errorEndsTurn): nothing continues after an abort without a new prompt.
+      if (m.errorAt !== null && (m.errorEndsTurn || !(Date.parse(lastAt) > Date.parse(m.errorAt)))) {
+        // Explanation and click target from the marker chosen; a hook has no node: the last main-thread node.
+        return item('error', m.errorAt, m.errorMarker?.text ?? null, m.errorMarker?.id ?? last?.id ?? null);
       }
       return item('finished', lastAt, m.lastReply?.text ?? null, m.lastReply?.id ?? last?.id ?? null);
     case 'running': {

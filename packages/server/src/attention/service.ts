@@ -14,9 +14,10 @@ import {
   type SessionStatus,
 } from '@agent-canvas/shared';
 import { cursorHookConversationId } from '../normalize/cursor-hooks.js';
-import { isErrorHook, isErrorMarkerNode } from '../notify/markers.js';
+import { errorMarkerAt, isErrorHook, isErrorMarkerNode } from '../notify/markers.js';
 import type { Store } from '../store/store.js';
 import { decideAttention, type SessionMarks } from './decide.js';
+import { hookErrorText, permissionText } from './explain.js';
 
 /** meta key of the page's stored state: JSON of { autoHideHours, dismissed: string[] } (spec 4.4). */
 export const ATTENTION_META_KEY = 'attention';
@@ -43,15 +44,11 @@ const ERROR_FIELDS = ['timestamp', 'kind', 'agentId', 'status', 'systemSubtype',
 /** Patch fields that may turn any node into a prompt, a reply or an error marker. */
 const ROLE_FIELDS = ['kind', 'agentId', 'systemSubtype'] as const;
 
-/**
- * When an error marker node marks its turn as failed, as the notification engine dates it (engine.ts handleChanges,
- * node_added: an interrupt node from its own time, an aborted Cursor call from its end). One difference: for a Cursor call
- * patched to `failed` without an `endedAt` the engine takes the time it sees the change; here the stored node's
- * `endedAt ?? timestamp` is taken, so the item's `since` (and key) is the same after a restart.
+/*
+ * An error marker node is dated by markers.ts errorMarkerAt, as the notification engine dates it. One difference: for a
+ * Cursor call patched to `failed` without an `endedAt` the engine takes the time it sees the change; here the stored
+ * node's `endedAt ?? timestamp` is taken (the session is re-read), so the item's `since` (and key) survives a restart.
  */
-export function errorMarkerAt(node: Pick<GraphNode, 'kind' | 'systemSubtype' | 'timestamp' | 'endedAt'>): string {
-  return node.kind === 'system' && node.systemSubtype === 'interrupt' ? node.timestamp : (node.endedAt ?? node.timestamp);
-}
 
 const message = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
@@ -78,8 +75,10 @@ interface Tracked {
   prompt: { id: string | null; at: string; ms: number } | null;
   last: Kept | null;
   reply: Kept | null;
-  error: (Kept & { at: string; atMs: number }) | null;
-  hookError: { at: string; ms: number } | null;
+  /** endsTurn: a Cursor aborted call (SessionMarks.errorEndsTurn). */
+  error: (Kept & { at: string; atMs: number; endsTurn: boolean }) | null;
+  /** text: the hook's reason (explain.ts hookErrorText). */
+  hookError: { at: string; ms: number; text: string } | null;
   /** receivedAt of the latest hook read (the next read starts there). */
   hooksReadTo: string | null;
   waiting: Map<string, Kept>;
@@ -226,7 +225,8 @@ export class AttentionService {
     }
     undeterminable.sort((a, b) => b.at - a.at || (a.sessionId < b.sessionId ? -1 : 1));
     return {
-      items: sortAttention(items),
+      // sortAttention is stable: ordered by key first, equal `since`s come out the same way live and after a restart.
+      items: sortAttention(items.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))),
       hidden: options.includeHidden === true ? hidden : [],
       hiddenCount: hidden.length,
       undeterminable: undeterminable.map(({ sessionId, title, origin }) => ({ sessionId, title, origin })),
@@ -382,7 +382,9 @@ export class AttentionService {
       if (isErrorMarkerNode(t.session.origin, n, () => this.aborted(n.sessionId, n.id))) {
         const at = errorMarkerAt(n);
         const atMs = msOf(at);
-        if (atMs >= t.prompt.ms && (t.error === null || atMs >= t.error.atMs)) t.error = { ...keep(n), at, atMs };
+        // Not an interrupt node: a Cursor call failed as aborted (isErrorMarkerNode).
+        const endsTurn = !(n.kind === 'system' && n.systemSubtype === 'interrupt');
+        if (atMs >= t.prompt.ms && (t.error === null || atMs >= t.error.atMs)) t.error = { ...keep(n), at, atMs, endsTurn };
       }
     }
     return true;
@@ -441,7 +443,7 @@ export class AttentionService {
       const ms = msOf(h.receivedAt);
       if (ms < t.prompt.ms || !isMainThreadHook(t.session.origin, id, h.payload)) continue;
       if (!isErrorHook(t.session.origin, h.eventName, h.payload)) continue;
-      if (t.hookError === null || ms >= t.hookError.ms) t.hookError = { at: h.receivedAt, ms };
+      if (t.hookError === null || ms >= t.hookError.ms) t.hookError = { at: h.receivedAt, ms, text: hookErrorText(t.session.origin, h.eventName, h.payload) };
     }
   }
 
@@ -449,13 +451,16 @@ export class AttentionService {
     const promptMs = t.prompt?.ms ?? Number.POSITIVE_INFINITY;
     let waiting: Kept | null = null;
     for (const w of t.waiting.values()) if (w.ms >= promptMs && (waiting === null || w.ms >= waiting.ms)) waiting = w;
-    const errorAt = t.error !== null && (t.hookError === null || t.error.atMs >= t.hookError.ms) ? t.error.at : (t.hookError?.at ?? null);
+    // The later of the node marker and the hook marker (the node on a tie); its text and node go with it.
+    const node = t.error !== null && (t.hookError === null || t.error.atMs >= t.hookError.ms) ? t.error : null;
+    const hook = node === null ? t.hookError : null;
     return {
       session: t.session,
       lastPromptAt: t.prompt?.at ?? null,
-      errorAt,
-      errorNode: t.error !== null ? { id: t.error.id, text: t.error.summary || t.error.title } : null,
-      waitingNode: waiting !== null ? { id: waiting.id, timestamp: waiting.timestamp, text: [waiting.toolName ?? waiting.title, waiting.summary].filter((x) => x !== '').join(' · ') } : null,
+      errorAt: node?.at ?? hook?.at ?? null,
+      errorMarker: node !== null ? { id: node.id, text: node.summary || node.title } : hook !== null ? { id: null, text: hook.text } : null,
+      errorEndsTurn: node !== null && node.endsTurn,
+      waitingNode: waiting !== null ? { id: waiting.id, timestamp: waiting.timestamp, text: permissionText(waiting.toolName, waiting.title, waiting.summary) } : null,
       lastMainNode: t.last !== null ? { id: t.last.id, timestamp: t.last.timestamp, text: t.last.title } : null,
       lastReply: t.reply !== null ? { id: t.reply.id, text: t.reply.summary || t.reply.title } : null,
     };

@@ -319,9 +319,10 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
     await app.listen({ port: config.port, host: config.host });
     // After the (automatic) rebuild above, before the initial scan: its changes arrive while importing() holds.
     notifications.start(`http://${config.host}:${(app.server.address() as AddressInfo).port}`);
-    // Once listening (its construction reads the store, about 1 s with 1,500 sessions active in 30 days), before the
-    // initial scan, whose changes it follows; until now /api/attention answered 503. Hooks ingested meanwhile are in the
-    // store it reads.
+    // Once listening, before the initial scan, whose changes it follows. Its construction reads the store synchronously
+    // (about 1 s with 1,500 sessions active in 30 days); nothing yields to the event loop between `listen` and here, so
+    // requests arriving meanwhile wait in the socket backlog and are answered once it is set: start() never shows the
+    // slot's 503 (that is for embedders that set it later). Hooks ingested before are in the store it reads.
     attention = createAttentionService(store, { log: (line) => process.stderr.write(`${line}\n`) });
     attentionSlot.set(attention);
     // The initial scan runs in the background; the server is already answering requests.

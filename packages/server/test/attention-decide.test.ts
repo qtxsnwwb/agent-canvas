@@ -32,7 +32,8 @@ function marks(status: SessionStatus, over: Partial<SessionMarks> = {}, sessionO
     session: session(status, { lastActivityAt, ...sessionOver }),
     lastPromptAt: iso(T0 - 10 * MIN),
     errorAt: null,
-    errorNode: null,
+    errorMarker: null,
+    errorEndsTurn: false,
     waitingNode: null,
     lastMainNode: { id: 'r1', timestamp: iso(T0 - MIN), text: 'Text' },
     lastReply: { id: 'r1', text: '已经改好，测试全部通过' },
@@ -67,14 +68,23 @@ describe('decideAttention: each kind', () => {
   });
 
   test.each(['idle', 'awaiting_input'] as const)('%s with an error marker -> error, since = the marker', (status) => {
-    const item = decideAttention(marks(status, { errorAt: iso(T0 - 30_000), errorNode: { id: 'x1', text: 'Turn failed: 请求超时' } }), T0, 15)!;
+    const item = decideAttention(marks(status, { errorAt: iso(T0 - 30_000), errorMarker: { id: 'x1', text: 'Turn failed: 请求超时' } }), T0, 15)!;
     expect(item).toMatchObject({ kind: 'error', since: iso(T0 - 30_000), nodeId: 'x1', explanation: 'Turn failed: 请求超时' });
     expect(item.key).toBe(attentionKey('s1', 'error', iso(T0 - 30_000)));
   });
 
-  test('an error known from a hook only (no node): explanation null, the click target is the last main-thread node', () => {
-    const item = decideAttention(marks('idle', { errorAt: iso(T0 - 5_000) }), T0, 15)!;
-    expect(item).toMatchObject({ kind: 'error', since: iso(T0 - 5_000), explanation: null, nodeId: 'r1' });
+  test('an error known from a hook only (no node): its reason, the click target is the last main-thread node', () => {
+    const item = decideAttention(marks('idle', { errorAt: iso(T0 - 5_000), errorMarker: { id: null, text: '接口报错（rate_limit）' } }), T0, 15)!;
+    expect(item).toMatchObject({ kind: 'error', since: iso(T0 - 5_000), explanation: '接口报错（rate_limit）', nodeId: 'r1' });
+  });
+
+  test('a Cursor aborted call ends the turn even with later main-thread nodes (written before the abort); other markers do not', () => {
+    const later = { lastMainNode: { id: 'bubble2', timestamp: iso(T0 - MIN), text: 'Text' } };
+    const aborted = marks('idle', { ...later, errorAt: iso(T0 - 3 * MIN), errorMarker: { id: 'call1', text: 'run_terminal_cmd' }, errorEndsTurn: true }, { origin: 'cursor' });
+    expect(decideAttention(aborted, T0, 15)).toMatchObject({ kind: 'error', since: iso(T0 - 3 * MIN), nodeId: 'call1' });
+    // A Claude Code interrupt node followed by main-thread nodes stays finished (the turn went on).
+    const interrupt = marks('idle', { ...later, errorAt: iso(T0 - 3 * MIN), errorMarker: { id: 'x1', text: 'Interrupted' } });
+    expect(decideAttention(interrupt, T0, 15)).toMatchObject({ kind: 'finished', since: iso(T0 - MIN) });
   });
 
   test('running and quiet for longer than stuckMinutes -> stuck, since = the last main-thread node', () => {
@@ -96,7 +106,7 @@ describe('decideAttention: priority and identity', () => {
   test('awaiting_permission wins over an error marker and over a long quiet stretch', () => {
     const m = marks('awaiting_permission', {
       errorAt: iso(T0 - 2 * MIN),
-      errorNode: { id: 'x1', text: 'Interrupted' },
+      errorMarker: { id: 'x1', text: 'Interrupted' },
       lastMainNode: { id: 'tool:t1', timestamp: iso(T0 - 60 * MIN), text: 'Bash' },
       waitingNode: { id: 'tool:t1', timestamp: iso(T0 - 60 * MIN), text: 'Bash · rm -rf build' },
     });
@@ -119,18 +129,18 @@ describe('decideAttention: priority and identity', () => {
     expect(later.kind).toBe('finished');
     expect(later.since).toBe(idle.since);
     expect(later.key).toBe(idle.key);
-    const err = { errorAt: iso(T0 - 5_000), errorNode: { id: 'x1', text: 'Interrupted' } };
+    const err = { errorAt: iso(T0 - 5_000), errorMarker: { id: 'x1', text: 'Interrupted' } };
     expect(decideAttention(marks('awaiting_input', err), T0 + 60_000, 15)!.key).toBe(decideAttention(marks('idle', err), T0, 15)!.key);
   });
 
   test('an error marker counts only when the turn ended with it: a later main-thread node makes it finished (new key)', () => {
     // The marker is the last thing on the main thread (also when it is that node itself): error.
-    const atEnd = decideAttention(marks('idle', { errorAt: iso(T0 - MIN), errorNode: { id: 'r1', text: 'Interrupted' } }), T0, 15)!;
+    const atEnd = decideAttention(marks('idle', { errorAt: iso(T0 - MIN), errorMarker: { id: 'r1', text: 'Interrupted' } }), T0, 15)!;
     expect(atEnd.kind).toBe('error');
     // The main thread went on after it (e.g. a background task's completion, no new prompt) and stopped normally.
     const after = marks('idle', {
       errorAt: iso(T0 - 5 * MIN),
-      errorNode: { id: 'x1', text: 'Interrupted' },
+      errorMarker: { id: 'x1', text: 'Interrupted' },
       lastMainNode: { id: 'r2', timestamp: iso(T0 - MIN), text: 'Text' },
       lastReply: { id: 'r2', text: '测试全部通过' },
     });

@@ -22,6 +22,14 @@ export function isErrorMarkerNode(
 }
 
 /**
+ * When an error marker node (isErrorMarkerNode) marks its turn as failed: an interrupt node from its own time, an
+ * aborted Cursor call from its end (else its start). Used by the notification engine (node_added) and the attention page.
+ */
+export function errorMarkerAt(node: Pick<GraphNode, 'kind' | 'systemSubtype' | 'timestamp' | 'endedAt'>): string {
+  return node.kind === 'system' && node.systemSubtype === 'interrupt' ? node.timestamp : (node.endedAt ?? node.timestamp);
+}
+
+/**
  * Hooks that by themselves say the current turn failed or was interrupted (main thread): Claude Code `StopFailure`,
  * Codex `Interrupt`, Cursor `stop` whose `status` is `error` or `aborted`. Codex `Stop` carries no failure field. The
  * origins without hooks (Gemini CLI, Grok Build, Copilot CLI, DeepSeek Harness, WorkBuddy, CodeBuddy Code, Doubao Work,

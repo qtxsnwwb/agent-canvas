@@ -57,7 +57,7 @@ test('行：说明加前缀，项目取目录名，时间是相对时间，链�
     item({ sessionId: 'x y', kind: 'finished', since: ago(70), explanation: null, nodeId: null, title: null, cwd: null, projectId: 'cursor-abc' }),
   ], IDENTITY_MASKER, NOW);
   expect(p!.explanation).toBe('要执行：Bash npm publish ./release');
-  expect(e!.explanation).toBe('一轮以错误结束：请求超时');
+  expect(e!.explanation).toBe('这一轮没有正常结束：请求超时');
   expect(s!.explanation).toBe('最后一步：读取文件');
   expect(f!.explanation).toBe('最后的回复：已经改好，测试全部通过');
   expect(bare!.explanation).toBeNull();

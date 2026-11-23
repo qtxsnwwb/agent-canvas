@@ -355,7 +355,7 @@ describe('Claude Code', () => {
     const h = await harness(T);
     await h.append(file(h), [prompt('u1', null, 'publish it', 0), toolUse('a1', 'u1', 'tu1', 'npm publish', 2)]);
     await h.append(file(h), interrupted('u2', 'a1', 'tu1', 9));
-    expect((await h.agree(SID, 'error')).explanation).toMatch(/interrupted/);
+    expect(await h.agree(SID, 'error')).toMatchObject({ explanation: '[Request interrupted by user for tool use]', nodeId: 'u2' });
   });
 
   test('出错中断: a StopFailure hook (no node of its own)', async () => {
@@ -363,15 +363,16 @@ describe('Claude Code', () => {
     await h.append(file(h), [prompt('u1', null, 'refactor the store', 0)]);
     await h.hook(hookBody('StopFailure', { error: 'rate_limit' }));
     expect(h.store.getSession(SID)!.status).toBe('idle');
-    await h.agree(SID, 'error');
+    // No step of its own: the hook's reason; the click target is the turn's last main-thread node.
+    expect(await h.agree(SID, 'error')).toMatchObject({ explanation: '接口报错（rate_limit）', nodeId: 'u1' });
   });
 
   test('等你批准: a PermissionRequest hook on the pending call', async () => {
     const h = await harness(T);
     await h.append(file(h), [prompt('u1', null, 'publish it', 0), toolUse('a1', 'u1', 'tu1', 'npm publish ./release', 2)]);
     await h.hook(hookBody('PermissionRequest', { tool_name: 'Bash', tool_input: { command: 'npm publish ./release' } }));
-    const item = await h.agree(SID, 'permission');
-    expect(item.explanation).toContain('npm publish ./release');
+    // The command, not the call's input JSON.
+    expect(await h.agree(SID, 'permission')).toMatchObject({ explanation: 'Bash · npm publish ./release', nodeId: 'tool:tu1' });
   });
 
   test('known difference: an interruption then a new prompt in the same run — engine 出错中断, page 跑完了 (the new turn ended normally)', async () => {
@@ -392,6 +393,7 @@ describe('Claude Code', () => {
     await h.append(file(h), [prompt('u1', null, 'look around', 0)]);
     await h.hook(hookBody('StopFailure', { error: 'server_error' }));
     const error = await h.agree(SID, 'error');
+    expect(error.explanation).toBe('接口报错（server_error）');
     // A background subagent goes on (its hooks make the session running), then Claude Code waits for input.
     h.later(40_000);
     await h.hook(hookBody('PreToolUse', { agent_id: 'ag1', tool_use_id: 'stu1', tool_name: 'Grep', tool_input: { pattern: 'TODO' } }));
@@ -432,18 +434,20 @@ describe('Codex', () => {
     const c = thread();
     await started(h, c);
     await h.append(file(h, c), lines([...c.assistant('m1', 'The build is green.'), c.complete()]));
-    await h.agree(c.sessionId, 'finished');
+    expect(await h.agree(c.sessionId, 'finished')).toMatchObject({ explanation: 'The build is green.', nodeId: 'text:m1' });
   });
 
   test.each([
-    ['task_complete with an error ("Turn failed")', (c: CodexThread) => [c.complete('upstream 500')]],
-    ['turn_aborted ("Interrupted")', (c: CodexThread) => [c.aborted('interrupted')]],
-  ])('出错中断: %s', async (_name, end) => {
+    ['task_complete with an error ("Turn failed")', (c: CodexThread) => [c.complete('upstream 500')], 'upstream 500'],
+    ['turn_aborted ("Interrupted")', (c: CodexThread) => [c.aborted('interrupted')], 'interrupted'],
+  ])('出错中断: %s', async (_name, end, explanation) => {
     const h = await harness(T);
     const c = thread();
     await started(h, c);
     await h.append(file(h, c), lines(end(c)));
-    await h.agree(c.sessionId, 'error');
+    const item = await h.agree(c.sessionId, 'error');
+    expect(item.explanation).toBe(explanation);
+    expect(item.nodeId).toMatch(/^system:/);
   });
 
   test('出错中断: an Interrupt hook', async () => {
@@ -452,7 +456,7 @@ describe('Codex', () => {
     await started(h, c);
     await h.hook(hookBody(c, 'Interrupt'), 'codex');
     expect(h.store.getSession(c.sessionId)!.status).toBe('idle');
-    await h.agree(c.sessionId, 'error');
+    expect(await h.agree(c.sessionId, 'error')).toMatchObject({ explanation: '被中断', nodeId: 'prompt:u1' });
   });
 
   test('等你批准: a PermissionRequest hook', async () => {
@@ -460,7 +464,8 @@ describe('Codex', () => {
     const c = thread();
     await started(h, c);
     await h.hook(hookBody(c, 'PermissionRequest', { tool_name: 'shell', tool_input: { command: 'rm -rf build' } }), 'codex');
-    await h.agree(c.sessionId, 'permission');
+    // No call node waits (the transcript has none yet): no line; the click target is the last main-thread node.
+    expect(await h.agree(c.sessionId, 'permission')).toMatchObject({ explanation: null, nodeId: 'prompt:u1' });
   });
 
   test('known difference: a run without a prompt node — engine 跑完了, no page item', async () => {
@@ -501,7 +506,7 @@ describe('Cursor', () => {
     const c = new CursorConv({ id: SID });
     await started(h, c);
     await h.cursorRecords(c, [c.text('a1', 'Imports tidied.', 1), c.turnEnd('e1', 2), c.composer({ status: 'completed' })], cursorAt(2) + 500);
-    await h.agree(SID, 'finished');
+    expect(await h.agree(SID, 'finished')).toMatchObject({ explanation: 'Done.', nodeId: c.node('e1') });
   });
 
   test('出错中断: the conversation is aborted while a call runs (the call is failed as aborted)', async () => {
@@ -511,7 +516,8 @@ describe('Cursor', () => {
     await h.cursorRecords(c, [c.tool('t1', 'run_terminal_cmd', 'loading', 1)], cursorAt(1) + 500);
     await h.cursorRecords(c, [c.composer({ status: 'aborted' })], cursorAt(3));
     expect(h.store.getSession(SID)!.status).toBe('idle');
-    await h.agree(SID, 'error');
+    // The aborted call: its summary, and a click opens it.
+    expect(await h.agree(SID, 'error')).toMatchObject({ explanation: 'src/t1.ts', nodeId: c.node('t1') });
   });
 
   test.each(['error', 'aborted'])('出错中断: a stop hook with status %s; the turn\'s records read after it keep it so', async (status) => {
@@ -521,6 +527,7 @@ describe('Cursor', () => {
     await h.hook(stopHook(status), 'cursor');
     expect(h.store.getSession(SID)!.status).toBe('idle');
     const error = await h.agree(SID, 'error');
+    expect(error).toMatchObject({ explanation: status === 'aborted' ? '对话被中止' : '出错', nodeId: c.node('u1') });
     // The poll then reads what Cursor wrote of the turn: Cursor's own times, before the hook arrived. The same item
     // (same key); its click target, with no marker node, follows the turn's last main-thread node.
     await h.cursorRecords(c, [c.text('a1', 'Partial answer', 1), c.composer({ status: 'completed' })], cursorAt(1) + 6_000);
@@ -531,7 +538,7 @@ describe('Cursor', () => {
     expect(h.afterRestart(SID)).toEqual(after);
   });
 
-  test('known difference (fixtures only): an aborted call followed by two bubbles of its turn — engine 出错中断, page 跑完了', async () => {
+  test('出错中断: an aborted call followed by two bubbles of its turn (written before the abort) — both sides 出错中断', async () => {
     const h = await harness(T);
     const c = new CursorConv({ id: SID });
     await started(h, c);
@@ -541,9 +548,8 @@ describe('Cursor', () => {
     await h.cursorRecords(c, [c.composer({ status: 'aborted' })], cursorAt(4));
     const call = h.store.getGraph(SID)!.nodes.find((x) => x.id === c.node('t1'))!;
     expect(call).toMatchObject({ status: 'failed', endedAt: iso(cursorAt(2)) });
-    h.settle();
-    expect(h.newlyNotified(SID)).toEqual(['error']);
-    expect((await h.item(SID))?.kind).toBe('finished');
+    // The marker's time stays the call's end, as the notification dates it: the item's key does not move.
+    expect(await h.agree(SID, 'error')).toMatchObject({ since: iso(cursorAt(2)), nodeId: c.node('t1') });
   });
 });
 
@@ -565,14 +571,15 @@ describe('Gemini CLI', () => {
     const h = await harness(T, files);
     await started(h);
     await h.append(file(h), [JSON.stringify(gemini.m2(0))]);
-    await h.agree(gemini.SID, 'finished');
+    expect((await h.agree(gemini.SID, 'finished')).explanation).toBe("I'll read the file first.");
   });
 
   test('出错中断 ❌ (no marker in the file): a turn ending in a failed call is 跑完了 on both sides', async () => {
     const h = await harness(T, files);
     await started(h);
     await h.append(file(h), [JSON.stringify(gemini.m4('error'))]);
-    await h.agree(gemini.SID, 'finished');
+    // No reply in the turn: no line; the click target is the failed call (the last main-thread node).
+    expect(await h.agree(gemini.SID, 'finished')).toMatchObject({ explanation: null, nodeId: expect.stringMatching(/:call:/) });
   });
 });
 
@@ -599,16 +606,16 @@ describe.skipIf(!dsh.HAS_ZSTD)('DeepSeek Harness', () => {
 
   test('跑完了: turn/end completed', async () => {
     const h = await run({ kind: 'completed' });
-    await h.agree(dsh.SID, 'finished');
+    expect((await h.agree(dsh.SID, 'finished')).explanation).toBe('Fixed it.');
   });
 
   test.each([
-    ['an error', { kind: 'error', error: { message: 'boom' } }],
-    ['an abort', { kind: 'aborted', reason: { kind: 'user' } }],
-    ['an interruption', { kind: 'interrupted' }],
-  ])('出错中断: turn/end with %s', async (_name, end) => {
+    ['an error', { kind: 'error', error: { message: 'boom' } }, 'boom'],
+    ['an abort', { kind: 'aborted', reason: { kind: 'user' } }, 'user'],
+    ['an interruption', { kind: 'interrupted' }, 'Interrupted'],
+  ])('出错中断: turn/end with %s', async (_name, end, explanation) => {
     const h = await run(end);
-    await h.agree(dsh.SID, 'error');
+    expect((await h.agree(dsh.SID, 'error')).explanation).toBe(explanation);
   });
 });
 
@@ -633,15 +640,15 @@ describe.each(['workbuddy', 'codebuddy'] as const)('%s', (origin) => {
   }
 
   test('跑完了: a turn-metrics record', async () => {
-    await (await run(buddy.turnMetrics)).agree(buddy.SID, 'finished');
+    expect((await (await run(buddy.turnMetrics)).agree(buddy.SID, 'finished')).explanation).toBe('The fixture path was wrong; fixed.');
   });
 
   test('跑完了: an acp-terminal-state without an error', async () => {
-    await (await run(terminal())).agree(buddy.SID, 'finished');
+    expect((await (await run(terminal())).agree(buddy.SID, 'finished')).explanation).toBe('The fixture path was wrong; fixed.');
   });
 
   test('出错中断: an acp-terminal-state with an error', async () => {
-    await (await run(terminal({ code: 'E_API', message: 'upstream 500' }))).agree(buddy.SID, 'error');
+    expect((await (await run(terminal({ code: 'E_API', message: 'upstream 500' }))).agree(buddy.SID, 'error')).explanation).toBe('upstream 500');
   });
 });
 
@@ -665,11 +672,11 @@ describe('Qwen Code', () => {
   }
 
   test('跑完了: turn_result completed', async () => {
-    await (await run('completed')).agree(qwen.SID, 'finished');
+    expect((await (await run('completed')).agree(qwen.SID, 'finished')).explanation).toBe('Fixed the race.');
   });
 
   test.each(['error', 'cancelled'] as const)('出错中断: turn_result %s', async (state) => {
-    await (await run(state)).agree(qwen.SID, 'error');
+    expect((await (await run(state)).agree(qwen.SID, 'error')).explanation).toBe(state === 'error' ? 'boom' : 'Interrupted');
   });
 });
 

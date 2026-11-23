@@ -22,7 +22,8 @@ export const ATTENTION_KIND_LABEL: Record<AttentionKind, string> = {
 /** What the explanation line says it is (spec 5 sketch; spec 4.3 says where each comes from). */
 export const ATTENTION_EXPLANATION_PREFIX: Record<AttentionKind, string> = {
   permission: '要执行：',
-  error: '一轮以错误结束：',
+  // An error and a user interruption alike (the explanation says which: the step, or a hook's reason).
+  error: '这一轮没有正常结束：',
   stuck: '最后一步：',
   finished: '最后的回复：',
 };

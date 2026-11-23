@@ -347,6 +347,58 @@ describe('review round 1', () => {
   });
 });
 
+describe('final review: explanations and markers', () => {
+  test('hook-only errors explain themselves: Claude StopFailure, Codex Interrupt, Cursor stop aborted', () => {
+    const svc = makeService();
+    const turn = (sid: string, origin: Origin): void =>
+      void apply([up(sid, 'running', { origin }), prompt(sid, `${sid}-p`, T0 - 5 * MIN), reply(sid, `${sid}-r`, T0 - 4 * MIN)]);
+    turn('cl', 'claude');
+    hookRow('cl', 'StopFailure', T0 - 3 * MIN);
+    turn('cx', 'codex');
+    hookRow('cx', 'Interrupt', T0 - 3 * MIN, {}, 'codex');
+    turn('cu', 'cursor');
+    store.insertRaw({ source: 'hook', origin: 'cursor', receivedAt: iso(T0 - 3 * MIN), eventName: 'stop', sessionId: 'cu', payload: JSON.stringify({ conversation_id: 'cu', status: 'aborted' }) });
+    apply([up('cl', 'idle'), up('cx', 'idle', { origin: 'codex' }), up('cu', 'idle', { origin: 'cursor' })]);
+    const by = (sid: string) => svc.snapshot(ALL).items.find((i) => i.sessionId === sid);
+    expect(by('cl')).toMatchObject({ kind: 'error', explanation: '接口报错', nodeId: 'cl-r' });
+    expect(by('cx')).toMatchObject({ kind: 'error', explanation: '被中断', nodeId: 'cx-r' });
+    expect(by('cu')).toMatchObject({ kind: 'error', explanation: '对话被中止', nodeId: 'cu-r' });
+    expect(makeService().snapshot(ALL)).toEqual(svc.snapshot(ALL));
+  });
+
+  test('a node marker and a hook marker: explanation and click target come from the one errorAt was taken from', () => {
+    const svc = makeService();
+    const interrupt = (sid: string, at: number): Change => add(node(sid, `${sid}-x`, at, { kind: 'system', systemSubtype: 'interrupt', title: 'Interrupted', summary: '[Request interrupted by user]' }));
+    // The hook is the later marker.
+    apply([up('a', 'running'), prompt('a', 'a-p', T0 - 5 * MIN), interrupt('a', T0 - 4 * MIN)]);
+    hookRow('a', 'StopFailure', T0 - 3 * MIN, { error: 'server_error' });
+    apply([up('a', 'idle')]);
+    // The node is the later marker.
+    hookRow('b', 'StopFailure', T0 - 4 * MIN, { error: 'server_error' });
+    apply([up('b', 'running'), prompt('b', 'b-p', T0 - 5 * MIN), interrupt('b', T0 - 3 * MIN), up('b', 'idle')]);
+    const by = (sid: string) => svc.snapshot(ALL).items.find((i) => i.sessionId === sid);
+    expect(by('a')).toMatchObject({ kind: 'error', since: iso(T0 - 3 * MIN), explanation: '接口报错（server_error）', nodeId: 'a-x' });
+    expect(by('b')).toMatchObject({ kind: 'error', since: iso(T0 - 3 * MIN), explanation: '[Request interrupted by user]', nodeId: 'b-x' });
+  });
+
+  test('Cursor: an aborted call followed by two bubbles of its turn stays an error (as the notification), since its end', () => {
+    const svc = makeService();
+    apply([up('c1', 'running', { origin: 'cursor' }), prompt('c1', 'p1', T0 - 10 * MIN), tool('c1', 'call1', T0 - 6 * MIN), reply('c1', 'b1', T0 - 5 * MIN), reply('c1', 'b2', T0 - 4 * MIN)]);
+    aborted.add('c1/call1');
+    apply([patch('c1', 'call1', { status: 'failed', endedAt: iso(T0 - 5 * MIN) }), up('c1', 'idle', { origin: 'cursor' })]);
+    const item = svc.snapshot(ALL).items[0]!;
+    expect(item).toMatchObject({ kind: 'error', since: iso(T0 - 5 * MIN), nodeId: 'call1', explanation: 'npm test' });
+    expect(makeService().snapshot(ALL).items).toEqual([item]);
+  });
+
+  test('a permission line is the command, not the input JSON', () => {
+    const svc = makeService();
+    const summary = JSON.stringify({ command: 'npm publish ./release', description: 'Publish the package' });
+    apply([up('s1', 'running'), prompt('s1', 'p1', T0 - 2 * MIN), tool('s1', 't1', T0 - MIN, { summary }), patch('s1', 't1', { status: 'awaiting_permission' }), up('s1', 'awaiting_permission')]);
+    expect(svc.snapshot(ALL).items[0]).toMatchObject({ kind: 'permission', explanation: 'Bash · npm publish ./release', nodeId: 't1' });
+  });
+});
+
 describe('the one-time index build notice', () => {
   let tmp: string;
   beforeEach(async () => {
@@ -431,7 +483,7 @@ describe('Review Focus', () => {
     hookRow('s1', 'StopFailure', T0 - 3 * MIN, { error: 'rate_limit' });
     apply([up('s1', 'idle', { lastActivityAt: iso(T0 - 3 * MIN) })]);
     const item = svc.snapshot(ALL).items[0]!;
-    expect(item).toMatchObject({ kind: 'error', since: iso(T0 - 3 * MIN), explanation: null });
+    expect(item).toMatchObject({ kind: 'error', since: iso(T0 - 3 * MIN), explanation: '接口报错（rate_limit）', nodeId: 'r1' });
     expect(store.getGraph('s1')!.nodes.map((n) => n.id)).toEqual(['p1', 'r1']);
     const restarted = makeService();
     expect(restarted.snapshot(ALL).items).toEqual([item]);
@@ -505,7 +557,7 @@ describe('Review Focus', () => {
     stop('c1', T0 - 2 * MIN);
     svc.noteHook('c1');
     const item = svc.snapshot(ALL).items[0]!;
-    expect(item).toMatchObject({ kind: 'error', since: iso(T0 - 2 * MIN) });
+    expect(item).toMatchObject({ kind: 'error', since: iso(T0 - 2 * MIN), explanation: '出错', nodeId: 'r1' });
     expect(makeService().snapshot(ALL).items).toEqual([item]);
   });
 

@@ -10,7 +10,7 @@ import {
   type Session,
   type SessionStatus,
 } from '@agent-canvas/shared';
-import { isErrorHook, isErrorMarkerNode } from './markers.js';
+import { errorMarkerAt, isErrorHook, isErrorMarkerNode } from './markers.js';
 
 export { isErrorHook };
 
@@ -244,7 +244,7 @@ export class NotificationEngine {
           } else if (state !== undefined && isErrorMarkerNode(state.session.origin, n, () => this.abortedCall(n.sessionId, n.id))) {
             // A session not known yet is skipped: it is primed by this batch with no marker pending anyway.
             // An interrupt node counts from its own time, an aborted Cursor call from its end.
-            mark(n.sessionId, ms(n.kind === 'system' && n.systemSubtype === 'interrupt' ? n.timestamp : (n.endedAt ?? n.timestamp)));
+            mark(n.sessionId, ms(errorMarkerAt(n)));
           }
           break;
         }

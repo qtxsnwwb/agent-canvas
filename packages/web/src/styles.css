@@ -107,7 +107,9 @@ header {
   background: rgba(255, 255, 255, 0.85); border-bottom: 2px solid var(--edge);
 }
 header a { color: var(--ink); font: 800 19px/1 var(--font-fun); letter-spacing: 0.3px; }
+/* The title and the links never shrink or wrap, at any width: what gives way is the masking switch's notes (below). */
 header a:first-child {
+  flex: none; white-space: nowrap;
   background: linear-gradient(90deg, #ff7eb6, #b892ff 55%, #4cc9f0); -webkit-background-clip: text; background-clip: text; color: transparent;
   /* The gradient is clipped to the line box: with line-height 1 the descenders (the g of Agent) are cut off. */
   line-height: 1.4;
@@ -288,6 +290,7 @@ a.hero-live:hover { text-decoration: underline; }
 
 /* Header link and diagnostics page. */
 header .header-link {
+  flex: none; white-space: nowrap;
   margin-left: 16px; padding: 2px 12px; border: 2px solid var(--edge); border-radius: 999px; background: var(--card);
   font: 700 12px/18px var(--font); box-shadow: var(--shadow-sm);
 }
@@ -626,16 +629,19 @@ header .header-link[aria-current="page"] { background: var(--sun); }
   .session-bar-end { flex: 1 1 100%; margin-left: 0; flex-wrap: wrap; gap: 6px 8px; }
 }
 
-/* The header's masking switch (spec 5): at the end of the header; while on, filled and labelled 遮蔽中. */
-.mask-switch { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; flex: none; }
+/* The header's masking switch (spec 5): at the end of the header; while on, filled and labelled 遮蔽中. It takes the
+   room the title and the links leave (min-width 0: it may get narrower than its content); its button keeps its size and
+   its notes are shortened with an ellipsis (screen readers still read their whole text). */
+.mask-switch { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; flex: 0 1 auto; min-width: 0; }
 .mask-toggle {
+  flex: none;
   display: inline-flex; align-items: center; gap: 4px; margin: 0; padding: 2px 12px; border: 2px solid var(--edge); border-radius: 999px;
   background: var(--card); color: var(--ink); font: 700 12px/18px var(--font); box-shadow: var(--shadow-sm); cursor: pointer; white-space: nowrap;
 }
 .mask-toggle:hover { background: var(--paper); }
 .mask-toggle:focus-visible { outline: 3px solid var(--grape); outline-offset: 2px; }
 .mask-toggle[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: var(--card); }
-.mask-warn { color: #c2410c; font-size: 12px; font-weight: 700; white-space: nowrap; cursor: help; }
+.mask-warn { color: #c2410c; font-size: 12px; font-weight: 700; white-space: nowrap; cursor: help; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 @media (max-width: 640px) {
   .mask-toggle { padding: 2px 8px; }
   .mask-warn-text { display: none; }
@@ -699,5 +705,5 @@ header .header-link[aria-current="page"] { background: var(--sun); }
 .export-dialog .export-go { background: var(--sun); }
 .export-dialog .export-close { padding: 0 9px; font-size: 16px; }
 .export-dialog .export-link { padding: 0 8px; }
-.mask-note { color: var(--ink-soft); font-size: 12px; font-weight: 600; white-space: nowrap; }
+.mask-note { color: var(--ink-soft); font-size: 12px; font-weight: 600; white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 @media (max-width: 640px) { .mask-note { display: none; } }
