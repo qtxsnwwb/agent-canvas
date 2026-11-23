@@ -2,6 +2,8 @@ import {
   applyChanges,
   type AnomalyCountsResponse,
   type AnomalyListResponse,
+  type AttentionHidden,
+  type AttentionResponse,
   type ClientMessage,
   type ContentSearchResponse,
   type Diagnostics,
@@ -27,6 +29,7 @@ import {
   type SessionFilesResponse,
   type StatsResponse,
 } from '@agent-canvas/shared';
+import { attentionProblem, attentionRetryDelay } from './attention';
 
 const RECONNECT_MS = 1000;
 
@@ -88,6 +91,13 @@ export const api = {
   anomalies: (query: string) => getJson<AnomalyListResponse>(`/api/anomalies?${query}`),
   anomalyCounts: () => getJson<AnomalyCountsResponse>('/api/anomalies/counts'),
   exportSettings: () => getJson<ExportSettingsResponse>('/api/export/settings'),
+  /** The attention state (GET /api/attention); `hidden` true adds the hidden list (`?hidden=1`). */
+  attention: (hidden?: true) => getJson<AttentionResponse>(hidden === true ? '/api/attention?hidden=1' : '/api/attention'),
+  /** "知道了": the answer is the new state without the hidden list. */
+  dismissAttention: (key: string) => sendJson<AttentionResponse>('POST', '/api/attention/dismiss', { key }),
+  /** Undo a "知道了". */
+  restoreAttention: (key: string) => sendJson<AttentionResponse>('POST', '/api/attention/restore', { key }),
+  saveAttentionSettings: (autoHideHours: number) => sendJson<AttentionResponse>('PUT', '/api/attention/settings', { autoHideHours }),
   /**
    * POST /api/sessions/:id/mask/learned: the secret values the server learned from the whole session, for the page's
    * masker (memory only; never logged or stored).
@@ -150,14 +160,14 @@ function createBrowserSocket(): WebSocketLike {
 }
 
 /**
- * Keeps one socket open: sends `subscribe()` on every open, hands each server message to `onMessage`,
- * and reconnects 1 s after a drop until the returned function (close) is called.
+ * Keeps one socket open: sends `subscribe()` on every open (then calls `onOpen`, `reconnect` true after a drop), hands
+ * each server message to `onMessage`, and reconnects 1 s after a drop until the returned function (close) is called.
  */
 function connect(
   subscribe: () => ClientMessage,
   onMessage: (msg: ServerMessage) => void,
   createSocket: () => WebSocketLike,
-  onReconnect?: () => void,
+  onOpen?: (reconnect: boolean) => void,
 ): () => void {
   let closed = false;
   let sock: WebSocketLike | null = null;
@@ -170,8 +180,9 @@ function connect(
     s.onopen = () => {
       if (closed || sock !== s) return;
       s.send(JSON.stringify(subscribe()));
-      if (reconnecting) onReconnect?.();
+      const again = reconnecting;
       reconnecting = false;
+      onOpen?.(again);
     };
     s.onmessage = (ev) => {
       if (closed || sock !== s || typeof ev.data !== 'string') return;
@@ -288,6 +299,8 @@ export async function openLiveSession(
         epoch = msg.epoch;
       } else if (msg.type === 'resync') {
         if (msg.sessionId === sessionId) resync();
+      } else if (msg.type !== 'changes') {
+        // not for a session's graph
       } else if (buffered !== null) {
         buffered.push(...msg.changes);
       } else if (apply(msg.changes)) {
@@ -312,19 +325,194 @@ export async function openLiveSession(
   };
 }
 
-/** Live feed of every session upsert. Missed upserts are not replayed: `onReconnect` lets the caller refetch. */
+/** One listener of a SessionsFeed. */
+export interface SessionsListener {
+  message(msg: ServerMessage): void;
+  /**
+   * The subscription is in place: after the socket opened (`reconnect` true after a drop, when messages may have been
+   * missed), or at once (false) for a listener joining a feed that is already subscribed.
+   */
+  open?(reconnect: boolean): void;
+}
+
+/** A sessions-scope subscription shared by its listeners: one socket while at least one listens. */
+export interface SessionsFeed {
+  listen(listener: SessionsListener): () => void;
+}
+
+/**
+ * A feed over one sessions-scope socket: opened with the first listener, closed when the last one leaves (a later
+ * listener opens a new one). Every listener gets every message.
+ */
+export function createSessionsFeed(createSocket: () => WebSocketLike): SessionsFeed {
+  const listeners = new Set<SessionsListener>();
+  let close: (() => void) | null = null;
+  let subscribed = false;
+  return {
+    listen(listener) {
+      listeners.add(listener);
+      if (close === null) {
+        close = connect(
+          () => ({ type: 'subscribe', scope: 'sessions' }),
+          (msg) => { for (const l of [...listeners]) l.message(msg); },
+          createSocket,
+          (reconnect) => {
+            subscribed = true;
+            for (const l of [...listeners]) l.open?.(reconnect);
+          },
+        );
+      } else if (subscribed) {
+        listener.open?.(false);
+      }
+      return () => {
+        if (!listeners.delete(listener) || listeners.size > 0) return;
+        const c = close;
+        close = null;
+        subscribed = false;
+        c?.();
+      };
+    },
+  };
+}
+
+let browserFeed: SessionsFeed | null = null;
+/** The app's one sessions-scope socket (the home page's session list and the attention state share it). */
+function sharedSessionsFeed(): SessionsFeed {
+  browserFeed ??= createSessionsFeed(createBrowserSocket);
+  return browserFeed;
+}
+
+const feedOf = (deps: { feed?: SessionsFeed; createSocket?: () => WebSocketLike }): SessionsFeed =>
+  deps.feed ?? (deps.createSocket !== undefined ? createSessionsFeed(deps.createSocket) : sharedSessionsFeed());
+
+/**
+ * Live feed of every session upsert. Missed upserts are not replayed: `onReconnect` lets the caller refetch. `feed`: the
+ * subscription to use (default: the app's shared one; `createSocket` alone: a feed of its own).
+ */
 export function openLiveSessions(
   onSession: (s: Session) => void,
-  deps: { createSocket?: () => WebSocketLike; onReconnect?: () => void } = {},
+  deps: { createSocket?: () => WebSocketLike; feed?: SessionsFeed; onReconnect?: () => void } = {},
 ): { close(): void } {
-  const close = connect(
-    () => ({ type: 'subscribe', scope: 'sessions' }),
-    (msg) => {
+  const close = feedOf(deps).listen({
+    message(msg) {
       if (msg.type !== 'changes') return;
       for (const c of msg.changes) if (c.type === 'session_upserted') onSession(c.session);
     },
-    deps.createSocket ?? createBrowserSocket,
-    deps.onReconnect,
-  );
+    open(reconnect) { if (reconnect) deps.onReconnect?.(); },
+  });
   return { close };
+}
+
+/** The attention state as the app shows it: the last state received, and why it may be missing or old. */
+export interface AttentionLiveState {
+  response: AttentionResponse | null;
+  /** null: up to date. `preparing`: the server's list is not ready yet (503). `failed`: the last fetch failed. */
+  problem: { kind: 'preparing' | 'failed'; text: string } | null;
+}
+
+/** The live attention state's handle: the page's writes and hidden-list fetches go through it. */
+export interface LiveAttention {
+  /**
+   * Runs a write route's call; its answer becomes the state unless a push arrived after the call started (that push is
+   * newer: the server pushes every change after it). A failure is passed on to the caller, the state is left alone.
+   */
+  write(call: () => Promise<AttentionResponse>): Promise<void>;
+  /** The hidden list (`?hidden=1`); null when a push arrived after the request started (the answer is older than it). */
+  hidden(): Promise<AttentionHidden[] | null>;
+  close(): void;
+}
+
+/**
+ * The attention state, live (spec 5): fetched once the sessions-scope subscription is in place and again after every
+ * reconnect (nothing is pushed on subscribe), then replaced by each `attention` message. A failed fetch (503 while the
+ * server prepares the list, or any other failure) keeps the last state and is retried after attentionRetryDelay; a push
+ * cancels the retry.
+ *
+ * Answers and pushes come over different connections, in no fixed order. Every push counts; an answer (GET, write,
+ * hidden list) whose request started before the latest push is older than that push and is not applied: a GET that then
+ * succeeds only clears the problem, one that fails is not reported or retried. Nothing is lost by dropping it: the
+ * server pushes every change after the state it last pushed.
+ */
+export function openLiveAttention(
+  onState: (s: AttentionLiveState) => void,
+  deps: {
+    fetchAttention?: () => Promise<AttentionResponse>;
+    fetchHidden?: () => Promise<AttentionResponse>;
+    feed?: SessionsFeed;
+    createSocket?: () => WebSocketLike;
+  } = {},
+): LiveAttention {
+  const fetchAttention = deps.fetchAttention ?? (() => api.attention());
+  const fetchHidden = deps.fetchHidden ?? (() => api.attention(true));
+  let closed = false;
+  let response: AttentionResponse | null = null;
+  let problem: AttentionLiveState['problem'] = null;
+  /** Pushes received so far: an answer to a request started at a lower count is older than the state shown. */
+  let pushes = 0;
+  let failures = 0;
+  let inFlight = false;
+  let again = false;
+  let retry: ReturnType<typeof setTimeout> | null = null;
+  const cancelRetry = (): void => {
+    if (retry !== null) clearTimeout(retry);
+    retry = null;
+  };
+  const show = (r: AttentionResponse): void => {
+    cancelRetry();
+    failures = 0;
+    response = r;
+    problem = null;
+    onState({ response, problem });
+  };
+  const load = (): void => {
+    if (closed) return;
+    if (inFlight) { again = true; return; }
+    cancelRetry();
+    inFlight = true;
+    const startedAt = pushes;
+    fetchAttention().then(
+      (r) => {
+        if (closed) return;
+        if (pushes === startedAt) { show(r); return; }
+        // Older than the pushed state: keep that, only note that fetching works again.
+        failures = 0;
+        if (problem !== null) { problem = null; onState({ response, problem }); }
+      },
+      (e: unknown) => {
+        if (closed || pushes !== startedAt) return; // a push since: the state shown is current
+        failures += 1;
+        problem = attentionProblem(e);
+        onState({ response, problem });
+        retry = setTimeout(() => { retry = null; load(); }, attentionRetryDelay(failures));
+      },
+    ).finally(() => {
+      inFlight = false;
+      if (again && !closed) { again = false; load(); }
+    });
+  };
+  const unlisten = feedOf(deps).listen({
+    message(msg) {
+      if (msg.type !== 'attention' || closed) return;
+      pushes += 1;
+      show(msg.response);
+    },
+    open: () => load(),
+  });
+  return {
+    async write(call) {
+      const startedAt = pushes;
+      const r = await call();
+      if (!closed && pushes === startedAt) show(r);
+    },
+    async hidden() {
+      const startedAt = pushes;
+      const r = await fetchHidden();
+      return pushes === startedAt ? r.hidden : null;
+    },
+    close() {
+      closed = true;
+      cancelRetry();
+      unlisten();
+    },
+  };
 }

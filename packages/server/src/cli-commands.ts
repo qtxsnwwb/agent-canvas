@@ -3,7 +3,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import type { AddressInfo } from 'node:net';
-import { buildServer } from './api/server.js';
+import { AttentionSlot, buildServer, createAttentionService } from './api/server.js';
+import type { AttentionService } from './attention/service.js';
 import { loadConfig, type Config } from './config.js';
 import { runHookForward } from './hook-forward.js';
 import {
@@ -259,6 +260,7 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
   let stats: StatsService | null = null;
   let files: FilesService | null = null;
   let anomalies: AnomaliesService | null = null;
+  let attention: AttentionService | null = null;
   let warmup: StatsWarmup | null = null;
   let storage: StorageMaintenance | null = null;
   let searchBuild: SearchIndexBuild | null = null;
@@ -301,6 +303,7 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
     }
     const storageJob = storage;
     const searchJobNow = searchBuild;
+    const attentionSlot = new AttentionSlot();
     app = buildServer({
       store,
       pipeline,
@@ -309,12 +312,19 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
       stats,
       files,
       anomalies,
+      attention: attentionSlot,
       ...(storageJob !== null ? { storage: storageJob } : {}),
       ...(searchJobNow !== null ? { search: searchJobNow } : {}),
     });
     await app.listen({ port: config.port, host: config.host });
     // After the (automatic) rebuild above, before the initial scan: its changes arrive while importing() holds.
     notifications.start(`http://${config.host}:${(app.server.address() as AddressInfo).port}`);
+    // Once listening, before the initial scan, whose changes it follows. Its construction reads the store synchronously
+    // (about 1 s with 1,500 sessions active in 30 days); nothing yields to the event loop between `listen` and here, so
+    // requests arriving meanwhile wait in the socket backlog and are answered once it is set: start() never shows the
+    // slot's 503 (that is for embedders that set it later). Hooks ingested before are in the store it reads.
+    attention = createAttentionService(store, { log: (line) => process.stderr.write(`${line}\n`) });
+    attentionSlot.set(attention);
     // The initial scan runs in the background; the server is already answering requests.
     watcher = startWatcher(pipeline, config);
     if (options.statsWarmup ?? process.env.AGENT_CANVAS_STATS_WARMUP !== '0') {
@@ -337,6 +347,7 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
     stats?.close();
     files?.close();
     anomalies?.close();
+    attention?.close();
     await warmup?.stop();
     await storage?.stop();
     await searchBuild?.stop();
@@ -355,6 +366,7 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
   const statsService = stats!;
   const filesService = files!;
   const anomaliesService = anomalies!;
+  const attentionService = attention!;
   const statsWarmup = warmup;
   const storageJob = storage;
   const searchJob = searchBuild;
@@ -374,6 +386,7 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
           statsService.close();
           filesService.close();
           anomaliesService.close();
+          attentionService.close();
           await statsWarmup?.done;
           // Unsubscribes and stops the timer at once; deliveries in flight end within their timeout meanwhile.
           const notificationsClosed = service.close();
@@ -393,11 +406,15 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
 }
 
 /** Re-derives all graph data from the raw log with a fresh store and pipeline (no watcher, nothing pending). */
-export function rebuild(overrides: Partial<Config> = {}, options: { progress?: (done: number, total: number) => void } = {}): void {
+export function rebuild(
+  overrides: Partial<Config> = {},
+  options: { progress?: (done: number, total: number) => void; log?: (line: string) => void } = {},
+): void {
   const config = resolveConfig(overrides);
   const lock = acquireLock(config.dataDir);
   try {
-    const store = openStore(config.dbPath);
+    // log: the one-time notices of opening the database (as for start).
+    const store = openStore(config.dbPath, options.log ? { log: options.log } : {});
     try {
       new Pipeline(store, config, { sources: fileSources(config, store) }).rebuild(options.progress);
     } finally {
@@ -417,6 +434,8 @@ export interface CompactOptions {
   freeBytes?: (dir: string) => number;
   /** Tests: VACUUM's deadline and checkpoint settings. */
   vacuum?: Pick<VacuumOptions, 'deadlineMs' | 'checkpointBusyMs' | 'checkpointAttempts'>;
+  /** The one-time notices of opening the database (as for start). */
+  log?: (line: string) => void;
 }
 
 export interface CompactResult {
@@ -438,7 +457,7 @@ export async function compact(overrides: Partial<Config> = {}, options: CompactO
   const config = resolveConfig(overrides);
   const lock = acquireLock(config.dataDir);
   try {
-    const store = openStore(config.dbPath);
+    const store = openStore(config.dbPath, options.log ? { log: options.log } : {});
     try {
       const before = store.dbFileSizes();
       const migratedBefore = store.getMeta(STORAGE_META.migration) === 'done';
@@ -576,13 +595,13 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
     }
     if (command === 'rebuild') {
       parseArgs({ args: rest, options: {}, allowPositionals: false });
-      rebuild({}, { progress: (done, total) => process.stderr.write(`rebuild: ${done}/${total} sessions\n`) });
+      rebuild({}, { log: (line) => console.log(line), progress: (done, total) => process.stderr.write(`rebuild: ${done}/${total} sessions\n`) });
       console.log('agent-canvas rebuild complete');
       return 0;
     }
     if (command === 'compact') {
       const { values } = parseArgs({ args: rest, options: { force: { type: 'boolean' } }, allowPositionals: false });
-      const r = await compact({}, { force: values.force === true, progress: throttledProgress((line) => process.stderr.write(line)) });
+      const r = await compact({}, { force: values.force === true, log: (line) => console.log(line), progress: throttledProgress((line) => process.stderr.write(line)) });
       const size = (s: { fileBytes: number; walBytes: number }): string => megabytes(s.fileBytes + s.walBytes);
       if (r.failed > 0) console.log(`agent-canvas compact: ${r.failed} stored rows could not be compressed (kept as they were)`);
       if (r.vacuum.outcome === 'skipped') console.log(`agent-canvas compact: VACUUM ${r.vacuum.failed === true ? 'failed' : 'skipped'}: ${r.vacuum.reason ?? ''}`);

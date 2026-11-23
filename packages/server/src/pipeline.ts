@@ -137,6 +137,7 @@ export class Pipeline {
   private readonly pollOffsets = new Map<string, number>();
   private readonly listeners = new Set<Listener>();
   private readonly resyncListeners = new Set<ResyncListener>();
+  private readonly hookStoredListeners = new Set<(sessionId: string) => void>();
   /**
    * Sessions whose committed raw events are ahead of their derived rows (mirror of the store's dirty_session, loaded
    * once): re-derived from their raw events on the next touch. Empty on the normal path.
@@ -394,6 +395,28 @@ export class Pipeline {
     };
   }
 
+  /**
+   * Called with the session id after a hook's raw event of that session was committed (after the changes it caused, if
+   * any, were announced): also for a hook that changed nothing derived, which onChanges never announces.
+   */
+  onHookStored(listener: (sessionId: string) => void): () => void {
+    this.hookStoredListeners.add(listener);
+    return () => {
+      this.hookStoredListeners.delete(listener);
+    };
+  }
+
+  private notifyHookStored(sessionId: string | null): void {
+    if (sessionId === null) return;
+    for (const listener of [...this.hookStoredListeners]) {
+      try {
+        listener(sessionId);
+      } catch {
+        // a failing subscriber must not break ingestion
+      }
+    }
+  }
+
   lastHookAt(): string | null {
     this.seed();
     return this.lastHook;
@@ -487,8 +510,9 @@ export class Pipeline {
           this.persistedHooks.add(event);
           if (sessionId !== null) this.dirty.add(sessionId);
         } catch {
-          // nothing more we can do
+          return; // nothing more we can do
         }
+        this.notifyHookStored(sessionId);
       }
     };
     const onError = (err: unknown): void => {
@@ -1297,6 +1321,7 @@ export class Pipeline {
       },
       () => this.persistedHooks.add(event),
     );
+    this.notifyHookStored(sessionId);
   }
 
   /**

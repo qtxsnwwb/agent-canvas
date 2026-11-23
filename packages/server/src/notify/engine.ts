@@ -10,6 +10,9 @@ import {
   type Session,
   type SessionStatus,
 } from '@agent-canvas/shared';
+import { errorMarkerAt, isErrorHook, isErrorMarkerNode } from './markers.js';
+
+export { isErrorHook };
 
 /** A notification the engine decided to send (spec 4). Delivery is the Notifier's job. */
 export interface EngineNotification {
@@ -99,31 +102,8 @@ export const ANOMALY_FUTURE_SKEW_MS = 60_000;
 /** Sessions whose seen anomaly ids (and last anomaly notification) are kept, least recently summarised dropped. */
 export const ANOMALY_SEEN_MAX_SESSIONS = 10_000;
 
-/**
- * Hooks that by themselves say the current turn failed or was interrupted (main thread): Claude Code `StopFailure`,
- * Codex `Interrupt`, Cursor `stop` whose `status` is `error` or `aborted`. Codex `Stop` carries no failure field. The
- * origins without hooks (Gemini CLI, Grok Build, Copilot CLI, DeepSeek Harness, WorkBuddy, CodeBuddy Code, Doubao Work,
- * Qwen Code) never have one.
- */
-export function isErrorHook(origin: Origin, eventName: string, payload: Readonly<Record<string, unknown>> | null): boolean {
-  switch (origin) {
-    case 'claude':
-      return eventName === 'StopFailure';
-    case 'codex':
-      return eventName === 'Interrupt';
-    case 'cursor':
-      return eventName === 'stop' && (payload?.status === 'error' || payload?.status === 'aborted');
-    case 'gemini':
-    case 'grok':
-    case 'copilot':
-    case 'deepseek':
-    case 'workbuddy':
-    case 'codebuddy':
-    case 'doubao':
-    case 'qwen':
-      return false; // no hooks
-  }
-}
+/** A node_updated patch to `failed` of a main-thread node (a patch carries no kind; only Cursor calls count). */
+const FAILED_CALL = { kind: 'tool', systemSubtype: null, status: 'failed', agentId: null } as const;
 
 interface Held {
   notification: EngineNotification;
@@ -184,6 +164,7 @@ const errorMessage = (err: unknown): string => (err instanceof Error ? err.messa
  * - Codex: a `system` node with systemSubtype `interrupt` ("Turn failed" / "Interrupted"); the `Interrupt` hook.
  * - Cursor: a call node turning `failed` because the conversation was aborted (isAbortedCall); the `stop` hook with
  *   status `error` / `aborted`.
+ * The judgements are markers.ts's isErrorMarkerNode and isErrorHook (shared with the attention page).
  * A "finished" is held for graceMs: a marker of the same session arriving meanwhile replaces it by one "出错中断".
  */
 export class NotificationEngine {
@@ -260,18 +241,18 @@ export class NotificationEngine {
               if (state !== undefined) state.lastPromptMs = Math.max(state.lastPromptMs ?? t, t);
               else prompts.set(n.sessionId, Math.max(prompts.get(n.sessionId) ?? t, t));
             }
-          } else if (n.kind === 'system' && n.systemSubtype === 'interrupt') {
-            mark(n.sessionId, ms(n.timestamp));
-          } else if (n.status === 'failed' && state?.session.origin === 'cursor' && this.abortedCall(n.sessionId, n.id)) {
-            mark(n.sessionId, ms(n.endedAt ?? n.timestamp));
+          } else if (state !== undefined && isErrorMarkerNode(state.session.origin, n, () => this.abortedCall(n.sessionId, n.id))) {
+            // A session not known yet is skipped: it is primed by this batch with no marker pending anyway.
+            // An interrupt node counts from its own time, an aborted Cursor call from its end.
+            mark(n.sessionId, ms(errorMarkerAt(n)));
           }
           break;
         }
         case 'node_updated': {
           if (c.patch.status !== 'failed') break;
           const state = this.sessions.get(c.sessionId);
-          if (state?.session.origin !== 'cursor' || state.subagentNodes?.has(c.id) === true) break;
-          if (this.abortedCall(c.sessionId, c.id)) mark(c.sessionId, c.patch.endedAt != null ? ms(c.patch.endedAt) : now);
+          if (state === undefined || state.subagentNodes?.has(c.id) === true) break;
+          if (isErrorMarkerNode(state.session.origin, FAILED_CALL, () => this.abortedCall(c.sessionId, c.id))) mark(c.sessionId, c.patch.endedAt != null ? ms(c.patch.endedAt) : now);
           break;
         }
         default:

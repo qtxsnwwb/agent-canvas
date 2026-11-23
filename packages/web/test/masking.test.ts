@@ -2,7 +2,7 @@ import { expect, test } from 'vitest';
 import type { ContentHit, Graph, GraphNode, NodeDetail, SessionAnomaliesResponse, SessionFilesResponse } from '@agent-canvas/shared';
 import {
   IDENTITY_MASKER, MASK_SWITCH_KEY, PAGE_MASK_CATEGORIES, createDisplaySource, createPageMasker, maskDiagnostics,
-  maskProject, maskProjectFiles, resolveMaskedId, projectOptionValue, projectFromOptionValue, maskSessionFields, maskStats, maskAnomalyList, parseMaskSwitch, sameMaskedValue,
+  maskProject, maskProjectFiles, resolveMaskedId, projectOptionValue, projectFromOptionValue, maskSessionFields, maskStats, maskAnomalyList, maskAttention, parseMaskSwitch, sameMaskedValue,
   serializeMaskSwitch, stripPlaceholderNumbers,
 } from '../src/masking';
 import type { SessionSource } from '../src/sessionSource';
@@ -343,6 +343,30 @@ test('跨会话的列表：会话字段、项目目录、文件、统计、异�
   }, m);
   expect(JSON.stringify(anomalies)).not.toContain(KEY);
   expect(JSON.stringify(anomalies)).not.toContain(TERM);
+});
+
+test('待处理页：说明、会话标题、目录都遮蔽（主列表、已移出的、无法判断的）；ids 和键不变；关着原样', () => {
+  const m = masker(false);
+  const it = {
+    key: 's|permission|t', sessionId: 's', kind: 'permission' as const, since: 't', title: `改 ${TERM}`, origin: 'claude' as const,
+    projectId: 'p', cwd: `C:/${TERM}`, explanation: `Bash export TOKEN=${KEY}`, nodeId: 'n',
+  };
+  // A cut explanation (ends with …) is masked in truncated mode: a key cut in the middle is still masked.
+  const cut = { ...it, key: 's2|error|t', sessionId: 's2', explanation: `${'x'.repeat(150)} ${KEY.slice(0, 20)}…` };
+  const r = {
+    items: [it, cut], hidden: [{ item: it, reason: 'dismissed' as const }], hiddenCount: 1,
+    undeterminable: [{ sessionId: 'u', title: `看 ${TERM}`, origin: 'doubao' as const }], runningCount: 0, autoHideHours: 24,
+  };
+  const shown = maskAttention(r, m);
+  const text = JSON.stringify(shown);
+  expect(text).not.toContain(KEY);
+  expect(text).not.toContain(KEY.slice(0, 20));
+  expect(text).not.toContain(TERM);
+  expect(shown.items[0]!.key).toBe(it.key);
+  expect(shown.items[0]!.sessionId).toBe('s');
+  expect(shown.items[0]!.nodeId).toBe('n');
+  expect(shown.items[0]!.projectId).toBe('p');
+  expect(maskAttention(r, IDENTITY_MASKER)).toBe(r);
 });
 
 test('统计页：工具名、项目名、最慢的调用都遮蔽', () => {

@@ -12,3 +12,8 @@ test('parseHash("#/diagnostics") 是诊断页；未知路径仍回首页', () =>
 test('parseHash("#/stats") 是统计页', () => {
   expect(parseHash('#/stats')).toEqual({ page: 'stats' });
 });
+
+test('parseHash("#/attention") 是待处理页', () => {
+  expect(parseHash('#/attention')).toEqual({ page: 'attention' });
+  expect(parseHash('#/attention/x')).toEqual({ page: 'home', projectId: null });
+});

@@ -322,7 +322,7 @@ export function Home({ projectId: addressed }: { projectId: string | null }) {
         {totals.sessions !== null && totals.active !== null && (
           <>
             {' '}· {totals.sessions} 个会话 ·{' '}
-            {totals.active > 0 ? <strong className="hero-live">{totals.active} 个正在进行</strong> : '此刻都在休息'}
+            {totals.active > 0 ? <a className="hero-live" href="#/attention" title="看看哪些会话在等你">{totals.active} 个正在进行</a> : '此刻都在休息'}
           </>
         )}
       </p>
