@@ -5,12 +5,16 @@ import type { ExportBundle, Graph, GraphNode, NodeKind, Origin, Session } from '
 import { computeAgentTimeline, type AgentTimeline, type AgentTimelineResult, type ThreadTime } from '../src/canvas/agentTime';
 import {
   AgentTimelineView, TIMELINE_NO_AGENTS, TIMELINE_NO_TIMES, TIMELINE_NO_TIMES_DOUBAO, axisScale, compactStepCounts, panelTitle,
-  scopeOfNode, threadScope, threadTooltip, timelineRows, turnAt, type AgentTimelineViewProps,
+  scopeOfNode, stepTurn, threadScope, threadTooltip, timelineRowModel, timelineRows, turnAt, turnGroupings,
+  type AgentTimelineViewProps,
 } from '../src/canvas/AgentTimeline';
 import {
-  IN_THREAD_BELOW, createInThreadTimelineClient, createTimelineClient, createTimelineWorkerState, watchAgentTimeline,
+  createInThreadTimelineClient, createTimelineClient, createTimelineWorkerState, startAgentTimeline, watchAgentTimeline,
   type TimelineClient, type TimelineRequest,
 } from '../src/canvas/timelineClient';
+import {
+  CLOSED_PANEL, FOLLOW_LATEST, panelForDispatch, panelForStep, panelScopeOf, pickedPanel, pinForStep, unpinOnDrawerClose,
+} from '../src/canvas/timelinePanel';
 import type { WorkerLike } from '../src/canvas/layoutClient';
 import { snapshotClock, waterfallClock, type WaterfallClock } from '../src/canvas/waterfall';
 import { formatSpan } from '../src/stats';
@@ -101,7 +105,7 @@ function th(id: string, waitMs: number, startMs: number, children: ThreadTime[] 
 
 function props(o: Partial<AgentTimelineViewProps> & { result: AgentTimelineResult | null; graph: Graph }): AgentTimelineViewProps {
   return {
-    error: null, origin: 'claude', compact: false, sort: 'wait', onSortChange: () => {}, panelKey: null, onPickScope: () => {}, ...o,
+    error: null, origin: 'claude', compact: false, sort: 'wait', onSortChange: () => {}, panelKey: null, pickedRow: null, onPickScope: () => {}, ...o,
   };
 }
 const render = (p: AgentTimelineViewProps): string => renderToStaticMarkup(createElement(AgentTimelineView, p));
@@ -404,11 +408,127 @@ describe('deep link, file panel and anomaly picks while the timeline shows', () 
     expect(scopeOfNode(g, 'c1')).toEqual({ type: 'agent', agentId: 'C' });
     expect(scopeOfNode(g, 'nope')).toBeNull();
   });
-  test('the panel title: the turn’s prompt, or the agent’s dispatching step', () => {
+  test('the panel title: the turn’s prompt (from the canvas’s turns when it has them), or the agent’s dispatching step', () => {
     const tl = timeline(g);
-    expect(panelTitle(g, { type: 'turn', turnKey: 't2' }, tl)).toBe('and the tests');
-    expect(panelTitle(g, { type: 'agent', agentId: 'A' }, tl)).toBe('Explore · find the files');
-    expect(panelTitle(g, { type: 'turn', turnKey: 'unknown' }, tl)).toBe('（无提示）');
+    const none = (): undefined => undefined;
+    expect(panelTitle(g, { type: 'turn', turnKey: 't2' }, tl, none)).toBe('and the tests');
+    expect(panelTitle(g, { type: 'turn', turnKey: 't2' }, tl, (k) => (k === 't2' ? 'from the canvas' : undefined))).toBe('from the canvas');
+    expect(panelTitle(g, { type: 'agent', agentId: 'A' }, tl, none)).toBe('Explore · find the files');
+    expect(panelTitle(g, { type: 'agent', agentId: 'A' }, null, none)).toBe('Explore · find the files');
+    expect(panelTitle(g, { type: 'turn', turnKey: 'unknown' }, tl, none)).toBe('（无提示）');
+  });
+
+  test('the turn of a step: its turnId directly; one without a turnId by one grouping per graph, as turnKeyOf groups', () => {
+    const g2 = graph([
+      prompt('p1', 't1', 0), text('x1', null, null, 500),
+      prompt('p2', 't2', 1000), text('x2', null, null, 1500), dispatch('du', null, null, null, 1600, 1700),
+    ]);
+    const before = turnGroupings();
+    expect(scopeOfNode(g2, 'p2')).toEqual({ type: 'turn', turnKey: 't2' });
+    expect(turnGroupings()).toBe(before); // a turnId needs no grouping
+    for (const id of ['x1', 'x2', 'du']) expect(scopeOfNode(g2, id)).toEqual({ type: 'turn', turnKey: turnKeyOf(g2, id) });
+    expect(scopeOfNode(g2, 'x1')).toEqual({ type: 'turn', turnKey: 't1' });
+    expect(turnGroupings()).toBe(before + 1); // once for this graph object, however many lookups
+    const changed = { ...g2, nodes: { ...g2.nodes } };
+    scopeOfNode(changed, 'x2');
+    expect(turnGroupings()).toBe(before + 2); // a new graph: grouped again
+  });
+});
+
+describe('the panel while the timeline shows (the page’s rules)', () => {
+  const g = claudeGraph();
+  test('following the latest turn until a pick or a close', () => {
+    expect(panelScopeOf(FOLLOW_LATEST, 't2')).toEqual({ type: 'turn', turnKey: 't2' });
+    expect(panelScopeOf(FOLLOW_LATEST, null)).toBeNull();
+    expect(panelScopeOf(CLOSED_PANEL, 't2')).toBeNull();
+    const picked = pickedPanel({ type: 'agent', agentId: 'A' }, 'A');
+    expect(panelScopeOf(picked, 't2')).toEqual({ type: 'agent', agentId: 'A' });
+    expect(picked.row).toBe('A');
+  });
+  test('opening a step while following pins the shown turn; closing the drawer undoes only that pin', () => {
+    const pinned = pinForStep(FOLLOW_LATEST, { type: 'turn', turnKey: 't2' });
+    expect(pinned).toEqual({ scope: { type: 'turn', turnKey: 't2' }, closed: false, pinned: true, row: null });
+    expect(unpinOnDrawerClose(pinned)).toEqual(FOLLOW_LATEST);
+    const picked = pickedPanel({ type: 'agent', agentId: 'A' }, 'A');
+    expect(pinForStep(picked, { type: 'agent', agentId: 'A' })).toBe(picked); // the reader's own pick: unchanged
+    expect(unpinOnDrawerClose(picked)).toBe(picked);
+  });
+  test('a deep link, a file-panel or anomaly pick, a chain row: the step’s agent or turn, the drawer on the step', () => {
+    expect(panelForStep(g, 'c1')).toEqual({ panel: pickedPanel({ type: 'agent', agentId: 'C' }), detail: { id: 'c1', scope: 'agent:C' } });
+    expect(panelForStep(g, 'y')).toEqual({ panel: pickedPanel({ type: 'turn', turnKey: 't2' }), detail: { id: 'y', scope: 'turn:t2' } });
+    expect(panelForStep(g, 'nope')).toBeNull();
+  });
+  test('the execution panel’s 内部步骤 on a dispatch: that agent; a dispatch without an agent: nothing', () => {
+    expect(panelForDispatch(g, 'd1')).toEqual(pickedPanel({ type: 'agent', agentId: 'A' }));
+    const g2 = graph([prompt('p1', 't1', 0), dispatch('du', 't1', null, null, 10, 20)]);
+    expect(panelForDispatch(g2, 'du')).toBeNull();
+  });
+});
+
+describe('highlight, running style, keyboard and names', () => {
+  const g = graph([
+    prompt('p1', 't1', 0),
+    dispatch('du', 't1', null, null, 1000, 3000, { title: 'Helper', messageId: 'm1' }),
+    dispatch('dA', 't1', null, 'A', 1000, 3000, { title: 'Explore', messageId: 'm1' }),
+    tool('a1', null, 'A', 1100, 2900),
+    text('x', 't1', null, 3500, { messageId: 'm2' }),
+  ]);
+  const tl = timeline(g);
+  const selected = (panelKey: string | null, pickedRow: string | null): string[] =>
+    timelineRowModel(tl, { graph: g, sort: 'wait', steps: null, panelKey, pickedRow }).filter((r) => r.selected).map((r) => r.thread.id);
+
+  test('following the latest turn highlights nothing; an unmatched row or the main bar only when the reader picked it', () => {
+    expect(selected('turn:t1', null)).toEqual([]);
+    expect(selected('turn:t1', 'unmatched:du')).toEqual(['unmatched:du']);
+    expect(selected('turn:t1', 'main')).toEqual(['main']);
+    expect(selected(null, 'main')).toEqual([]);
+    expect(selected('agent:A', null)).toEqual(['A']); // an agent's own steps: its row, however they got there
+  });
+
+  test('only the open segment of an open thread is drawn running', () => {
+    const g2 = graph([
+      prompt('p1', 't1', 0), tool('t', 't1', null, 0, 1000), text('x', 't1', null, 1500),
+      prompt('p2', 't2', 10_000), tool('u', 't2', null, 10_000, null),
+    ]);
+    const running = sessionOf('claude', { status: 'running', lastActivityAt: iso(12_000) });
+    const r = computeAgentTimeline(g2, running, waterfallClock(running, EPOCH + 12_000));
+    const html = render(props({ result: r, graph: g2 }));
+    const row = new RegExp('data-id="main"(?:(?!data-id=).)*', 's').exec(html)![0];
+    expect(row.match(/class="cc-tl-bar[^"]*"/g)).toEqual(['class="cc-tl-bar"', 'class="cc-tl-bar cc-tl-running"']);
+  });
+
+  test('numbers carry their column names; each row’s details are its description; the main bar is focusable', () => {
+    const html = decode(render(props({ result: tl, graph: g })));
+    const a = tl.root.children.find((t) => t.id === 'A')!;
+    expect(html).toContain(`aria-label="等待 ${formatSpan(a.waitMs)}"`);
+    expect(html).toContain(`aria-label="各自用时 ${formatSpan(a.ownMs)}"`);
+    const id = /<button[^>]*class="cc-tl-pick"[^>]*aria-describedby="([^"]+)"/.exec(html)?.[1]
+      ?? /aria-describedby="([^"]+)"[^>]*class="cc-tl-pick"/.exec(html)![1]!;
+    const described = new RegExp(`id="${id}"[^>]*>([^<]*)<`).exec(html)![1]!;
+    expect(described.length).toBeGreaterThan(0);
+    expect(described).toContain('步骤');
+    expect(html).toMatch(/class="cc-tl-track cc-tl-main-track"[^>]*tabindex="0"|tabindex="0"[^>]*class="cc-tl-track cc-tl-main-track"/);
+  });
+
+  test('arrow keys move between turns on the main bar (from none: the first or the last), Home / End', () => {
+    expect(stepTurn(null, 'ArrowRight', 3)).toBe(0);
+    expect(stepTurn(null, 'ArrowLeft', 3)).toBe(2);
+    expect(stepTurn(0, 'ArrowRight', 3)).toBe(1);
+    expect(stepTurn(2, 'ArrowRight', 3)).toBe(2);
+    expect(stepTurn(0, 'ArrowLeft', 3)).toBe(0);
+    expect(stepTurn(1, 'Home', 3)).toBe(0);
+    expect(stepTurn(1, 'End', 3)).toBe(2);
+    expect(stepTurn(1, 'a', 3)).toBeNull();
+    expect(stepTurn(null, 'ArrowRight', 0)).toBeNull();
+  });
+
+  test('a break mark comes right before the tick of the stretch after it (so the label can be moved clear of it)', () => {
+    const g2 = graph([
+      prompt('p1', 't1', 0), tool('a', 't1', null, 0, 60_000), text('x', 't1', null, 61_000),
+      prompt('p2', 't2', 3_600_000), tool('b', 't2', null, 3_600_000, 3_660_000), text('y', 't2', null, 3_661_000),
+    ]);
+    const html = render(props({ result: timeline(g2), graph: g2 }));
+    expect(html).toMatch(/class="cc-tl-break"[^>]*>\/\/<\/span><span class="cc-tl-tick cc-tl-tick-start"/);
   });
 });
 
@@ -486,8 +606,40 @@ describe('the client', () => {
     expect(created).toHaveLength(1);
   });
 
-  test('the default threshold', () => {
-    expect(IN_THREAD_BELOW).toBe(10_000);
+  test('the threshold: one node below it no worker is created; at it, one is', async () => {
+    const created: FakeWorker[] = [];
+    const c = createTimelineClient(() => { const w = new FakeWorker(); created.push(w); return w; }, { inThreadBelow: 100 });
+    const below = big(96);
+    expect(Object.keys(below.nodes)).toHaveLength(99);
+    expect(await c.compute(below, s, clock)).toEqual(computeAgentTimeline(below, s, clock));
+    expect(created).toHaveLength(0);
+    const at = big(97);
+    expect(Object.keys(at.nodes)).toHaveLength(100);
+    expect(await c.compute(at, s, clock)).toEqual(computeAgentTimeline(at, s, clock));
+    expect(created).toHaveLength(1);
+    expect(created[0]!.sent).toHaveLength(1);
+    c.dispose();
+  });
+
+  test('the view’s client lives only while the view shows: created on start, disposed (worker released) on stop', () => {
+    let made = 0;
+    let disposed = 0;
+    const source = {
+      live: false, getGraph: () => claudeGraph(), getSession: () => sessionOf('claude'), subscribe: () => () => {},
+      createTimelineClient(): TimelineClient {
+        made++;
+        const inner = createInThreadTimelineClient();
+        return { compute: inner.compute, dispose: () => { disposed++; inner.dispose(); } };
+      },
+    };
+    const stop = startAgentTimeline(source, { onResult: () => {} });
+    expect([made, disposed]).toEqual([1, 0]);
+    stop();
+    expect([made, disposed]).toEqual([1, 1]);
+    const again = startAgentTimeline(source, { onResult: () => {} });
+    expect([made, disposed]).toEqual([2, 1]);
+    again();
+    expect([made, disposed]).toEqual([2, 2]);
   });
 });
 

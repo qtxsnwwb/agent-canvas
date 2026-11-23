@@ -536,6 +536,9 @@ button.cc-reason:focus-visible, .cc-reason-current:focus-visible { outline: 3px 
 .cc-tl-open { background: #dff4fd; color: #0b7fab; }
 .cc-tl-track { position: relative; height: 30px; min-width: 0; }
 .cc-tl-main .cc-tl-track { cursor: pointer; }
+.cc-tl-main-track:focus-visible { outline: 3px solid var(--grape); outline-offset: 1px; border-radius: 6px; }
+/* The turn the main bar's arrow keys are on. */
+.cc-tl-turnfocus { position: absolute; top: 4px; height: 22px; min-width: 4px; box-sizing: border-box; border: 2px solid var(--ink); border-radius: 8px; pointer-events: none; }
 .cc-tl-bar {
   position: absolute; top: 8px; height: 14px; min-width: 3px; box-sizing: border-box; border-radius: 999px;
   background-color: var(--sky); box-shadow: 0 2px 0 rgba(63, 58, 90, 0.12);
@@ -557,6 +560,8 @@ button.cc-reason:focus-visible, .cc-reason-current:focus-visible { outline: 3px 
 .cc-tl-tick { position: absolute; top: 4px; padding-left: 4px; border-left: 2px dashed var(--line); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .cc-tl-tick.cc-tl-tick-end { left: auto; right: 0; padding: 0 4px 0 0; border-left: 0; border-right: 2px dashed var(--line); }
 .cc-tl-break { position: absolute; top: 3px; box-sizing: border-box; min-width: 14px; border-radius: 4px; background: var(--paper-deep); color: var(--ink-soft); font-weight: 800; text-align: center; letter-spacing: -1px; }
+/* The mark is at least 14 px wide, wider than a narrow axis's break: the label after it starts clear of it. */
+.cc-tl-break + .cc-tl-tick { padding-left: 16px; }
 @media (max-width: 640px) {
   .cc-tl-cols, .cc-tl-row, .cc-tl-axisrow { grid-template-columns: 72px minmax(0, 1fr) 62px 62px 26px; column-gap: 4px; padding: 0 8px; }
   .cc-tl-name { padding-left: calc(var(--depth, 0) * 8px); }

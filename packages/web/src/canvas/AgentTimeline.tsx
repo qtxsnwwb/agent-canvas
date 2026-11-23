@@ -6,16 +6,18 @@
  * (agentTime.ts), run through a TimelineClient (timelineClient.ts). Nothing here loads a worker by URL: the exported
  * viewer renders this too.
  */
-import { memo, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent } from 'react';
-import type { Graph, Origin } from '@agent-canvas/shared';
+import {
+  memo, useEffect, useId, useMemo, useState, type CSSProperties, type KeyboardEvent, type MouseEvent,
+} from 'react';
+import type { Graph, GraphNode, Origin } from '@agent-canvas/shared';
 import type { SessionSource } from '../sessionSource';
 import { graphTurns } from '../anomalies';
 import { formatSpan } from '../stats';
 import { MAIN_THREAD_ID, sortThreads, type AgentTimeline, type AgentTimelineResult, type ThreadTime, type TimeSpan } from './agentTime';
 import { isNoise } from './compact';
 import { usageLabel } from './replay';
-import { createInThreadTimelineClient, watchAgentTimeline, type TimelineClient } from './timelineClient';
-import { turnKeyOf } from './view';
+import { startAgentTimeline } from './timelineClient';
+import { byTimeThenId, groupByTurn, type Entry } from './view';
 import { scopeKey, type WaterfallScope } from './waterfall';
 
 export type TimelineSort = 'wait' | 'start';
@@ -78,13 +80,46 @@ export function threadTooltip(t: ThreadTime, { graph, steps }: { graph: Graph; s
 }
 
 // ---- what a click opens in the execution panel ----
+//
+// The view re-renders every second while the clock ticks: nothing on that path may be linear in the graph. Lookups that
+// need the whole graph are made at most once per graph object (kept in WeakMaps, so a new graph is looked at again).
+
+/** Main-thread node id -> turn key (view.ts groupByTurn), per graph object; only for nodes without a turnId. */
+const turnsByGraph = new WeakMap<Graph, Map<string, string>>();
+let groupings = 0;
+/** How often the graph had to be grouped into turns (tests: once per graph object at most). */
+export function turnGroupings(): number {
+  return groupings;
+}
+
+/**
+ * The turn of a main-thread node, as turnKeyOf finds it: a node with a turnId belongs to that turn (groupByTurn's rule,
+ * no lookup needed); one without is looked up in one grouping of the graph, made once per graph object.
+ */
+function mainTurnOf(graph: Graph, n: GraphNode): string | null {
+  if (n.turnId !== null) return n.turnId;
+  let turnOf = turnsByGraph.get(graph);
+  if (turnOf === undefined) {
+    groupings++;
+    const main: Entry[] = [];
+    for (const node of Object.values(graph.nodes)) {
+      if (node.agentId !== null) continue;
+      const ms = Date.parse(node.timestamp);
+      main.push({ node, ms: Number.isNaN(ms) ? 0 : ms });
+    }
+    main.sort(byTimeThenId);
+    turnOf = groupByTurn(main).turnOf;
+    turnsByGraph.set(graph, turnOf);
+  }
+  return turnOf.get(n.id) ?? null;
+}
 
 /** The panel scope of a node: its agent's steps, or its turn's (main thread); null when the node is not known. */
 export function scopeOfNode(graph: Graph, nodeId: string): WaterfallScope | null {
   const n = graph.nodes[nodeId];
   if (n === undefined) return null;
   if (n.agentId !== null) return { type: 'agent', agentId: n.agentId };
-  const turnKey = turnKeyOf(graph, nodeId);
+  const turnKey = mainTurnOf(graph, n);
   return turnKey === null ? null : { type: 'turn', turnKey };
 }
 
@@ -104,9 +139,29 @@ export function turnAt(turnSpans: readonly { turnKey: string; startMs: number; e
   return best?.turnKey ?? null;
 }
 
-/** The panel's title while the timeline shows: the turn's prompt, or the dispatching step of the agent. */
-export function panelTitle(graph: Graph, scope: WaterfallScope, timeline: AgentTimeline | null): string {
-  if (scope.type === 'turn') return graphTurns(graph).find((t) => t.key === scope.turnKey)?.promptSummary || '（无提示）';
+const promptsByGraph = new WeakMap<Graph, Map<string, string>>();
+const dispatchesByGraph = new WeakMap<Graph, Map<string, GraphNode>>();
+
+/**
+ * The panel's title while the timeline shows: the turn's prompt, or the dispatching step of the agent. `turnPrompt`:
+ * the prompt summary of a turn as the canvas already knows it (its view's turns; undefined when it does not have that
+ * turn, e.g. a replay before it); otherwise the graph is grouped into turns once per graph object.
+ */
+export function panelTitle(
+  graph: Graph, scope: WaterfallScope, timeline: AgentTimeline | null, turnPrompt: (turnKey: string) => string | undefined,
+): string {
+  if (scope.type === 'turn') {
+    let prompt = turnPrompt(scope.turnKey);
+    if (prompt === undefined) {
+      let prompts = promptsByGraph.get(graph);
+      if (prompts === undefined) {
+        prompts = new Map(graphTurns(graph).map((t) => [t.key, t.promptSummary]));
+        promptsByGraph.set(graph, prompts);
+      }
+      prompt = prompts.get(scope.turnKey);
+    }
+    return prompt || '（无提示）';
+  }
   let dispatchId: string | undefined;
   if (timeline !== null) {
     const stack = [timeline.root];
@@ -118,9 +173,65 @@ export function panelTitle(graph: Graph, scope: WaterfallScope, timeline: AgentT
   }
   let d = dispatchId !== undefined ? graph.nodes[dispatchId] : undefined;
   if (d === undefined) {
-    for (const n of Object.values(graph.nodes)) if (n.kind === 'subagent' && n.childAgentId === scope.agentId) { d = n; break; }
+    let byAgent = dispatchesByGraph.get(graph);
+    if (byAgent === undefined) {
+      byAgent = new Map();
+      for (const n of Object.values(graph.nodes)) {
+        if (n.kind === 'subagent' && n.childAgentId !== null && !byAgent.has(n.childAgentId)) byAgent.set(n.childAgentId, n);
+      }
+      dispatchesByGraph.set(graph, byAgent);
+    }
+    d = byAgent.get(scope.agentId);
   }
   return d === undefined ? '' : [d.title, d.summary].filter(Boolean).join(' · ');
+}
+
+/** One row as the view draws it (computed on every render: nothing linear in the graph). */
+export interface TimelineRowModel {
+  thread: ThreadTime;
+  depth: number;
+  /** What a click on it lists in the execution panel (null: the main row, which picks a turn by where it is clicked). */
+  scope: WaterfallScope | null;
+  /** Highlighted: an agent whose steps the panel lists; the main row or an unmatched row only when the reader picked it. */
+  selected: boolean;
+  longest: boolean;
+  /** The tooltip (also the row's accessible description). */
+  details: string;
+}
+
+/**
+ * The rows of a timeline with what each needs: main first with its own numbers (own time, and the rest as its wait),
+ * then the agents in `sort` order. `panelKey`: scopeKey of what the panel lists; `pickedRow`: the row the reader picked
+ * (a turn listed because the panel follows the latest turn, or because of a link, highlights no row).
+ */
+export function timelineRowModel(timeline: AgentTimeline, o: {
+  graph: Graph; sort: TimelineSort; steps: ReadonlyMap<string, number> | null; panelKey: string | null; pickedRow: string | null;
+}): TimelineRowModel[] {
+  return timelineRows(timeline.root, o.sort).map(({ thread, depth }) => {
+    const main = thread.id === MAIN_THREAD_ID;
+    const t = main ? { ...thread, ownMs: timeline.mainOwnMs, waitMs: timeline.mainWaitMs } : thread;
+    const scope = threadScope(o.graph, t);
+    const shown = o.panelKey !== null;
+    const selected = main
+      ? shown && o.pickedRow === MAIN_THREAD_ID
+      : scope !== null && shown && scopeKey(scope) === o.panelKey && (!t.id.startsWith(UNMATCHED_PREFIX) || o.pickedRow === t.id);
+    return { thread: t, depth, scope, selected, longest: t.id === timeline.longestWaitId, details: threadTooltip(t, o) };
+  });
+}
+
+/**
+ * The main bar's keyboard: the turn to show after `key` (arrows step between turns; from none, → is the first and ←
+ * the last; Home / End), or null for a key that does not move.
+ */
+export function stepTurn(current: number | null, key: string, count: number): number | null {
+  if (count === 0) return null;
+  switch (key) {
+    case 'ArrowRight': case 'ArrowDown': return current === null ? 0 : Math.min(count - 1, current + 1);
+    case 'ArrowLeft': case 'ArrowUp': return current === null ? count - 1 : Math.max(0, current - 1);
+    case 'Home': return 0;
+    case 'End': return count - 1;
+    default: return null;
+  }
 }
 
 // ---- the axis ----
@@ -224,25 +335,13 @@ export function axisScale(axis: { startMs: number; endMs: number; breaks: readon
  */
 export function useAgentTimeline(source: SessionSource, active: boolean): { result: AgentTimelineResult | null; error: string | null } {
   const [state, setState] = useState<{ result: AgentTimelineResult | null; error: string | null }>({ result: null, error: null });
-  const client = useRef<{ source: SessionSource; client: TimelineClient } | null>(null);
-  useEffect(() => () => {
-    client.current?.client.dispose();
-    client.current = null;
-  }, [source]);
-  useEffect(() => {
-    if (!active) return undefined;
-    let cur = client.current;
-    if (cur === null || cur.source !== source) {
-      cur?.client.dispose();
-      cur = client.current = { source, client: source.createTimelineClient?.() ?? createInThreadTimelineClient() };
-    }
-    return watchAgentTimeline({
-      source,
-      client: cur.client,
+  // A new client (and worker) each time the view is shown; leaving the view disposes it (startAgentTimeline).
+  useEffect(() => (active
+    ? startAgentTimeline(source, {
       onResult: (result) => setState({ result, error: null }),
       onError: (err) => setState((s) => ({ result: s.result, error: err.message })),
-    });
-  }, [active, source]);
+    })
+    : undefined), [active, source]);
   return state;
 }
 
@@ -260,57 +359,111 @@ export interface AgentTimelineViewProps {
   compact: boolean;
   sort: TimelineSort;
   onSortChange(sort: TimelineSort): void;
-  /** scopeKey of what the execution panel lists (that row is highlighted); null when it is closed. */
+  /** scopeKey of what the execution panel lists; null when it is closed. */
   panelKey: string | null;
-  /** A row (an agent) or a point of the main bar (a turn) was clicked. */
-  onPickScope(scope: WaterfallScope): void;
+  /** The row the reader picked ('main' for the main bar; see timelineRowModel); null: none. */
+  pickedRow: string | null;
+  /** A row (an agent) or a point of the main bar (a turn) was picked; `row` is the picked row's id. */
+  onPickScope(scope: WaterfallScope, row: string): void;
 }
 
 const pct = (x: number): string => `${(x * 100).toFixed(3)}%`;
 
-/** Bars (and light overlays) for spans; nothing for a span of zero width. */
-function spansOn(spans: readonly TimeSpan[], scale: AxisScale, className: string): JSX.Element[] {
+/**
+ * Bars (and light overlays) for spans; nothing for a span of zero width. `runningLast`: the thread is still at work, so
+ * its last span (the one still growing) is drawn running.
+ */
+function spansOn(spans: readonly TimeSpan[], scale: AxisScale, className: string, runningLast = false): JSX.Element[] {
   const out: JSX.Element[] = [];
-  for (const s of spans) {
+  spans.forEach((s, i) => {
     const a = scale.toX(s.startMs);
     const b = scale.toX(s.endMs);
-    if (!(b > a)) continue;
-    out.push(<span key={`${className}${s.startMs}`} className={className} style={{ left: pct(a), width: pct(b - a) }} />);
-  }
+    if (!(b > a)) return;
+    const running = runningLast && i === spans.length - 1;
+    out.push(<span key={`${className}${s.startMs}`} className={running ? `${className} cc-tl-running` : className} style={{ left: pct(a), width: pct(b - a) }} />);
+  });
   return out;
 }
 
-const Row = memo(function Row({ thread: t, depth, scale, longest, selected, tooltip, turnSpans, onPick, onPickScope }: {
-  thread: ThreadTime; depth: number; scale: AxisScale; longest: boolean; selected: boolean; tooltip: string;
-  turnSpans: AgentTimeline['turnSpans']; onPick(t: ThreadTime): void; onPickScope(scope: WaterfallScope): void;
+/**
+ * The main bar: a click picks the turn at that moment. It is focusable: arrow keys (Home / End) move between turns,
+ * Enter or Space opens the one shown, which a live region names.
+ */
+function MainTrack({ thread: t, scale, turnSpans, describedBy, onPickScope }: {
+  thread: ThreadTime; scale: AxisScale; turnSpans: AgentTimeline['turnSpans']; describedBy: string;
+  onPickScope(scope: WaterfallScope, row: string): void;
 }) {
-  const main = t.id === MAIN_THREAD_ID;
+  const [turn, setTurn] = useState<number | null>(null);
+  const span = turn !== null ? turnSpans[turn] : undefined;
   const pickHere = (e: MouseEvent<HTMLDivElement>): void => {
     const rect = e.currentTarget.getBoundingClientRect();
     if (rect.width <= 0) return;
     const key = turnAt(turnSpans, scale.fromX((e.clientX - rect.left) / rect.width));
-    if (key !== null) onPickScope({ type: 'turn', turnKey: key });
+    if (key !== null) onPickScope({ type: 'turn', turnKey: key }, MAIN_THREAD_ID);
   };
+  const onKeyDown = (e: KeyboardEvent<HTMLDivElement>): void => {
+    if ((e.key === 'Enter' || e.key === ' ') && span !== undefined) {
+      e.preventDefault();
+      onPickScope({ type: 'turn', turnKey: span.turnKey }, MAIN_THREAD_ID);
+      return;
+    }
+    const next = stepTurn(turn, e.key, turnSpans.length);
+    if (next === null) return;
+    e.preventDefault();
+    setTurn(next);
+  };
+  const a = span !== undefined ? scale.toX(span.startMs) : 0;
+  const b = span !== undefined ? scale.toX(span.endMs) : 0;
+  return (
+    <div className="cc-tl-track cc-tl-main-track" tabIndex={0} role="group"
+      aria-label="主线：左右方向键选一轮，回车在执行过程里打开" aria-describedby={describedBy}
+      onClick={pickHere} onKeyDown={onKeyDown} onBlur={() => setTurn(null)}>
+      {spansOn(t.segments, scale, 'cc-tl-bar', t.open)}
+      {spansOn(t.waitingSpans, scale, 'cc-tl-waiting')}
+      {span !== undefined && <span className="cc-tl-turnfocus" style={{ left: pct(a), width: pct(Math.max(0, b - a)) }} />}
+      <span className="visually-hidden" aria-live="polite">
+        {span !== undefined ? `第 ${turn! + 1} 轮（共 ${turnSpans.length} 轮）：${clockText(span.startMs)} 到 ${clockText(span.endMs)}` : ''}
+      </span>
+    </div>
+  );
+}
+
+const Row = memo(function Row({ row, scale, turnSpans, onPickScope }: {
+  row: TimelineRowModel; scale: AxisScale; turnSpans: AgentTimeline['turnSpans']; onPickScope(scope: WaterfallScope, row: string): void;
+}) {
+  const { thread: t, depth, scope, selected, longest, details } = row;
+  const main = t.id === MAIN_THREAD_ID;
+  const detailsId = useId();
+  const pick = scope === null ? undefined : () => onPickScope(scope, t.id);
   return (
     <div className={`cc-tl-row${main ? ' cc-tl-main' : ''}${selected ? ' cc-tl-selected' : ''}`} data-id={t.id}
-      style={{ ['--depth' as string]: depth } as CSSProperties} title={tooltip} onClick={main ? undefined : () => onPick(t)}>
+      style={{ ['--depth' as string]: depth } as CSSProperties} title={details} onClick={main ? undefined : pick}>
       <div className="cc-tl-name">
         {main
           ? <span className="cc-tl-label">{t.label}</span>
-          : <button type="button" className="cc-tl-pick" aria-current={selected ? 'true' : undefined}><span className="cc-tl-label">{t.label}</span></button>}
+          : (
+            <button type="button" className="cc-tl-pick" aria-current={selected ? 'true' : undefined} aria-describedby={detailsId}>
+              <span className="cc-tl-label">{t.label}</span>
+            </button>
+          )}
         {t.id.startsWith(UNMATCHED_PREFIX) && <span className="cc-tl-tag">未配上</span>}
         {t.open && <span className="cc-tl-open">进行中</span>}
+        <span id={detailsId} className="visually-hidden">{details}</span>
       </div>
-      <div className="cc-tl-track" onClick={main ? pickHere : undefined}>
-        {spansOn(t.segments, scale, `cc-tl-bar${t.open ? ' cc-tl-running' : ''}`)}
-        {spansOn(t.waitingSpans, scale, 'cc-tl-waiting')}
-      </div>
+      {main
+        ? <MainTrack thread={t} scale={scale} turnSpans={turnSpans} describedBy={detailsId} onPickScope={onPickScope} />
+        : (
+          <div className="cc-tl-track">
+            {spansOn(t.segments, scale, 'cc-tl-bar', t.open)}
+            {spansOn(t.waitingSpans, scale, 'cc-tl-waiting')}
+          </div>
+        )}
       {main
         ? <span className="cc-tl-main-nums">{`自己 ${formatSpan(t.ownMs)} · 等 ${formatSpan(t.waitMs)}`}</span>
         : (
           <>
-            <span className="cc-tl-wait">{formatSpan(t.waitMs)}</span>
-            <span className="cc-tl-own">{formatSpan(t.ownMs)}</span>
+            <span className="cc-tl-wait" aria-label={`等待 ${formatSpan(t.waitMs)}`}>{formatSpan(t.waitMs)}</span>
+            <span className="cc-tl-own" aria-label={`各自用时 ${formatSpan(t.ownMs)}`}>{formatSpan(t.ownMs)}</span>
           </>
         )}
       <span className="cc-tl-mark">{longest && <span className="cc-tl-longest">最长</span>}</span>
@@ -320,16 +473,16 @@ const Row = memo(function Row({ thread: t, depth, scale, longest, selected, tool
 
 /** The 时间线 view (in the canvas's place). */
 export const AgentTimelineView = memo(function AgentTimelineView({
-  result, error, origin, graph, compact, sort, onSortChange, panelKey, onPickScope,
+  result, error, origin, graph, compact, sort, onSortChange, panelKey, pickedRow, onPickScope,
 }: AgentTimelineViewProps) {
   const timeline = result !== null && result.available ? result : null;
-  const rows = useMemo(() => (timeline === null ? [] : timelineRows(timeline.root, sort)), [timeline, sort]);
   const scale = useMemo(() => (timeline === null ? null : axisScale(timeline.axis)), [timeline]);
+  // Once per graph change (not per tick).
   const steps = useMemo(() => (compact ? compactStepCounts(graph) : null), [graph, compact]);
-  const pick = (t: ThreadTime): void => {
-    const scope = threadScope(graph, t);
-    if (scope !== null) onPickScope(scope);
-  };
+  const rows = useMemo(
+    () => (timeline === null ? [] : timelineRowModel(timeline, { graph, sort, steps, panelKey, pickedRow })),
+    [timeline, graph, sort, steps, panelKey, pickedRow],
+  );
   if (timeline === null || scale === null) {
     const note = result === null
       ? (error !== null ? `时间线算不出来：${error}` : '计算中…')
@@ -341,14 +494,21 @@ export const AgentTimelineView = memo(function AgentTimelineView({
     );
   }
   const main = timeline.root;
-  // Main's numbers: its own attributed time and the rest (waiting on its agents).
-  const mainRow: ThreadTime = { ...main, ownMs: timeline.mainOwnMs, waitMs: timeline.mainWaitMs };
   const ticks = scale.ticks;
-  const lastTick = ticks[ticks.length - 1];
   const shortAxis = timeline.axis.endMs - timeline.axis.startMs - timeline.axis.breaks.reduce((s, b) => s + b.endMs - b.startMs, 0) < 10 * 60_000;
   const tickText = (ms: number): string => (shortAxis
     ? new Date(ms).toLocaleTimeString()
     : new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+  // Breaks and ticks in the order of their place: a break comes right before the tick of the stretch after it, whose
+  // label is then moved clear of the drawn mark (canvas.css, `.cc-tl-break + .cc-tl-tick`).
+  const axisMarks = [
+    ...scale.breaks.map((b) => ({ x: b.x, order: 0, el: <span key={`b${b.x}`} className="cc-tl-break" style={{ left: pct(b.x), width: pct(b.width) }}>//</span> })),
+    ...ticks.map((tk) => ({
+      x: tk.x, order: 1,
+      el: <span key={`t${tk.x}`} className={`cc-tl-tick${tk.start ? ' cc-tl-tick-start' : ''}`} style={{ left: pct(tk.x) }}>{tickText(tk.ms)}</span>,
+    })),
+  ].sort((a, b) => a.x - b.x || a.order - b.order);
+  const lastTick = ticks[ticks.length - 1];
   return (
     <section className="cc-tl" aria-label="时间线">
       <div className="cc-tl-head">
@@ -364,6 +524,7 @@ export const AgentTimelineView = memo(function AgentTimelineView({
         </div>
         {error !== null && <span className="cc-tl-error" role="status">{`更新失败：${error}`}</span>}
       </div>
+      {/* The column names are on each number too (aria-label), so this row is for the eye only. */}
       <div className="cc-tl-cols" aria-hidden="true">
         <span />
         <span />
@@ -372,26 +533,15 @@ export const AgentTimelineView = memo(function AgentTimelineView({
         <span />
       </div>
       <div className="cc-tl-body">
-        {rows.map(({ thread, depth }) => {
-          const t = thread.id === MAIN_THREAD_ID ? mainRow : thread;
-          const scope = threadScope(graph, t);
-          return (
-            <Row key={t.id} thread={t} depth={depth} scale={scale} longest={t.id === timeline.longestWaitId}
-              selected={scope !== null && panelKey !== null && scopeKey(scope) === panelKey}
-              tooltip={threadTooltip(t, { graph, steps })} turnSpans={timeline.turnSpans} onPick={pick} onPickScope={onPickScope} />
-          );
-        })}
+        {rows.map((row) => (
+          <Row key={row.thread.id} row={row} scale={scale} turnSpans={timeline.turnSpans} onPickScope={onPickScope} />
+        ))}
         {main.children.length === 0 && <p className="cc-tl-note">{TIMELINE_NO_AGENTS}</p>}
       </div>
       <div className="cc-tl-axisrow" aria-hidden="true">
         <span />
         <div className="cc-tl-axis">
-          {ticks.map((tk) => (
-            <span key={tk.x} className={`cc-tl-tick${tk.start ? ' cc-tl-tick-start' : ''}`} style={{ left: pct(tk.x) }}>{tickText(tk.ms)}</span>
-          ))}
-          {scale.breaks.map((b) => (
-            <span key={b.x} className="cc-tl-break" style={{ left: pct(b.x), width: pct(b.width) }}>//</span>
-          ))}
+          {axisMarks.map((m) => m.el)}
           {(lastTick === undefined || lastTick.x < 0.8) && <span className="cc-tl-tick cc-tl-tick-end">{tickText(timeline.axis.endMs)}</span>}
         </div>
       </div>

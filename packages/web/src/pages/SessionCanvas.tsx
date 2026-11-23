@@ -10,7 +10,11 @@ import type { SessionSource } from '../sessionSource';
 import { Canvas, type CanvasFocus } from '../canvas/Canvas';
 import { FilePanel } from '../canvas/FilePanel';
 import { AnomalyPanel, useSessionAnomalies } from '../canvas/AnomalyPanel';
-import { AgentTimelineView, panelTitle, scopeOfNode, useAgentTimeline, type TimelineSort } from '../canvas/AgentTimeline';
+import { AgentTimelineView, panelTitle, useAgentTimeline, type TimelineSort } from '../canvas/AgentTimeline';
+import {
+  CLOSED_PANEL, FOLLOW_LATEST, panelForDispatch, panelForStep, panelScopeOf, pickedPanel, pinForStep, unpinOnDrawerClose,
+  type TimelinePanel,
+} from '../canvas/timelinePanel';
 import {
   NO_CARD_MARKS, anomaliesUntil, anomalyButton, cardMarks, graphResolver, graphTurns, panelRows, pickedRowKey, stableCardMarks, turnLabel,
   type CardMarks, type PanelRow,
@@ -103,13 +107,8 @@ export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, file
   // ---- the 时间线 view (page state, not a ViewMode: it replaces the canvas, whose mode is kept for coming back) ----
   const [timeline, setTimeline] = useState(false);
   const [timelineSort, setTimelineSort] = useState<TimelineSort>('wait');
-  /**
-   * What the execution panel lists while the timeline shows: its own state, not the canvas selection. `scope` null:
-   * the latest turn (until closed); `pinned`: set by opening a step while following (undone when the drawer closes).
-   */
-  const [timelinePanel, setTimelinePanel] = useState<{ scope: WaterfallScope | null; closed: boolean; pinned: boolean }>(
-    { scope: null, closed: false, pinned: false },
-  );
+  /** What the execution panel lists while the timeline shows: its own state, not the canvas selection (timelinePanel.ts). */
+  const [timelinePanel, setTimelinePanel] = useState<TimelinePanel>(FOLLOW_LATEST);
   const agentTimeline = useAgentTimeline(source, timeline);
   const timelineResult = agentTimeline.result !== null && agentTimeline.result.available ? agentTimeline.result : null;
   const latestTimelineTurn = timelineResult?.turnSpans[timelineResult.turnSpans.length - 1]?.turnKey ?? null;
@@ -208,7 +207,7 @@ export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, file
   const latestTurn = canvas.view.turns[canvas.view.turns.length - 1];
   // The timeline: its own scope, else the latest turn (until the panel is closed).
   const scope: WaterfallScope | null = timeline
-    ? (timelinePanel.closed ? null : timelinePanel.scope ?? (latestTimelineTurn !== null ? { type: 'turn', turnKey: latestTimelineTurn } : null))
+    ? panelScopeOf(timelinePanel, latestTimelineTurn)
     : !outline || panelClosed
       ? null
       : explicitScope ?? (selected === null && latestTurn !== undefined ? { type: 'turn', turnKey: latestTurn.key } : null);
@@ -226,15 +225,15 @@ export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, file
       ? (replaying ? graphNow.nodes[selectedView.id] : undefined) ?? selectedView.node
       : null;
   // The latest values for the stable callbacks below.
-  const now = useRef({ outline, timeline, timelineScope: timelinePanel.scope, scope, selected, scopeNodeId, currentScope, view: canvas.view });
-  now.current = { outline, timeline, timelineScope: timelinePanel.scope, scope, selected, scopeNodeId, currentScope, view: canvas.view };
+  const now = useRef({ outline, timeline, scope, selected, scopeNodeId, currentScope, view: canvas.view });
+  now.current = { outline, timeline, scope, selected, scopeNodeId, currentScope, view: canvas.view };
   /** The turn card openStep selected on the reader's behalf (to pin the panel); undone when the drawer closes. */
   const pinned = useRef<string | null>(null);
   const closeDrawer = useCallback(() => {
     if (now.current.timeline) {
       setDetail(null);
       // Back to following the latest turn when the panel was pinned only for the drawer.
-      setTimelinePanel((p) => (p.pinned ? { scope: null, closed: false, pinned: false } : p));
+      setTimelinePanel(unpinOnDrawerClose);
     } else if (now.current.outline) {
       setDetail(null);
       // Back to following the latest turn, unless the reader has picked something themself since.
@@ -246,11 +245,17 @@ export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, file
     }
   }, []);
   const scopeView = scopeNodeId !== null ? canvas.view.nodes.get(scopeNodeId) : undefined;
+  // A turn's prompt as the canvas's view already has it (no pass over the graph on the timeline's per-second renders).
+  const viewTurns = canvas.view.turns;
+  const canvasTurnPrompt = useCallback(
+    (key: string): string | undefined => viewTurns.find((t) => t.key === key)?.summary.promptSummary,
+    [viewTurns],
+  );
   const timelineScopeTitle = useMemo(
-    () => (timeline && scope !== null ? panelTitle(graphNow, scope, timelineResult) : ''),
+    () => (timeline && scope !== null ? panelTitle(graphNow, scope, timelineResult, canvasTurnPrompt) : ''),
     // `scope` is rebuilt on every render; its key says whether it changed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [timeline, currentScope, graphNow, timelineResult],
+    [timeline, currentScope, graphNow, timelineResult, canvasTurnPrompt],
   );
   const scopeTitle = scope === null
     ? ''
@@ -261,7 +266,7 @@ export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, file
         : scopeView?.type === 'node' ? [scopeView.node.title, scopeView.node.summary].filter(Boolean).join(' · ') : '';
   const closePanel = useCallback(() => {
     if (now.current.timeline) {
-      setTimelinePanel({ scope: null, closed: true, pinned: false });
+      setTimelinePanel(CLOSED_PANEL);
       setDetail(null);
       return;
     }
@@ -272,16 +277,16 @@ export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, file
   }, []);
   const openAgent = useCallback((dispatchNodeId: string) => {
     if (now.current.timeline) {
-      const agentId = source.getGraph().nodes[dispatchNodeId]?.childAgentId ?? null;
-      if (agentId !== null) setTimelinePanel({ scope: { type: 'agent', agentId }, closed: false, pinned: false });
+      const next = panelForDispatch(source.getGraph(), dispatchNodeId);
+      if (next !== null) setTimelinePanel(next);
       return;
     }
     pinned.current = null; // the reader's own choice
     setSelectedId(dispatchNodeId);
   }, [source]);
-  /** A row or a point of the main bar in the timeline: the panel lists that agent or turn. */
-  const pickTimelineScope = useCallback((next: WaterfallScope) => {
-    setTimelinePanel({ scope: next, closed: false, pinned: false });
+  /** A row or a point of the main bar in the timeline: the panel lists that agent or turn; the row is highlighted. */
+  const pickTimelineScope = useCallback((next: WaterfallScope, row: string) => {
+    setTimelinePanel(pickedPanel(next, row));
   }, []);
   // Opening a step while the panel follows the latest turn pins the panel to that turn: a new turn must not take the
   // list away from under the open drawer.
@@ -291,7 +296,8 @@ export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, file
     setFilesOpen(false); // the drawer and the panels share the right-hand side
     setAnomaliesOpen(false);
     if (cur.timeline) {
-      if (cur.timelineScope === null && cur.scope !== null) setTimelinePanel({ scope: cur.scope, closed: false, pinned: true });
+      const shown = cur.scope;
+      setTimelinePanel((p) => pinForStep(p, shown));
     } else if (cur.selected === null && cur.scopeNodeId !== null) {
       pinned.current = cur.scopeNodeId;
       setSelectedId(cur.scopeNodeId);
@@ -306,13 +312,13 @@ export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, file
     const node = graph.nodes[id];
     if (node === undefined || cur.currentScope === null) return;
     if (cur.timeline) {
-      const next = scopeOfNode(graph, id);
+      const next = panelForStep(graph, id);
       if (next === null) {
         setDetail({ id, scope: cur.currentScope });
         return;
       }
-      setTimelinePanel({ scope: next, closed: false, pinned: false });
-      setDetail({ id, scope: scopeKey(next) });
+      setTimelinePanel(next.panel);
+      setDetail(next.detail);
       return;
     }
     let target: string | null = null;
@@ -403,10 +409,10 @@ export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, file
     }
     if (cur.timeline) {
       // The panel lists the step's agent or turn, the drawer opens on the step.
-      const next = scopeOfNode(graph, nodeId);
+      const next = panelForStep(graph, nodeId);
       if (next === null) return '这一步在时间线里找不到所在的轮次。';
-      setTimelinePanel({ scope: next, closed: false, pinned: false });
-      setDetail({ id: nodeId, scope: scopeKey(next) });
+      setTimelinePanel(next.panel);
+      setDetail(next.detail);
       return null;
     }
     const turnId = plan.turnKey !== null ? `turn:${plan.turnKey}` : null;
@@ -551,6 +557,7 @@ export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, file
             sort={timelineSort}
             onSortChange={setTimelineSort}
             panelKey={currentScope}
+            pickedRow={timelinePanel.row}
             onPickScope={pickTimelineScope}
           />
         )}

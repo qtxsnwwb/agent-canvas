@@ -197,6 +197,23 @@ export function createTimelineClient(createWorker: () => WorkerLike, opts: { inT
 }
 
 /**
+ * The 时间线 view's computation while it shows: a client from the source (the app's moves a large session into a
+ * worker; none: the page's own thread), kept current by watchAgentTimeline. The stop function also disposes the client,
+ * so a worker and its copy of the graph do not outlive the view; showing it again starts a new one.
+ */
+export function startAgentTimeline(
+  source: Pick<SessionSource, 'getGraph' | 'getSession' | 'subscribe' | 'live' | 'createTimelineClient'>,
+  handlers: { onResult(result: AgentTimelineResult, graph: Graph): void; onError?(err: Error): void },
+): () => void {
+  const client = source.createTimelineClient?.() ?? createInThreadTimelineClient();
+  const stop = watchAgentTimeline({ source, client, ...handlers });
+  return () => {
+    stop();
+    client.dispose();
+  };
+}
+
+/**
  * Keeps the 时间线 numbers current: computed now, again when the source changes (throttled, TIMELINE_REFRESH_MS) and
  * every second while the clock ticks (once more when it stops), one computation at a time; triggers while one runs are
  * folded into one run after it, on the newest graph, so an older result never follows a newer one. A snapshot source
