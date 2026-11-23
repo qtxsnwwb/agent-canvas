@@ -2,6 +2,7 @@ import {
   applyChanges,
   type AnomalyCountsResponse,
   type AnomalyListResponse,
+  type AttentionHidden,
   type AttentionResponse,
   type ClientMessage,
   type ContentSearchResponse,
@@ -409,19 +410,45 @@ export interface AttentionLiveState {
   problem: { kind: 'preparing' | 'failed'; text: string } | null;
 }
 
+/** The live attention state's handle: the page's writes and hidden-list fetches go through it. */
+export interface LiveAttention {
+  /**
+   * Runs a write route's call; its answer becomes the state unless a push arrived after the call started (that push is
+   * newer: the server pushes every change after it). A failure is passed on to the caller, the state is left alone.
+   */
+  write(call: () => Promise<AttentionResponse>): Promise<void>;
+  /** The hidden list (`?hidden=1`); null when a push arrived after the request started (the answer is older than it). */
+  hidden(): Promise<AttentionHidden[] | null>;
+  close(): void;
+}
+
 /**
  * The attention state, live (spec 5): fetched once the sessions-scope subscription is in place and again after every
  * reconnect (nothing is pushed on subscribe), then replaced by each `attention` message. A failed fetch (503 while the
  * server prepares the list, or any other failure) keeps the last state and is retried after attentionRetryDelay; a push
- * cancels the retry. `accept` takes a write route's answer as the current state.
+ * cancels the retry.
+ *
+ * Answers and pushes come over different connections, in no fixed order. Every push counts; an answer (GET, write,
+ * hidden list) whose request started before the latest push is older than that push and is not applied: a GET that then
+ * succeeds only clears the problem, one that fails is not reported or retried. Nothing is lost by dropping it: the
+ * server pushes every change after the state it last pushed.
  */
 export function openLiveAttention(
   onState: (s: AttentionLiveState) => void,
-  deps: { fetchAttention?: () => Promise<AttentionResponse>; feed?: SessionsFeed; createSocket?: () => WebSocketLike } = {},
-): { accept(r: AttentionResponse): void; close(): void } {
+  deps: {
+    fetchAttention?: () => Promise<AttentionResponse>;
+    fetchHidden?: () => Promise<AttentionResponse>;
+    feed?: SessionsFeed;
+    createSocket?: () => WebSocketLike;
+  } = {},
+): LiveAttention {
   const fetchAttention = deps.fetchAttention ?? (() => api.attention());
+  const fetchHidden = deps.fetchHidden ?? (() => api.attention(true));
   let closed = false;
   let response: AttentionResponse | null = null;
+  let problem: AttentionLiveState['problem'] = null;
+  /** Pushes received so far: an answer to a request started at a lower count is older than the state shown. */
+  let pushes = 0;
   let failures = 0;
   let inFlight = false;
   let again = false;
@@ -434,19 +461,28 @@ export function openLiveAttention(
     cancelRetry();
     failures = 0;
     response = r;
-    onState({ response, problem: null });
+    problem = null;
+    onState({ response, problem });
   };
   const load = (): void => {
     if (closed) return;
     if (inFlight) { again = true; return; }
     cancelRetry();
     inFlight = true;
+    const startedAt = pushes;
     fetchAttention().then(
-      (r) => { if (!closed) show(r); },
-      (e: unknown) => {
+      (r) => {
         if (closed) return;
+        if (pushes === startedAt) { show(r); return; }
+        // Older than the pushed state: keep that, only note that fetching works again.
+        failures = 0;
+        if (problem !== null) { problem = null; onState({ response, problem }); }
+      },
+      (e: unknown) => {
+        if (closed || pushes !== startedAt) return; // a push since: the state shown is current
         failures += 1;
-        onState({ response, problem: attentionProblem(e) });
+        problem = attentionProblem(e);
+        onState({ response, problem });
         retry = setTimeout(() => { retry = null; load(); }, attentionRetryDelay(failures));
       },
     ).finally(() => {
@@ -455,11 +491,24 @@ export function openLiveAttention(
     });
   };
   const unlisten = feedOf(deps).listen({
-    message(msg) { if (msg.type === 'attention' && !closed) show(msg.response); },
+    message(msg) {
+      if (msg.type !== 'attention' || closed) return;
+      pushes += 1;
+      show(msg.response);
+    },
     open: () => load(),
   });
   return {
-    accept(r) { if (!closed) show(r); },
+    async write(call) {
+      const startedAt = pushes;
+      const r = await call();
+      if (!closed && pushes === startedAt) show(r);
+    },
+    async hidden() {
+      const startedAt = pushes;
+      const r = await fetchHidden();
+      return pushes === startedAt ? r.hidden : null;
+    },
     close() {
       closed = true;
       cancelRetry();

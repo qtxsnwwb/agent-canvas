@@ -1,13 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { AttentionHidden, AttentionResponse } from '@agent-canvas/shared';
 import {
-  attentionRows, emptyText, footerText, hiddenRows, parseAutoHideInput, writeErrorText, type AttentionRowView, type HiddenRowView,
+  attentionRows, emptyText, footerText, hiddenRows, parseAutoHideInput, undeterminableRows, writeErrorText, type AttentionRowView,
+  type HiddenRowView,
 } from '../attention';
-import { api, type AttentionLiveState } from '../client';
+import { api, type AttentionLiveState, type LiveAttention } from '../client';
 import { useMask } from '../MaskContext';
-import { maskAttention } from '../masking';
 import { OriginBadge } from '../OriginBadge';
-import { sessionHash } from '../route';
 import { useNow } from '../useNow';
 
 function fullTime(iso: string): string | undefined {
@@ -24,10 +23,10 @@ export function dismissClick(act: () => void) {
   };
 }
 
-/** The row's link: kind, origin, project, title and time, then the explanation line. */
+/** The row's link (its text is its name): kind, origin, project, title and time, then the explanation line. */
 function RowLink({ row }: { row: AttentionRowView }) {
   return (
-    <a className="attention-link" href={row.href} title="打开这个会话，定位到相关的那一步">
+    <a className="attention-link" href={row.href}>
       <span className="attention-line">
         <span className={`status status-${row.statusClass}`}>{row.kindLabel}</span>
         <OriginBadge origin={row.origin} />
@@ -63,8 +62,11 @@ function HiddenRow({ row, onRestore, busy }: { row: HiddenRowView; onRestore(): 
   );
 }
 
-/** The auto-hide limit, edited in place (1..720 hours). */
-function AutoHideSetting({ hours, onSaved }: { hours: number; onSaved(r: AttentionResponse): void }) {
+/**
+ * The auto-hide limit, edited in place (1..720 hours). `save` sends it (rejects with the server's text). The browser's
+ * own validation is off (noValidate) so the page's message is the one shown.
+ */
+export function AutoHideSetting({ hours, save: send }: { hours: number; save(hours: number): Promise<void> }) {
   const [text, setText] = useState<string | null>(null);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const [saving, setSaving] = useState(false);
@@ -74,13 +76,13 @@ function AutoHideSetting({ hours, onSaved }: { hours: number; onSaved(r: Attenti
     if (!parsed.ok) { setNote({ ok: false, text: parsed.error }); return; }
     setSaving(true);
     setNote(null);
-    api.saveAttentionSettings(parsed.value).then(
-      (r) => { onSaved(r); setText(null); setNote({ ok: true, text: '已保存' }); },
+    send(parsed.value).then(
+      () => { setText(null); setNote({ ok: true, text: '已保存' }); },
       (e: unknown) => setNote({ ok: false, text: writeErrorText(e) }),
     ).finally(() => setSaving(false));
   };
   return (
-    <form className="notify-field attention-setting" onSubmit={(e) => { e.preventDefault(); save(); }}>
+    <form className="notify-field attention-setting" noValidate onSubmit={(e) => { e.preventDefault(); save(); }}>
       <label htmlFor="attention-hours">超过</label>
       <input id="attention-hours" type="number" inputMode="numeric" min={1} max={720} step={1} value={shown}
         aria-invalid={note !== null && !note.ok ? true : undefined}
@@ -94,36 +96,36 @@ function AutoHideSetting({ hours, onSaved }: { hours: number; onSaved(r: Attenti
 
 /**
  * `#/attention` (spec 5): the sessions waiting for the user, live. `live` is the app's attention state (it also feeds the
- * header's count); `onResponse` takes a write's answer as the new state.
+ * header's count); `actions` runs the writes and the hidden-list fetch so that an answer older than a push is not applied.
  */
-export function Attention({ live, onResponse }: { live: AttentionLiveState; onResponse(r: AttentionResponse): void }) {
+export function Attention({ live, actions }: { live: AttentionLiveState; actions: Pick<LiveAttention, 'write' | 'hidden'> }) {
   const now = useNow(30_000);
   const { list: m } = useMask();
   const r = live.response;
   const rows = useMemo(() => (r === null ? [] : attentionRows(r.items, m, now)), [r, m, now]);
-  const undeterminable = useMemo(() => (r === null ? [] : maskAttention(r, m).undeterminable), [r, m]);
+  const undeterminable = useMemo(() => (r === null ? [] : undeterminableRows(r.undeterminable, m)), [r, m]);
   const [busy, setBusy] = useState<string | null>(null);
   const [writeError, setWriteError] = useState<string | null>(null);
   const write = (key: string, call: () => Promise<AttentionResponse>): void => {
     setBusy(key);
     setWriteError(null);
-    call().then(onResponse, (e: unknown) => setWriteError(writeErrorText(e))).finally(() => setBusy(null));
+    actions.write(call).catch((e: unknown) => setWriteError(writeErrorText(e))).finally(() => setBusy(null));
   };
 
   // The hidden list is fetched only while shown, and again on every new state (a push, this page's own writes): the
-  // pushes carry its count, not its items.
+  // pushes carry its count, not its items. Only the latest request's answer is used, and none older than a push (null).
   const [showHidden, setShowHidden] = useState(false);
   const [hidden, setHidden] = useState<{ list: AttentionHidden[] | null; failed: boolean }>({ list: null, failed: false });
   const [hiddenAttempt, setHiddenAttempt] = useState(0);
   useEffect(() => {
     if (!showHidden || r === null) return;
     let alive = true;
-    api.attention(true).then(
-      (res) => { if (alive) setHidden({ list: res.hidden, failed: false }); },
+    actions.hidden().then(
+      (list) => { if (alive && list !== null) setHidden({ list, failed: false }); },
       () => { if (alive) setHidden((h) => ({ list: h.list, failed: true })); },
     );
     return () => { alive = false; };
-  }, [showHidden, r, hiddenAttempt]);
+  }, [showHidden, r, hiddenAttempt, actions]);
   const hiddenView = useMemo(
     () => (hidden.list === null || r === null ? null : hiddenRows(hidden.list, r.autoHideHours, m, now)),
     [hidden.list, r, m, now],
@@ -188,10 +190,10 @@ export function Attention({ live, onResponse }: { live: AttentionLiveState; onRe
           <ul className="attention-items">
             {undeterminable.map((u) => (
               <li key={u.sessionId}>
-                <a className="attention-link" href={sessionHash(u.sessionId)}>
+                <a className="attention-link" href={u.href}>
                   <span className="attention-line">
                     <OriginBadge origin={u.origin} />
-                    <span className="attention-title">{u.title ?? u.sessionId.slice(0, 8)}</span>
+                    <span className="attention-title">{u.title}</span>
                   </span>
                 </a>
               </li>
@@ -199,7 +201,7 @@ export function Attention({ live, onResponse }: { live: AttentionLiveState; onRe
           </ul>
         </section>
       )}
-      <AutoHideSetting hours={r.autoHideHours} onSaved={onResponse} />
+      <AutoHideSetting hours={r.autoHideHours} save={(hours) => actions.write(() => api.saveAttentionSettings(hours))} />
       {showHidden && (
         <section className="files-card attention-card" aria-label="已移出的">
           <h2>已移出的</h2>

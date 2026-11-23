@@ -98,6 +98,18 @@ export function hiddenRows(hidden: readonly AttentionHidden[], autoHideHours: nu
   }));
 }
 
+/** The undeterminable sessions as listed under the footer: title (masked with the switch on) else the id's start, link. */
+export function undeterminableRows(
+  list: AttentionResponse['undeterminable'], m: PageMasker,
+): { sessionId: string; origin: Origin; title: string; href: string }[] {
+  return list.map((u) => ({
+    sessionId: u.sessionId,
+    origin: u.origin,
+    title: u.title === null ? u.sessionId.slice(0, 8) : m.title(u.title),
+    href: sessionHash(u.sessionId),
+  }));
+}
+
 /** The header's number next to “待处理”: the main list's length; null (no number) while unknown or zero. */
 export function headerCount(r: AttentionResponse | null): number | null {
   return r === null || r.items.length === 0 ? null : r.items.length;

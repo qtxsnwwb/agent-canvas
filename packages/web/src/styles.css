@@ -595,17 +595,30 @@ header .header-link[aria-current="page"] { background: var(--sun); }
 .anomaly-chip-count { padding: 0 7px; border-radius: 999px; background: var(--paper-deep); color: var(--ink-soft); font-size: 11px; font-variant-numeric: tabular-nums; }
 .anomaly-chip[aria-pressed="true"] .anomaly-chip-count { background: var(--card); color: var(--ink); }
 .stats section.anomaly-card { padding: 6px 8px 8px; }
-/* A narrow window: the header's links stay on one line (the title keeps only its picture, the name stays for screen
-   readers); when the seven no longer fit (a phone), the header scrolls sideways by itself instead of the page. */
+/* A narrower window (below 800 px, where the seven links and the switch stop fitting on one line): the header takes two
+   rows, every control in sight — the title and the masking switch on the first, the links on the second (the ::before
+   is the line break) — so nothing is squeezed or hidden behind a sideways scroll. The header's height (--header-h, which
+   the session page subtracts) is the two rows'; a window too narrow even for the links on one row (under about 345 px)
+   gets a third row and a slightly taller header. Below 480 px the title keeps only its picture (the name stays for
+   screen readers). */
+@media (max-width: 800px) {
+  :root { --header-h: 80px; }
+  header { height: auto; min-height: var(--header-h); padding-top: 6px; padding-bottom: 6px; flex-wrap: wrap; align-content: center; row-gap: 6px; }
+  header::before { content: ""; order: 1; flex-basis: 100%; height: 0; }
+  header .header-link { order: 2; flex: none; white-space: nowrap; }
+  header .header-link:not(.header-link-next) { margin-left: 0; }
+  header .mask-switch { margin-left: auto; }
+}
 @media (max-width: 640px) {
-  header { padding: 0 12px; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
-  header .header-link { flex: none; margin-left: 6px; padding: 2px 9px; white-space: nowrap; }
+  header { padding: 6px 12px; }
+  header .header-link { margin-left: 6px; padding: 2px 9px; }
   .stats-project select { max-width: 100%; }
 }
 @media (max-width: 480px) {
   header a:first-child { font-size: 0; }
   header a:first-child::before { font-size: 19px; margin-right: 2px; }
   header .header-link, header .header-link-next { margin-left: 5px; padding: 2px 7px; }
+  header .header-link:not(.header-link-next) { margin-left: 0; }
 }
 /* A narrow window: the session info bar wraps (the controls go to their own lines) instead of pushing the page sideways. */
 @media (max-width: 760px) {

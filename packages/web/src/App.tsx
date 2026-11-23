@@ -1,7 +1,6 @@
-import { useEffect, useRef, useState } from 'react';
-import type { AttentionResponse } from '@agent-canvas/shared';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { headerCount } from './attention';
-import { api, openLiveAttention, type AttentionLiveState } from './client';
+import { api, openLiveAttention, type AttentionLiveState, type LiveAttention } from './client';
 import { MaskProvider, MaskSwitch, useMask } from './MaskContext';
 import { Anomalies } from './pages/Anomalies';
 import { Attention } from './pages/Attention';
@@ -41,15 +40,19 @@ function AppBody() {
   }, []);
 
   // The attention state, live on every page (the header's count) over the app's one sessions-scope subscription, which
-  // the home page's session list shares; the attention page renders it and hands its writes' answers back.
+  // the home page's session list shares; the attention page renders it and runs its writes through it.
   const [attention, setAttention] = useState<AttentionLiveState>({ response: null, problem: null });
-  const attentionLive = useRef<ReturnType<typeof openLiveAttention> | null>(null);
+  const attentionLive = useRef<LiveAttention | null>(null);
   useEffect(() => {
     const live = openLiveAttention(setAttention);
     attentionLive.current = live;
     return () => { attentionLive.current = null; live.close(); };
   }, []);
-  const acceptAttention = (r: AttentionResponse): void => attentionLive.current?.accept(r);
+  // Stable for the page's effects; without the live state (not opened yet, or closed) a write's answer is not applied.
+  const attentionActions = useMemo<Pick<LiveAttention, 'write' | 'hidden'>>(() => ({
+    write: (call) => attentionLive.current?.write(call) ?? call().then(() => {}),
+    hidden: () => attentionLive.current?.hidden() ?? api.attention(true).then((r) => r.hidden),
+  }), []);
   const waiting = headerCount(attention.response);
 
   return (
@@ -82,7 +85,7 @@ function AppBody() {
       ) : route.page === 'anomalies' ? (
         <Anomalies query={route.query} />
       ) : route.page === 'attention' ? (
-        <Attention live={attention} onResponse={acceptAttention} />
+        <Attention live={attention} actions={attentionActions} />
       ) : route.page === 'notifications' ? (
         <Notifications onEnabledChange={setNotifyOn} />
       ) : (

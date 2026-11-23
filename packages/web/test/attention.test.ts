@@ -4,10 +4,11 @@ import { afterEach, expect, test, vi } from 'vitest';
 import type { AttentionHidden, AttentionItem, AttentionResponse, Session } from '@agent-canvas/shared';
 import {
   ATTENTION_KIND_LABEL, attentionRetryDelay, attentionRows, emptyText, footerText, headerCount, hiddenRows, parseAutoHideInput,
+  undeterminableRows,
 } from '../src/attention';
 import { createSessionsFeed, openLiveAttention, openLiveSessions, type AttentionLiveState } from '../src/client';
 import { createPageMasker, IDENTITY_MASKER } from '../src/masking';
-import { AttentionRow, dismissClick } from '../src/pages/Attention';
+import { AttentionRow, AutoHideSetting, dismissClick } from '../src/pages/Attention';
 import { baseSession, fakeSocket, type FakeSocket } from './helpers';
 
 afterEach(() => { vi.useRealTimers(); });
@@ -103,6 +104,17 @@ test('底部：运行中 N 个 · 无法判断状态的 M 个（来源名，各�
   expect(footerText(response({ runningCount: 4 }), false)).toBeNull();
 });
 
+test('无法判断的会话：只遮蔽它们的标题；没有标题用 id 开头；链接到会话', () => {
+  const TERM = 'Falcon' + 'Project';
+  const on = createPageMasker({ customTerms: [TERM], numbered: false });
+  const list = [{ sessionId: 'u 1', title: `看 ${TERM}`, origin: 'doubao' as const }, { sessionId: 'abcdefghij', title: null, origin: 'grok' as const }];
+  const rows = undeterminableRows(list, on);
+  expect(JSON.stringify(rows)).not.toContain(TERM);
+  expect(rows[1]).toEqual({ sessionId: 'abcdefghij', origin: 'grok', title: 'abcdefgh', href: '#/s/abcdefghij' });
+  expect(rows[0]!.href).toBe('#/s/u%201');
+  expect(undeterminableRows(list, IDENTITY_MASKER)[0]!.title).toBe(`看 ${TERM}`);
+});
+
 test('空列表：一句话加运行中的数量', () => {
   expect(emptyText(response({ runningCount: 3 }))).toEqual({ title: '此刻没有需要你处理的会话', sub: '运行中 3 个' });
   expect(emptyText(response({ runningCount: 0 })).sub).toBe('也没有正在运行的会话');
@@ -142,12 +154,21 @@ test('“知道了”在链接外面：点它不会跳转，也不往外冒泡',
   expect(html).toContain('知道了');
   expect(linkEnd).toBeGreaterThan(0);
   expect(button).toBeGreaterThan(linkEnd);
+  // The row's own text names the link: no identical tooltip on every row.
+  expect(html).not.toContain('title="打开这个会话');
   const onDismiss = vi.fn();
   const ev = { preventDefault: vi.fn(), stopPropagation: vi.fn() };
   dismissClick(onDismiss)(ev);
   expect(ev.preventDefault).toHaveBeenCalled();
   expect(ev.stopPropagation).toHaveBeenCalled();
   expect(onDismiss).toHaveBeenCalledTimes(1);
+});
+
+test('时限表单：不用浏览器自带的校验（页面自己的“1 到 720 的整数”提示才显示得出来）', () => {
+  const html = renderToStaticMarkup(createElement(AutoHideSetting, { hours: 24, save: async () => {} }));
+  expect(html).toContain('<form');
+  expect(html).toContain('novalidate=""');
+  expect(html).toContain('value="24"');
 });
 
 // ---- live state ----
@@ -236,14 +257,104 @@ test('推送到达时取消等待中的重试', async () => {
   live.close();
 });
 
-test('accept：写接口的回答直接成为当前状态', async () => {
+/** A promise the test settles. */
+function deferred<T>() {
+  let resolve!: (v: T) => void;
+  let reject!: (e: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
+test('write：没有推送插进来时，写接口的回答成为当前状态；失败照样抛给调用方', async () => {
   vi.useFakeTimers();
   const sock = fakeSocket();
   const states: AttentionLiveState[] = [];
   const live = openLiveAttention((s) => states.push(s), { fetchAttention: async () => response(), createSocket: () => sock });
   await vi.advanceTimersByTimeAsync(0);
-  live.accept(response({ autoHideHours: 48 }));
+  await live.write(async () => response({ autoHideHours: 48 }));
   expect(states.at(-1)).toEqual({ response: response({ autoHideHours: 48 }), problem: null });
+  await expect(live.write(async () => { throw http(503); })).rejects.toMatchObject({ status: 503 });
+  expect(states.at(-1)).toEqual({ response: response({ autoHideHours: 48 }), problem: null });
+  live.close();
+});
+
+test('GET 发出后到了更新的推送：GET 的旧回答不覆盖它（审读复现：应为 9）', async () => {
+  vi.useFakeTimers();
+  const sock = fakeSocket();
+  const get = deferred<AttentionResponse>();
+  const states: AttentionLiveState[] = [];
+  const live = openLiveAttention((s) => states.push(s), { fetchAttention: () => get.promise, createSocket: () => sock });
+  await vi.advanceTimersByTimeAsync(0); // subscribed; the GET is in flight
+  sock.receive({ type: 'attention', response: response({ runningCount: 9 }) });
+  get.resolve(response({ runningCount: 1 }));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(states.at(-1)).toEqual({ response: response({ runningCount: 9 }), problem: null });
+  live.close();
+});
+
+test('GET 发出后到了推送，GET 又失败：不标问题，也不重试', async () => {
+  vi.useFakeTimers();
+  const sock = fakeSocket();
+  const get = deferred<AttentionResponse>();
+  const fetchAttention = vi.fn<Fetch>(() => get.promise);
+  const states: AttentionLiveState[] = [];
+  const live = openLiveAttention((s) => states.push(s), { fetchAttention, createSocket: () => sock });
+  await vi.advanceTimersByTimeAsync(0);
+  sock.receive({ type: 'attention', response: response({ runningCount: 9 }) });
+  get.reject(new TypeError('fetch failed'));
+  await vi.advanceTimersByTimeAsync(10_000);
+  expect(fetchAttention).toHaveBeenCalledTimes(1);
+  expect(states.at(-1)).toEqual({ response: response({ runningCount: 9 }), problem: null });
+  live.close();
+});
+
+test('GET 失败后到了推送，再一次 GET 成功：问题清掉（推送之前开始的回答不再覆盖）', async () => {
+  vi.useFakeTimers();
+  const sock = fakeSocket();
+  let calls = 0;
+  const second = deferred<AttentionResponse>();
+  const fetchAttention = vi.fn<Fetch>(() => { calls += 1; return calls === 1 ? Promise.reject(http(500)) : second.promise; });
+  const states: AttentionLiveState[] = [];
+  const live = openLiveAttention((s) => states.push(s), { fetchAttention, createSocket: () => sock });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(states.at(-1)!.problem?.kind).toBe('failed');
+  await vi.advanceTimersByTimeAsync(500); // the retry is in flight
+  sock.receive({ type: 'attention', response: response({ runningCount: 9 }) });
+  second.resolve(response({ runningCount: 1 }));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(states.at(-1)).toEqual({ response: response({ runningCount: 9 }), problem: null });
+  live.close();
+});
+
+test('写接口的回答比它发出后到的推送旧：不覆盖推送', async () => {
+  vi.useFakeTimers();
+  const sock = fakeSocket();
+  const states: AttentionLiveState[] = [];
+  const live = openLiveAttention((s) => states.push(s), { fetchAttention: async () => response(), createSocket: () => sock });
+  await vi.advanceTimersByTimeAsync(0);
+  const answer = deferred<AttentionResponse>();
+  const done = live.write(() => answer.promise);
+  sock.receive({ type: 'attention', response: response({ runningCount: 9, hiddenCount: 1 }) });
+  answer.resolve(response({ runningCount: 1, hiddenCount: 1 }));
+  await done;
+  expect(states.at(-1)).toEqual({ response: response({ runningCount: 9, hiddenCount: 1 }), problem: null });
+  live.close();
+});
+
+test('已移出的列表：发出后到了推送，旧回答作废（null）；否则给出列表', async () => {
+  vi.useFakeTimers();
+  const sock = fakeSocket();
+  const hiddenItem: AttentionHidden = { item: item(), reason: 'dismissed' };
+  const pending = deferred<AttentionResponse>();
+  const fetchHidden = vi.fn(() => pending.promise);
+  const live = openLiveAttention(() => {}, { fetchAttention: async () => response(), fetchHidden, createSocket: () => sock });
+  await vi.advanceTimersByTimeAsync(0);
+  const stale = live.hidden();
+  sock.receive({ type: 'attention', response: response({ hiddenCount: 2 }) });
+  pending.resolve(response({ hidden: [hiddenItem], hiddenCount: 1 }));
+  expect(await stale).toBeNull();
+  fetchHidden.mockImplementation(async () => response({ hidden: [hiddenItem], hiddenCount: 1 }));
+  expect(await live.hidden()).toEqual([hiddenItem]);
   live.close();
 });
 
