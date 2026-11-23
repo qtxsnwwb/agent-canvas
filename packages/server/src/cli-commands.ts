@@ -3,7 +3,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import type { AddressInfo } from 'node:net';
-import { buildServer } from './api/server.js';
+import { AttentionSlot, buildServer, createAttentionService } from './api/server.js';
+import type { AttentionService } from './attention/service.js';
 import { loadConfig, type Config } from './config.js';
 import { runHookForward } from './hook-forward.js';
 import {
@@ -259,6 +260,7 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
   let stats: StatsService | null = null;
   let files: FilesService | null = null;
   let anomalies: AnomaliesService | null = null;
+  let attention: AttentionService | null = null;
   let warmup: StatsWarmup | null = null;
   let storage: StorageMaintenance | null = null;
   let searchBuild: SearchIndexBuild | null = null;
@@ -301,6 +303,7 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
     }
     const storageJob = storage;
     const searchJobNow = searchBuild;
+    const attentionSlot = new AttentionSlot();
     app = buildServer({
       store,
       pipeline,
@@ -309,12 +312,18 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
       stats,
       files,
       anomalies,
+      attention: attentionSlot,
       ...(storageJob !== null ? { storage: storageJob } : {}),
       ...(searchJobNow !== null ? { search: searchJobNow } : {}),
     });
     await app.listen({ port: config.port, host: config.host });
     // After the (automatic) rebuild above, before the initial scan: its changes arrive while importing() holds.
     notifications.start(`http://${config.host}:${(app.server.address() as AddressInfo).port}`);
+    // Once listening (its construction reads the store, about 1 s with 1,500 sessions active in 30 days), before the
+    // initial scan, whose changes it follows; until now /api/attention answered 503. Hooks ingested meanwhile are in the
+    // store it reads.
+    attention = createAttentionService(store, { log: (line) => process.stderr.write(`${line}\n`) });
+    attentionSlot.set(attention);
     // The initial scan runs in the background; the server is already answering requests.
     watcher = startWatcher(pipeline, config);
     if (options.statsWarmup ?? process.env.AGENT_CANVAS_STATS_WARMUP !== '0') {
@@ -337,6 +346,7 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
     stats?.close();
     files?.close();
     anomalies?.close();
+    attention?.close();
     await warmup?.stop();
     await storage?.stop();
     await searchBuild?.stop();
@@ -355,6 +365,7 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
   const statsService = stats!;
   const filesService = files!;
   const anomaliesService = anomalies!;
+  const attentionService = attention!;
   const statsWarmup = warmup;
   const storageJob = storage;
   const searchJob = searchBuild;
@@ -374,6 +385,7 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
           statsService.close();
           filesService.close();
           anomaliesService.close();
+          attentionService.close();
           await statsWarmup?.done;
           // Unsubscribes and stops the timer at once; deliveries in flight end within their timeout meanwhile.
           const notificationsClosed = service.close();

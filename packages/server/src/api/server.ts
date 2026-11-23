@@ -7,6 +7,7 @@ import {
   ORIGINS,
   SEARCH_DEFAULT_LIMIT,
   SEARCH_MAX_LIMIT,
+  type AttentionResponse,
   type Change,
   type ClientMessage,
   type ContentSearchResponse,
@@ -21,11 +22,14 @@ import {
   type SeqChange,
   type ServerMessage,
 } from '@agent-canvas/shared';
+import { AttentionService } from '../attention/service.js';
 import type { Config } from '../config.js';
 import { isForeignHookPayload } from '../hook-guard.js';
+import { ABORTED_NOTE } from '../normalize/cursor.js';
 import { cursorHookConversationId, cursorHookWorkspaceRoot, sanitizeCursorHookPayload } from '../normalize/cursor-hooks.js';
 import { NORMALIZER_VERSION } from '../normalize/version.js';
 import type { NotificationService } from '../notify/service.js';
+import { loadNotificationSettings } from '../notify/settings.js';
 import type { Pipeline } from '../pipeline.js';
 import { isExistingDir, sourceDirsOf } from '../sources/dirs.js';
 import { DSH_UNAVAILABLE, zstdAvailable } from '../sources/deepseek/zstd-frames.js';
@@ -52,6 +56,58 @@ export const MAX_BUFFERED_BYTES = 16 * 1024 * 1024;
 const RESERVED_PREFIXES = ['/api', '/ws', '/hooks'];
 /** Longest path parameter the router accepts (session ids, project ids, node ids). */
 const MAX_PARAM_LENGTH = 8192;
+/** Period of the attention page's time-driven re-evaluation (stuck, auto-hide): within a minute (attention spec 4.2). */
+export const ATTENTION_TICK_MS = 30_000;
+/** The /api/attention routes' 503 before the service exists (start() creates it once the server listens). */
+export const ATTENTION_NOT_READY = '待处理列表正在准备，稍后再试';
+/** The write routes' 503 while the database is being compacted (VACUUM holds writes). */
+const WRITES_HELD = '数据库正在整理，稍后再试';
+
+/**
+ * The attention service as the server runs it (attention spec 4): `stuckMinutes` is the notification settings' value,
+ * read at every use (also while notifications are off); a Cursor call counts as aborted when its stored note says so,
+ * as the notification service tells it. Construction reads the store: about 1 s with 1,500 sessions active in 30 days.
+ */
+export function createAttentionService(
+  store: Store,
+  options: { now?: () => number; coalesceMs?: number; log?: (line: string) => void } = {},
+): AttentionService {
+  return new AttentionService({
+    store,
+    now: options.now ?? Date.now,
+    stuckMinutes: () => loadNotificationSettings(store).settings.stuckMinutes,
+    isAbortedCall: (sessionId, nodeId) => store.getNodeDetail(sessionId, nodeId)?.text === ABORTED_NOTE,
+    ...(options.coalesceMs !== undefined ? { coalesceMs: options.coalesceMs } : {}),
+    ...(options.log !== undefined ? { log: options.log } : {}),
+  });
+}
+
+/**
+ * The attention service of a server that is built before it (start(): its construction would delay listening). The
+ * server wires the service when set() is called; until then the /api/attention routes answer 503 ATTENTION_NOT_READY.
+ * One slot serves one server.
+ */
+export class AttentionSlot {
+  private service: AttentionService | null = null;
+  private onSet: ((service: AttentionService) => void) | null = null;
+
+  get(): AttentionService | null {
+    return this.service;
+  }
+
+  /** Once only; the caller keeps owning (and closes) the service. */
+  set(service: AttentionService): void {
+    if (this.service !== null) throw new Error('attention service already set');
+    this.service = service;
+    this.onSet?.(service);
+  }
+
+  /** buildServer's hook: called with the service when it is set, at once when it already is; null unbinds. */
+  bind(listener: ((service: AttentionService) => void) | null): void {
+    this.onSet = listener;
+    if (listener !== null && this.service !== null) listener(this.service);
+  }
+}
 
 interface Connection {
   send(message: ServerMessage): void;
@@ -228,6 +284,10 @@ function parseClientMessage(raw: string): ClientMessage | null {
  * `files`: the service behind /api/files and /api/sessions/:id/files (default: one reading `store`); told the same.
  * `anomalies`: the service behind /api/anomalies, /api/anomalies/counts and /api/sessions/:id/anomalies (default: one
  * reading `store`, its answers saying `computing` until pipeline.startupDone()); told the same.
+ * `attention`: the service behind /api/attention (default: one made by createAttentionService, closed with the server);
+ * an AttentionSlot when it is created after the server (start()). Whichever it is, it is fed the change stream, the
+ * re-derived sessions and the stored hooks, ticked every ATTENTION_TICK_MS, and its updates are pushed to every
+ * sessions-scope WebSocket connection as `attention` messages; all of it stops when the server closes.
  */
 export function buildServer(deps: {
   store: Store;
@@ -243,6 +303,7 @@ export function buildServer(deps: {
   search?: { status(): SearchIndexStatus };
   /** Export and its settings (default: one reading `store`, settings in config.dataDir). */
   exports?: ExportService;
+  attention?: AttentionService | AttentionSlot;
 }): FastifyInstance {
   const { store, pipeline, config, notifications } = deps;
   const stats = deps.stats ?? new StatsService(storeStatsSource(store));
@@ -309,6 +370,48 @@ export function buildServer(deps: {
   const unsubscribeAnomalies = pipeline.onChanges((changes) => anomalies.noteChanges(changes));
   // Learned values of a changed session are computed again on the next request.
   const unsubscribeLearned = pipeline.onChanges((changes) => learned.noteChanges(changes));
+  // The attention page (spec 4.2): not tied to the notifications (they exist in start() only).
+  const wireAttention = (service: AttentionService): (() => void) => {
+    const offs = [
+      pipeline.onChanges((changes) => service.noteChanges(changes)),
+      pipeline.onResync((sessionId) => service.noteResync(sessionId)),
+      pipeline.onHookStored((sessionId) => service.noteHook(sessionId)),
+      service.onUpdate((response) => {
+        for (const conn of [...connections]) {
+          if (!conn.sessionsScope) continue;
+          try {
+            conn.send({ type: 'attention', response });
+          } catch {
+            connections.delete(conn);
+          }
+        }
+      }),
+    ];
+    // Changes caused by time alone: a running session becoming stuck, an item passing the auto-hide limit.
+    const timer = setInterval(() => {
+      try {
+        service.tick();
+      } catch {
+        // the next tick tries again
+      }
+    }, ATTENTION_TICK_MS);
+    timer.unref();
+    return () => {
+      for (const off of offs) off();
+      clearInterval(timer);
+    };
+  };
+  let attentionSlot: AttentionSlot;
+  if (deps.attention instanceof AttentionSlot) attentionSlot = deps.attention;
+  else {
+    attentionSlot = new AttentionSlot();
+    attentionSlot.set(deps.attention ?? createAttentionService(store));
+  }
+  const ownAttention = deps.attention === undefined ? attentionSlot.get() : null;
+  let unwireAttention = (): void => {};
+  attentionSlot.bind((service) => {
+    unwireAttention = wireAttention(service);
+  });
   app.addHook('onClose', async () => {
     unsubscribe();
     unsubscribeResync();
@@ -316,6 +419,9 @@ export function buildServer(deps: {
     unsubscribeFiles();
     unsubscribeAnomalies();
     unsubscribeLearned();
+    attentionSlot.bind(null);
+    unwireAttention();
+    ownAttention?.close();
     if (deps.files === undefined) files.close(); // the default one is ours
     if (deps.anomalies === undefined) anomalies.close();
     connections.clear();
@@ -522,6 +628,44 @@ export function buildServer(deps: {
     if (result === null) return reply.code(404).send({ error: 'session not found' });
     return result;
   });
+
+  // ---- attention page (spec 4.5). Explanations are conversation text (the page masks them); answers are not cached.
+  // GET: the state without the hidden list (hiddenCount gives its length); `hidden=1` adds it.
+  app.get<{ Querystring: { hidden?: unknown } }>('/api/attention', async (req, reply) => {
+    reply.header('cache-control', 'no-store');
+    const service = attentionSlot.get();
+    if (service === null) return reply.code(503).send({ error: ATTENTION_NOT_READY });
+    return service.snapshot({ includeHidden: req.query.hidden === '1' });
+  });
+  /** A write route's answer: 503 (no service yet, writes held), 400 (refused), or the state without the hidden list. */
+  const attentionWrite = (
+    reply: FastifyReply,
+    act: (service: AttentionService) => { ok: true } | { ok: false; error: string },
+  ): FastifyReply | AttentionResponse => {
+    reply.header('cache-control', 'no-store');
+    const service = attentionSlot.get();
+    if (service === null) return reply.code(503).send({ error: ATTENTION_NOT_READY });
+    // While the database is being compacted (VACUUM) writes are held; a change would only live in memory.
+    if (pipeline.writesHeld()) return reply.code(503).send({ error: WRITES_HELD });
+    const result = act(service);
+    if (!result.ok) return reply.code(400).send({ error: result.error });
+    return service.snapshot();
+  };
+  const field = (body: unknown, name: string): unknown =>
+    typeof body === 'object' && body !== null && !Array.isArray(body) ? (body as Record<string, unknown>)[name] : undefined;
+  const withKey = (body: unknown, act: (key: string) => { ok: true } | { ok: false; error: string }) => {
+    const key = field(body, 'key');
+    return typeof key === 'string' && key !== '' ? act(key) : { ok: false as const, error: 'key 必须是非空的字符串' };
+  };
+  app.post('/api/attention/dismiss', { onRequest: sameOriginJson }, async (req, reply) =>
+    attentionWrite(reply, (service) => withKey(req.body, (key) => service.dismiss(key))),
+  );
+  app.post('/api/attention/restore', { onRequest: sameOriginJson }, async (req, reply) =>
+    attentionWrite(reply, (service) => withKey(req.body, (key) => service.restore(key))),
+  );
+  app.put('/api/attention/settings', { onRequest: sameOriginJson }, async (req, reply) =>
+    attentionWrite(reply, (service) => service.setAutoHideHours(field(req.body, 'autoHideHours'))),
+  );
 
   if (notifications !== undefined) {
     app.get('/api/notifications/settings', async (): Promise<NotificationSettingsResponse> => notifications.getSettings());
