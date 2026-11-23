@@ -498,3 +498,70 @@ button.cc-reason:focus-visible, .cc-reason-current:focus-visible { outline: 3px 
 .cc-anomaly-icon { width: 12px; height: 12px; font-size: 9px; }
 .anomaly-panel .file-panel-head { background: #fff6d6; }
 .anomaly-panel h2.cc-drawer-title { margin: 0; }
+
+/* The 时间线 view (AgentTimeline.tsx): in the canvas's place, the waterfall panel below it as in the outline view. The
+   canvas stays mounted underneath, hidden, so coming back finds it as it was. Colours, bars and rows follow the
+   waterfall panel's. */
+.canvas-area.cc-timeline-shown { display: flex; flex-direction: column; }
+.canvas-area.cc-timeline-shown > .cc-canvas { position: absolute; inset: 0; pointer-events: none; }
+/* !important: React Flow sets `visibility: visible` on its nodes inline. */
+.canvas-area.cc-timeline-shown > .cc-canvas, .canvas-area.cc-timeline-shown > .cc-canvas * { visibility: hidden !important; }
+.cc-tl {
+  flex: 1 1 auto; min-height: 0; box-sizing: border-box; display: flex; flex-direction: column; min-width: 0;
+  background: #fffdf7; font: 12px/1.4 var(--font); color: var(--ink);
+}
+@media (min-width: 1101px) { .cc-drawer-open > .cc-tl { padding-right: var(--cc-drawer-width); } }
+.cc-tl-head { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 7px 14px; border-bottom: 2px solid var(--edge); background: var(--card); min-width: 0; }
+.cc-tl-total { font: 800 14px/1.3 var(--font-fun); font-variant-numeric: tabular-nums; }
+.cc-tl-sort { display: flex; align-items: center; gap: 6px; }
+.cc-tl-sort-label { color: var(--ink-soft); font-weight: 600; }
+.cc-tl-error { color: #c2410c; font-weight: 700; }
+.cc-tl-cols, .cc-tl-row, .cc-tl-axisrow {
+  display: grid; grid-template-columns: minmax(140px, 24%) minmax(0, 1fr) 76px 76px 44px; align-items: center;
+  column-gap: 8px; padding: 0 14px; min-width: 0;
+}
+.cc-tl-cols { flex: none; height: 22px; border-bottom: 2px dashed var(--line); color: var(--ink-faint); font-size: 11px; font-weight: 700; }
+.cc-tl-colname { text-align: right; white-space: nowrap; }
+.cc-tl-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.cc-tl-row { min-height: 30px; border-bottom: 1.5px dashed var(--line); cursor: pointer; }
+.cc-tl-row:hover { background: var(--paper); }
+.cc-tl-row.cc-tl-main { cursor: default; background: var(--paper); }
+.cc-tl-row.cc-tl-selected { background: #dff4fd; }
+.cc-tl-name { display: flex; align-items: center; gap: 6px; min-width: 0; padding-left: calc(var(--depth, 0) * 14px); }
+.cc-tl-pick { min-width: 0; padding: 0; border: 0; background: none; font: inherit; color: inherit; text-align: left; cursor: pointer; }
+.cc-tl-pick:focus-visible { outline: 3px solid var(--grape); outline-offset: 1px; border-radius: 6px; }
+.cc-tl-label { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 700; }
+.cc-tl-tag, .cc-tl-open { flex: none; padding: 0 7px; border-radius: 999px; font-size: 10.5px; font-weight: 700; line-height: 17px; white-space: nowrap; }
+.cc-tl-tag { background: var(--paper-deep); color: var(--ink-soft); }
+.cc-tl-open { background: #dff4fd; color: #0b7fab; }
+.cc-tl-track { position: relative; height: 30px; min-width: 0; }
+.cc-tl-main .cc-tl-track { cursor: pointer; }
+.cc-tl-bar {
+  position: absolute; top: 8px; height: 14px; min-width: 3px; box-sizing: border-box; border-radius: 999px;
+  background-color: var(--sky); box-shadow: 0 2px 0 rgba(63, 58, 90, 0.12);
+}
+.cc-tl-main .cc-tl-bar { background-color: var(--grape); }
+/* Where the thread waited on its own agents: the bar drawn light. */
+.cc-tl-waiting { position: absolute; top: 8px; height: 14px; background: rgba(255, 255, 255, 0.62); pointer-events: none; }
+.cc-tl-bar.cc-tl-running { background-image: repeating-linear-gradient(-45deg, rgba(255,255,255,0.55) 0 6px, rgba(255,255,255,0) 6px 12px); background-size: 34px 100%; animation: cc-wf-run 0.9s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .cc-tl-bar.cc-tl-running { animation: none; } }
+.cc-tl-wait, .cc-tl-own, .cc-tl-main-nums { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cc-tl-wait { font-weight: 700; }
+.cc-tl-own { color: var(--ink-soft); }
+.cc-tl-main-nums { grid-column: span 2; color: var(--ink-soft); font-weight: 600; white-space: normal; line-height: 1.25; }
+.cc-tl-mark { min-width: 0; }
+.cc-tl-longest { padding: 0 6px; border: 1.5px solid var(--edge); border-radius: 999px; background: var(--sun); font-size: 10.5px; font-weight: 700; white-space: nowrap; }
+.cc-tl-note { margin: 18px 14px; color: var(--ink-faint); font-weight: 600; }
+.cc-tl-axisrow { flex: none; height: 24px; border-top: 2px dashed var(--line); color: var(--ink-faint); font-size: 11px; font-weight: 600; }
+.cc-tl-axis { position: relative; height: 100%; min-width: 0; }
+.cc-tl-tick { position: absolute; top: 4px; padding-left: 4px; border-left: 2px dashed var(--line); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.cc-tl-tick.cc-tl-tick-end { left: auto; right: 0; padding: 0 4px 0 0; border-left: 0; border-right: 2px dashed var(--line); }
+.cc-tl-break { position: absolute; top: 3px; box-sizing: border-box; min-width: 14px; border-radius: 4px; background: var(--paper-deep); color: var(--ink-soft); font-weight: 800; text-align: center; letter-spacing: -1px; }
+@media (max-width: 640px) {
+  .cc-tl-cols, .cc-tl-row, .cc-tl-axisrow { grid-template-columns: 72px minmax(0, 1fr) 62px 62px 26px; column-gap: 4px; padding: 0 8px; }
+  .cc-tl-name { padding-left: calc(var(--depth, 0) * 8px); }
+  .cc-tl-wait, .cc-tl-own, .cc-tl-main-nums { font-size: 11px; }
+  .cc-tl-longest { padding: 0 2px; font-size: 10px; }
+  /* Room for the start of each stretch only. */
+  .cc-tl-tick:not(.cc-tl-tick-start) { display: none; }
+}

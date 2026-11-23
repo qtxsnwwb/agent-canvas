@@ -1,5 +1,6 @@
 import type { Graph, NodeDetail, Session, SessionAnomaliesResponse, SessionFilesResponse } from '@agent-canvas/shared';
 import type { LayoutClient } from './canvas/layoutClient';
+import type { TimelineClient } from './canvas/timelineClient';
 
 /**
  * A step's detail as the drawer shows it. `detail` null: there is no stored detail for this step (an export leaves out
@@ -32,4 +33,9 @@ export interface SessionSource {
   readonly anomalies: (() => Promise<SessionAnomaliesResponse>) | null;
   /** A layout client for the canvas (one per canvas model; disposed with it). */
   createLayoutClient(): LayoutClient;
+  /**
+   * Where the 时间线 view computes (one per page; disposed with it): the app's moves a large session into a worker.
+   * Absent: on the page's own thread (the exported viewer, whose content security policy allows no worker).
+   */
+  createTimelineClient?(): TimelineClient;
 }

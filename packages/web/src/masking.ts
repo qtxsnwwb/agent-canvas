@@ -386,6 +386,7 @@ export function createDisplaySource(source: SessionSource, initial: PageMasker):
     }),
     anomalies: anomalies === null ? null : () => anomalies().then((r) => maskSessionAnomalies(r, m)),
     createLayoutClient: () => source.createLayoutClient(),
+    ...(source.createTimelineClient !== undefined ? { createTimelineClient: () => source.createTimelineClient!() } : {}),
     setMasker(next) {
       if (next === m) return;
       m = next;

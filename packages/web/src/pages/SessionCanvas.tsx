@@ -10,6 +10,7 @@ import type { SessionSource } from '../sessionSource';
 import { Canvas, type CanvasFocus } from '../canvas/Canvas';
 import { FilePanel } from '../canvas/FilePanel';
 import { AnomalyPanel, useSessionAnomalies } from '../canvas/AnomalyPanel';
+import { AgentTimelineView, panelTitle, scopeOfNode, useAgentTimeline, type TimelineSort } from '../canvas/AgentTimeline';
 import {
   NO_CARD_MARKS, anomaliesUntil, anomalyButton, cardMarks, graphResolver, graphTurns, panelRows, pickedRowKey, stableCardMarks, turnLabel,
   type CardMarks, type PanelRow,
@@ -41,17 +42,26 @@ const VIEW_MODES: { mode: ViewMode; label: string; title: string }[] = [
   { mode: 'replay', label: '复盘', title: '按时间轴回放' },
 ];
 
-/** Segmented live / topology / causal / replay switch; the mode itself lives in the canvas model. */
-/** Disabled until the model exists (before that a click would be dropped). */
-function ViewSwitch({ mode, disabled, onChange }: { mode: ViewMode; disabled: boolean; onChange(mode: ViewMode): void }) {
+/**
+ * Segmented outline / live / topology / causal / replay switch, then 时间线. The mode lives in the canvas model and is
+ * disabled until the model exists (before that a click would be dropped); 时间线 is page state (`timeline`): while it
+ * shows, it is the pressed entry and the mode is kept for when the reader goes back to the canvas.
+ */
+export function ViewSwitch({ mode, timeline, disabled, onChange, onTimeline }: {
+  mode: ViewMode; timeline: boolean; disabled: boolean; onChange(mode: ViewMode): void; onTimeline(): void;
+}) {
   return (
     <div className="view-switch" role="group" aria-label="视角">
       {VIEW_MODES.map((m) => (
-        <button key={m.mode} type="button" aria-pressed={mode === m.mode} disabled={disabled} title={m.title}
+        <button key={m.mode} type="button" aria-pressed={!timeline && mode === m.mode} disabled={disabled} title={m.title}
           onClick={() => onChange(m.mode)}>
           {m.label}
         </button>
       ))}
+      <button type="button" aria-pressed={timeline} title="主线和各个子代理放在同一条时间轴上，看时间花在哪个子代理上"
+        onClick={onTimeline}>
+        时间线
+      </button>
     </div>
   );
 }
@@ -90,6 +100,19 @@ export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, file
   nodeId: string | null;
 }) {
   const canvas = useCanvas(source);
+  // ---- the 时间线 view (page state, not a ViewMode: it replaces the canvas, whose mode is kept for coming back) ----
+  const [timeline, setTimeline] = useState(false);
+  const [timelineSort, setTimelineSort] = useState<TimelineSort>('wait');
+  /**
+   * What the execution panel lists while the timeline shows: its own state, not the canvas selection. `scope` null:
+   * the latest turn (until closed); `pinned`: set by opening a step while following (undone when the drawer closes).
+   */
+  const [timelinePanel, setTimelinePanel] = useState<{ scope: WaterfallScope | null; closed: boolean; pinned: boolean }>(
+    { scope: null, closed: false, pinned: false },
+  );
+  const agentTimeline = useAgentTimeline(source, timeline);
+  const timelineResult = agentTimeline.result !== null && agentTimeline.result.available ? agentTimeline.result : null;
+  const latestTimelineTurn = timelineResult?.turnSpans[timelineResult.turnSpans.length - 1]?.turnKey ?? null;
   // ---- the file panel (spec 4) ----
   // It sits where the drawer does: while it is open the drawer is not shown (the selection stays on the canvas, and the
   // drawer comes back when the panel closes); a step the reader opens on the canvas or in the waterfall closes it.
@@ -170,9 +193,11 @@ export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, file
   // Only graph nodes open the drawer; a vanished node (or a turn summary) leaves selectedNode null and closes it.
   const selectedView = selected !== null ? canvas.view.nodes.get(selected) : undefined;
   // The replay view draws nodes as they were at the replay time; the drawer shows the node's current content.
-  const replaying = canvas.view.mode === 'replay';
+  const replaying = !timeline && canvas.view.mode === 'replay';
   // Outline view: the canvas selection picks what the waterfall panel lists; a row of the panel opens the drawer.
-  const outline = canvas.view.mode === 'outline';
+  const outline = !timeline && canvas.view.mode === 'outline';
+  // Outline and the timeline: the drawer shows the step opened in the waterfall panel.
+  const listing = outline || timeline;
   const [panelClosed, setPanelClosed] = useState(false);
   /** The step open in the drawer, and the scope (scopeKey) it belongs to; it is shown only while that scope is listed. */
   const [detail, setDetail] = useState<{ id: string; scope: string } | null>(null);
@@ -181,29 +206,36 @@ export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, file
   // is a turn card or a subagent, so a selection always has a scope.
   const explicitScope = outline ? scopeOf(selectedView) : null;
   const latestTurn = canvas.view.turns[canvas.view.turns.length - 1];
-  const scope: WaterfallScope | null = !outline || panelClosed
-    ? null
-    : explicitScope ?? (selected === null && latestTurn !== undefined ? { type: 'turn', turnKey: latestTurn.key } : null);
+  // The timeline: its own scope, else the latest turn (until the panel is closed).
+  const scope: WaterfallScope | null = timeline
+    ? (timelinePanel.closed ? null : timelinePanel.scope ?? (latestTimelineTurn !== null ? { type: 'turn', turnKey: latestTimelineTurn } : null))
+    : !outline || panelClosed
+      ? null
+      : explicitScope ?? (selected === null && latestTurn !== undefined ? { type: 'turn', turnKey: latestTurn.key } : null);
   const currentScope = scope !== null ? scopeKey(scope) : null;
   /** The canvas node the panel belongs to (highlighted): the selection, or the latest turn's card while following it. */
-  const scopeNodeId = scope === null ? null : selected ?? `turn:${latestTurn!.key}`;
+  const scopeNodeId = scope === null || timeline ? null : selected ?? `turn:${latestTurn!.key}`;
   const detailId = detail !== null && detail.scope === currentScope ? detail.id : null;
   // A step of a scope that is no longer listed is dropped, so its drawer cannot reopen by itself later.
   useEffect(() => {
     if (detail !== null && detailId === null) setDetail(null);
   }, [detail, detailId]);
-  const selectedNode = outline
+  const selectedNode = listing
     ? (detailId !== null ? graphNow.nodes[detailId] ?? null : null)
     : selectedView?.type === 'node'
       ? (replaying ? graphNow.nodes[selectedView.id] : undefined) ?? selectedView.node
       : null;
   // The latest values for the stable callbacks below.
-  const now = useRef({ outline, selected, scopeNodeId, currentScope, view: canvas.view });
-  now.current = { outline, selected, scopeNodeId, currentScope, view: canvas.view };
+  const now = useRef({ outline, timeline, timelineScope: timelinePanel.scope, scope, selected, scopeNodeId, currentScope, view: canvas.view });
+  now.current = { outline, timeline, timelineScope: timelinePanel.scope, scope, selected, scopeNodeId, currentScope, view: canvas.view };
   /** The turn card openStep selected on the reader's behalf (to pin the panel); undone when the drawer closes. */
   const pinned = useRef<string | null>(null);
   const closeDrawer = useCallback(() => {
-    if (now.current.outline) {
+    if (now.current.timeline) {
+      setDetail(null);
+      // Back to following the latest turn when the panel was pinned only for the drawer.
+      setTimelinePanel((p) => (p.pinned ? { scope: null, closed: false, pinned: false } : p));
+    } else if (now.current.outline) {
       setDetail(null);
       // Back to following the latest turn, unless the reader has picked something themself since.
       const pin = pinned.current;
@@ -214,20 +246,42 @@ export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, file
     }
   }, []);
   const scopeView = scopeNodeId !== null ? canvas.view.nodes.get(scopeNodeId) : undefined;
+  const timelineScopeTitle = useMemo(
+    () => (timeline && scope !== null ? panelTitle(graphNow, scope, timelineResult) : ''),
+    // `scope` is rebuilt on every render; its key says whether it changed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [timeline, currentScope, graphNow, timelineResult],
+  );
   const scopeTitle = scope === null
     ? ''
-    : scope.type === 'turn'
-      ? canvas.view.turns.find((t) => t.key === scope.turnKey)?.summary.promptSummary || '（无提示）'
-      : scopeView?.type === 'node' ? [scopeView.node.title, scopeView.node.summary].filter(Boolean).join(' · ') : '';
+    : timeline
+      ? timelineScopeTitle
+      : scope.type === 'turn'
+        ? canvas.view.turns.find((t) => t.key === scope.turnKey)?.summary.promptSummary || '（无提示）'
+        : scopeView?.type === 'node' ? [scopeView.node.title, scopeView.node.summary].filter(Boolean).join(' · ') : '';
   const closePanel = useCallback(() => {
+    if (now.current.timeline) {
+      setTimelinePanel({ scope: null, closed: true, pinned: false });
+      setDetail(null);
+      return;
+    }
     pinned.current = null;
     setPanelClosed(true);
     setSelectedId(null);
     setDetail(null);
   }, []);
   const openAgent = useCallback((dispatchNodeId: string) => {
+    if (now.current.timeline) {
+      const agentId = source.getGraph().nodes[dispatchNodeId]?.childAgentId ?? null;
+      if (agentId !== null) setTimelinePanel({ scope: { type: 'agent', agentId }, closed: false, pinned: false });
+      return;
+    }
     pinned.current = null; // the reader's own choice
     setSelectedId(dispatchNodeId);
+  }, [source]);
+  /** A row or a point of the main bar in the timeline: the panel lists that agent or turn. */
+  const pickTimelineScope = useCallback((next: WaterfallScope) => {
+    setTimelinePanel({ scope: next, closed: false, pinned: false });
   }, []);
   // Opening a step while the panel follows the latest turn pins the panel to that turn: a new turn must not take the
   // list away from under the open drawer.
@@ -236,7 +290,9 @@ export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, file
     if (cur.currentScope === null) return;
     setFilesOpen(false); // the drawer and the panels share the right-hand side
     setAnomaliesOpen(false);
-    if (cur.selected === null && cur.scopeNodeId !== null) {
+    if (cur.timeline) {
+      if (cur.timelineScope === null && cur.scope !== null) setTimelinePanel({ scope: cur.scope, closed: false, pinned: true });
+    } else if (cur.selected === null && cur.scopeNodeId !== null) {
       pinned.current = cur.scopeNodeId;
       setSelectedId(cur.scopeNodeId);
     }
@@ -249,6 +305,16 @@ export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, file
     const graph = source.getGraph();
     const node = graph.nodes[id];
     if (node === undefined || cur.currentScope === null) return;
+    if (cur.timeline) {
+      const next = scopeOfNode(graph, id);
+      if (next === null) {
+        setDetail({ id, scope: cur.currentScope });
+        return;
+      }
+      setTimelinePanel({ scope: next, closed: false, pinned: false });
+      setDetail({ id, scope: scopeKey(next) });
+      return;
+    }
     let target: string | null = null;
     let key: string | null = null;
     if (node.agentId !== null) {
@@ -270,7 +336,7 @@ export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, file
   }, [source]);
   // Outline view: the steps that led to the open step, highlighted in the waterfall and listed in the drawer ("精简"
   // leaves out thinking steps whose content was not recorded).
-  const steps = useMemo(() => (outline && detailId !== null ? stepChain(graphNow, detailId) : null), [outline, graphNow, detailId]);
+  const steps = useMemo(() => (listing && detailId !== null ? stepChain(graphNow, detailId) : null), [listing, graphNow, detailId]);
   const compactNow = canvas.compact;
   const stepReasoning = useMemo(() => {
     if (steps === null) return undefined;
@@ -303,7 +369,7 @@ export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, file
   // Causal view: the selection's upstream chain, once per (view, selection); highlighted on the canvas and listed in
   // the drawer. EMPTY_CHAIN in the other views and without a selected graph node.
   const view = canvas.view;
-  const chainStart = view.mode === 'causal' && selectedNode !== null ? selectedNode.id : null;
+  const chainStart = !timeline && view.mode === 'causal' && selectedNode !== null ? selectedNode.id : null;
   const chain = useMemo(() => (chainStart !== null ? upstreamChain(view, chainStart) : EMPTY_CHAIN), [view, chainStart]);
   // The drawer's "展开" under a chain cut short by a fold: show the `earlier` folds in full, expand the collapsed turns
   // (in full too, so one click reveals the upstream instead of running into the long-turn fold). Like a canvas button
@@ -334,6 +400,14 @@ export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, file
     const focusOn = (target: Omit<CanvasFocus, 'seq'>): void => setFocus({ ...target, seq: ++focusSeq.current });
     if (node === undefined || plan === null) {
       return '这一步已经不在画布上了。';
+    }
+    if (cur.timeline) {
+      // The panel lists the step's agent or turn, the drawer opens on the step.
+      const next = scopeOfNode(graph, nodeId);
+      if (next === null) return '这一步在时间线里找不到所在的轮次。';
+      setTimelinePanel({ scope: next, closed: false, pinned: false });
+      setDetail({ id: nodeId, scope: scopeKey(next) });
+      return null;
     }
     const turnId = plan.turnKey !== null ? `turn:${plan.turnKey}` : null;
     if (cur.outline) {
@@ -437,10 +511,16 @@ export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, file
     return panelRows(source.getSession().id, anomalyData.anomalies, { turns, resolver: anomalyResolver, cwd: source.getSession().cwd });
   }, [anomaliesOpen, anomalyData, anomalyResolver, source]);
   const anomalyButtonText = anomalyButton(anomalyData === null ? null : anomalyData.anomalies);
+  const { setMode } = canvas;
+  const chooseMode = useCallback((mode: ViewMode) => {
+    setTimeline(false);
+    setMode(mode);
+  }, [setMode]);
+  const showTimeline = useCallback(() => setTimeline(true), []);
   // "暂无节点" only when the live graph really has no nodes; "布局中…" while the model is starting or the view has
   // nodes none of which is placed yet.
   const empty = !hasKeys(source.getGraph().nodes);
-  const laying = !empty && canvas.layoutError === null
+  const laying = !timeline && !empty && canvas.layoutError === null
     && (!canvas.ready || (canvas.view.nodes.size > 0 && !hasKeys(canvas.positions)));
   return (
     <>
@@ -455,12 +535,26 @@ export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, file
               aria-label={anomalyButtonText.label} title="这个会话里按固定规则找出来的异常">{anomalyButtonText.text}</button>
           )}
           <DensitySwitch compact={canvas.compact} disabled={!canvas.ready} onChange={canvas.setCompact} />
-          <ViewSwitch mode={canvas.view.mode} disabled={!canvas.ready} onChange={canvas.setMode} />
+          <ViewSwitch mode={canvas.view.mode} timeline={timeline} disabled={!canvas.ready} onChange={chooseMode} onTimeline={showTimeline} />
         </>,
         toolbar,
       )}
       {canvas.layoutError !== null && <div className="canvas-error">布局失败，正在自动重试：{canvas.layoutError}</div>}
-      <div className={`canvas-area${selectedNode !== null || sideOpen ? ' cc-drawer-open' : ''}${canvas.replay !== null ? ' cc-replay' : ''}${scope !== null ? ' cc-waterfall-open' : ''}`}>
+      <div className={`canvas-area${selectedNode !== null || sideOpen ? ' cc-drawer-open' : ''}${!timeline && canvas.replay !== null ? ' cc-replay' : ''}${scope !== null ? ' cc-waterfall-open' : ''}${timeline ? ' cc-timeline-shown' : ''}`}>
+        {timeline && !empty && (
+          <AgentTimelineView
+            result={agentTimeline.result}
+            error={agentTimeline.error}
+            origin={source.getSession().origin}
+            graph={graphNow}
+            compact={canvas.compact}
+            sort={timelineSort}
+            onSortChange={setTimelineSort}
+            panelKey={currentScope}
+            onPickScope={pickTimelineScope}
+          />
+        )}
+        {/* Kept mounted (hidden) while the timeline shows: coming back finds it as it was (viewport, following). */}
         <Canvas
           snapshot={canvas}
           selectedId={outline ? scopeNodeId : selected}
@@ -488,7 +582,7 @@ export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, file
             // The drawer shows the node's current state (also in the replay view).
             stalled={!stepTicking(sessionClock, selectedNode)}
             reasoning={stepReasoning}
-            onSelect={outline ? openChainStep : setSelectedId}
+            onSelect={listing ? openChainStep : setSelectedId}
             onExpandCut={expandChainCut}
             onClose={closeDrawer}
           />
@@ -515,7 +609,7 @@ export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, file
             onClose={closeAnomalies}
           />
         )}
-        {canvas.replay !== null && <Timeline replay={canvas.replay} onSeek={canvas.setReplayTime} />}
+        {!timeline && canvas.replay !== null && <Timeline replay={canvas.replay} onSeek={canvas.setReplayTime} />}
         {scope !== null && (
           <Waterfall
             graph={graphNow}

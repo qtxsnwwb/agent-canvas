@@ -1,5 +1,7 @@
 import { api, type LiveSession } from './client';
 import { createBrowserLayoutWorker, createLayoutClient } from './canvas/layoutClient';
+import { createTimelineClient } from './canvas/timelineClient';
+import { createBrowserTimelineWorker } from './canvas/timelineWorker';
 import type { SessionSource } from './sessionSource';
 
 /** The session page's source for the running app: the live session plus the API (details, files, anomalies on demand). */
@@ -14,5 +16,6 @@ export function liveSource(live: LiveSession): SessionSource {
     files: () => api.sessionFiles(id()),
     anomalies: () => api.sessionAnomalies(id()),
     createLayoutClient: () => createLayoutClient(createBrowserLayoutWorker),
+    createTimelineClient: () => createTimelineClient(createBrowserTimelineWorker),
   };
 }
