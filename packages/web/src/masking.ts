@@ -8,13 +8,14 @@
  *   masker is swapped in place (switch, custom terms) without rebuilding the canvas. The same wrapper, with the identity
  *   masker, makes the exported viewer show bidi controls as visible markers (bidi.ts).
  * - the cross-session pages: each page masks the API answer it received with the functions below before rendering it
- *   (maskSessionFields, maskProject, maskProjectFiles, maskStats, maskAnomalyList, maskDiagnostics). Search snippets are
+ *   (maskSessionFields, maskProject, maskProjectFiles, maskStats, maskAnomalyList, maskAttention, maskDiagnostics). Search snippets are
  *   masked by the server (`mask=1`) and rendered as they come (search.ts).
  * Ids are never masked (they address sessions and nodes); links that would carry a path or a project id carry it
  * masked, and the page that receives it compares with sameMaskedValue.
  */
 import {
-  createMasker, FILE_ONLY_ORIGINS, isCutSummary, isCutTitle, MASK_FAILED_TEXT, type AnomalyListResponse, type Diagnostics, type Graph, type GraphNode,
+  createMasker, FILE_ONLY_ORIGINS, isCutSummary, isCutTitle, MASK_FAILED_TEXT, type AnomalyListResponse, type AttentionItem,
+  type AttentionResponse, type Diagnostics, type Graph, type GraphNode,
   type LearnedValue, type Masker, type MaskCategory, type NodeDetail, type Project, type ProjectFilesResponse, type Session,
   type FileOnlyOrigin, type FileSourceStatus, type SessionAnomaliesResponse, type SessionFilesResponse, type StatsResponse,
 } from '@agent-canvas/shared';
@@ -448,6 +449,27 @@ export function maskAnomalyList(r: AnomalyListResponse, m: PageMasker): AnomalyL
       ...(a.path !== undefined ? { path: m.text(a.path) } : {}),
       ...(a.toolName !== undefined ? { toolName: maybe(a.toolName, m.text) } : {}),
     })),
+  };
+}
+
+/**
+ * One attention item's texts: the session title (isCutTitle), the explanation (a node title or summary cut by the
+ * server, so isCutSummary: truncated mode when it ends with `…`) and the working directory. Ids, the key included,
+ * unchanged.
+ */
+export function maskAttentionItem(item: AttentionItem, m: PageMasker): AttentionItem {
+  if (!m.on) return item;
+  return { ...item, title: maybe(item.title, m.title), explanation: maybe(item.explanation, m.summary), cwd: maybe(item.cwd, m.text) };
+}
+
+/** The attention page's state: the main list, the hidden list and the undeterminable sessions' titles. */
+export function maskAttention(r: AttentionResponse, m: PageMasker): AttentionResponse {
+  if (!m.on) return r;
+  return {
+    ...r,
+    items: r.items.map((i) => maskAttentionItem(i, m)),
+    hidden: r.hidden.map((h) => ({ ...h, item: maskAttentionItem(h.item, m) })),
+    undeterminable: r.undeterminable.map((u) => ({ ...u, title: maybe(u.title, m.title) })),
   };
 }
 

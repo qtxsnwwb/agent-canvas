@@ -14,6 +14,8 @@ export type Route =
   | { page: 'notifications' }
   | { page: 'stats' }
   | { page: 'files' }
+  /** The sessions waiting for the user (attention spec 5). */
+  | { page: 'attention' }
   /** `query`: what follows `#/anomalies?` (the page's filter, see anomalies.ts parseAnomaliesQuery); '' when none. */
   | { page: 'anomalies'; query: string };
 
@@ -33,6 +35,7 @@ export function parseHash(hash: string): Route {
   if (h === '/notifications') return { page: 'notifications' };
   if (h === '/stats') return { page: 'stats' };
   if (h === '/files') return { page: 'files' };
+  if (h === '/attention') return { page: 'attention' };
   if (h === '/anomalies') return { page: 'anomalies', query: '' };
   if (h.startsWith('/anomalies?')) return { page: 'anomalies', query: h.slice('/anomalies?'.length) };
   if (h.startsWith('/s/')) {

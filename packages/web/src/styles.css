@@ -137,7 +137,8 @@ pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
 @keyframes wave { 0%, 60%, 100% { transform: rotate(0); } 10%, 30% { transform: rotate(16deg); } 20%, 40% { transform: rotate(-10deg); } }
 @media (prefers-reduced-motion: reduce) { .hero-wave { animation: none; } }
 .hero-sub { margin: 8px 0 0; color: var(--ink-soft); font-size: 14px; }
-.hero-live { color: #0b8fbf; }
+.hero-live { color: #0b8fbf; font-weight: 700; }
+a.hero-live:hover { text-decoration: underline; }
 .home { max-width: 1180px; margin: 0 auto; padding: 14px 24px 40px; }
 .chip {
   display: inline-block; max-width: 100%; box-sizing: border-box; padding: 0 9px; border-radius: 999px; background: var(--paper-deep);
@@ -308,6 +309,49 @@ header .header-link:hover { background: var(--paper); }
 header .header-link-next { margin-left: 8px; }
 header .header-link[aria-current="page"] { background: var(--sun); }
 .header-dot { display: inline-block; width: 8px; height: 8px; margin-left: 6px; border-radius: 50%; background: var(--mint); vertical-align: 1px; }
+/* The attention link's count: the pressed masking switch's colours (ink on card), readable on the link and on its
+   current-page yellow. */
+.header-count {
+  display: inline-block; min-width: 16px; margin-left: 6px; padding: 0 5px; box-sizing: border-box; border-radius: 999px;
+  background: var(--ink); color: var(--card); font-size: 11px; line-height: 16px; text-align: center; font-variant-numeric: tabular-nums;
+}
+
+/* The attention page (spec 5): rows like the anomaly list's; each row's buttons sit beside its link, not inside it.
+   Kinds use the session status pills (等你批准 = awaiting permission, 出错中断 = failed, 卡住了 = stale, 跑完了 = idle). */
+.attention-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 8px 16px; }
+.stats section.attention-card { padding: 6px 8px 8px; }
+.attention-card h2 { margin: 6px 8px 2px; }
+.attention-card .stats-caption { margin: 0 8px 6px; }
+.attention-items li + li { border-top: 1.5px dashed var(--line); }
+.attention-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.attention-link {
+  flex: 1 1 auto; display: flex; flex-direction: column; gap: 3px; min-width: 0; padding: 7px 8px; border: 1.5px solid transparent;
+  border-radius: 10px; color: var(--ink); font-size: 12.5px; overflow-wrap: anywhere;
+}
+.attention-link:hover { background: var(--paper); border-color: var(--line); }
+.attention-link:focus-visible { outline: 3px solid var(--grape); outline-offset: -2px; }
+.attention-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; }
+.attention-project { font-weight: 700; }
+.attention-title { min-width: 0; font-weight: 700; color: #3a5bd9; }
+.attention-link:hover .attention-title { text-decoration: underline; }
+.attention-time { margin-left: auto; color: var(--ink-soft); font-size: 11.5px; white-space: nowrap; }
+.attention-explanation { color: var(--ink-soft); }
+.attention-reason { flex: none; color: var(--ink-soft); font-size: 12px; white-space: nowrap; }
+.attention-btn {
+  flex: none; margin: 0; padding: 2px 12px; border: 2px solid var(--edge); border-radius: 999px; background: var(--card); color: var(--ink);
+  font: 700 12px/18px var(--font); box-shadow: var(--shadow-sm); cursor: pointer; white-space: nowrap;
+}
+.attention-row .attention-btn { margin-right: 4px; }
+.attention-btn:hover:not(:disabled) { background: var(--paper); }
+.attention-btn:disabled { cursor: default; opacity: 0.55; }
+.attention-btn:focus-visible { outline: 3px solid var(--grape); outline-offset: 2px; }
+.attention-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 0 0 14px; color: var(--ink-soft); font-size: 12.5px; }
+.attention-setting { flex-wrap: wrap; margin: 0 0 16px; font-weight: 600; }
+.attention-setting input { width: 84px; }
+@media (max-width: 640px) {
+  .attention-row { flex-wrap: wrap; }
+  .attention-row .attention-btn, .attention-reason { margin-left: 8px; margin-bottom: 6px; }
+}
 .notify { padding: 18px; max-width: 900px; }
 .notify h1 { font: 800 20px/1.3 var(--font-fun); margin: 0 0 4px; }
 .notify > .muted { margin: 0 0 14px; }
@@ -551,10 +595,10 @@ header .header-link[aria-current="page"] { background: var(--sun); }
 .anomaly-chip-count { padding: 0 7px; border-radius: 999px; background: var(--paper-deep); color: var(--ink-soft); font-size: 11px; font-variant-numeric: tabular-nums; }
 .anomaly-chip[aria-pressed="true"] .anomaly-chip-count { background: var(--card); color: var(--ink); }
 .stats section.anomaly-card { padding: 6px 8px 8px; }
-/* A narrow window: the header's six links fit on one line (the title keeps only its picture, the name stays for screen
-   readers). */
+/* A narrow window: the header's links stay on one line (the title keeps only its picture, the name stays for screen
+   readers); when the seven no longer fit (a phone), the header scrolls sideways by itself instead of the page. */
 @media (max-width: 640px) {
-  header { padding: 0 12px; }
+  header { padding: 0 12px; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
   header .header-link { flex: none; margin-left: 6px; padding: 2px 9px; white-space: nowrap; }
   .stats-project select { max-width: 100%; }
 }
