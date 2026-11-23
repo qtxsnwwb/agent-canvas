@@ -194,6 +194,11 @@ export interface Store {
    * stored first), at most `limit`. Served by node_main_time: reads only the rows returned.
    */
   mainTailNodes(sessionId: string, sinceIso: string | null, limit: number): GraphNode[];
+  /**
+   * The session's latest main-thread `text` node whose timestamp is at or after `sinceIso` (ties: the later stored), or
+   * null. Served by node_main_time, walking back from the newest: reads the main-thread nodes after that text node.
+   */
+  latestMainTextNode(sessionId: string, sinceIso: string): GraphNode | null;
   /** The session's nodes of any thread whose status is awaiting_permission, in stored order (node_awaiting_permission). */
   awaitingPermissionNodes(sessionId: string): GraphNode[];
   /**
@@ -421,6 +426,10 @@ export const ATTENTION_QUERIES = {
   mainTail: `SELECT body FROM node
      WHERE session_id = ? AND json_extract(body, '$.agentId') IS NULL AND json_extract(body, '$.timestamp') IS NOT NULL
      ORDER BY json_extract(body, '$.timestamp') DESC, rowid DESC LIMIT ?`,
+  lastMainText: `SELECT body FROM node
+     WHERE session_id = ? AND json_extract(body, '$.agentId') IS NULL AND json_extract(body, '$.timestamp') IS NOT NULL
+       AND json_extract(body, '$.timestamp') >= ? AND json_extract(body, '$.kind') = 'text'
+     ORDER BY json_extract(body, '$.timestamp') DESC, rowid DESC LIMIT 1`,
   awaitingPermission: `SELECT body FROM node
      WHERE session_id = ? AND json_extract(body, '$.status') = 'awaiting_permission' ORDER BY rowid`,
   hooksSince: `SELECT event_name, received_at, data, enc FROM raw_event
@@ -807,6 +816,7 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     .pluck();
   const selectMainTailSince = db.prepare(ATTENTION_QUERIES.mainTailSince).pluck();
   const selectMainTail = db.prepare(ATTENTION_QUERIES.mainTail).pluck();
+  const selectLastMainText = db.prepare(ATTENTION_QUERIES.lastMainText).pluck();
   const selectAwaitingPermission = db.prepare(ATTENTION_QUERIES.awaitingPermission).pluck();
   const selectHooksSince = db.prepare(ATTENTION_QUERIES.hooksSince);
   // Query text is only ever a bound parameter (already LIKE-escaped by likePattern). The prompt condition repeats
@@ -1288,6 +1298,10 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     mainTailNodes(sessionId, sinceIso, limit) {
       const rows = (sinceIso === null ? selectMainTail.all(sessionId, limit) : selectMainTailSince.all(sessionId, sinceIso, limit)) as string[];
       return rows.map((body) => JSON.parse(body) as GraphNode);
+    },
+    latestMainTextNode(sessionId, sinceIso) {
+      const body = selectLastMainText.get(sessionId, sinceIso) as string | undefined;
+      return body === undefined ? null : (JSON.parse(body) as GraphNode);
     },
     awaitingPermissionNodes(sessionId) {
       return (selectAwaitingPermission.all(sessionId) as string[]).map((body) => JSON.parse(body) as GraphNode);

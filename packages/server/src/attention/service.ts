@@ -53,6 +53,8 @@ export function errorMarkerAt(node: Pick<GraphNode, 'kind' | 'systemSubtype' | '
   return node.kind === 'system' && node.systemSubtype === 'interrupt' ? node.timestamp : (node.endedAt ?? node.timestamp);
 }
 
+const message = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
 const msOf = (iso: string | null | undefined): number => {
   const t = typeof iso === 'string' ? Date.parse(iso) : Number.NaN;
   return Number.isFinite(t) ? t : Number.NEGATIVE_INFINITY;
@@ -86,7 +88,18 @@ interface Tracked {
 }
 
 export interface AttentionServiceDeps {
-  store: Pick<Store, 'getMeta' | 'setMeta' | 'getSession' | 'sessionsActiveSince' | 'latestMainPromptAt' | 'mainTailNodes' | 'awaitingPermissionNodes' | 'hookEventsSince'>;
+  store: Pick<
+    Store,
+    | 'getMeta'
+    | 'setMeta'
+    | 'getSession'
+    | 'sessionsActiveSince'
+    | 'latestMainPromptAt'
+    | 'mainTailNodes'
+    | 'latestMainTextNode'
+    | 'awaitingPermissionNodes'
+    | 'hookEventsSince'
+  >;
   /** Current time (ms). */
   now(): number;
   /** The notification settings' stuckMinutes (read at every decision, also while notifications are off). */
@@ -95,9 +108,14 @@ export interface AttentionServiceDeps {
   isAbortedCall(sessionId: string, nodeId: string): boolean;
   /** Coalescing window of onUpdate (default COALESCE_MS). */
   coalesceMs?: number;
+  /** Failure lines (stderr): the session id and the error message, never content. */
+  log?: (line: string) => void;
 }
 
 type Result = { ok: true } | { ok: false; error: string };
+
+/** A session that could not be read is logged at most this often. */
+const LOG_EVERY_MS = 60_000;
 
 /**
  * Which sessions wait for the user (attention spec 3, 4): per-session marks kept in memory, loaded at construction for
@@ -105,6 +123,9 @@ type Result = { ok: true } | { ok: false; error: string };
  * costing O(1) store work except the rare ones that make a session be re-read (a tracked node removed or moved; one
  * session's batch larger than TAIL_LIMIT, as a rebuild's; a Cursor call aborted). Re-reading a session is a handful of
  * indexed reads, never its whole graph. Dismissals and the auto-hide limit are kept in meta (ATTENTION_META_KEY).
+ *
+ * Wiring (api/server.ts): pipeline.onChanges -> noteChanges, pipeline.onResync -> noteResync, pipeline.onHookStored ->
+ * noteHook, tick() every 30 s, close().
  */
 export class AttentionService {
   private readonly tracked = new Map<string, Tracked>();
@@ -115,6 +136,8 @@ export class AttentionService {
   private lastJson: string;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
+  /** Session id -> when its read failure was last logged (Date.now). */
+  private readonly lastLogged = new Map<string, number>();
 
   constructor(private readonly deps: AttentionServiceDeps) {
     this.coalesceMs = Math.max(0, deps.coalesceMs ?? COALESCE_MS);
@@ -123,16 +146,10 @@ export class AttentionService {
     let sessions: Session[] = [];
     try {
       sessions = deps.store.sessionsActiveSince(new Date(now - KEEP_MS).toISOString());
-    } catch {
-      // nothing at start; changes fill it in
+    } catch (err) {
+      this.log(`agent-canvas: attention: start-up state unavailable: ${message(err)}`); // changes fill it in
     }
-    for (const s of sessions) {
-      try {
-        this.load(s.id, s);
-      } catch {
-        this.tracked.delete(s.id);
-      }
-    }
+    for (const s of sessions) this.guard(s.id, () => this.load(s.id, s));
     for (const id of this.tracked.keys()) this.refreshView(id);
     this.lastJson = JSON.stringify(this.snapshot());
   }
@@ -148,15 +165,7 @@ export class AttentionService {
       else list.push(c);
     }
     let changed = false;
-    for (const [id, list] of bySession) {
-      const before = this.tracked.get(id)?.view ?? '';
-      try {
-        this.applySession(id, list);
-      } catch {
-        this.tracked.delete(id); // re-read on its next change
-      }
-      if (this.refreshView(id) !== before) changed = true;
-    }
+    for (const [id, list] of bySession) if (this.update(id, () => this.applySession(id, list))) changed = true;
     if (changed) this.scheduleFlush();
   }
 
@@ -166,16 +175,25 @@ export class AttentionService {
    */
   noteResync(sessionId: string): void {
     if (this.closed) return;
-    const before = this.tracked.get(sessionId)?.view ?? '';
-    try {
-      this.load(sessionId);
-    } catch {
-      this.tracked.delete(sessionId);
-    }
-    if (this.refreshView(sessionId) !== before) this.scheduleFlush();
+    if (this.update(sessionId, () => this.load(sessionId))) this.scheduleFlush();
   }
 
-  snapshot(): AttentionResponse {
+  /**
+   * A hook raw event of the session was committed (pipeline.onHookStored): its error hooks are read now, also when the
+   * hook changed nothing derived (a Cursor `stop` error after the poll closed the turn), as a restart would read them.
+   */
+  noteHook(sessionId: string): void {
+    if (this.closed) return;
+    const t = this.tracked.get(sessionId);
+    if (t === undefined || !HOOK_ORIGINS.has(t.session.origin)) return;
+    if (this.update(sessionId, () => this.readHooks(t))) this.scheduleFlush();
+  }
+
+  /**
+   * The current state. The hidden list only with `includeHidden` (it can be long: the page asks for it when shown);
+   * otherwise `hidden` is empty and `hiddenCount` gives its length. The live push (onUpdate) never carries it.
+   */
+  snapshot(options: { includeHidden?: boolean } = {}): AttentionResponse {
     const now = this.deps.now();
     const keepFrom = now - KEEP_MS;
     const hideFrom = now - this.autoHideHours * HOUR_MS;
@@ -203,11 +221,14 @@ export class AttentionService {
         if (since >= keepFrom) hidden.push({ item, reason: 'expired' });
       } else items.push(item);
     }
-    hidden.sort((a, b) => msOf(b.item.since) - msOf(a.item.since) || (a.item.key < b.item.key ? -1 : a.item.key > b.item.key ? 1 : 0));
+    if (options.includeHidden === true) {
+      hidden.sort((a, b) => msOf(b.item.since) - msOf(a.item.since) || (a.item.key < b.item.key ? -1 : a.item.key > b.item.key ? 1 : 0));
+    }
     undeterminable.sort((a, b) => b.at - a.at || (a.sessionId < b.sessionId ? -1 : 1));
     return {
       items: sortAttention(items),
-      hidden,
+      hidden: options.includeHidden === true ? hidden : [],
+      hiddenCount: hidden.length,
       undeterminable: undeterminable.map(({ sessionId, title, origin }) => ({ sessionId, title, origin })),
       runningCount,
       autoHideHours: this.autoHideHours,
@@ -348,7 +369,9 @@ export class AttentionService {
         // Nodes newer than this prompt arrived before it: which of them belong to its turn is read from the store.
         if (t.last !== null && t.last.ms > ms) return false;
         t.prompt = { id: n.id, at: n.timestamp, ms };
-        if (t.error !== null && t.error.atMs < ms) t.error = null;
+        // A marker node belongs to the turn of its own time (as a re-read sees it: the tail starts at the prompt), even
+        // a Cursor call that started before this prompt and was aborted after it.
+        if (t.error !== null && t.error.ms < ms) t.error = null;
         if (t.hookError !== null && t.hookError.ms < ms) t.hookError = null;
         if (t.reply !== null && t.reply.ms < ms) t.reply = null;
       } else if (ms === t.prompt.ms) t.prompt = { id: n.id, at: n.timestamp, ms };
@@ -389,6 +412,9 @@ export class AttentionService {
       t.prompt = { id: null, at: promptAt, ms: msOf(promptAt) };
       const tail = store.mainTailNodes(id, promptAt, TAIL_LIMIT);
       for (let i = tail.length - 1; i >= 0; i--) this.noteMainNode(t, tail[i]!);
+      // The turn's last reply also when more than TAIL_LIMIT main-thread nodes follow it.
+      const text = store.latestMainTextNode(id, promptAt);
+      t.reply = text !== null ? keep(text) : null;
     } else {
       const [lastNode] = store.mainTailNodes(id, null, 1);
       if (lastNode !== undefined) t.last = keep(lastNode);
@@ -512,6 +538,36 @@ export class AttentionService {
       return this.deps.isAbortedCall(sessionId, nodeId) === true;
     } catch {
       return false;
+    }
+  }
+
+  /** Runs a step on one session; true when what the session contributes to the response changed. */
+  private update(id: string, step: () => void): boolean {
+    const before = this.tracked.get(id)?.view ?? '';
+    this.guard(id, step);
+    return this.refreshView(id) !== before;
+  }
+
+  /** A step that throws drops the session (read again on its next change) and is logged. */
+  private guard(id: string, step: () => void): void {
+    try {
+      step();
+    } catch (err) {
+      this.tracked.delete(id);
+      const at = Date.now();
+      const last = this.lastLogged.get(id);
+      if (last !== undefined && at - last < LOG_EVERY_MS) return;
+      if (this.lastLogged.size >= 1_000) for (const [key, when] of this.lastLogged) if (at - when >= LOG_EVERY_MS) this.lastLogged.delete(key);
+      this.lastLogged.set(id, at);
+      this.log(`agent-canvas: attention: session ${id} could not be read: ${message(err)}`);
+    }
+  }
+
+  private log(line: string): void {
+    try {
+      this.deps.log?.(line);
+    } catch {
+      // nothing more to do
     }
   }
 

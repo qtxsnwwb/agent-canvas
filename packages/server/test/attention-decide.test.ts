@@ -22,10 +22,14 @@ function session(status: SessionStatus, over: Partial<Session> = {}): Session {
   };
 }
 
-/** A turn asked at T0 - 10 min whose last main-thread node is at T0 - 1 min (a reply). */
+/**
+ * A turn asked at T0 - 10 min whose last main-thread node is at T0 - 1 min (a reply). The session's lastActivityAt is
+ * that of the last main-thread node unless given.
+ */
 function marks(status: SessionStatus, over: Partial<SessionMarks> = {}, sessionOver: Partial<Session> = {}): SessionMarks {
+  const lastActivityAt = over.lastMainNode?.timestamp ?? iso(T0 - MIN);
   return {
-    session: session(status, sessionOver),
+    session: session(status, { lastActivityAt, ...sessionOver }),
     lastPromptAt: iso(T0 - 10 * MIN),
     errorAt: null,
     errorNode: null,
@@ -119,6 +123,24 @@ describe('decideAttention: priority and identity', () => {
     expect(decideAttention(marks('awaiting_input', err), T0 + 60_000, 15)!.key).toBe(decideAttention(marks('idle', err), T0, 15)!.key);
   });
 
+  test('an error marker counts only when the turn ended with it: a later main-thread node makes it finished (new key)', () => {
+    // The marker is the last thing on the main thread (also when it is that node itself): error.
+    const atEnd = decideAttention(marks('idle', { errorAt: iso(T0 - MIN), errorNode: { id: 'r1', text: 'Interrupted' } }), T0, 15)!;
+    expect(atEnd.kind).toBe('error');
+    // The main thread went on after it (e.g. a background task's completion, no new prompt) and stopped normally.
+    const after = marks('idle', {
+      errorAt: iso(T0 - 5 * MIN),
+      errorNode: { id: 'x1', text: 'Interrupted' },
+      lastMainNode: { id: 'r2', timestamp: iso(T0 - MIN), text: 'Text' },
+      lastReply: { id: 'r2', text: '测试全部通过' },
+    });
+    const item = decideAttention(after, T0, 15)!;
+    expect(item).toMatchObject({ kind: 'finished', since: iso(T0 - MIN), explanation: '测试全部通过', nodeId: 'r2' });
+    expect(item.key).not.toBe(decideAttention({ ...after, lastMainNode: { id: 'x1', timestamp: iso(T0 - 5 * MIN), text: 'Interrupted' } }, T0, 15)!.key);
+    // A hook marker later than the last node still ends the turn.
+    expect(decideAttention(marks('idle', { errorAt: iso(T0 - MIN + 1) }), T0, 15)!.kind).toBe('error');
+  });
+
   test('a later error marker turns finished into error with a new key', () => {
     const finished = decideAttention(marks('idle'), T0, 15)!;
     const error = decideAttention(marks('idle', { errorAt: iso(T0 + 1_000) }), T0 + 2_000, 15)!;
@@ -152,6 +174,17 @@ describe('decideAttention: stuck threshold', () => {
     expect(decideAttention(quiet(T0 - 15 * MIN + 1_000), T0, 15)).toBeNull();
     expect(decideAttention(quiet(T0 - 15 * MIN - 1_000), T0, 15)!.kind).toBe('stuck');
   });
+  test('quiet means the later of the last main-thread node and lastActivityAt (as the notifications); since stays the main node', () => {
+    // A subagent kept the session active until 5 min ago while the main thread waited 20 min: not stuck.
+    const busy = marks('running', { lastMainNode: { id: 'dispatch', timestamp: iso(T0 - 20 * MIN), text: 'Explore' } }, { lastActivityAt: iso(T0 - 5 * MIN) });
+    expect(decideAttention(busy, T0, 15)).toBeNull();
+    // Silence since then for stuckMinutes: stuck, since = the main-thread node (its key does not move with the subagent).
+    expect(decideAttention(busy, T0 - 5 * MIN + 15 * MIN, 15)).toBeNull();
+    expect(decideAttention(busy, T0 - 5 * MIN + 15 * MIN + 1, 15)).toMatchObject({ kind: 'stuck', since: iso(T0 - 20 * MIN), nodeId: 'dispatch' });
+    // An unparsable lastActivityAt falls back to the main-thread node.
+    expect(decideAttention({ ...busy, session: { ...busy.session, lastActivityAt: 'garbage' } }, T0, 15)!.kind).toBe('stuck');
+  });
+
   test('the threshold follows the argument', () => {
     expect(decideAttention(quiet(T0 - 6 * MIN), T0, 5)!.kind).toBe('stuck');
     expect(decideAttention(quiet(T0 - 6 * MIN), T0, 10)).toBeNull();

@@ -36,11 +36,12 @@ export function cutExplanation(text: string | null | undefined): string | null {
 /**
  * The session's attention item now, or null (spec 3, plan Global Constraints). In priority order:
  * - awaiting_permission -> `permission` since the waiting node (else the last main-thread node);
- * - idle / awaiting_input with an error marker -> `error` since the marker;
- * - running and the last main-thread node more than `stuckMinutes` ago -> `stuck` since that node;
+ * - idle / awaiting_input with an error marker no main-thread node is later than -> `error` since the marker;
+ * - running and quiet for more than `stuckMinutes` (since the later of the last main-thread node and
+ *   Session.lastActivityAt, as the notification engine) -> `stuck` since the last main-thread node;
  * - idle / awaiting_input -> `finished` since the last main-thread node.
- * No main-thread prompt, `ended`, `sourceDeleted`: null. "Latest activity" is always the last main-thread node, never
- * Session.lastActivityAt (hooks, subagents and late records move that one).
+ * No main-thread prompt, `ended`, `sourceDeleted`: null. `since` is always a main-thread time, never
+ * Session.lastActivityAt (hooks, subagents and late records move that one), so a key survives them.
  */
 export function decideAttention(m: SessionMarks, nowMs: number, stuckMinutes: number): AttentionItem | null {
   const s = m.session;
@@ -66,11 +67,18 @@ export function decideAttention(m: SessionMarks, nowMs: number, stuckMinutes: nu
     }
     case 'idle':
     case 'awaiting_input':
-      if (m.errorAt !== null) return item('error', m.errorAt, m.errorNode?.text ?? null, m.errorNode?.id ?? last?.id ?? null);
+      // The turn ended with the error only when nothing came after the marker on the main thread (spec 3 "以出错或中断
+      // 结束"): a main thread that went on without a new prompt (a background task's completion) and stopped is finished.
+      if (m.errorAt !== null && !(Date.parse(lastAt) > Date.parse(m.errorAt))) {
+        return item('error', m.errorAt, m.errorNode?.text ?? null, m.errorNode?.id ?? last?.id ?? null);
+      }
       return item('finished', lastAt, m.lastReply?.text ?? null, m.lastReply?.id ?? last?.id ?? null);
     case 'running': {
-      const quietMs = nowMs - Date.parse(lastAt);
-      return quietMs > stuckMinutes * 60_000 ? item('stuck', lastAt, last?.text ?? null, last?.id ?? null) : null;
+      // Quiet as the notifications see it (the later of the last main-thread node and lastActivityAt, so a working
+      // subagent keeps it from "stuck"); `since` stays the main-thread node, so the key does not move with the subagent.
+      const activity = Date.parse(s.lastActivityAt);
+      const quietFrom = Number.isFinite(activity) ? Math.max(Date.parse(lastAt), activity) : Date.parse(lastAt);
+      return nowMs - quietFrom > stuckMinutes * 60_000 ? item('stuck', lastAt, last?.text ?? null, last?.id ?? null) : null;
     }
     default:
       return null;

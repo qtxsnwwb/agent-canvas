@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
-import { afterEach, beforeEach, describe, expect, test } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import {
   attentionKey,
   type AttentionResponse,
@@ -13,10 +13,11 @@ import {
   type Session,
   type SessionStatus,
 } from '@agent-canvas/shared';
-import { ATTENTION_META_KEY, AttentionService } from '../src/attention/service.js';
+import { ATTENTION_META_KEY, AttentionService, type AttentionServiceDeps } from '../src/attention/service.js';
+import { compact, rebuild } from '../src/cli.js';
 import { loadConfig } from '../src/config.js';
 import { Pipeline } from '../src/pipeline.js';
-import { ATTENTION_QUERIES, openStore, type Store } from '../src/store/store.js';
+import { ATTENTION_INDEX_NOTICE, ATTENTION_QUERIES, openStore, type RawEvent, type Store } from '../src/store/store.js';
 import { userPrompt, assistantBlock } from './fixtures.js';
 
 // In-memory stores (temp dirs where a file is needed); changes go through store.applyChanges and then noteChanges.
@@ -28,19 +29,25 @@ const MIN = 60 * SEC;
 const HOUR = 60 * MIN;
 const DAY = 24 * HOUR;
 
+/** snapshot() with the hidden list (the live push and the default leave it out). */
+const ALL = { includeHidden: true } as const;
+
 let now: number;
 let stuckMinutes: number;
 let aborted: Set<string>;
 let store: Store;
+let logs: string[];
 const services: AttentionService[] = [];
 
-function makeService(): AttentionService {
+function makeService(over: Partial<AttentionServiceDeps> = {}): AttentionService {
   const svc = new AttentionService({
     store,
     now: () => now,
     stuckMinutes: () => stuckMinutes,
     isAbortedCall: (sessionId, nodeId) => aborted.has(`${sessionId}/${nodeId}`),
     coalesceMs: 0,
+    log: (line) => logs.push(line),
+    ...over,
   });
   services.push(svc);
   return svc;
@@ -50,6 +57,7 @@ beforeEach(() => {
   now = T0;
   stuckMinutes = 15;
   aborted = new Set();
+  logs = [];
   store = openStore(':memory:');
 });
 afterEach(() => {
@@ -114,6 +122,35 @@ function hookRow(sessionId: string, eventName: string, receivedAt: number, body:
   store.insertRaw({ source: 'hook', origin, receivedAt: iso(receivedAt), eventName, sessionId, payload: JSON.stringify({ session_id: sessionId, hook_event_name: eventName, ...body }) });
 }
 
+/**
+ * A real Pipeline over a temp dir and this test's store (Claude Code transcript `proj/s1.jsonl`). The service clock is
+ * set to the real time: hooks are stamped with it.
+ */
+async function withPipeline(fn: (p: { pipeline: Pipeline; real: number; write: (events: RawEvent[]) => Promise<void> }) => Promise<void>): Promise<void> {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-attention-'));
+  const config = loadConfig({}, { deepseekDir: null, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [], qwenDir: null, geminiDir: null, grokDir: null, copilotDir: null, projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), rescanMs: 200, cursorDbPath: null });
+  const file = path.join(config.projectsDir, 'proj', 's1.jsonl');
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  const pipeline = new Pipeline(store, config);
+  const real = Date.now();
+  now = real;
+  const write = async (events: RawEvent[]): Promise<void> => {
+    await fs.appendFile(file, events.map((e) => (e.source === 'transcript' ? e.line : '') + '\n').join(''));
+    await pipeline.ingestFile(file);
+  };
+  try {
+    await fn({ pipeline, real, write });
+  } finally {
+    await pipeline.close();
+    await pipeline.idle();
+    await fs.rm(tmp, { recursive: true, force: true, maxRetries: 5 });
+  }
+}
+async function claudeHook(pipeline: Pipeline, eventName: string, body: Record<string, unknown> = {}): Promise<void> {
+  pipeline.ingestHook(eventName, 's1', JSON.stringify({ session_id: 's1', hook_event_name: eventName, ...body }));
+  await pipeline.idle();
+}
+
 /** A finished turn: prompt at T0 - 10 min, a reply at T0 - 1 min, idle. */
 function finishedTurn(sid = 's1', origin: Origin = 'claude'): void {
   apply([up(sid, 'running', { origin }), prompt(sid, `${sid}-p1`, T0 - 10 * MIN), reply(sid, `${sid}-r1`, T0 - MIN), up(sid, 'idle', { origin })]);
@@ -124,7 +161,7 @@ describe('items', () => {
   test('a finished turn: since = the last main-thread node, explanation = the reply, node = the reply', () => {
     const svc = makeService();
     finishedTurn();
-    const r = svc.snapshot();
+    const r = svc.snapshot(ALL);
     expect(r.items).toEqual([
       {
         key: attentionKey('s1', 'finished', iso(T0 - MIN)),
@@ -145,7 +182,7 @@ describe('items', () => {
   test('running sessions are counted, not listed; a session with no prompt has no item', () => {
     const svc = makeService();
     apply([up('s1', 'running'), prompt('s1', 'p1', T0 - MIN), up('s2', 'idle')]);
-    const r = svc.snapshot();
+    const r = svc.snapshot(ALL);
     expect(r.items).toEqual([]);
     expect(r.runningCount).toBe(1);
   });
@@ -156,7 +193,7 @@ describe('items', () => {
     finishedTurn('b');
     apply([prompt('b', 'b-p2', T0 - 30 * SEC), reply('b', 'b-r2', T0 - 20 * SEC), up('b', 'idle')]);
     apply([up('c', 'running'), prompt('c', 'c-p1', T0 - 5 * MIN), tool('c', 'c-t1', T0 - 4 * MIN), up('c', 'awaiting_permission')]);
-    expect(kindsOf(svc.snapshot())).toEqual(['c:permission', 'b:finished', 'a:finished']);
+    expect(kindsOf(svc.snapshot(ALL))).toEqual(['c:permission', 'b:finished', 'a:finished']);
   });
 
   test('a Cursor call failed because the conversation was aborted is an error marker (isAbortedCall)', () => {
@@ -164,19 +201,19 @@ describe('items', () => {
     apply([up('c1', 'running', { origin: 'cursor' }), prompt('c1', 'p1', T0 - 5 * MIN), tool('c1', 'call1', T0 - 4 * MIN)]);
     aborted.add('c1/call1');
     apply([patch('c1', 'call1', { status: 'failed', endedAt: iso(T0 - 3 * MIN) }), up('c1', 'idle', { origin: 'cursor' })]);
-    expect(svc.snapshot().items[0]).toMatchObject({ kind: 'error', since: iso(T0 - 3 * MIN), nodeId: 'call1' });
+    expect(svc.snapshot(ALL).items[0]).toMatchObject({ kind: 'error', since: iso(T0 - 3 * MIN), nodeId: 'call1' });
     // A failed call that was not aborted is no marker.
     const other = makeService();
     apply([prompt('c1', 'p2', T0 - 2 * MIN), tool('c1', 'call2', T0 - MIN), patch('c1', 'call2', { status: 'failed', endedAt: iso(T0 - 30 * SEC) }), up('c1', 'idle', { origin: 'cursor' })], other);
-    expect(other.snapshot().items[0]).toMatchObject({ kind: 'finished', since: iso(T0 - MIN) });
+    expect(other.snapshot(ALL).items[0]).toMatchObject({ kind: 'finished', since: iso(T0 - MIN) });
   });
 
   test('an interrupt node of the main thread makes the turn an error; a new prompt starts a fresh turn', () => {
     const svc = makeService();
     apply([up('s1', 'running'), prompt('s1', 'p1', T0 - 5 * MIN), add(node('s1', 'x1', T0 - 4 * MIN, { kind: 'system', systemSubtype: 'interrupt', title: 'Interrupted', summary: '请求超时' })), up('s1', 'idle')]);
-    expect(svc.snapshot().items[0]).toMatchObject({ kind: 'error', since: iso(T0 - 4 * MIN), explanation: '请求超时', nodeId: 'x1' });
+    expect(svc.snapshot(ALL).items[0]).toMatchObject({ kind: 'error', since: iso(T0 - 4 * MIN), explanation: '请求超时', nodeId: 'x1' });
     apply([up('s1', 'running'), prompt('s1', 'p2', T0 - 3 * MIN), reply('s1', 'r2', T0 - 2 * MIN), up('s1', 'idle')]);
-    expect(svc.snapshot().items[0]).toMatchObject({ kind: 'finished', since: iso(T0 - 2 * MIN), explanation: '已经改好' });
+    expect(svc.snapshot(ALL).items[0]).toMatchObject({ kind: 'finished', since: iso(T0 - 2 * MIN), explanation: '已经改好' });
   });
 
   test('a subagent waiting for permission gives permission with the subagent node', () => {
@@ -184,13 +221,13 @@ describe('items', () => {
     apply([up('s1', 'running'), prompt('s1', 'p1', T0 - 5 * MIN), tool('s1', 'dispatch', T0 - 4 * MIN, { kind: 'subagent', title: 'Explore', toolName: 'Task' })]);
     apply([tool('s1', 'sub-t1', T0 - 3 * MIN, { agentId: 'ag1', summary: 'rm -rf build' }), tool('s1', 'main-t2', T0 - 2 * MIN)]);
     apply([patch('s1', 'sub-t1', { status: 'awaiting_permission' }), up('s1', 'awaiting_permission')]);
-    const item = svc.snapshot().items[0]!;
+    const item = svc.snapshot(ALL).items[0]!;
     expect(item).toMatchObject({ kind: 'permission', since: iso(T0 - 3 * MIN), nodeId: 'sub-t1', explanation: 'Bash · rm -rf build' });
     // Restart: the same item from the store.
-    expect(makeService().snapshot().items).toEqual([item]);
+    expect(makeService().snapshot(ALL).items).toEqual([item]);
     // Approved: back to running, no item.
     apply([patch('s1', 'sub-t1', { status: 'succeeded' }), up('s1', 'running')]);
-    expect(svc.snapshot().items).toEqual([]);
+    expect(svc.snapshot(ALL).items).toEqual([]);
   });
 
   test('the origins that cannot tell finished from running are only counted as undeterminable', () => {
@@ -198,7 +235,7 @@ describe('items', () => {
     for (const origin of ['grok', 'copilot', 'doubao'] as const) finishedTurn(`u-${origin}`, origin);
     apply([up('u-run', 'running', { origin: 'doubao' }), prompt('u-run', 'p', T0 - 99 * MIN)]);
     finishedTurn('c1', 'codex');
-    const r = svc.snapshot();
+    const r = svc.snapshot(ALL);
     expect(kindsOf(r)).toEqual(['c1:finished']);
     expect(r.hidden).toEqual([]);
     expect(r.runningCount).toBe(0);
@@ -211,45 +248,170 @@ describe('items', () => {
     finishedTurn('a');
     finishedTurn('b');
     apply([up('a', 'ended'), up('b', 'idle', { sourceDeleted: true })]);
-    expect(svc.snapshot()).toMatchObject({ items: [], hidden: [], undeterminable: [], runningCount: 0 });
+    expect(svc.snapshot(ALL)).toMatchObject({ items: [], hidden: [], undeterminable: [], runningCount: 0 });
   });
 
   test('a session whose last main-thread node is older than 30 days is not a candidate', () => {
     const svc = makeService();
     finishedTurn();
     now = T0 - MIN + 30 * DAY;
-    expect(svc.snapshot().hidden).toHaveLength(1);
+    expect(svc.snapshot(ALL).hidden).toHaveLength(1);
     now += 1;
-    expect(svc.snapshot()).toMatchObject({ items: [], hidden: [] });
+    expect(svc.snapshot(ALL)).toMatchObject({ items: [], hidden: [] });
   });
 
   test('node_removed of the last main-thread node re-reads the tail', () => {
     const svc = makeService();
     finishedTurn();
     apply([reply('s1', 'r2', T0 - 30 * SEC, '第二段回复')]);
-    expect(svc.snapshot().items[0]).toMatchObject({ since: iso(T0 - 30 * SEC), explanation: '第二段回复' });
+    expect(svc.snapshot(ALL).items[0]).toMatchObject({ since: iso(T0 - 30 * SEC), explanation: '第二段回复' });
     apply([{ type: 'node_removed', sessionId: 's1', id: 'r2' }]);
-    expect(svc.snapshot().items[0]).toMatchObject({ since: iso(T0 - MIN), explanation: '已经改好', nodeId: 's1-r1' });
+    expect(svc.snapshot(ALL).items[0]).toMatchObject({ since: iso(T0 - MIN), explanation: '已经改好', nodeId: 's1-r1' });
+  });
+});
+
+describe('review round 1', () => {
+  test('I-3: subagent work keeps a session out of stuck as for the notifications; then silence makes it stuck, since = the main node', () => {
+    const svc = makeService();
+    apply([up('s1', 'running', { lastActivityAt: iso(T0 - 21 * MIN) }), prompt('s1', 'p1', T0 - 21 * MIN), tool('s1', 'dispatch', T0 - 20 * MIN, { kind: 'subagent', title: 'Explore', toolName: 'Task' })]);
+    for (let m = 20; m >= 0; m--) {
+      now = T0 - m * MIN;
+      apply([up('s1', 'running', { lastActivityAt: iso(now) }), tool('s1', `sub-${m}`, now, { agentId: 'ag1' })]);
+      svc.tick();
+      expect(svc.snapshot(ALL)).toMatchObject({ items: [], runningCount: 1 });
+    }
+    now = T0 + 15 * MIN;
+    svc.tick();
+    expect(svc.snapshot(ALL).items).toEqual([]);
+    now += 1;
+    svc.tick();
+    expect(svc.snapshot(ALL).items[0]).toMatchObject({ kind: 'stuck', since: iso(T0 - 20 * MIN), nodeId: 'dispatch', explanation: 'Explore' });
+  });
+
+  test('M-1: more than TAIL_LIMIT main-thread nodes after the last reply: the reply survives a restart', () => {
+    const svc = makeService();
+    apply([up('s1', 'running'), prompt('s1', 'p1', T0 - 2 * HOUR), reply('s1', 'plan', T0 - 2 * HOUR + SEC, '先说明一下计划')]);
+    for (let b = 0; b < 6; b++) {
+      const batch: Change[] = [];
+      for (let i = 0; i < 100; i++) batch.push(tool('s1', `t${b}-${i}`, T0 - HOUR + (b * 100 + i) * SEC, { status: 'succeeded' }));
+      apply(batch);
+    }
+    apply([up('s1', 'idle')]);
+    const item = svc.snapshot(ALL).items[0]!;
+    expect(item).toMatchObject({ kind: 'finished', explanation: '先说明一下计划', nodeId: 'plan' });
+    expect(makeService().snapshot(ALL).items).toEqual([item]);
+  });
+
+  test('M-2: a Cursor call started before a new prompt and aborted after it: the same live and after a restart (node time decides the turn)', () => {
+    const svc = makeService();
+    apply([up('c1', 'running', { origin: 'cursor' }), prompt('c1', 'p1', T0 - 10 * MIN), tool('c1', 'call1', T0 - 6 * MIN)]);
+    aborted.add('c1/call1');
+    apply([patch('c1', 'call1', { status: 'failed', endedAt: iso(T0 - 4 * MIN) })]);
+    // The next prompt is dated between the call's start and its end.
+    apply([prompt('c1', 'p2', T0 - 5 * MIN), reply('c1', 'r2', T0 - 3 * MIN), up('c1', 'idle', { origin: 'cursor' })]);
+    const live = svc.snapshot(ALL);
+    expect(live.items[0]).toMatchObject({ kind: 'finished', since: iso(T0 - 3 * MIN) });
+    expect(makeService().snapshot(ALL)).toEqual(live);
+  });
+
+  test('M-4: a session that cannot be read is logged (session id and error, no content) and retried on its next change', () => {
+    let fail = true;
+    const flaky: Store = {
+      ...store,
+      mainTailNodes(sessionId, sinceIso, limit) {
+        if (fail) throw new Error('disk I/O error');
+        return store.mainTailNodes(sessionId, sinceIso, limit);
+      },
+    };
+    const svc = makeService({ store: flaky });
+    finishedTurn();
+    expect(svc.snapshot(ALL).items).toEqual([]);
+    expect(logs).toEqual(['agent-canvas: attention: session s1 could not be read: disk I/O error']);
+    fail = false;
+    apply([up('s1', 'idle')]);
+    expect(svc.snapshot(ALL).items[0]!.kind).toBe('finished');
+  });
+
+  test('M-6: the default snapshot and the live push carry no hidden list, only its count', async () => {
+    const svc = makeService();
+    const got: AttentionResponse[] = [];
+    svc.onUpdate((r) => got.push(r));
+    finishedTurn('a');
+    finishedTurn('b');
+    svc.dismiss(svc.snapshot().items.find((i) => i.sessionId === 'a')!.key);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(svc.snapshot()).toMatchObject({ hidden: [], hiddenCount: 1 });
+    expect(svc.snapshot(ALL)).toMatchObject({ hiddenCount: 1, hidden: [{ reason: 'dismissed' }] });
+    expect(got.at(-1)).toMatchObject({ hidden: [], hiddenCount: 1 });
+    expect(got.at(-1)!.items.map((i) => i.sessionId)).toEqual(['b']);
+  });
+});
+
+describe('the one-time index build notice', () => {
+  let tmp: string;
+  beforeEach(async () => {
+    vi.stubEnv('AGENT_CANVAS_CODEX_DIR', ''); // never the real ~/.codex/sessions
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-attention-notice-'));
+  });
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    await fs.rm(tmp, { recursive: true, force: true, maxRetries: 5 });
+  });
+  /** A database from before the attention indexes. */
+  const oldDatabase = (dataDir: string): void => {
+    openStore(path.join(dataDir, 'data.db')).close();
+    const db = new Database(path.join(dataDir, 'data.db'));
+    db.exec('DROP INDEX node_main_time; DROP INDEX node_awaiting_permission; DROP INDEX raw_event_session_hook');
+    db.close();
+  };
+
+  test('rebuild and compact print it too (start already did)', async () => {
+    const projectsDir = path.join(tmp, 'projects');
+    const dataDir = path.join(tmp, 'data');
+    await fs.mkdir(projectsDir, { recursive: true });
+    await fs.mkdir(dataDir, { recursive: true });
+    oldDatabase(dataDir);
+    const lines: string[] = [];
+    rebuild({ projectsDir, dataDir }, { log: (l) => lines.push(l) });
+    expect(lines).toEqual([ATTENTION_INDEX_NOTICE]);
+    oldDatabase(dataDir);
+    const compactLines: string[] = [];
+    await compact({ projectsDir, dataDir }, { log: (l) => compactLines.push(l), freeBytes: () => 10 ** 12 });
+    expect(compactLines).toEqual([ATTENTION_INDEX_NOTICE]);
+    const again: string[] = [];
+    rebuild({ projectsDir, dataDir }, { log: (l) => again.push(l) });
+    expect(again).toEqual([]);
   });
 });
 
 describe('Review Focus', () => {
-  test('1: idle, then ~60 s later awaiting_input (idle_prompt): same episode, a dismissal survives', () => {
-    const svc = makeService();
-    finishedTurn();
-    const first = svc.snapshot().items[0]!;
-    expect(svc.dismiss(first.key)).toEqual({ ok: true });
-    now += 60 * SEC;
-    apply([up('s1', 'awaiting_input', { lastActivityAt: iso(now) })]);
-    const r = svc.snapshot();
-    expect(r.items).toEqual([]);
-    expect(r.hidden).toEqual([{ item: first, reason: 'dismissed' }]);
+  test('1 (pipeline): idle, then the idle_prompt hook turns it awaiting_input: same episode, a dismissal survives', async () => {
+    await withPipeline(async ({ pipeline, real, write }) => {
+      const svc = makeService();
+      pipeline.onChanges((c) => svc.noteChanges(c));
+      await write([userPrompt('u1', null, '修一下', { timestamp: iso(real - 3 * MIN) }), assistantBlock('a1', 'u1', { type: 'text', text: '改好了' }, { timestamp: iso(real - 2 * MIN) })]);
+      await claudeHook(pipeline, 'UserPromptSubmit');
+      await claudeHook(pipeline, 'Stop');
+      expect(store.getSession('s1')!.status).toBe('idle');
+      const first = svc.snapshot(ALL).items[0]!;
+      expect(first).toMatchObject({ kind: 'finished', since: iso(real - 2 * MIN), explanation: '改好了' });
+      expect(svc.dismiss(first.key)).toEqual({ ok: true });
+      const activityBefore = store.getSession('s1')!.lastActivityAt;
+      await new Promise((r) => setTimeout(r, 5)); // the hook comes later (about 60 s in Claude Code)
+      await claudeHook(pipeline, 'Notification', { notification_type: 'idle_prompt', message: 'Claude is waiting for your input' });
+      expect(store.getSession('s1')).toMatchObject({ status: 'awaiting_input' });
+      expect(store.getSession('s1')!.lastActivityAt > activityBefore).toBe(true);
+      const r = svc.snapshot(ALL);
+      expect(r.items).toEqual([]);
+      expect(r.hidden).toEqual([{ item: first, reason: 'dismissed' }]);
+      expect(makeService().snapshot(ALL)).toEqual(r);
+    });
   });
 
   test('2: a subagent keeps writing after the main turn ended: the main item and its since do not move', () => {
     const svc = makeService();
     finishedTurn();
-    const first = svc.snapshot().items[0]!;
+    const first = svc.snapshot(ALL).items[0]!;
     for (let i = 0; i < 5; i++) {
       now += 10 * SEC;
       apply([
@@ -259,7 +421,7 @@ describe('Review Focus', () => {
         add(node('s1', `sub-text-${i}`, now, { agentId: 'ag1', summary: '子代理的话' })),
         up('s1', 'idle', { lastActivityAt: iso(now) }),
       ]);
-      expect(svc.snapshot().items).toEqual([first]);
+      expect(svc.snapshot(ALL).items).toEqual([first]);
     }
   });
 
@@ -268,31 +430,22 @@ describe('Review Focus', () => {
     apply([up('s1', 'running'), prompt('s1', 'p1', T0 - 5 * MIN), reply('s1', 'r1', T0 - 4 * MIN)]);
     hookRow('s1', 'StopFailure', T0 - 3 * MIN, { error: 'rate_limit' });
     apply([up('s1', 'idle', { lastActivityAt: iso(T0 - 3 * MIN) })]);
-    const item = svc.snapshot().items[0]!;
+    const item = svc.snapshot(ALL).items[0]!;
     expect(item).toMatchObject({ kind: 'error', since: iso(T0 - 3 * MIN), explanation: null });
     expect(store.getGraph('s1')!.nodes.map((n) => n.id)).toEqual(['p1', 'r1']);
     const restarted = makeService();
-    expect(restarted.snapshot().items).toEqual([item]);
+    expect(restarted.snapshot(ALL).items).toEqual([item]);
     // A subagent's StopFailure, a StopFailure of another origin's hook and one before the prompt are not markers.
     apply([up('s2', 'running'), prompt('s2', 'p1', T0 - 5 * MIN), reply('s2', 'r1', T0 - 4 * MIN)]);
     hookRow('s2', 'StopFailure', T0 - 6 * MIN);
     hookRow('s2', 'StopFailure', T0 - 3 * MIN, { agent_id: 'ag1' });
     hookRow('s2', 'Stop', T0 - 3 * MIN);
     apply([up('s2', 'idle')]);
-    expect(svc.snapshot().items.find((i) => i.sessionId === 's2')).toMatchObject({ kind: 'finished' });
+    expect(svc.snapshot(ALL).items.find((i) => i.sessionId === 's2')).toMatchObject({ kind: 'finished' });
   });
 
   test('3 (pipeline): the hook row is committed before the changes it causes are emitted; a restart agrees', async () => {
-    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-attention-'));
-    try {
-      const config = loadConfig({}, { deepseekDir: null, workbuddyDirs: [], codebuddyDir: null, doubaoDirs: [], qwenDir: null, geminiDir: null, grokDir: null, copilotDir: null, projectsDir: path.join(tmp, 'projects'), dataDir: path.join(tmp, 'data'), rescanMs: 200, cursorDbPath: null });
-      const file = path.join(config.projectsDir, 'proj', 's1.jsonl');
-      await fs.mkdir(path.dirname(file), { recursive: true });
-      const real = Date.now();
-      now = real;
-      const events = [userPrompt('u1', null, '修一下', { timestamp: iso(real - 2 * MIN) }), assistantBlock('a1', 'u1', { type: 'text', text: '好的' }, { timestamp: iso(real - MIN) })];
-      await fs.writeFile(file, events.map((e) => (e.source === 'transcript' ? e.line : '') + '\n').join(''));
-      const pipeline = new Pipeline(store, config);
+    await withPipeline(async ({ pipeline, real, write }) => {
       const svc = makeService();
       const seenAtEmit: string[][] = [];
       pipeline.onChanges((changes) => {
@@ -300,40 +453,97 @@ describe('Review Focus', () => {
         seenAtEmit.push(store.hookEventsSince('s1', iso(real - 10 * MIN)).map((h) => h.eventName));
         svc.noteChanges(changes);
       });
-      await pipeline.ingestFile(file);
-      pipeline.ingestHook('UserPromptSubmit', 's1', JSON.stringify({ session_id: 's1', hook_event_name: 'UserPromptSubmit' }));
-      await pipeline.idle();
+      await write([userPrompt('u1', null, '修一下', { timestamp: iso(real - 2 * MIN) }), assistantBlock('a1', 'u1', { type: 'text', text: '好的' }, { timestamp: iso(real - MIN) })]);
+      await claudeHook(pipeline, 'UserPromptSubmit');
       expect(store.getSession('s1')!.status).toBe('running');
-      pipeline.ingestHook('StopFailure', 's1', JSON.stringify({ session_id: 's1', hook_event_name: 'StopFailure', error: 'rate_limit' }));
-      await pipeline.idle();
+      await claudeHook(pipeline, 'StopFailure', { error: 'rate_limit' });
       expect(store.getSession('s1')!.status).toBe('idle');
       expect(seenAtEmit.at(-1)).toEqual(['UserPromptSubmit', 'StopFailure']);
-      const item = svc.snapshot().items[0]!;
+      const item = svc.snapshot(ALL).items[0]!;
       expect(item.kind).toBe('error');
       expect(Date.parse(item.since)).toBeGreaterThanOrEqual(real);
-      expect(makeService().snapshot().items).toEqual([item]);
-      await pipeline.close();
-    } finally {
-      await fs.rm(tmp, { recursive: true, force: true, maxRetries: 5 });
-    }
+      expect(makeService().snapshot(ALL).items).toEqual([item]);
+    });
+  });
+
+  test('I-1 (pipeline): the main thread goes on after a StopFailure without a prompt and ends normally: finished, a new key', async () => {
+    await withPipeline(async ({ pipeline, real, write }) => {
+      const svc = makeService();
+      pipeline.onChanges((c) => svc.noteChanges(c));
+      await write([userPrompt('u1', null, '跑一下测试', { timestamp: iso(real - 5 * MIN) }), assistantBlock('a1', 'u1', { type: 'text', text: '开始跑' }, { timestamp: iso(real - 4 * MIN) })]);
+      await claudeHook(pipeline, 'UserPromptSubmit');
+      await claudeHook(pipeline, 'StopFailure', { error: 'rate_limit' });
+      const error = svc.snapshot(ALL).items[0]!;
+      expect(error.kind).toBe('error');
+      expect(svc.dismiss(error.key)).toEqual({ ok: true });
+      // A background task's completion arrives as a <task-notification> user record (no prompt node); Claude Code goes on.
+      await write([
+        userPrompt('u2', 'a1', '<task-notification>后台任务完成</task-notification>', { timestamp: iso(real + MIN) }),
+        assistantBlock('a2', 'u2', { type: 'text', text: '测试全部通过' }, { timestamp: iso(real + 2 * MIN) }),
+      ]);
+      expect(store.getGraph('s1')!.nodes.filter((n) => n.kind === 'prompt')).toHaveLength(1);
+      await claudeHook(pipeline, 'Stop');
+      now = real + 3 * MIN;
+      const r = svc.snapshot(ALL);
+      expect(r.items).toHaveLength(1);
+      expect(r.items[0]).toMatchObject({ kind: 'finished', since: iso(real + 2 * MIN), explanation: '测试全部通过' });
+      expect(r.items[0]!.key).not.toBe(error.key);
+      expect(makeService().snapshot(ALL)).toEqual(r);
+    });
+  });
+
+  test('I-2: an error hook that changes nothing in the session is seen live (noteHook), as after a restart', () => {
+    const svc = makeService();
+    apply([up('c1', 'running', { origin: 'cursor' }), prompt('c1', 'p1', T0 - 5 * MIN), reply('c1', 'r1', T0 - 4 * MIN), up('c1', 'idle', { origin: 'cursor' })]);
+    expect(svc.snapshot(ALL).items[0]!.kind).toBe('finished');
+    // A subagent conversation's stop filed under its owner is no marker; the session's own stop with status error is.
+    const stop = (conversation: string, at: number): void =>
+      void store.insertRaw({ source: 'hook', origin: 'cursor', receivedAt: iso(at), eventName: 'stop', sessionId: 'c1', payload: JSON.stringify({ conversation_id: conversation, status: 'error' }) });
+    stop('sub-conv', T0 - 3 * MIN);
+    svc.noteHook('c1');
+    expect(svc.snapshot(ALL).items[0]!.kind).toBe('finished');
+    stop('c1', T0 - 2 * MIN);
+    svc.noteHook('c1');
+    const item = svc.snapshot(ALL).items[0]!;
+    expect(item).toMatchObject({ kind: 'error', since: iso(T0 - 2 * MIN) });
+    expect(makeService().snapshot(ALL).items).toEqual([item]);
+  });
+
+  test('I-2 (pipeline): onHookStored is called once the hook row is committed, also when the hook changes nothing', async () => {
+    await withPipeline(async ({ pipeline, real, write }) => {
+      const stored: [string, string[]][] = [];
+      let batches = 0;
+      pipeline.onChanges(() => (batches += 1));
+      pipeline.onHookStored((sessionId) => stored.push([sessionId, store.hookEventsSince(sessionId, iso(real - HOUR)).map((h) => h.eventName)]));
+      // Records stamped later than the hooks: a hook moves no lastActivityAt.
+      await write([userPrompt('u1', null, '修一下', { timestamp: iso(real + HOUR) }), assistantBlock('a1', 'u1', { type: 'text', text: '好' }, { timestamp: iso(real + HOUR + 1) })]);
+      await claudeHook(pipeline, 'Stop');
+      const before = batches;
+      await claudeHook(pipeline, 'Stop');
+      expect(batches).toBe(before); // nothing changed, no batch
+      expect(stored).toEqual([
+        ['s1', ['Stop']],
+        ['s1', ['Stop', 'Stop']],
+      ]);
+    });
   });
 
   test('5: awaiting_permission for weeks: main list until the limit, hidden until 30 days, then the dismissal is pruned', () => {
     const svc = makeService();
     apply([up('s1', 'running'), prompt('s1', 'p1', T0 - 2 * MIN), tool('s1', 't1', T0 - MIN), patch('s1', 't1', { status: 'awaiting_permission' }), up('s1', 'awaiting_permission')]);
-    const item = svc.snapshot().items[0]!;
+    const item = svc.snapshot(ALL).items[0]!;
     expect(item).toMatchObject({ kind: 'permission', since: iso(T0 - MIN) });
     now = T0 - MIN + 24 * HOUR;
-    expect(svc.snapshot().items).toEqual([item]);
+    expect(svc.snapshot(ALL).items).toEqual([item]);
     now += 1;
-    expect(svc.snapshot()).toMatchObject({ items: [], hidden: [{ item, reason: 'expired' }] });
+    expect(svc.snapshot(ALL)).toMatchObject({ items: [], hidden: [{ item, reason: 'expired' }] });
     expect(svc.dismiss(item.key)).toEqual({ ok: true });
-    expect(svc.snapshot().hidden).toEqual([{ item, reason: 'dismissed' }]);
+    expect(svc.snapshot(ALL).hidden).toEqual([{ item, reason: 'dismissed' }]);
     expect(JSON.parse(store.getMeta(ATTENTION_META_KEY)!).dismissed).toEqual([item.key]);
     now = T0 - MIN + 30 * DAY;
-    expect(svc.snapshot().hidden).toHaveLength(1);
+    expect(svc.snapshot(ALL).hidden).toHaveLength(1);
     now += 1;
-    expect(svc.snapshot()).toMatchObject({ items: [], hidden: [] });
+    expect(svc.snapshot(ALL)).toMatchObject({ items: [], hidden: [] });
     expect(svc.setAutoHideHours(48)).toEqual({ ok: true, value: 48 });
     expect(JSON.parse(store.getMeta(ATTENTION_META_KEY)!)).toEqual({ autoHideHours: 48, dismissed: [] });
   });
@@ -344,12 +554,12 @@ describe('dismiss, restore, auto-hide', () => {
     const svc = makeService();
     finishedTurn('a');
     finishedTurn('b');
-    const a = svc.snapshot().items.find((i) => i.sessionId === 'a')!;
+    const a = svc.snapshot(ALL).items.find((i) => i.sessionId === 'a')!;
     expect(svc.dismiss(a.key)).toEqual({ ok: true });
-    expect(kindsOf(svc.snapshot())).toEqual(['b:finished']);
+    expect(kindsOf(svc.snapshot(ALL))).toEqual(['b:finished']);
     // The user answers in the terminal; the next turn finishes: a new episode.
     apply([up('a', 'running'), prompt('a', 'a-p2', T0 + MIN), reply('a', 'a-r2', T0 + 2 * MIN), up('a', 'idle')]);
-    const r = svc.snapshot();
+    const r = svc.snapshot(ALL);
     expect(r.items.map((i) => i.key)).toContain(attentionKey('a', 'finished', iso(T0 + 2 * MIN)));
     expect(r.hidden).toEqual([]);
   });
@@ -357,48 +567,48 @@ describe('dismiss, restore, auto-hide', () => {
   test('the same episode coming back (running, then idle with no new main-thread node) stays dismissed', () => {
     const svc = makeService();
     finishedTurn();
-    svc.dismiss(svc.snapshot().items[0]!.key);
+    svc.dismiss(svc.snapshot(ALL).items[0]!.key);
     apply([up('s1', 'running')]);
     apply([up('s1', 'idle')]);
-    expect(svc.snapshot().items).toEqual([]);
+    expect(svc.snapshot(ALL).items).toEqual([]);
   });
 
   test('restore brings a dismissed item back; unknown keys are refused', () => {
     const svc = makeService();
     finishedTurn();
-    const item = svc.snapshot().items[0]!;
+    const item = svc.snapshot(ALL).items[0]!;
     expect(svc.dismiss('s1|finished|2020-01-01T00:00:00.000Z')).toMatchObject({ ok: false });
     expect(svc.dismiss('nonsense')).toMatchObject({ ok: false });
     expect(svc.restore(item.key)).toMatchObject({ ok: false });
     svc.dismiss(item.key);
     expect(svc.dismiss(item.key)).toEqual({ ok: true }); // idempotent
     expect(svc.restore(item.key)).toEqual({ ok: true });
-    expect(svc.snapshot()).toMatchObject({ items: [item], hidden: [] });
+    expect(svc.snapshot(ALL)).toMatchObject({ items: [item], hidden: [] });
     // Kept across a restart.
     svc.dismiss(item.key);
-    expect(makeService().snapshot().hidden).toEqual([{ item, reason: 'dismissed' }]);
+    expect(makeService().snapshot(ALL).hidden).toEqual([{ item, reason: 'dismissed' }]);
   });
 
   test('auto-hide boundary: since exactly the limit ago stays, 1 ms more is hidden as expired', () => {
     const svc = makeService();
     finishedTurn();
-    const item = svc.snapshot().items[0]!;
+    const item = svc.snapshot(ALL).items[0]!;
     now = T0 - MIN + 24 * HOUR;
-    expect(svc.snapshot().items).toEqual([item]);
+    expect(svc.snapshot(ALL).items).toEqual([item]);
     now += 1;
-    expect(svc.snapshot()).toMatchObject({ items: [], hidden: [{ item, reason: 'expired' }] });
+    expect(svc.snapshot(ALL)).toMatchObject({ items: [], hidden: [{ item, reason: 'expired' }] });
   });
 
   test('changing the limit applies at once (and is kept); invalid values are refused', () => {
     const svc = makeService();
     finishedTurn();
     now = T0 + 2 * HOUR;
-    expect(svc.snapshot().items).toHaveLength(1);
+    expect(svc.snapshot(ALL).items).toHaveLength(1);
     expect(svc.setAutoHideHours(1)).toEqual({ ok: true, value: 1 });
-    expect(svc.snapshot()).toMatchObject({ items: [], autoHideHours: 1 });
-    expect(svc.snapshot().hidden[0]!.reason).toBe('expired');
+    expect(svc.snapshot(ALL)).toMatchObject({ items: [], autoHideHours: 1 });
+    expect(svc.snapshot(ALL).hidden[0]!.reason).toBe('expired');
     for (const bad of [0, 721, 1.5, '24', null]) expect(svc.setAutoHideHours(bad)).toMatchObject({ ok: false });
-    expect(makeService().snapshot().autoHideHours).toBe(1);
+    expect(makeService().snapshot(ALL).autoHideHours).toBe(1);
   });
 
   test('the hidden list keeps 30 days, newest first; a dismissed and expired item is listed as dismissed', () => {
@@ -407,11 +617,11 @@ describe('dismiss, restore, auto-hide', () => {
     apply([up('b', 'running'), prompt('b', 'b-p', T0 - 10 * DAY), reply('b', 'b-r', T0 - 10 * DAY + MIN), up('b', 'idle')]);
     apply([up('c', 'running'), prompt('c', 'c-p', T0 - 40 * DAY), reply('c', 'c-r', T0 - 40 * DAY + MIN), up('c', 'idle')]);
     now = T0 + 2 * DAY;
-    const r = svc.snapshot();
+    const r = svc.snapshot(ALL);
     expect(r.items).toEqual([]);
     expect(r.hidden.map((h) => `${h.item.sessionId}:${h.reason}`)).toEqual(['a:expired', 'b:expired']);
     svc.dismiss(r.hidden[1]!.item.key);
-    expect(svc.snapshot().hidden.map((h) => `${h.item.sessionId}:${h.reason}`)).toEqual(['a:expired', 'b:dismissed']);
+    expect(svc.snapshot(ALL).hidden.map((h) => `${h.item.sessionId}:${h.reason}`)).toEqual(['a:expired', 'b:dismissed']);
   });
 
   test('dismissal records stay bounded after 10,000 dismissals', () => {
@@ -423,7 +633,7 @@ describe('dismiss, restore, auto-hide', () => {
       at += 3 * HOUR;
       now = at + SEC;
       apply([prompt('s1', `p${i}`, at), reply('s1', `r${i}`, at + 1), up('s1', 'idle', { lastActivityAt: iso(at + 1) })]);
-      const item = svc.snapshot().items[0]!;
+      const item = svc.snapshot(ALL).items[0]!;
       expect(svc.dismiss(item.key)).toEqual({ ok: true });
       maxStored = Math.max(maxStored, (JSON.parse(store.getMeta(ATTENTION_META_KEY)!) as { dismissed: string[] }).dismissed.length);
     }
@@ -437,9 +647,9 @@ describe('dismiss, restore, auto-hide', () => {
 
   test('a damaged stored value is read as the defaults', () => {
     store.setMeta(ATTENTION_META_KEY, '{not json');
-    expect(makeService().snapshot().autoHideHours).toBe(24);
+    expect(makeService().snapshot(ALL).autoHideHours).toBe(24);
     store.setMeta(ATTENTION_META_KEY, JSON.stringify({ autoHideHours: 9999, dismissed: 'x' }));
-    expect(makeService().snapshot().autoHideHours).toBe(24);
+    expect(makeService().snapshot(ALL).autoHideHours).toBe(24);
   });
 });
 
@@ -488,7 +698,7 @@ describe('updates', () => {
     apply([up('s1', 'running'), prompt('s1', 'p1', T0 - MIN), tool('s1', 't1', T0, { title: 'Bash' })]);
     now = T0 + 14 * MIN;
     svc.tick();
-    expect(svc.snapshot().items).toEqual([]);
+    expect(svc.snapshot(ALL).items).toEqual([]);
     now = T0 + 15 * MIN + 1;
     svc.tick();
     expect(got.at(-1)!.items[0]).toMatchObject({ kind: 'stuck', since: iso(T0), explanation: 'Bash', nodeId: 't1' });
@@ -506,17 +716,17 @@ describe('updates', () => {
     const batches: Change[][] = [
       [up('a', 'running'), prompt('a', 'a-p', T0 - 9 * MIN), reply('a', 'a-r', T0 - 8 * MIN), up('a', 'idle')],
       [up('b', 'running'), prompt('b', 'b-p', T0 - 7 * MIN), tool('b', 'b-t', T0 - 6 * MIN), patch('b', 'b-t', { status: 'awaiting_permission' }), up('b', 'awaiting_permission')],
-      [up('c', 'running'), prompt('c', 'c-p', T0 - 60 * MIN), tool('c', 'c-t', T0 - 59 * MIN)],
+      [up('c', 'running', { lastActivityAt: iso(T0 - 59 * MIN) }), prompt('c', 'c-p', T0 - 60 * MIN), tool('c', 'c-t', T0 - 59 * MIN)],
       [up('d', 'running'), prompt('d', 'd-p', T0 - 5 * MIN), add(node('d', 'd-x', T0 - 4 * MIN, { kind: 'system', systemSubtype: 'interrupt', title: 'Turn failed' })), up('d', 'idle')],
     ];
     for (const b of batches) apply(b);
-    svc.dismiss(svc.snapshot().items.find((i) => i.sessionId === 'a')!.key);
-    const before = svc.snapshot();
+    svc.dismiss(svc.snapshot(ALL).items.find((i) => i.sessionId === 'a')!.key);
+    const before = svc.snapshot(ALL);
     expect(kindsOf(before)).toEqual(['b:permission', 'd:error', 'c:stuck']);
     store.clearDerived();
     for (const b of batches) apply(b);
-    expect(svc.snapshot()).toEqual(before);
-    expect(makeService().snapshot()).toEqual(before);
+    expect(svc.snapshot(ALL)).toEqual(before);
+    expect(makeService().snapshot(ALL)).toEqual(before);
   });
 
   test('noteResync re-reads a session re-derived behind the change stream', () => {
@@ -526,7 +736,7 @@ describe('updates', () => {
     store.applyChanges([reply('s1', 'r9', T0 - 10 * SEC, '重新推导')]);
     apply([up('s1', 'idle', { lastActivityAt: iso(T0) })]);
     svc.noteResync('s1');
-    expect(svc.snapshot().items[0]).toMatchObject({ since: iso(T0 - 10 * SEC), explanation: '重新推导' });
+    expect(svc.snapshot(ALL).items[0]).toMatchObject({ since: iso(T0 - 10 * SEC), explanation: '重新推导' });
   });
 });
 
@@ -549,6 +759,9 @@ describe('store queries', () => {
     expect(store.mainTailNodes('s1', iso(T0 - 5 * MIN), 10).map((n) => n.id)).toEqual(['r2', 'r1', 'p1']);
     expect(store.mainTailNodes('s1', iso(T0 - 5 * MIN), 2).map((n) => n.id)).toEqual(['r2', 'r1']);
     expect(store.mainTailNodes('s1', null, 10).map((n) => n.id)).toEqual(['r2', 'r1', 'p1', 'p0']);
+    expect(store.latestMainTextNode('s1', iso(T0 - 5 * MIN))!.id).toBe('r2');
+    expect(store.latestMainTextNode('s1', iso(T0 - MIN))).toBeNull();
+    expect(store.latestMainTextNode('s2', iso(T0 - 5 * MIN))!.id).toBe('other');
   });
 
   test('hookEventsSince: the session hooks received at/after since, with their parsed bodies', () => {
@@ -579,6 +792,7 @@ describe('store queries', () => {
         const plan = (sql: string, ...params: unknown[]): string => (db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...params) as { detail: string }[]).map((r) => r.detail).join(' | ');
         expect(plan(ATTENTION_QUERIES.mainTailSince, 's', 't', 1)).toMatch(/USING INDEX node_main_time/);
         expect(plan(ATTENTION_QUERIES.mainTail, 's', 1)).toMatch(/USING INDEX node_main_time/);
+        expect(plan(ATTENTION_QUERIES.lastMainText, 's', 't')).toMatch(/USING INDEX node_main_time/);
         expect(plan(ATTENTION_QUERIES.awaitingPermission, 's')).toMatch(/USING INDEX node_awaiting_permission/);
         expect(plan(ATTENTION_QUERIES.hooksSince, 's', 't')).toMatch(/USING INDEX raw_event_session_hook/);
         for (const sql of Object.values(ATTENTION_QUERIES)) expect(plan(sql, ...Array(sql.split('?').length - 1).fill('x'))).not.toMatch(/TEMP B-TREE|^SCAN|\| SCAN/);

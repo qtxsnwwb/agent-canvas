@@ -48,8 +48,13 @@ export interface AttentionHidden {
 export interface AttentionResponse {
   /** The main list, sorted by sortAttention. */
   items: AttentionItem[];
-  /** Items whose `since` is within ATTENTION_LIMITS.keepDays, newest first. */
+  /**
+   * Items out of the main list whose `since` is within ATTENTION_LIMITS.keepDays, newest first. Only when asked for
+   * (it can be long); empty in the live push and the default answer, where hiddenCount gives their number.
+   */
   hidden: AttentionHidden[];
+  /** Number of such items (whether or not `hidden` lists them). */
+  hiddenCount: number;
   /** Sessions of ATTENTION_UNDETERMINABLE_ORIGINS that would otherwise be candidates. */
   undeterminable: { sessionId: string; title: string | null; origin: Origin }[];
   /** Sessions running and not stuck. */
