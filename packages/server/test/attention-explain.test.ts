@@ -23,6 +23,8 @@ describe('permissionText: the command or the file path, not the input JSON', () 
     expect(permissionText('Edit', 'Edit', summary)).toBe('Edit · C:\\work\\demo\\src\\a.ts');
     expect(permissionText('Write', 'Write', summarize({ path: '/work/app/README.md', content: 'x' }))).toBe('Write · /work/app/README.md');
     expect(permissionText('NotebookEdit', 'NotebookEdit', summarize({ notebook_path: '/w/n.ipynb' }))).toBe('NotebookEdit · /w/n.ipynb');
+    // A search names its pattern before the directory it searches.
+    expect(permissionText('Grep', 'Grep', summarize({ path: '/work/app', pattern: 'TODO' }))).toBe('Grep · TODO');
   });
 
   test('a summary cut at SUMMARY_MAX: the field is still found, cut inside it too', () => {

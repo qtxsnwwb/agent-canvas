@@ -5,8 +5,11 @@ import type { Origin } from '@agent-canvas/shared';
  * by the page, as every explanation.
  */
 
-/** Input fields that name what a call does, in this order: the command, else the file, else the address / pattern. */
-const PERMISSION_FIELDS = ['command', 'cmd', 'file_path', 'filePath', 'absolute_path', 'notebook_path', 'path', 'url', 'pattern'] as const;
+/**
+ * Input fields that name what a call does, in this order: the command, else the file, else the search pattern (a
+ * Grep / Glob call's pattern says more than the directory it searches), else the directory or address.
+ */
+const PERMISSION_FIELDS = ['command', 'cmd', 'file_path', 'filePath', 'absolute_path', 'notebook_path', 'pattern', 'path', 'url'] as const;
 
 /**
  * A waiting call's line: its tool name and what it is about to do — the command (a Codex command array joined with
