@@ -485,6 +485,19 @@ test('升级：已有数据库打开时从 raw_event 回填一次 hook_stat，�
 const WAL_TIMING_SCALE = Math.max(1, Number(process.env.AGENT_CANVAS_TIMING_SCALE) || 1);
 const CHECKPOINT_WAIT_MS = 2500 * WAL_TIMING_SCALE;
 
+/** The checkpoint sequence number in a WAL file's header (bytes 12-15, big-endian): SQLite bumps it each time the WAL restarts. */
+async function walCheckpointSeq(walPath: string): Promise<number> {
+  const fsp = await import('node:fs/promises');
+  const fh = await fsp.open(walPath, 'r');
+  try {
+    const buf = Buffer.alloc(16);
+    await fh.read(buf, 0, 16, 0);
+    return buf.readUInt32BE(12);
+  } finally {
+    await fh.close();
+  }
+}
+
 test('文件数据库的 WAL 由后台线程检查点，主连接不做自动检查点', async () => {
   const fsp = await import('node:fs/promises');
   const os = await import('node:os');
@@ -501,15 +514,27 @@ test('文件数据库的 WAL 由后台线程检查点，主连接不做自动检
     const walAfterFirst = (await fsp.stat(`${file}-wal`)).size;
     // No automatic checkpoint on the main connection: the WAL holds all ~12 MB (SQLite's default would cap it near 4 MB).
     expect(walAfterFirst).toBeGreaterThan(8_000_000);
-    // The worker checkpoints within a second or two; the WAL is then reused from its start instead of growing.
-    await new Promise((r) => setTimeout(r, CHECKPOINT_WAIT_MS));
+    // The worker checkpoints; once every frame is copied, the next write restarts the WAL from its start, which bumps
+    // the checkpoint sequence number in the WAL header. Waited for by that number, not for a fixed time: a passive
+    // checkpoint of this WAL took more than 7.5 s on GitHub's Windows runner. Small writes 500 ms apart, as in the next
+    // test, so that a checkpoint can finish between them.
+    const seq0 = await walCheckpointSeq(`${file}-wal`);
+    const deadline = Date.now() + 20_000 * WAL_TIMING_SCALE;
+    let restarted = false;
+    for (let i = 0; !restarted && Date.now() < deadline; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      s.applyChanges([{ type: 'node_added', node: mkNode(`poll${i}`, 's1'), detail: {} }]);
+      restarted = (await walCheckpointSeq(`${file}-wal`)) !== seq0;
+    }
+    expect(restarted, 'the background checkpointer completed a checkpoint and the WAL restarted').toBe(true);
+    // The WAL is then reused from its start instead of growing.
     write(1);
     expect((await fsp.stat(`${file}-wal`)).size).toBeLessThan(walAfterFirst * 1.5);
   } finally {
     s.close();
     await fsp.rm(dir, { recursive: true, force: true, maxRetries: 10 });
   }
-}, 30_000 * WAL_TIMING_SCALE);
+}, 60_000 * WAL_TIMING_SCALE);
 
 test('WAL 在检查点后被截断到上限，不保留导入时的峰值大小', async () => {
   const fsp = await import('node:fs/promises');
