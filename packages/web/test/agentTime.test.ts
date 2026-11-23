@@ -202,28 +202,75 @@ describe('blocking by origin (spec 3.1, Background detection)', () => {
     expectInvariant(tl);
   });
 
-  test('an origin without message ids (Gemini, …): a step at the dispatch time is the same message, a later one carries on', () => {
-    const same = timeline(graph([
+  test('a background launch stops blocking at a foreground dispatch of the next message, which then holds the main thread (review round 1)', () => {
+    // The shape the Claude normaliser gives: message m1 launches agB in the background (its dispatch stays open until
+    // agB ends at 60000); message m2 is only a foreground dispatch of agA (no text or thinking before it).
+    const tl = timeline(graph([
       prompt('p1', 't1', 0),
-      dispatch('d1', 't1', null, 'A', 1000, 6000),
-      tool('par', 't1', null, 1000, 3000),
-      text('x', 't1', 6500),
-    ]), 'gemini');
-    expect(thread(same, 'A').waitMs).toBe(3000); // 3000-6000: the parallel call kept the main thread busy before
-    expect(same.mainOwnMs).toBe(3500);
-    expectInvariant(same);
+      dispatch('dB', 't1', null, 'agB', 1000, 60_000, { messageId: 'm1', title: 'Watcher' }),
+      tool('b1', null, 'agB', 1100, 60_000),
+      dispatch('dA', 't1', null, 'agA', 2000, 9500, { messageId: 'm2', title: 'Explore' }),
+      tool('a1', null, 'agA', 4000, 9000),
+      text('reply', 't1', 10_000, { messageId: 'm3' }),
+    ]));
+    expect(tl.totalMs).toBe(10_000);
+    expect(thread(tl, 'agB').waitMs).toBe(1000); // only 1000-2000, the gap before the next message
+    expect(thread(tl, 'agA').waitMs).toBe(7500); // 2000-9500
+    expect(tl.mainOwnMs).toBe(1500);
+    expect(tl.longestWaitId).toBe('agA');
+    expectInvariant(tl);
+  });
+
+  test('parallel dispatches of one message still wait together (the later one does not cut the earlier)', () => {
+    const tl = timeline(graph([
+      prompt('p1', 't1', 0),
+      dispatch('d1', 't1', null, 'A', 1000, 8000, { messageId: 'm1' }),
+      dispatch('d2', 't1', null, 'B', 1002, 5000, { messageId: 'm1' }),
+      text('x', 't1', 8500, { messageId: 'm2' }),
+    ]));
+    expect(thread(tl, 'A').waitMs).toBe(7000);
+    expect(thread(tl, 'B').waitMs).toBe(0);
+    expectInvariant(tl);
+  });
+
+  test('Cursor (no message ids): calls of one batch share their parent; a step with another parent carries on', () => {
+    // Cursor batches parallel calls under one parent (cursor.ts), at slightly different times.
+    const batch = timeline(graph([
+      prompt('p1', 't1', 0),
+      node('th', 'thinking', 't1', null, 900, { parentId: 'p1' }),
+      dispatch('d1', 't1', null, 'A', 1000, 6000, { parentId: 'th' }),
+      tool('par', 't1', null, 1005, 3000, { parentId: 'th' }),
+      text('x', 't1', 6500, { parentId: 'par' }),
+    ]), 'cursor');
+    expect(thread(batch, 'A').waitMs).toBe(3005); // 1000-1005 and 3000-6000: the parallel call kept the main thread busy between
+    expect(batch.mainOwnMs).toBe(3495);
+    expectInvariant(batch);
     const later = timeline(graph([
       prompt('p1', 't1', 0),
-      dispatch('d1', 't1', null, 'A', 1000, 6000),
-      tool('next', 't1', null, 1001, 3000),
-      text('x', 't1', 6500),
-    ]), 'gemini');
+      node('th', 'thinking', 't1', null, 900, { parentId: 'p1' }),
+      dispatch('d1', 't1', null, 'A', 1000, 6000, { parentId: 'th' }),
+      tool('next', 't1', null, 1001, 3000, { parentId: 'd1' }),
+      text('x', 't1', 6500, { parentId: 'next' }),
+    ]), 'cursor');
     expect(thread(later, 'A').waitMs).toBe(1);
     expectInvariant(later);
   });
 
-  test('Qwen / WorkBuddy foreground dispatch behaves like Claude foreground', () => {
-    for (const origin of ['qwen', 'workbuddy', 'codebuddy', 'grok'] as const) {
+  test('Grok (no message ids, every node chained to the one before): a call right after a dispatch carries on', () => {
+    // Grok gives no batch marker (grok.ts parentOf: always the previous node), so a call issued with the dispatch cannot
+    // be told from the next message: it ends the block (a known limit).
+    const tl = timeline(graph([
+      prompt('p1', 't1', 0),
+      dispatch('d1', 't1', null, 'A', 1000, 6000, { parentId: 'p1' }),
+      tool('c2', 't1', null, 1200, 3000, { parentId: 'd1' }),
+      text('x', 't1', 6500, { parentId: 'c2' }),
+    ]), 'grok');
+    expect(thread(tl, 'A').waitMs).toBe(200);
+    expectInvariant(tl);
+  });
+
+  test('Gemini / Qwen / WorkBuddy / CodeBuddy foreground dispatch behaves like Claude foreground', () => {
+    for (const origin of ['gemini', 'qwen', 'workbuddy', 'codebuddy'] as const) {
       const tl = timeline(graph([
         prompt('p1', 't1', 0),
         dispatch('d1', 't1', null, 'A', 1000, 9000, { messageId: 'm1' }),
@@ -296,6 +343,7 @@ describe('blocking by origin (spec 3.1, Background detection)', () => {
     // Turns [0, 12500] and [20000, 26500].
     expect(tl.totalMs).toBe(19_000);
     expect(tl.turns).toBe(2);
+    expect(tl.turnSpans.map((t) => [t.turnKey, t.startMs - EPOCH, t.endMs - EPOCH])).toEqual([['t1', 0, 12_500], ['t2', 20_000, 26_500]]);
     expect(thread(tl, 'thr-b').waitMs).toBe(7000); // all of w1: beta ends last (11800 > 8000)
     expect(thread(tl, 'thr-a').waitMs).toBe(5800); // w2
     expect(tl.mainOwnMs).toBe(6200); // nothing during the main thread's own work 1200-5000
@@ -333,9 +381,34 @@ describe('total (spec 3.2)', () => {
       tool('b2', null, 'bg', 1_500_000, 2_000_000),
       text('x', 't1', 1000, { messageId: 'm2' }),
       prompt('p2', 't2', 3_000_000),
+      text('y', 't2', 3_001_000, { messageId: 'm3' }),
     ]));
     // Turn 1 ends at 1000; the agent's segment [1000, 2000000] covers the gap until 2000000; the rest is a break.
     expect(rel(busy.axis.breaks)).toEqual([[2_000_000, 3_000_000]]);
+  });
+
+  test('a turn that is only a prompt: in turnSpans, but no zero-length piece in the total, and no break ends at it', () => {
+    const tl = timeline(graph([
+      prompt('p1', 't1', 0),
+      text('x', 't1', 1000),
+      prompt('p2', 't2', 2_000_000),
+      prompt('p3', 't3', 3_000_000),
+      text('y', 't3', 3_001_000),
+    ]));
+    expect(tl.turns).toBe(3);
+    expect(tl.turnSpans.map((t) => [t.turnKey, t.startMs - EPOCH, t.endMs - EPOCH])).toEqual([
+      ['t1', 0, 1000], ['t2', 2_000_000, 2_000_000], ['t3', 3_000_000, 3_001_000],
+    ]);
+    expect(tl.totalMs).toBe(2000);
+    expect(rel(tl.root.segments)).toEqual([[0, 1000], [3_000_000, 3_001_000]]);
+    expect(rel(tl.axis.breaks)).toEqual([[1000, 3_000_000]]);
+  });
+
+  test('a session that is one prompt so far: total 0, the axis at the prompt', () => {
+    const tl = timeline(graph([prompt('p1', 't1', 5000)]));
+    expect(tl.totalMs).toBe(0);
+    expect(tl.root.segments).toEqual([]);
+    expect(rel([tl.axis])).toEqual([[5000, 5001]]);
   });
 
   test('a turn in progress runs to now', () => {
@@ -515,6 +588,38 @@ describe('missing data (spec 3.1, 3.6)', () => {
     expectInvariant(tl);
   });
 
+  test("a dispatch whose time cannot be read is placed (and ordered) at its turn's start, as the waterfall does (review round 1)", () => {
+    const tl = timeline(graph([
+      prompt('p1', 't1', 0),
+      text('x1', 't1', 1000, { messageId: 'm1' }),
+      prompt('p2', 't2', 10_000),
+      dispatch('d', 't2', null, 'A', 0, 19_000, { timestamp: 'garbage', durationMs: null, messageId: 'm2' }),
+      tool('a1', null, 'A', 10_100, 18_000),
+      text('x2', 't2', 19_500, { messageId: 'm3' }),
+    ]));
+    expect(thread(tl, 'A').waitMs).toBe(9000); // d placed at 10000, waits to 19000
+    expect(tl.totalMs).toBe(10_500);
+    expect(tl.mainOwnMs).toBe(1500);
+    expect(rel(thread(tl, 'A').segments)).toEqual([[10_000, 19_000]]);
+    expectInvariant(tl);
+  });
+
+  test('an agent whose first step cannot be read is still hung under the thread that dispatched it (review round 1)', () => {
+    const tl = timeline(graph([
+      prompt('p1', 't1', 0),
+      text('x', 't1', 10_000),
+      tool('o1', null, 'P', 5000, 5500),
+      dispatch('dP', null, 'P', 'C', 6000, 7000, { messageId: 'pm1' }),
+      node('c0', 'prompt', null, 'C', 0, { timestamp: 'garbage' }),
+      tool('c1', null, 'C', 6100, 6900),
+    ]));
+    expect(tl.orphans.map((o) => o.id)).toEqual(['P']);
+    expect(thread(tl, 'C').parentId).toBe('P');
+    expect(thread(tl, 'P').children.map((c) => c.id)).toEqual(['C']);
+    expect(thread(tl, 'C').steps).toBe(2);
+    expectInvariant(tl);
+  });
+
   test('a session whose times cannot be read at all has no timeline', () => {
     const g = graph([node('p1', 'prompt', 't1', null, 0, { timestamp: 'x' })]);
     expect(computeAgentTimeline(g, session(), ended(0))).toEqual({ available: false, reason: 'no-times' });
@@ -549,6 +654,26 @@ describe('missing data (spec 3.1, 3.6)', () => {
     expect(o.label).toBe('orph');
     expect(tl.root.children.map((c) => c.id)).toEqual(['orph']);
     expectInvariant(tl);
+  });
+
+  test("Codex: an orphan thread gets no wait, whether a wait names it or a follow-up made it the main thread's agent (spec 3.6)", () => {
+    // The spawn could not be paired with its thread (childAgentId null): the thread is an orphan.
+    const g = (waitSummary: string): Graph => graph([
+      prompt('p1', 't1', 0),
+      dispatch('d1', 't1', null, null, 1000, 1000, { title: 'collaboration.spawn_agent', summary: 'helper', toolName: 'collaboration.spawn_agent', status: 'failed' }),
+      tool('o1', null, 'thr-o', 1100, 9000),
+      tool('fu', 't1', null, 2000, 2000, { toolName: 'collaboration.followup_task', summary: '{"target":"thr-o","message":"more"}' }),
+      tool('w', 't1', null, 3000, 9500, { toolName: 'collaboration.wait_agent', summary: waitSummary }),
+      text('x', 't1', 10_000),
+    ]);
+    for (const summary of ['{"targets":["thr-o"]}', '{"timeout_ms":1000}']) {
+      const tl = timeline(g(summary), 'codex');
+      expect(tl.orphans.map((o) => o.id)).toEqual(['thr-o']);
+      expect(thread(tl, 'thr-o').waitMs).toBe(0);
+      expect(thread(tl, 'thr-o').parentId).toBeNull();
+      expect(tl.mainOwnMs).toBe(10_000);
+      expectInvariant(tl);
+    }
   });
 
   test('dispatch cycles and an agent dispatched from two threads: hung under the first claim only, no loop', () => {
@@ -650,7 +775,7 @@ interface Random { graph: Graph; origin: Origin; clock: WaterfallClock }
 function randomSession(seed: number): Random {
   const rnd = mulberry32(seed);
   const int = (n: number): number => Math.floor(rnd() * n);
-  const origins: Origin[] = ['claude', 'codex', 'gemini'];
+  const origins: Origin[] = ['claude', 'codex', 'gemini', 'cursor'];
   const origin = origins[int(origins.length)]!;
   const codex = origin === 'codex';
   const nodes: GraphNode[] = [];
@@ -663,11 +788,13 @@ function randomSession(seed: number): Random {
     return done.length > 0 && rnd() < chance ? done[int(done.length)]!.agent : null;
   };
   let agentNo = 0;
-  const msg = (): string | null => (origin === 'gemini' ? null : id('m'));
+  /** Cursor has no message ids: the calls of one batch share their parent instead. */
+  const msg = (): string | null => (origin === 'cursor' ? null : id('m'));
+  const unreadable = (): Partial<GraphNode> => (rnd() < 0.05 ? { timestamp: 'not a time' } : {});
 
   /** An agent's steps from `t`; may dispatch a nested agent. Returns when its last step ends. */
   const agentWork = (agent: string, t: number, depth: number, open: boolean): number => {
-    nodes.push(prompt(id('ap'), null, t, agent));
+    nodes.push({ ...prompt(id('ap'), null, t, agent), ...unreadable() });
     let at = t + 10 + int(50);
     const n = 1 + int(4);
     for (let i = 0; i < n; i++) {
@@ -748,6 +875,7 @@ function randomSession(seed: number): Random {
       } else {
         // one or more parallel dispatches of one message, foreground or background, maybe reused or unmatched
         const m = msg();
+        const batch = m === null ? { parentId: id('bp') } : {};
         const parallel = 1 + int(3);
         const background = rnd() < 0.3;
         const start = t;
@@ -760,8 +888,8 @@ function randomSession(seed: number): Random {
           const end = child === null ? start + int(3000) : agentWork(child, start + 10, 1, open);
           const missingEnd = reuse === null && child !== null && !open && rnd() < 0.15;
           nodes.push(dispatch(id('d'), turn, null, child, start, open ? null : end, missingEnd
-            ? { messageId: m, status: 'succeeded', endedAt: null, durationMs: null, title: `N${int(3)}` }
-            : { messageId: m, title: `N${int(3)}` }));
+            ? { messageId: m, status: 'succeeded', endedAt: null, durationMs: null, title: `N${int(3)}`, ...batch, ...unreadable() }
+            : { messageId: m, title: `N${int(3)}`, ...batch, ...unreadable() }));
           if (child !== null && !open && !missingEnd && !ran.some((r) => r.agent === child)) ran.push({ agent: child, end });
           latest = Math.max(latest, end);
         }
@@ -770,7 +898,7 @@ function randomSession(seed: number): Random {
           if (known) known.end = Math.max(known.end, r.end);
           else reusable.push(r);
         }
-        if (rnd() < 0.3) nodes.push(tool(id('par'), turn, null, start, start + int(2000), { messageId: m }));
+        if (rnd() < 0.3) nodes.push(tool(id('par'), turn, null, start + int(5), start + int(2000), { messageId: m, ...batch }));
         t = background ? start + 1 + int(1000) : latest + 1 + int(200);
         if (openHere) t = Math.max(t, latest);
       }

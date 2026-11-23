@@ -9,11 +9,12 @@ import { isBackgroundStep, parseMs, stepSpan, type WaterfallClock } from './wate
  * not known (`unmatched:<dispatch id>`). Step intervals and "now" follow the waterfall (stepSpan, WaterfallClock).
  *
  * - Blocking: when a thread is held up by one of its agents. Every origin but Codex: a dispatch blocks its thread from
- *   its start until the earlier of its end and the first later step of that thread that is neither a dispatch nor part
- *   of the dispatch's message (same messageId; without a messageId, the same timestamp). A background dispatch so stops
- *   blocking once its thread carries on. A main-thread dispatch still open blocks no later than the main thread's "now".
- *   Codex: dispatches and follow-ups never block; a `wait_agent` step blocks for its interval, on the agents its input
- *   names (read from its summary), else on the thread's own agents active during it.
+ *   its start until the earlier of its end and the first step of that thread recorded after it that is not part of the
+ *   dispatch's message (same messageId; without a messageId, a fork sibling: the same parentId) - another dispatch
+ *   included. A background dispatch so stops blocking once its thread carries on. A main-thread dispatch still open
+ *   blocks no later than the main thread's "now". Codex: dispatches and follow-ups never block; a `wait_agent` step
+ *   blocks for its interval, on the agents its input names (read from its summary), else on the thread's own agents
+ *   active during it. Only agents of the waiting thread's own tree count: an orphan never gets wait time.
  * - Total: the union of the turns' intervals. A turn runs from its first step to the later of its last main-thread step
  *   that is not a dispatch / wait_agent and the end of the main thread's blocking that starts in it; the latest turn to
  *   "now" while the main thread is ticking.
@@ -24,6 +25,8 @@ import { isBackgroundStep, parseMs, stepSpan, type WaterfallClock } from './wate
  * - Own time: one segment per dispatch of the agent (Codex follow-ups count as dispatches): from the dispatch to the end
  *   of the agent's last step before its next dispatch (and the dispatch's own end when it ended by then); an agent still
  *   working runs to the background "now". Overlapping segments are merged.
+ * - Unreadable timestamps: placed (and ordered) at the earliest readable time of their turn / agent, as the waterfall
+ *   places them; with no readable time there, left out of all timing.
  */
 
 export interface TimeSpan { startMs: number; endMs: number }
@@ -37,7 +40,7 @@ export interface ThreadTime {
   label: string;
   /** The dispatch nodes (and Codex follow-ups) of this thread, in order. */
   dispatchIds: string[];
-  /** Own-time segments, by start, not overlapping. Main: the turns' union. */
+  /** Own-time segments, by start, not overlapping. Main: the turns' union, without zero-length pieces. */
   segments: TimeSpan[];
   /** Where this thread was waiting on its own agents (drawn light). Main: inside the total only. */
   waitingSpans: TimeSpan[];
@@ -58,11 +61,16 @@ export interface AgentTimeline {
   turns: number;
   mainOwnMs: number;
   mainWaitMs: number;
+  /** Every turn with a readable time, by start: its key (as view.ts groups turns) and interval (zero length possible). */
+  turnSpans: { turnKey: string; startMs: number; endMs: number }[];
   /** Main, its agents below it; orphan threads appended to its children (same level as main's own agents). */
   root: ThreadTime;
   /** The orphan threads (also in root.children). */
   orphans: ThreadTime[];
-  /** breaks: gaps between turns longer than BREAK_AFTER_MS with no agent at work, to be drawn compressed. */
+  /**
+   * breaks: gaps between the total's pieces longer than BREAK_AFTER_MS with no agent at work, to be drawn compressed (a
+   * turn of zero length is not a piece, so no break ends at one).
+   */
   axis: { startMs: number; endMs: number; breaks: TimeSpan[] };
   longestWaitId: string | null;
 }
@@ -93,6 +101,8 @@ interface Thread {
   /** Dispatch nodes of this thread's agent, and Codex follow-ups to it. */
   points: Step[];
   claimed: boolean;
+  /** The top of its tree: main, or the orphan it hangs under. */
+  root: Thread | null;
   parentId: string | null;
   children: Thread[];
   blocks: Block[];
@@ -100,6 +110,8 @@ interface Thread {
   waits: Piece[];
   attributed: number;
   prefixEnd: Float64Array | null;
+  /** The agents it dispatched or followed up, in its own tree (built on first use). */
+  ownAgents: Thread[] | null;
 }
 
 const NO_TIMES: AgentTimelineResult = { available: false, reason: 'no-times' };
@@ -121,7 +133,7 @@ export function computeAgentTimeline(
   const threadOf = (id: string): Thread => {
     let t = threads.get(id);
     if (!t) {
-      t = { id, steps: [], nodes: [], points: [], claimed: false, parentId: null, children: [], blocks: [], waits: [], attributed: 0, prefixEnd: null };
+      t = { id, steps: [], nodes: [], points: [], claimed: false, root: null, parentId: null, children: [], blocks: [], waits: [], attributed: 0, prefixEnd: null, ownAgents: null };
       threads.set(id, t);
     }
     return t;
@@ -145,6 +157,11 @@ export function computeAgentTimeline(
   const { groups, turnOf } = groupByTurn(main.steps);
   for (const entries of groups.values()) fillUnreadable(entries as Step[]);
   for (const th of withNodes) if (th !== main) fillUnreadable(th.steps);
+  // From here on steps are ordered where they were placed (a step left without a time stays first, and is skipped).
+  for (const th of withNodes) {
+    for (const s of th.steps) if (s.at !== null) s.ms = s.at;
+    th.steps.sort(byTimeThenId);
+  }
   for (const th of withNodes) {
     for (const s of th.steps) {
       if (s.at === null) continue;
@@ -191,6 +208,7 @@ export function computeAgentTimeline(
   // The thread tree: breadth first from main, each agent under the first thread found dispatching it; then orphans.
   const claim = (root: Thread, parentId: string | null): void => {
     root.claimed = true;
+    root.root = root;
     root.parentId = parentId;
     const queue = [root];
     for (let k = 0; k < queue.length; k++) {
@@ -199,6 +217,7 @@ export function computeAgentTimeline(
         const c = targetOf.get(s);
         if (c === undefined || c.claimed) continue;
         c.claimed = true;
+        c.root = root;
         c.parentId = p.id;
         p.children.push(c);
         queue.push(c);
@@ -206,9 +225,11 @@ export function computeAgentTimeline(
     }
   };
   claim(main, null);
+  // Threads no dispatch names come first (a thread dispatched by an orphan hangs under it), then dispatch cycles.
   const orphanRoots: Thread[] = [];
+  const dispatched = new Set(targetOf.values());
   const unclaimed = [...threads.values()].filter((t) => !t.claimed)
-    .sort((a, b) => firstMs(a) - firstMs(b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    .sort((a, b) => Number(dispatched.has(a)) - Number(dispatched.has(b)) || firstMs(a) - firstMs(b) || byId(a, b));
   for (const t of unclaimed) {
     if (t.claimed) continue;
     claim(t, null);
@@ -229,31 +250,51 @@ export function computeAgentTimeline(
         if (th === main && s.open) end = Math.min(end, Math.max(s.startMs, clock.nowMs));
         if (end > s.startMs) th.blocks.push({ startMs: s.startMs, endMs: end, key: end, blocker: targetOf.get(s)!.id });
       } else if (isWait(s.node) && s.endMs > s.startMs) {
-        const targets = waitTargets(th, s);
-        if (targets.length > 0) end = s.endMs;
-        for (const target of targets) {
+        // All the wait's agents share its interval, so only the one ending last (ties: the smaller id) can hold it.
+        let best: Block | null = null;
+        for (const target of waitTargets(th, s)) {
           const key = Math.min(s.endMs, Math.max(s.startMs, lastEndBefore(target, s.endMs)));
-          th.blocks.push({ startMs: s.startMs, endMs: s.endMs, key, blocker: target.id });
+          if (best === null || key > best.key || (key === best.key && target.id < best.blocker)) {
+            best = { startMs: s.startMs, endMs: s.endMs, key, blocker: target.id };
+          }
+        }
+        if (best !== null) {
+          th.blocks.push(best);
+          end = s.endMs;
         }
       }
       const turn = th === main && end > s.startMs ? turnOf.get(s.node.id) : undefined;
       if (turn !== undefined) blockEnd.set(turn, Math.max(blockEnd.get(turn) ?? -Infinity, end));
     }
   }
+  /**
+   * The agents wait `w` of `th` is held up by: those its input names, else the thread's own agents active during it;
+   * only agents of th's own tree (an orphan gets no wait, spec 3.6). Naming only agents outside it blocks on nothing.
+   */
   function waitTargets(th: Thread, w: Step): Thread[] {
-    const named = new Set<Thread>();
-    for (const list of refsOf(w.node.summary, names)) {
-      const active = list.filter((t) => lastEndBefore(t, w.endMs) > w.startMs);
-      for (const t of active.length > 0 ? active : list) named.add(t);
+    const refs = refsOf(w.node.summary, names);
+    const active = (t: Thread): boolean => lastEndBefore(t, w.endMs) > w.startMs;
+    if (refs.length > 0) {
+      const named = new Set<Thread>();
+      for (const list of refs) {
+        const mine = list.filter((t) => t.root === th.root && t !== th);
+        const now = mine.filter(active);
+        for (const t of now.length > 0 ? now : mine) named.add(t);
+      }
+      return [...named];
     }
-    if (named.size > 0) return [...named];
-    // Nothing named: the thread's own agents that worked during the wait.
-    const own = new Set<Thread>();
-    for (const s of th.steps) {
-      const t = targetOf.get(s) ?? followUps.get(s);
-      if (t !== undefined && lastEndBefore(t, w.endMs) > w.startMs) own.add(t);
+    return ownAgentsOf(th).filter(active);
+  }
+  function ownAgentsOf(th: Thread): Thread[] {
+    if (th.ownAgents === null) {
+      const own = new Set<Thread>();
+      for (const s of th.steps) {
+        const t = targetOf.get(s) ?? followUps.get(s);
+        if (t !== undefined && t !== th && t.root === th.root) own.add(t);
+      }
+      th.ownAgents = [...own];
     }
-    return [...own];
+    return th.ownAgents;
   }
   function lastEndBefore(t: Thread, ms: number): number {
     if (t.prefixEnd === null) {
@@ -279,7 +320,7 @@ export function computeAgentTimeline(
   }
 
   // Turns and the total.
-  const turnSpans: TimeSpan[] = [];
+  const turnSpans: { turnKey: string; startMs: number; endMs: number }[] = [];
   let latest: TimeSpan | null = null;
   for (const [key, entries] of groups) {
     let start = Infinity;
@@ -290,12 +331,13 @@ export function computeAgentTimeline(
       if (e.node.kind !== 'subagent' && !isWait(e.node) && e.endMs > end) end = e.endMs;
     }
     if (start === Infinity) continue;
-    const span = { startMs: start, endMs: Math.max(start, end, blockEnd.get(key) ?? -Infinity) };
+    const span = { turnKey: key, startMs: start, endMs: Math.max(start, end, blockEnd.get(key) ?? -Infinity) };
     turnSpans.push(span);
     if (latest === null || span.startMs >= latest.startMs) latest = span;
   }
   if (latest !== null && clock.ticking) latest.endMs = Math.max(latest.endMs, clock.nowMs);
-  const total = mergeSpans(turnSpans);
+  turnSpans.sort((a, b) => a.startMs - b.startMs || (a.turnKey < b.turnKey ? -1 : a.turnKey > b.turnKey ? 1 : 0));
+  const total = mergeSpans(turnSpans).filter((u) => u.endMs > u.startMs);
   let totalMs = 0;
   for (const u of total) totalMs += u.endMs - u.startMs;
 
@@ -359,7 +401,9 @@ export function computeAgentTimeline(
   const activity = mergeSpans([...segmentsOf.values()].flat());
   let axisStart = Infinity;
   let axisEnd = -Infinity;
-  for (const s of [...total, ...activity]) {
+  // Nothing with a length (a session that is one prompt so far): the turns' instants.
+  const spanned = total.length + activity.length > 0 ? [...total, ...activity] : turnSpans;
+  for (const s of spanned) {
     if (s.startMs < axisStart) axisStart = s.startMs;
     if (s.endMs > axisEnd) axisEnd = s.endMs;
   }
@@ -388,6 +432,7 @@ export function computeAgentTimeline(
     available: true,
     totalMs,
     turns: turnSpans.length,
+    turnSpans,
     mainOwnMs: main.attributed,
     mainWaitMs: totalMs - main.attributed,
     root,
@@ -416,8 +461,10 @@ function baseName(n: GraphNode): string {
   return name.slice(name.lastIndexOf('.') + 1);
 }
 
+/** When the thread's first placed step is. */
 function firstMs(t: Thread): number {
-  return t.steps[0]?.ms ?? Infinity;
+  for (const s of t.steps) if (s.at !== null) return s.ms;
+  return Infinity;
 }
 
 /** Gives steps whose timestamp cannot be read the earliest readable time among `steps` (none: they stay without one). */
@@ -454,15 +501,17 @@ function firstEndingAfter(spans: readonly TimeSpan[], ms: number): number {
 
 /**
  * When the thread of dispatch `d` carries on without it: the start (not before d's) of its first step recorded after d
- * that is neither a dispatch nor part of d's message. A step with d's own timestamp is part of its message whatever
- * its messageId (this is the rule for origins without message ids); a later one is when it has d's messageId (the
- * parallel calls of one Claude message are written one record after another). Null when there is none.
+ * (a later timestamp: a step at d's own time is simultaneous, not later) that is not part of d's message - another
+ * dispatch included. Part of d's message: the same messageId; when d has none (Cursor, Grok), a fork sibling, i.e. the
+ * same parentId (Cursor hangs the calls of one batch under one parent; Grok chains every node to the one before, so
+ * there a call issued with d still counts as carrying on). Null when there is none.
  */
 function carriesOnAt(steps: readonly Step[], d: Step): number | null {
+  const { messageId, parentId } = d.node;
   for (let i = lowerBound(steps, d.ms + 1); i < steps.length; i++) {
     const n = steps[i]!;
-    if (n.at === null || n.node.kind === 'subagent') continue;
-    if (d.node.messageId !== null && n.node.messageId === d.node.messageId) continue;
+    if (n.at === null) continue;
+    if (messageId !== null ? n.node.messageId === messageId : parentId !== null && n.node.parentId === parentId) continue;
     return Math.max(d.startMs, n.startMs);
   }
   return null;

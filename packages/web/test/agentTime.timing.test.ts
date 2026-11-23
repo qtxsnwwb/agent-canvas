@@ -64,14 +64,59 @@ function bigSession(total: number, turns = 40, agentsPerTurn = 5): Graph {
   return { nodes: Object.fromEntries(nodes.map((x) => [x.id, x])), edges: {} };
 }
 
+/**
+ * A Codex session of about `total` nodes: per turn, `agentsPerTurn` spawned agents working in parallel and a main
+ * thread alternating its own calls with `waitsPerTurn` `wait_agent` calls whose input names no agent (the fallback:
+ * the thread's own agents active during the wait).
+ */
+function codexSession(total: number, turns = 40, agentsPerTurn = 5, waitsPerTurn = 125): Graph {
+  const nodes: GraphNode[] = [];
+  const perAgent = Math.floor((total * 0.8) / (turns * agentsPerTurn));
+  const perTurnMain = Math.floor((total * 0.2) / turns) - agentsPerTurn - 1;
+  let t = 0;
+  let n = 0;
+  for (let k = 0; k < turns; k++) {
+    const turn = `t${k}`;
+    nodes.push({ ...base(`p${k}`, turn, null, t), kind: 'prompt', title: 'Prompt', toolName: null });
+    t += 100;
+    const start = t;
+    let agentEnd = start;
+    for (let a = 0; a < agentsPerTurn; a++) {
+      const agent = `thr${k}-${a}`;
+      let at = start + 10 + a;
+      for (let s = 0; s < perAgent; s++) {
+        nodes.push({ ...base(`n${n++}`, null, agent, at), toolName: 'exec', title: 'exec', status: 'succeeded', endedAt: iso(at + 40), durationMs: 40 });
+        at += 50;
+      }
+      agentEnd = Math.max(agentEnd, at);
+      nodes.push({
+        ...base(`d${k}-${a}`, turn, null, start + a), kind: 'subagent', title: `helper${a}`, summary: `helper${a}`,
+        toolName: 'collaboration.spawn_agent', childAgentId: agent, status: 'succeeded', endedAt: iso(at), durationMs: at - start - a,
+      });
+    }
+    t = start + agentsPerTurn;
+    const step = Math.max(2, Math.floor((agentEnd - t) / perTurnMain));
+    for (let s = 0; s < perTurnMain; s++) {
+      const wait = (s * waitsPerTurn) % perTurnMain < waitsPerTurn; // waitsPerTurn of them, spread over the turn
+      nodes.push({
+        ...base(`x${n++}`, turn, null, t), status: 'succeeded', endedAt: iso(t + step - 1), durationMs: step - 1,
+        ...(wait ? { toolName: 'collaboration.wait_agent', title: 'collaboration.wait_agent', summary: '{"timeout_ms":1000}' } : { toolName: 'exec', title: 'exec' }),
+      });
+      t += step;
+    }
+    t += 10 * 60_000;
+  }
+  return { nodes: Object.fromEntries(nodes.map((x) => [x.id, x])), edges: {} };
+}
+
 const session = { origin: 'claude' as const, status: 'idle' as const, lastActivityAt: iso(0) };
 
-function measure(g: Graph, clock: WaterfallClock): number {
-  computeAgentTimeline(g, session, clock); // warm up
+function measure(g: Graph, clock: WaterfallClock, s: typeof session | { origin: 'codex'; status: 'idle'; lastActivityAt: string } = session): number {
+  computeAgentTimeline(g, s, clock); // warm up
   let best = Infinity;
   for (let i = 0; i < 3; i++) {
     const t0 = performance.now();
-    computeAgentTimeline(g, session, clock);
+    computeAgentTimeline(g, s, clock);
     best = Math.min(best, performance.now() - t0);
   }
   return best;
@@ -90,5 +135,23 @@ test('100,000 nodes, 200 agents, 40 turns: computeAgentTimeline within 300 ms, a
   console.log(`computeAgentTimeline: 100k nodes ${bigMs.toFixed(1)} ms, 25k nodes ${smallMs.toFixed(1)} ms`);
   expect(bigMs).toBeLessThan(bound(300));
   // Four times the nodes: about four times the time when linear (n log n a little more); quadratic would be ~16.
+  expect(bigMs / Math.max(smallMs, 1)).toBeLessThan(8);
+});
+
+test('a Codex session of 100,000 nodes with 5,000 waits that name no agent: within 300 ms, and linear in the size', () => {
+  const codex = { origin: 'codex' as const, status: 'idle' as const, lastActivityAt: iso(0) };
+  const big = codexSession(100_000);
+  const small = codexSession(25_000, 10);
+  const waits = Object.values(big.nodes).filter((x) => x.toolName === 'collaboration.wait_agent').length;
+  expect(waits).toBe(5000);
+  const last = Math.max(...Object.values(big.nodes).map((x) => Date.parse(x.timestamp)));
+  const clock: WaterfallClock = { nowMs: last, ticking: false, backgroundNowMs: last, backgroundTicking: false };
+  const r = computeAgentTimeline(big, codex, clock);
+  if (!r.available) throw new Error('expected a timeline');
+  expect(r.mainWaitMs).toBeGreaterThan(0); // the waits did fall back to the active agents
+  const bigMs = measure(big, clock, codex);
+  const smallMs = measure(small, clock, codex);
+  console.log(`computeAgentTimeline (Codex, ${waits} unnamed waits): 100k nodes ${bigMs.toFixed(1)} ms, 25k nodes ${smallMs.toFixed(1)} ms`);
+  expect(bigMs).toBeLessThan(bound(300));
   expect(bigMs / Math.max(smallMs, 1)).toBeLessThan(8);
 });
