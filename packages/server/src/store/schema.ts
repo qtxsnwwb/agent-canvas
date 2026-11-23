@@ -131,6 +131,28 @@ export const EDGE_TO_INDEX = 'edge_to';
 export const EDGE_TO_INDEX_SQL = `CREATE INDEX IF NOT EXISTS ${EDGE_TO_INDEX} ON edge (session_id, to_id)`;
 
 /**
+ * Indexes of the attention page's queries (store.ts ATTENTION_QUERIES), created by openStore at every open like
+ * EDGE_TO_INDEX (a no-op once they exist; no rebuild needed: SQLite fills an index from the rows already stored, and
+ * maintains it on every write, also for an older build). The queries repeat each partial predicate verbatim so SQLite
+ * uses the index. Without them each query read every node (or every raw event) of the session; measured on a 500,000-node,
+ * 1.3 GB database: 130-280 ms per call for a 100,000-node session, against under 0.2 ms with the index. Creating the three
+ * on that database at its first open took 3.8-4.1 s in all (+19 MB); writes through applyChanges got about 6% slower.
+ * - node_main_time: a session's main-thread nodes by time (mainTailNodes: the current turn's tail). Its predicate has a
+ *   term (`timestamp IS NOT NULL`) the older main-thread statements (latestMainPromptAt, the session search) do not
+ *   contain, so they keep node_main_prompt instead of walking every main-thread node through this one.
+ * - node_awaiting_permission: the few nodes waiting for permission, of any thread (a subagent's included).
+ * - raw_event_session_hook: a session's hook events by time (hookEventsSince: StopFailure and the like leave no node).
+ */
+export const ATTENTION_INDEXES = ['node_main_time', 'node_awaiting_permission', 'raw_event_session_hook'] as const;
+export const ATTENTION_INDEX_SQL = `
+CREATE INDEX IF NOT EXISTS node_main_time ON node (session_id, json_extract(body, '$.timestamp'))
+  WHERE json_extract(body, '$.agentId') IS NULL AND json_extract(body, '$.timestamp') IS NOT NULL;
+CREATE INDEX IF NOT EXISTS node_awaiting_permission ON node (session_id)
+  WHERE json_extract(body, '$.status') = 'awaiting_permission';
+CREATE INDEX IF NOT EXISTS raw_event_session_hook ON raw_event (session_id, received_at) WHERE source = 'hook';
+`;
+
+/**
  * Steps that bring an older database up to SCHEMA_SQL; migrateSchema (store.ts) runs each one only when its column is
  * missing, after SCHEMA_SQL, in one transaction. rawEventOrigin: every existing row is a Claude Code row.
  * hookStatByOrigin: rekeys hook_stat by (origin, event name), keeping the existing counters as 'claude'. rawEventEnc /

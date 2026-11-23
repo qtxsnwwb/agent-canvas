@@ -29,7 +29,7 @@ import {
 } from '@agent-canvas/shared';
 import { CorruptBodyError, decodeBody, encodeBody, parseDetail } from './codec.js';
 import { STORAGE_META, type BodyTable, type ConvertResult } from './migrate-storage.js';
-import { DERIVED_TABLES, EDGE_TO_INDEX, EDGE_TO_INDEX_SQL, MIGRATIONS, SCHEMA_SQL } from './schema.js';
+import { ATTENTION_INDEXES, ATTENTION_INDEX_SQL, DERIVED_TABLES, EDGE_TO_INDEX, EDGE_TO_INDEX_SQL, MIGRATIONS, SCHEMA_SQL } from './schema.js';
 import {
   DEFAULT_SEARCH_DETAIL,
   INDEXED_NODE_FIELDS,
@@ -184,6 +184,23 @@ export interface Store {
   liveSessions(): Session[];
   /** Timestamp of the session's latest main-thread prompt node (served by node_main_prompt), or null when none. */
   latestMainPromptAt(sessionId: string): string | null;
+  /**
+   * Sessions whose stored lastActivityAt (any ISO spelling) is at or after `iso`: a cheap superset of the sessions whose
+   * last main-thread node is that recent (one pass over the session rows).
+   */
+  sessionsActiveSince(iso: string): Session[];
+  /**
+   * The session's main-thread nodes whose timestamp is at or after `sinceIso` (null: all), newest first (ties: the later
+   * stored first), at most `limit`. Served by node_main_time: reads only the rows returned.
+   */
+  mainTailNodes(sessionId: string, sinceIso: string | null, limit: number): GraphNode[];
+  /** The session's nodes of any thread whose status is awaiting_permission, in stored order (node_awaiting_permission). */
+  awaitingPermissionNodes(sessionId: string): GraphNode[];
+  /**
+   * The session's hook events received at or after `sinceIso`, oldest first (raw_event_session_hook). `payload`: the
+   * stored body parsed as a JSON object, or null when it is not one (or cannot be decoded).
+   */
+  hookEventsSince(sessionId: string, sinceIso: string): { eventName: string; receivedAt: string; payload: Record<string, unknown> | null }[];
   /**
    * Case-insensitive (ASCII only, as SQLite LIKE) literal substring search over session title, id, git branch, cwd
    * and the summaries of main-thread prompt nodes. Newest activity first; fewer than SEARCH_MIN_CHARS characters
@@ -389,6 +406,26 @@ export const HOOK_STAT_BACKFILL_SELECT = `SELECT event_name, COUNT(*), MAX(recei
   GROUP BY event_name`;
 /** Printed (through StoreOptions.log) when opening a database runs that backfill. */
 export const HOOK_STAT_BACKFILL_NOTICE = 'agent-canvas counting stored hook events (one-time)…';
+/** Printed (through StoreOptions.log) when opening an existing database creates the attention indexes (schema.ts). */
+export const ATTENTION_INDEX_NOTICE = 'agent-canvas indexing stored records for the attention page (one-time)…';
+
+/**
+ * The attention page's indexed queries (schema.ts ATTENTION_INDEX_SQL); each repeats its index's partial predicate
+ * verbatim so SQLite uses the index. Exported for the query-plan test.
+ */
+export const ATTENTION_QUERIES = {
+  mainTailSince: `SELECT body FROM node
+     WHERE session_id = ? AND json_extract(body, '$.agentId') IS NULL AND json_extract(body, '$.timestamp') IS NOT NULL
+       AND json_extract(body, '$.timestamp') >= ?
+     ORDER BY json_extract(body, '$.timestamp') DESC, rowid DESC LIMIT ?`,
+  mainTail: `SELECT body FROM node
+     WHERE session_id = ? AND json_extract(body, '$.agentId') IS NULL AND json_extract(body, '$.timestamp') IS NOT NULL
+     ORDER BY json_extract(body, '$.timestamp') DESC, rowid DESC LIMIT ?`,
+  awaitingPermission: `SELECT body FROM node
+     WHERE session_id = ? AND json_extract(body, '$.status') = 'awaiting_permission' ORDER BY rowid`,
+  hooksSince: `SELECT event_name, received_at, data, enc FROM raw_event
+     WHERE session_id = ? AND source = 'hook' AND received_at >= ? ORDER BY received_at, ingest_id`,
+} as const;
 
 interface RawRow {
   ingest_id: number;
@@ -584,9 +621,14 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
   db.pragma('journal_mode = WAL');
   // A WAL that grew during an import is cut back to this size the next time it restarts after a full checkpoint.
   db.pragma(`journal_size_limit = ${options.walSizeLimitBytes ?? WAL_SIZE_LIMIT_BYTES}`);
+  const hadTables = db.prepare(`SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'node'`).get() !== undefined;
   db.exec(SCHEMA_SQL);
   migrateSchema(db);
   db.exec(EDGE_TO_INDEX_SQL);
+  // Filling them reads every stored node and raw event once (about 4 s for 1.3 GB on the development machine).
+  const hasIndex = db.prepare(`SELECT 1 FROM sqlite_schema WHERE type = 'index' AND name = ?`).pluck();
+  if (hadTables && ATTENTION_INDEXES.some((name) => hasIndex.get(name) === undefined)) options.log?.(ATTENTION_INDEX_NOTICE);
+  db.exec(ATTENTION_INDEX_SQL);
   // Undecodable details met by the index (its build, a search's verification) count as unreadable too.
   const search = new SearchIndex(db, options.searchDetail ?? DEFAULT_SEARCH_DETAIL, (sessionId, nodeId) =>
     unreadableDetails.add(detailKey(sessionId, nodeId)),
@@ -759,6 +801,14 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
        WHERE session_id = ? AND json_extract(body, '$.kind') = 'prompt' AND json_extract(body, '$.agentId') IS NULL`,
     )
     .pluck();
+  // One pass over the session rows; strftime normalizes the stored ISO spelling (as selectProjects does).
+  const selectSessionsActiveSince = db
+    .prepare(`SELECT body FROM session WHERE strftime('%Y-%m-%dT%H:%M:%fZ', last_activity_at) >= ? ORDER BY last_activity_at DESC, id`)
+    .pluck();
+  const selectMainTailSince = db.prepare(ATTENTION_QUERIES.mainTailSince).pluck();
+  const selectMainTail = db.prepare(ATTENTION_QUERIES.mainTail).pluck();
+  const selectAwaitingPermission = db.prepare(ATTENTION_QUERIES.awaitingPermission).pluck();
+  const selectHooksSince = db.prepare(ATTENTION_QUERIES.hooksSince);
   // Query text is only ever a bound parameter (already LIKE-escaped by likePattern). The prompt condition repeats
   // the node_main_prompt partial index predicate verbatim so the index is used. Cost per request, honestly: one pass
   // over the session rows (the OR over title/id/branch/cwd cannot use an index) plus the main-thread prompt rows via
@@ -1228,6 +1278,32 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     latestMainPromptAt(sessionId) {
       const v = selectLatestMainPrompt.get(sessionId) as string | null | undefined;
       return typeof v === 'string' ? v : null;
+    },
+    sessionsActiveSince(iso) {
+      // The spelling strftime gives the stored values (an unparsable `iso` is compared as it is).
+      const ms = Date.parse(iso);
+      const cutoff = Number.isFinite(ms) ? new Date(ms).toISOString() : iso;
+      return (selectSessionsActiveSince.all(cutoff) as string[]).map((body) => JSON.parse(body) as Session);
+    },
+    mainTailNodes(sessionId, sinceIso, limit) {
+      const rows = (sinceIso === null ? selectMainTail.all(sessionId, limit) : selectMainTailSince.all(sessionId, sinceIso, limit)) as string[];
+      return rows.map((body) => JSON.parse(body) as GraphNode);
+    },
+    awaitingPermissionNodes(sessionId) {
+      return (selectAwaitingPermission.all(sessionId) as string[]).map((body) => JSON.parse(body) as GraphNode);
+    },
+    hookEventsSince(sessionId, sinceIso) {
+      const rows = selectHooksSince.all(sessionId, sinceIso) as { event_name: string; received_at: string; data: unknown; enc: number }[];
+      return rows.map((r) => {
+        let payload: Record<string, unknown> | null = null;
+        try {
+          const parsed: unknown = JSON.parse(decodeBody(r.data, r.enc));
+          if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) payload = parsed as Record<string, unknown>;
+        } catch {
+          // not JSON, or a body that cannot be decoded: no payload
+        }
+        return { eventName: r.event_name, receivedAt: r.received_at, payload };
+      });
     },
     searchSessions(rawQuery, rawLimit) {
       const query = Array.from(rawQuery.trim()).slice(0, SEARCH_MAX_CHARS).join('').trim();
