@@ -11,9 +11,12 @@ import { sessionLoadState } from '../sessionLoad';
 import { useNow } from '../useNow';
 import { SessionCanvas } from './SessionCanvas';
 
-/** `notice`: a note shown once when the page opens (the 书签 page's 「这一步已经不在了」). */
+/**
+ * `notice`: the 书签 page's 「这一步已经不在了」, shown once when the page opens, with the gone step's time (`at`): the
+ * canvas shows the turn nearest it.
+ */
 export function SessionPage({ sessionId, filePath = null, nodeId = null, notice = null }: {
-  sessionId: string; filePath?: string | null; nodeId?: string | null; notice?: string | null;
+  sessionId: string; filePath?: string | null; nodeId?: string | null; notice?: { text: string; at: string | null } | null;
 }) {
   const [live, setLive] = useState<LiveSession | null>(null);
   /** The failure of openLiveSession (null while there is none); see sessionLoadState. */

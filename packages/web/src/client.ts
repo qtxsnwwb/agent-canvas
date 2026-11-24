@@ -63,13 +63,18 @@ function send(method: 'PUT' | 'POST' | 'PATCH' | 'DELETE', path: string, body?: 
 
 /** A non-2xx answer as an HttpError whose message is the server's `error` (else `message`) text when it has one. */
 async function failureFrom(path: string, res: Response): Promise<HttpError> {
-  let message = `${path}: HTTP ${res.status}`;
-  try {
-    const j = (await res.json()) as { error?: unknown; message?: unknown };
+  return errorFrom(path, res.status, await res.json().catch(() => null));
+}
+
+/** failureFrom for an answer whose body was read already (`body`: the parsed JSON, null when it was not JSON). */
+function errorFrom(path: string, status: number, body: unknown): HttpError {
+  let message = `${path}: HTTP ${status}`;
+  if (typeof body === 'object' && body !== null) {
+    const j = body as { error?: unknown; message?: unknown };
     if (typeof j.error === 'string' && j.error !== '') message = j.error;
     else if (typeof j.message === 'string' && j.message !== '') message = j.message;
-  } catch { /* keep the generic text */ }
-  return Object.assign(new Error(message), { status: res.status }) as HttpError;
+  }
+  return Object.assign(new Error(message), { status }) as HttpError;
 }
 
 /**
@@ -80,9 +85,10 @@ async function createBookmark(sessionId: string, nodeId: string | null, note?: s
   const path = '/api/bookmarks';
   const res = await send('POST', path, note === undefined ? { sessionId, nodeId } : { sessionId, nodeId, note });
   if (res.status === 409) {
-    const j = (await res.json().catch(() => null)) as { bookmark?: Bookmark } | null;
-    if (j?.bookmark !== undefined) return { created: false, bookmark: j.bookmark };
-    throw Object.assign(new Error(`${path}: HTTP 409`), { status: 409 }) as HttpError;
+    const j: unknown = await res.json().catch(() => null);
+    const bookmark = typeof j === 'object' && j !== null ? (j as { bookmark?: Bookmark }).bookmark : undefined;
+    if (bookmark !== undefined) return { created: false, bookmark };
+    throw errorFrom(path, 409, j);
   }
   if (!res.ok) throw await failureFrom(path, res);
   return { created: true, bookmark: (await res.json()) as Bookmark };

@@ -4,12 +4,13 @@ import { afterEach, expect, test, vi } from 'vitest';
 import type { Bookmark, BookmarkSnapshot } from '@agent-canvas/shared';
 import {
   BOOKMARKS_EMPTY_TEXT, BOOKMARK_FILTER_PLACEHOLDER, BOOKMARK_UNDO_MS, NO_NOTE_TEXT, SESSION_GONE_NOTICE, STEP_GONE_NOTICE,
-  bookmarkRows, bookmarkTime, bookmarksTitle, createBookmarkPageController, filterBookmarkRows, nextSessionNotice,
+  bookmarkClick, bookmarkOpener, bookmarkRows, bookmarkTime, bookmarksTitle, createBookmarkPageController, filterBookmarkRows,
+  nextSessionNotice, sessionNoticeFor, type ClickLike, type SessionNotice,
   type BookmarkWrites,
 } from '../src/bookmarks';
 import { api, openLiveBookmarks, type BookmarksLiveState } from '../src/client';
 import { createPageMasker, IDENTITY_MASKER } from '../src/masking';
-import { BookmarksView } from '../src/pages/Bookmarks';
+import { BookmarkRow, BookmarksView } from '../src/pages/Bookmarks';
 import { parseHash } from '../src/route';
 import { fakeSocket } from './helpers';
 
@@ -73,7 +74,7 @@ test('找不到这一步：标出来，点它打开会话并提示「这一步�
   const [row] = bookmarkRows([bm({ now: { node: false } })], IDENTITY_MASKER);
   expect(row!.missing).toBe('step');
   expect(row!.badge).toBe('找不到这一步');
-  expect(row!.open).toEqual({ kind: 'missing-step', href: '#/s/s1', notice: '这一步已经不在了' });
+  expect(row!.open).toEqual({ kind: 'missing-step', href: '#/s/s1', notice: '这一步已经不在了', at: at(11, 22, 14, 0) });
   expect(STEP_GONE_NOTICE).toBe('这一步已经不在了');
   expect(row!.title).toBe('修 CI 超时（新标题）');
 });
@@ -178,13 +179,69 @@ test('筛选匹配页面上显示出来的文字：遮蔽开着时猜密钥试�
 // ---- the notice handed to the session page ----
 
 test('提示交给会话页一次：到那个会话时留着，之后任何跳转都清掉', () => {
-  const notice = { sessionId: 's1', text: STEP_GONE_NOTICE, arrived: false };
+  const notice: SessionNotice = { sessionId: 's1', text: STEP_GONE_NOTICE, at: at(11, 22, 14, 0), arrived: false };
   const arrived = nextSessionNotice(notice, { page: 'session', sessionId: 's1' });
   expect(arrived).toEqual({ ...notice, arrived: true });
   expect(nextSessionNotice(arrived, { page: 'session', sessionId: 's1' })).toBeNull();
   expect(nextSessionNotice(arrived, { page: 'bookmarks' })).toBeNull();
   expect(nextSessionNotice(notice, { page: 'session', sessionId: 'other' })).toBeNull();
   expect(nextSessionNotice(null, { page: 'session', sessionId: 's1' })).toBeNull();
+});
+
+const plainClick: ClickLike = { button: 0, metaKey: false, ctrlKey: false, shiftKey: false, altKey: false };
+
+test('点击：会话不在了只在本页提示；步骤不在了普通点击把提示和时间交给会话页，带修饰键或中键的点击不交', () => {
+  const [gone, stepGone, fine] = bookmarkRows([
+    bm({ id: 3, createdAt: at(11, 23, 0, 0), now: { session: false, node: false, sessionTitle: null, projectName: null } }),
+    bm({ id: 2, createdAt: at(11, 22, 0, 0), now: { node: false } }),
+    bm({ id: 1, createdAt: at(11, 21, 0, 0) }),
+  ], IDENTITY_MASKER);
+  expect(bookmarkClick(gone!, plainClick)).toEqual({ kind: 'page-notice', text: SESSION_GONE_NOTICE });
+  expect(bookmarkClick(gone!, { ...plainClick, ctrlKey: true })).toEqual({ kind: 'page-notice', text: SESSION_GONE_NOTICE });
+  expect(bookmarkClick(stepGone!, plainClick)).toEqual({
+    kind: 'session-notice', notice: { sessionId: 's1', text: STEP_GONE_NOTICE, at: at(11, 22, 14, 0) },
+  });
+  for (const mod of [{ ctrlKey: true }, { metaKey: true }, { shiftKey: true }, { altKey: true }, { button: 1 }]) {
+    expect(bookmarkClick(stepGone!, { ...plainClick, ...mod }), JSON.stringify(mod)).toBeNull();
+  }
+  expect(bookmarkClick(fine!, plainClick)).toBeNull();
+});
+
+test('容器的点击：行上的链接和按钮把点击交给 bookmarkOpener，提示去本页或交给 App', () => {
+  const [gone, stepGone] = bookmarkRows([
+    bm({ id: 3, createdAt: at(11, 23, 0, 0), now: { session: false, node: false, sessionTitle: null, projectName: null } }),
+    bm({ id: 2, createdAt: at(11, 22, 0, 0), now: { node: false } }),
+  ], IDENTITY_MASKER);
+  const pageNotices: string[] = [];
+  const handed: Omit<SessionNotice, 'arrived'>[] = [];
+  const onOpen = bookmarkOpener((t) => pageNotices.push(t), (n) => handed.push(n));
+  // The row's clickable element, called the way React calls it.
+  const clickRow = (row: typeof gone, click: ClickLike): void => {
+    const li = BookmarkRow({ ...viewProps({ rows: [row!], total: 1, onOpen }), row: row! });
+    const target = (li.props as { children: { props: { onClick?: (e: ClickLike) => void } }[] }).children[0]!;
+    target.props.onClick!(click);
+  };
+  clickRow(gone, plainClick);
+  expect(pageNotices).toEqual([SESSION_GONE_NOTICE]);
+  expect(handed).toEqual([]);
+  clickRow(stepGone, { ...plainClick, ctrlKey: true });
+  expect(handed).toEqual([]);
+  clickRow(stepGone, plainClick);
+  expect(handed).toEqual([{ sessionId: 's1', text: STEP_GONE_NOTICE, at: at(11, 22, 14, 0) }]);
+  expect(pageNotices).toEqual([SESSION_GONE_NOTICE]);
+});
+
+test('提示到达会话页一次：交出后，只有到了那个会话时会话页才拿到它（同一个对象），再跳一次就没了', () => {
+  let notice: SessionNotice | null = { sessionId: 's1', text: STEP_GONE_NOTICE, at: at(11, 22, 14, 0), arrived: false };
+  // Handed on the 书签 page: nothing for a session page yet.
+  expect(sessionNoticeFor(notice, { page: 'bookmarks' })).toBeNull();
+  notice = nextSessionNotice(notice, { page: 'session', sessionId: 's1' }); // the link's navigation
+  const shown = sessionNoticeFor(notice, { page: 'session', sessionId: 's1' });
+  expect(shown).toMatchObject({ text: STEP_GONE_NOTICE, at: at(11, 22, 14, 0) });
+  expect(sessionNoticeFor(notice, { page: 'session', sessionId: 's1' })).toBe(shown); // re-renders: the same object
+  expect(sessionNoticeFor(notice, { page: 'session', sessionId: 's2' })).toBeNull();
+  notice = nextSessionNotice(notice, { page: 'session', sessionId: 's1', nodeId: 'n9' }); // any later navigation
+  expect(sessionNoticeFor(notice, { page: 'session', sessionId: 's1' })).toBeNull();
 });
 
 // ---- edit / delete / undo against a fake api ----
@@ -250,6 +307,21 @@ test('改备注：服务端 400 的提示显示在行里，编辑框留着', asy
   expect(c.state().editing).toMatchObject({ id: 1, draft: '长'.repeat(201), saving: false, error: '备注最多 200 个字，现在有 201 个' });
   c.setDraft('短');
   expect(c.state().editing!.error).toBeNull();
+  c.close();
+});
+
+test('删除的行：新列表里没有它了就不再记着，之后别处恢复了它会重新显示；列表里还有它（旧的）时仍藏着', async () => {
+  const f = fakeWrites();
+  const c = createBookmarkPageController(f.writes);
+  await c.remove(1);
+  const before = c.revision();
+  c.listChanged([bm({ id: 1 }), bm({ id: 2 })]); // an older list that still has it
+  expect(c.visible([bm({ id: 1 }), bm({ id: 2 })]).map((b) => b.id)).toEqual([2]);
+  expect(c.revision()).toBe(before);
+  c.listChanged([bm({ id: 2 })]); // the list after the delete
+  expect(c.revision()).toBe(before + 1);
+  // Restored in another tab: the next list has it again, and it shows.
+  expect(c.visible([bm({ id: 1 }), bm({ id: 2 })]).map((b) => b.id)).toEqual([1, 2]);
   c.close();
 });
 
@@ -417,6 +489,13 @@ test('api：每个写请求都带 JSON 体（没有内容时是 {}）和 Content
     { url: '/api/bookmarks/3', method: 'DELETE', type: 'application/json', body: {} },
     { url: '/api/bookmarks/3/restore', method: 'POST', type: 'application/json', body: {} },
   ]);
+});
+
+test('api：409 没带书签时，错误用服务端的文字', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: '已经收藏过了' }), { status: 409 })));
+  await expect(api.createBookmark('s1', 'n1')).rejects.toMatchObject({ status: 409, message: '已经收藏过了' });
+  vi.stubGlobal('fetch', vi.fn(async () => new Response('not json', { status: 409 })));
+  await expect(api.createBookmark('s1', 'n1')).rejects.toMatchObject({ status: 409, message: '/api/bookmarks: HTTP 409' });
 });
 
 test('api：新建成功是 created true', async () => {

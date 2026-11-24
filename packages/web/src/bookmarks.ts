@@ -36,7 +36,8 @@ export type BookmarkOpen =
   /** Open the session, or the session at the step. */
   | { kind: 'link'; href: string }
   /** The step is gone: open the session and have it say `notice`. */
-  | { kind: 'missing-step'; href: string; notice: string }
+  /** `at`: the step's time from the snapshot (the session page shows the turn nearest it). */
+  | { kind: 'missing-step'; href: string; notice: string; at: string | null }
   /** The session is gone: open nothing, say `notice` on this page. */
   | { kind: 'missing-session'; notice: string };
 
@@ -91,7 +92,7 @@ function rowOf(b: Bookmark, m: PageMasker): BookmarkRowView {
   const open: BookmarkOpen = missing === 'session'
     ? { kind: 'missing-session', notice: SESSION_GONE_NOTICE }
     : missing === 'step'
-      ? { kind: 'missing-step', href: sessionHash(b.sessionId), notice: STEP_GONE_NOTICE }
+      ? { kind: 'missing-step', href: sessionHash(b.sessionId), notice: STEP_GONE_NOTICE, at: s.nodeAt }
       : { kind: 'link', href: b.nodeId === null ? sessionHash(b.sessionId) : sessionNodeHash(b.sessionId, b.nodeId) };
   return {
     id: b.id,
@@ -147,12 +148,53 @@ export function filterBookmarkRows(rows: readonly BookmarkRowView[], query: stri
 export interface SessionNotice {
   sessionId: string;
   text: string;
+  /** The gone step's time (the snapshot's nodeAt): the session page shows the turn nearest it. */
+  at: string | null;
   arrived: boolean;
 }
 
 export function nextSessionNotice(notice: SessionNotice | null, route: Route): SessionNotice | null {
   if (notice === null || notice.arrived) return null;
   return route.page === 'session' && route.sessionId === notice.sessionId ? { ...notice, arrived: true } : null;
+}
+
+/** What the session page at `route` gets: the notice once it has arrived there (the same object), else null. */
+export function sessionNoticeFor(notice: SessionNotice | null, route: Route): SessionNotice | null {
+  return notice !== null && notice.arrived && route.page === 'session' && route.sessionId === notice.sessionId ? notice : null;
+}
+
+/** The parts of a click that say whether it opens the link here (a plain left click) or elsewhere. */
+export interface ClickLike {
+  button: number;
+  metaKey: boolean;
+  ctrlKey: boolean;
+  shiftKey: boolean;
+  altKey: boolean;
+}
+
+/**
+ * What a click on a row does besides following its link: a gone session says its notice on this page; a gone step hands
+ * its notice (and the step's time) to the session page, but only for a plain left click (a click that opens the link in
+ * another tab or window leaves this tab where it is). null: nothing.
+ */
+export function bookmarkClick(
+  row: BookmarkRowView, click: ClickLike,
+): { kind: 'page-notice'; text: string } | { kind: 'session-notice'; notice: Omit<SessionNotice, 'arrived'> } | null {
+  if (row.open.kind === 'missing-session') return { kind: 'page-notice', text: row.open.notice };
+  if (row.open.kind !== 'missing-step') return null;
+  if (click.button !== 0 || click.metaKey || click.ctrlKey || click.shiftKey || click.altKey) return null;
+  return { kind: 'session-notice', notice: { sessionId: row.sessionId, text: row.open.notice, at: row.open.at } };
+}
+
+/** The 书签 page's row click handler: bookmarkClick's answer sent to the page's notice or to the app (onStepGone). */
+export function bookmarkOpener(
+  setPageNotice: (text: string) => void, onStepGone: (notice: Omit<SessionNotice, 'arrived'>) => void,
+): (row: BookmarkRowView, click: ClickLike) => void {
+  return (row, click) => {
+    const r = bookmarkClick(row, click);
+    if (r?.kind === 'page-notice') setPageNotice(r.text);
+    else if (r?.kind === 'session-notice') onStepGone(r.notice);
+  };
 }
 
 // ---- the page's writes ----
@@ -189,7 +231,10 @@ export interface BookmarkPageController {
   revision(): number;
   /** The list as shown: without the rows deleted here, with the notes saved here that the list does not have yet. */
   visible(list: readonly Bookmark[]): Bookmark[];
-  /** A new list arrived: the saved notes it already has (or whose bookmark it no longer has) are forgotten. */
+  /**
+   * A new list arrived: the saved notes it already has (or whose bookmark it no longer has) are forgotten, and so are the
+   * rows deleted here that it no longer has (so one restored elsewhere later shows again).
+   */
   listChanged(list: readonly Bookmark[]): void;
   startEdit(id: number, note: string): void;
   setDraft(text: string): void;
@@ -252,6 +297,11 @@ export function createBookmarkPageController(api: BookmarkWrites): BookmarkPageC
         const b = byId.get(id);
         if (b === undefined || caughtUp(b, mine)) saved.delete(id);
       }
+      let dropped = false;
+      for (const id of removed) {
+        if (!byId.has(id)) { removed.delete(id); dropped = true; }
+      }
+      if (dropped) revision += 1;
     },
     startEdit(id, note) {
       set({ editing: { id, original: note, draft: note, saving: false, error: null } });

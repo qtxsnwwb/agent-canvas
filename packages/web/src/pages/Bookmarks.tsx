@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useReducer, useState, type KeyboardEvent } from 'react';
 import {
-  BOOKMARKS_EMPTY_TEXT, BOOKMARK_FILTER_PLACEHOLDER, bookmarkRows, bookmarksTitle, createBookmarkPageController, filterBookmarkRows,
-  type BookmarkEditing, type BookmarkRowView,
+  BOOKMARKS_EMPTY_TEXT, BOOKMARK_FILTER_PLACEHOLDER, bookmarkOpener, bookmarkRows, bookmarksTitle, createBookmarkPageController,
+  filterBookmarkRows, type BookmarkEditing, type BookmarkRowView, type ClickLike, type SessionNotice,
 } from '../bookmarks';
 import { api, openLiveBookmarks, type BookmarksLiveState } from '../client';
 import { useMask } from '../MaskContext';
@@ -30,8 +30,8 @@ export interface BookmarksViewProps {
   /** A notice for this page (a bookmark whose session is gone). */
   notice: string | null;
   onDismissNotice?(): void;
-  /** A row was clicked (a link also navigates by itself). */
-  onOpen(row: BookmarkRowView): void;
+  /** A row was clicked (a link also navigates by itself; `click` says whether it opens here). */
+  onOpen(row: BookmarkRowView, click: ClickLike): void;
   onEdit(row: BookmarkRowView): void;
   onDraft(text: string): void;
   onCommit(): void;
@@ -56,7 +56,7 @@ function NoteEditor({ editing, onDraft, onCommit, onCancel }: Pick<BookmarksView
 }
 
 /** One row: kind, note, time; the step's label and what is missing; project · origin · “title”. */
-function BookmarkRow(props: BookmarksViewProps & { row: BookmarkRowView }) {
+export function BookmarkRow(props: BookmarksViewProps & { row: BookmarkRowView }) {
   const { row, editing, onOpen, onEdit, onDelete } = props;
   const mine = editing !== null && editing.id === row.id ? editing : null;
   const body = (
@@ -86,10 +86,9 @@ function BookmarkRow(props: BookmarksViewProps & { row: BookmarkRowView }) {
       {mine !== null ? (
         <div className="bookmark-link is-editing">{body}</div>
       ) : row.open.kind === 'missing-session' ? (
-        <button type="button" className="bookmark-link" onClick={() => onOpen(row)}>{body}</button>
+        <button type="button" className="bookmark-link" onClick={(e) => onOpen(row, e)}>{body}</button>
       ) : (
-        <a className="bookmark-link" href={row.open.href}
-          onClick={(e) => { if (e.button === 0 && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) onOpen(row); }}>{body}</a>
+        <a className="bookmark-link" href={row.open.href} onClick={(e) => onOpen(row, e)}>{body}</a>
       )}
       <span className="bookmark-actions">
         <button type="button" className="attention-btn" disabled={mine !== null} onClick={dismissClick(() => onEdit(row))}>改备注</button>
@@ -152,9 +151,10 @@ export function BookmarksView(props: BookmarksViewProps) {
 
 /**
  * `#/bookmarks` (bookmarks spec 4): every bookmark, live (refetched on each `bookmarks` push). `onStepGone`: a bookmark
- * whose step is gone was clicked; its link opens the session, which then shows `text` once (App.tsx).
+ * whose step is gone was clicked; its link opens the session, which then shows the notice once, at the turn nearest the
+ * step's time (App.tsx).
  */
-export function Bookmarks({ onStepGone }: { onStepGone(sessionId: string, text: string): void }) {
+export function Bookmarks({ onStepGone }: { onStepGone(notice: Omit<SessionNotice, 'arrived'>): void }) {
   const { list: m } = useMask();
   const [live, setLive] = useState<BookmarksLiveState>({ bookmarks: null, failed: false });
   useEffect(() => {
@@ -180,10 +180,7 @@ export function Bookmarks({ onStepGone }: { onStepGone(sessionId: string, text: 
   const [query, setQuery] = useState('');
   const filtered = useMemo(() => filterBookmarkRows(rows, query), [rows, query]);
   const [notice, setNotice] = useState<string | null>(null);
-  const onOpen = (row: BookmarkRowView): void => {
-    if (row.open.kind === 'missing-session') setNotice(row.open.notice);
-    else if (row.open.kind === 'missing-step') onStepGone(row.sessionId, row.open.notice);
-  };
+  const onOpen = bookmarkOpener(setNotice, onStepGone);
   return (
     <BookmarksView
       rows={filtered} total={rows.length} loading={shown === null} failed={live.failed} query={query} onQuery={setQuery}

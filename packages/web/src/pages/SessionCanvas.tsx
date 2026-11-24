@@ -30,7 +30,7 @@ import { Waterfall } from '../canvas/WaterfallPanel';
 import { reasoningRow, type ReasoningRow } from '../canvas/reasoning';
 import { ALL_PROGRESSING, type Progressing } from '../canvas/nodes';
 import { scopeKey, scopeOf, snapshotClock, stepChain, stepTicking, waterfallClock, type WaterfallScope } from '../canvas/waterfall';
-import { NODE_MISSING_NOTE, nextNodeTarget, nodeJumpAction, type NodeTarget } from '../nodeJump';
+import { NODE_MISSING_NOTE, nearestTurnNode, nextNodeTarget, nodeJumpAction, type NodeTarget } from '../nodeJump';
 import { useNow } from '../useNow';
 
 function hasKeys(obj: object): boolean {
@@ -102,8 +102,11 @@ export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, file
   filePath: string | null;
   /** The deep link's node (`#/s/<id>/n/<nodeId>`): selected and brought into view, again whenever it changes. */
   nodeId: string | null;
-  /** Shown in the node note when the canvas opens (the 书签 page: the bookmarked step is gone); a node address replaces it. */
-  notice?: string | null;
+  /**
+   * The 书签 page's notice (the bookmarked step is gone): `text` is shown in the node note when the canvas opens, and
+   * once the canvas is ready the turn nearest `at` (the step's time) is shown like a node address. A node address wins.
+   */
+  notice?: { text: string; at: string | null } | null;
 }) {
   const canvas = useCanvas(source);
   // ---- the 时间线 view (page state, not a ViewMode: it replaces the canvas, whose mode is kept for coming back) ----
@@ -466,7 +469,7 @@ export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, file
   // Once per navigation, when the canvas model exists (the graph is loaded before this page is mounted): the node is shown
   // like a step picked in the file panel. Graph updates do not run it again (the effect depends on the target only).
   const [nodeTarget, setNodeTarget] = useState<NodeTarget | null>(() => nextNodeTarget(null, nodeId));
-  const [nodeNote, setNodeNote] = useState<string | null>(notice);
+  const [nodeNote, setNodeNote] = useState<string | null>(notice?.text ?? null);
   const handledNode = useRef(0);
   useEffect(() => { setNodeTarget((t) => nextNodeTarget(t, nodeId)); }, [nodeId]);
   const ready = canvas.ready;
@@ -485,6 +488,21 @@ export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, file
     setPickNote(null);
     setNodeNote(showStep(nodeTarget.id));
   }, [nodeTarget, ready, source, showStep]);
+  // The 书签 page's notice: once per mount, when the canvas model exists, the turn nearest the gone step's time is shown
+  // the way a node address shows its node; the note keeps the notice's text. Without a time or a turn: the notice only.
+  const noticeHandled = useRef(false);
+  useEffect(() => {
+    if (noticeHandled.current || notice === null || !ready) return;
+    noticeHandled.current = true;
+    if (nodeId !== null) return;
+    const target = nearestTurnNode(Object.values(source.getGraph().nodes), notice.at);
+    if (target === null) return;
+    setFilesOpen(false);
+    setPickedStep(target);
+    setPickNote(null);
+    showStep(target);
+    setNodeNote(notice.text);
+  }, [notice, ready, nodeId, source, showStep]);
   const closeFiles = useCallback(() => {
     setFilesOpen(false);
     setPickNote(null);

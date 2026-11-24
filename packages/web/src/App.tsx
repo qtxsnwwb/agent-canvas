@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { headerCount } from './attention';
-import { nextSessionNotice, type SessionNotice } from './bookmarks';
+import { nextSessionNotice, sessionNoticeFor, type SessionNotice } from './bookmarks';
 import { api, openLiveAttention, openLiveToday, type AttentionLiveState, type LiveAttention, type LiveToday, type TodayLiveState } from './client';
 import { MaskProvider, MaskSwitch, useMask } from './MaskContext';
 import { Anomalies } from './pages/Anomalies';
@@ -115,7 +115,7 @@ function AppBody() {
         <p className="muted session-loading">加载中…</p>
       ) : route.page === 'session' ? (
         <SessionPage key={route.sessionId} sessionId={route.sessionId} filePath={route.filePath ?? null} nodeId={route.nodeId ?? null}
-          notice={sessionNotice !== null && sessionNotice.arrived && sessionNotice.sessionId === route.sessionId ? sessionNotice.text : null} />
+          notice={sessionNoticeFor(sessionNotice, route)} />
       ) : route.page === 'diagnostics' ? (
         <Diagnostics />
       ) : route.page === 'stats' ? (
@@ -125,7 +125,7 @@ function AppBody() {
       ) : route.page === 'anomalies' ? (
         <Anomalies query={route.query} />
       ) : route.page === 'bookmarks' ? (
-        <Bookmarks onStepGone={(sessionId, text) => setSessionNotice({ sessionId, text, arrived: false })} />
+        <Bookmarks onStepGone={(n) => setSessionNotice({ ...n, arrived: false })} />
       ) : route.page === 'attention' ? (
         <Attention live={attention} actions={attentionActions} />
       ) : route.page === 'notifications' ? (
