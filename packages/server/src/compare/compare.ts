@@ -134,10 +134,11 @@ function filesByKey(input: CompareInput | null): Map<string, { path: string; cou
     const reads = f.counts.read;
     const changes = changesOf(f.counts);
     const known = out.get(key);
-    if (known === undefined) out.set(key, { path: rel, counts: { reads, changes } });
+    if (known === undefined) out.set(key, { path: rel, counts: f.failed > 0 ? { reads, changes, failed: f.failed } : { reads, changes } });
     else {
       known.counts.reads += reads;
       known.counts.changes += changes;
+      if (f.failed > 0) known.counts.failed = (known.counts.failed ?? 0) + f.failed;
     }
   }
   return out;

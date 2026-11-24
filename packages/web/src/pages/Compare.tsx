@@ -170,7 +170,7 @@ export function ComparePageView({ view, failed, onSwap, onChange }: ComparePageV
         </span>
       </div>
       {failed && <p className="error stats-state" role="status">{view === null ? LOAD_FAILED_TEXT : REFRESH_FAILED_TEXT}</p>}
-      {view !== null && view.live && <p className="muted compare-live" role="status">有一边正在进行，数字每 5 秒更新一次。</p>}
+      {view !== null && view.live && !failed && <p className="muted compare-live" role="status">有一边正在进行，数字每 5 秒更新一次。</p>}
       {view === null ? (!failed && <p className="muted stats-state">加载中…</p>) : <Body view={view} />}
     </div>
   );

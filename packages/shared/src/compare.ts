@@ -75,7 +75,11 @@ export interface CompareTurnRow {
   right: CompareTurnSide | null;
 }
 
-export interface CompareFileCounts { reads: number; changes: number }
+/**
+ * Successful reads and changes of a file (the file page's counts). `failed`: its failed or denied touches, present only
+ * when there are some (a file touched only by failed attempts reads 0 / 0 and says so).
+ */
+export interface CompareFileCounts { reads: number; changes: number; failed?: number }
 
 /**
  * One file, paired by its path relative to each session's cwd (the file page's relativePath: the absolute path when

@@ -4,7 +4,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import type { CompareResponse, CompareSide, SearchHit, Session } from '@agent-canvas/shared';
 import {
-  ALL_PROJECTS_TEXT, COMPARE_BUTTON_TEXT, COMPARE_POLL_MS, COMPARE_RETRY_MAX_MS, CWDS_DIFFER_TEXT, compareRetryDelay, isPlainClick, NOT_FOUND_TEXT, NO_TURN_TEXT, REFRESH_FAILED_TEXT,
+  ALL_PROJECTS_TEXT, COMPARE_BUTTON_TEXT, COMPARE_IDLE_POLL_MS, COMPARE_POLL_MS, FAILED_ONLY_TEXT, COMPARE_RETRY_MAX_MS, CWDS_DIFFER_TEXT, compareRetryDelay, isPlainClick, NOT_FOUND_TEXT, NO_TURN_TEXT, REFRESH_FAILED_TEXT,
   SAME_SESSION_TEXT, TURNS_TRUNCATED_TEXT, betterSide, compareView, createComparePoller, filterPickerRows, pickerList, pickerRows,
   searchPickerRows, shouldPoll, type CompareState,
 } from '../src/compare';
@@ -130,6 +130,34 @@ describe('bold rules', () => {
   });
 });
 
+describe('bold on what is shown', () => {
+  test('two values that print the same are not bolded, even when the raw numbers differ', () => {
+    const r = response();
+    r.left = { ...r.left!, activeMs: 2 * 3_600_000 + 5 * 60_000 + 10_000, tokens: { input: 1_000_000, cachedInput: 0, output: 210_000 } };
+    r.right = { ...r.right!, activeMs: 2 * 3_600_000 + 5 * 60_000 + 50_000, tokens: { input: 1_000_000, cachedInput: 0, output: 240_000 } };
+    const v = compareView(r, IDS, IDENTITY_MASKER, NOW);
+    const row = (label: string) => v.totals.find((x) => x.label === label)!;
+    expect(text(row('总用时').left)).toBe('2 小时 5 分');
+    expect(text(row('总用时').right)).toBe('2 小时 5 分');
+    expect([...bold(row('总用时').left), ...bold(row('总用时').right)]).toEqual([]);
+    expect(text(row('新输入 + 输出').left)).toBe('1.2M');
+    expect(text(row('新输入 + 输出').right)).toBe('1.2M');
+    expect([...bold(row('新输入 + 输出').left), ...bold(row('新输入 + 输出').right)]).toEqual([]);
+  });
+
+  test('calls and failures: judged on the printed counts too', () => {
+    const r = response();
+    r.left = { ...r.left!, toolCalls: 123_401, failed: 3 };
+    r.right = { ...r.right!, toolCalls: 123_449, failed: 4 };
+    const v = compareView(r, IDS, IDENTITY_MASKER, NOW);
+    const row = v.totals.find((x) => x.label === '工具调用 / 失败')!;
+    expect(text(row.left)).toBe('12.3 万 / 3');
+    expect(text(row.right)).toBe('12.3 万 / 4');
+    expect(bold(row.left)).toEqual(['3']);
+    expect(bold(row.right)).toEqual([]);
+  });
+});
+
 describe('the page view', () => {
   test('heads: title, origin, links to each session', () => {
     const v = compareView(response(), IDS, IDENTITY_MASKER, NOW);
@@ -174,8 +202,19 @@ describe('the page view', () => {
     expect(ci.left).toEqual({ text: '3 / 2', href: sessionFileHash('left-1', 'D:/work/demo/src/ci.yml') });
     expect(ci.right).toEqual({ text: '5 / 4', href: sessionFileHash('right-1', '/home/u/demo/src/ci.yml') });
     expect(v.files.groups[1]!.rows[0]!.right).toEqual({ text: '—', href: null });
+    expect(FAILED_ONLY_TEXT).toBe('（只有失败的尝试）');
     expect(v.files.cwdsDiffer).toBe(true);
     expect(CWDS_DIFFER_TEXT).toBe('两边工作目录不同，按相对路径配对');
+  });
+
+  test('a file touched only by failed attempts says so; failures beside successful touches do not change the cell', () => {
+    const r = response();
+    r.files.onlyLeft = [{ path: 'broken.ts', left: { reads: 0, changes: 0, failed: 2 }, right: null }];
+    r.files.both = [{ path: 'src/ci.yml', left: { reads: 3, changes: 2, failed: 1 }, right: { reads: 5, changes: 4 } }];
+    const v = compareView(r, IDS, IDENTITY_MASKER, NOW);
+    expect(v.files.groups[1]!.rows[0]!.left.text).toBe('0 / 0（只有失败的尝试）');
+    expect(v.files.groups[1]!.rows[0]!.left.href).toBe(sessionFileHash('left-1', 'D:/work/demo/broken.ts'));
+    expect(v.files.groups[0]!.rows[0]!.left.text).toBe('3 / 2');
   });
 
   test('a side not found: 「找不到这个会话」, its cells empty, no bold; the other side shown as usual', () => {
@@ -228,6 +267,13 @@ describe('the page view', () => {
     expect(html).toContain('<strong>12 分 30 秒</strong>');
     expect(html).toContain(REFRESH_FAILED_TEXT);
     expect(html.split(REFRESH_FAILED_TEXT).length).toBe(2);
+    // A running side while a refetch fails: the failure line only, not 「数字每 5 秒更新一次」 as well.
+    const live = compareView(response({ left: side({ status: 'running' }) }), IDS, IDENTITY_MASKER, Date.parse(side().lastActivityAt) + 1000);
+    expect(live.live).toBe(true);
+    const page = (failed: boolean): string => renderToStaticMarkup(createElement(ComparePageView, { view: live, failed, onSwap: () => {}, onChange: () => {} }));
+    expect(page(false)).toContain('每 5 秒更新一次');
+    expect(page(true)).not.toContain('每 5 秒更新一次');
+    expect(page(true)).toContain(REFRESH_FAILED_TEXT);
     expect(html).toContain(`href="${sessionNodeHash('left-1', 'p1')}"`);
     expect(html).toContain(NO_TURN_TEXT);
     // The tables scroll inside their own box.
@@ -248,7 +294,7 @@ describe('polling', () => {
     expect(shouldPoll(response({ left: null, right: null }), at)).toBe(false);
   });
 
-  test('a stale “running” side (长时间无活动) is not live: no note, no polling', async () => {
+  test('a stale “running” side (长时间无活动) is not live: no note, only the slow 60 s refetch', async () => {
     // Last activity a day before NOW: the pages show 长时间无活动, so the page neither says it is updating nor refetches.
     const stale = (): CompareResponse => response({ left: side({ status: 'running', lastActivityAt: '2026-11-23T10:00:00Z' }) });
     expect(shouldPoll(stale(), NOW)).toBe(false);
@@ -260,8 +306,10 @@ describe('polling', () => {
     vi.useFakeTimers();
     const load = vi.fn(() => Promise.resolve(stale()));
     const p = createComparePoller({ load, onState: () => {}, now: () => NOW });
-    await vi.advanceTimersByTimeAsync(COMPARE_POLL_MS * 5);
+    await vi.advanceTimersByTimeAsync(COMPARE_IDLE_POLL_MS - 1);
     expect(load).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(load).toHaveBeenCalledTimes(2);
     p.close();
     // The same side fresh is live.
     expect(compareView(running(), IDS, IDENTITY_MASKER, Date.parse(side().lastActivityAt) + 1000).live).toBe(true);
@@ -270,9 +318,9 @@ describe('polling', () => {
   // Answer time just after the running side's last activity: a fresh “running”.
   const fresh = (): number => Date.parse(side().lastActivityAt) + 1000;
 
-  test('refetches every 5 s while running, stops once both are idle', async () => {
+  test('refetches every 5 s while running, every 60 s once both are idle, and fast again when a side resumes', async () => {
     vi.useFakeTimers();
-    const answers = [running(), running(), idle()];
+    const answers = [running(), running(), idle(), idle(), running()];
     const load = vi.fn(() => Promise.resolve(answers.shift() ?? idle()));
     const states: CompareState[] = [];
     const p = createComparePoller({ load, onState: (s) => states.push(s), now: fresh });
@@ -283,11 +331,18 @@ describe('polling', () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(load).toHaveBeenCalledTimes(2);
     await vi.advanceTimersByTimeAsync(COMPARE_POLL_MS);
-    expect(load).toHaveBeenCalledTimes(3);
-    await vi.advanceTimersByTimeAsync(COMPARE_POLL_MS * 4);
-    expect(load).toHaveBeenCalledTimes(3);
-    expect(states.at(-1)!.failed).toBe(false);
+    expect(load).toHaveBeenCalledTimes(3); // both idle now
     expect(states.at(-1)!.response!.left!.status).toBe('idle');
+    await vi.advanceTimersByTimeAsync(COMPARE_IDLE_POLL_MS - 1);
+    expect(load).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(load).toHaveBeenCalledTimes(4); // still idle: the next in 60 s
+    await vi.advanceTimersByTimeAsync(COMPARE_IDLE_POLL_MS);
+    expect(load).toHaveBeenCalledTimes(5); // a side resumed: back to 5 s
+    await vi.advanceTimersByTimeAsync(COMPARE_POLL_MS);
+    expect(load).toHaveBeenCalledTimes(6);
+    expect(COMPARE_IDLE_POLL_MS).toBe(60_000);
+    expect(states.at(-1)!.failed).toBe(false);
     p.close();
   });
 
@@ -309,7 +364,7 @@ describe('polling', () => {
     p.close();
   });
 
-  test('closing stops it: no more requests, an answer in flight is dropped', async () => {
+  test('closing stops it: no more requests (the slow idle refetch included), an answer in flight is dropped', async () => {
     vi.useFakeTimers();
     let resolve: (r: CompareResponse) => void = () => {};
     const load = vi.fn()
@@ -321,7 +376,7 @@ describe('polling', () => {
     expect(load).toHaveBeenCalledTimes(2);
     p.close();
     resolve(running());
-    await vi.advanceTimersByTimeAsync(COMPARE_POLL_MS * 3);
+    await vi.advanceTimersByTimeAsync(COMPARE_IDLE_POLL_MS * 3);
     expect(load).toHaveBeenCalledTimes(2);
     expect(onState).toHaveBeenCalledTimes(1);
   });

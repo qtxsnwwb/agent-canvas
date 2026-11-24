@@ -286,6 +286,24 @@ describe('files', () => {
     ]);
   });
 
+  test('a file touched only by failed attempts: 0 / 0 with its failed count; a file without failures has no failed field', () => {
+    const start = NOW - H;
+    const touch = (t: number, tool: string, path: string, action: FileTouch['action'], status: 'succeeded' | 'failed'): GraphNode =>
+      callNode(start + t, 'T', tool, { status, files: [{ path, action } satisfies FileTouch] });
+    const withFailures = input(mkSession('a', { cwd: '/w/app' }), [
+      promptNode(start, 'T', 'x'),
+      touch(1, 'Read', '/w/app/ok.ts', 'read', 'succeeded'),
+      touch(2, 'Edit', '/w/app/ok.ts', 'edit', 'succeeded'),
+      touch(3, 'Edit', '/w/app/ok.ts', 'edit', 'failed'),
+      touch(4, 'Edit', '/w/app/broken.ts', 'edit', 'failed'),
+      touch(5, 'Write', '/w/app/broken.ts', 'write', 'failed'),
+    ]);
+    const r = pair(withFailures, withFiles('b', '/w/app', [['/w/app/ok.ts', 1, 0]]));
+    expect(r.files.both).toEqual([{ path: 'ok.ts', left: { reads: 1, changes: 1, failed: 1 }, right: { reads: 1, changes: 0 } }]);
+    expect(r.files.onlyLeft).toEqual([{ path: 'broken.ts', left: { reads: 0, changes: 0, failed: 2 }, right: null }]);
+    expect('failed' in r.files.both[0]!.right!).toBe(false);
+  });
+
   test('Windows paths: the same cwd spelled differently is not a difference; relative paths pair case-insensitively', () => {
     const r = pair(
       withFiles('a', 'D:\\w\\tea-shop', [['D:/w/tea-shop/src/A.ts', 1, 0]]),

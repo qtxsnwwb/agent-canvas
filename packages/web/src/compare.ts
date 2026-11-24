@@ -28,12 +28,16 @@ export const OTHER_TOOLS_TEXT = '其他';
 export const REFRESH_FAILED_TEXT = '刷新失败，正在重试…';
 export const LOAD_FAILED_TEXT = '对比没能加载出来，正在重试…';
 export const ALL_PROJECTS_TEXT = '在所有项目里找';
+/** After 「0 / 0」: the file was touched only by failed or denied attempts. */
+export const FAILED_ONLY_TEXT = '（只有失败的尝试）';
 
 export const moreText = (n: number): string => `还有 ${n} 个`;
 export const turnLabel = (index: number): string => `第 ${index} 轮`;
 
 /** How often the page refetches while a side is running or waiting for a permission. */
 export const COMPARE_POLL_MS = 5_000;
+/** How often it refetches while neither is (a session that resumes is picked up; the server answers from its caches). */
+export const COMPARE_IDLE_POLL_MS = 60_000;
 /** The longest wait before retrying a failed request (the waits double from COMPARE_POLL_MS up to this). */
 export const COMPARE_RETRY_MAX_MS = 60_000;
 
@@ -51,6 +55,15 @@ export type Better = 'left' | 'right' | null;
 export function betterSide(left: number | null, right: number | null): Better {
   if (left === null || right === null || left === right) return null;
   return left < right ? 'left' : 'right';
+}
+
+/**
+ * betterSide as the cells show it: none when the two values print the same (2 h 5 min 10 s and 2 h 5 min 50 s both
+ * 「2 小时 5 分」 at that size, 1.21M and 1.24M both 「1.2M」), so a bold never sits beside an identical-looking number.
+ */
+export function shownBetterSide(left: number | null, right: number | null, format: (n: number | null) => string): Better {
+  if (left === null || right === null || format(left) === format(right)) return null;
+  return betterSide(left, right);
 }
 
 // ---- the page's rows ----
@@ -131,7 +144,7 @@ function numberRow(
 ): TotalRow {
   const lv = l === null ? null : value(l);
   const rv = r === null ? null : value(r);
-  const better = judge ? betterSide(lv, rv) : null;
+  const better = judge ? shownBetterSide(lv, rv, format) : null;
   return {
     label,
     left: [{ text: l === null ? NONE : format(lv), better: better === 'left' }],
@@ -140,8 +153,8 @@ function numberRow(
 }
 
 function totals(l: CompareSide | null, r: CompareSide | null): TotalRow[] {
-  const calls = betterSide(l?.toolCalls ?? null, r?.toolCalls ?? null);
-  const failed = betterSide(l?.failed ?? null, r?.failed ?? null);
+  const calls = shownBetterSide(l?.toolCalls ?? null, r?.toolCalls ?? null, formatCount);
+  const failed = shownBetterSide(l?.failed ?? null, r?.failed ?? null, formatCount);
   const callsCell = (s: CompareSide | null, me: Better): CellPart[] => (s === null ? plain(NONE) : [
     { text: formatCount(s.toolCalls), better: calls === me }, { text: ' / ', better: false }, { text: formatCount(s.failed), better: failed === me },
   ]);
@@ -184,7 +197,8 @@ function turnCell(t: CompareTurnSide | null, s: CompareSide | null, m: PageMaske
 function fileCell(c: CompareFileCounts | null, path: string, s: CompareSide | null, m: PageMasker): LinkCell {
   if (c === null || s === null) return { text: NONE, href: null };
   const full = normalizeFilePath(path, s.cwd) || path;
-  return { text: `${formatCount(c.reads)} / ${formatCount(c.changes)}`, href: sessionFileHash(s.sessionId, m.on ? m.text(full) : full) };
+  const failedOnly = c.reads + c.changes === 0 && (c.failed ?? 0) > 0;
+  return { text: `${formatCount(c.reads)} / ${formatCount(c.changes)}${failedOnly ? FAILED_ONLY_TEXT : ''}`, href: sessionFileHash(s.sessionId, m.on ? m.text(full) : full) };
 }
 
 const FILE_GROUPS: readonly { key: FileGroupView['key']; label: string }[] = [
@@ -239,15 +253,17 @@ export function compareView(r: CompareResponse, ids: { a: string; b: string }, m
 export interface CompareState { response: CompareResponse | null; failed: boolean }
 
 /**
- * Loads the comparison now, then again every `intervalMs` (COMPARE_POLL_MS) while shouldPoll says a side is running
- * (judged at answer time, `now`); stops once both are idle (or closed). A failed request keeps the last answer, reports
- * `failed` and is retried after compareRetryDelay (doubling up to COMPARE_RETRY_MAX_MS; a success starts over). Answers
- * arriving after close are dropped.
+ * Loads the comparison now, then again for as long as the page is open: every `intervalMs` (COMPARE_POLL_MS) while
+ * shouldPoll says a side is running or waiting for a permission (judged at answer time, `now`), otherwise every
+ * `idleMs` (COMPARE_IDLE_POLL_MS), so a session that resumes is picked up. A failed request keeps the last answer,
+ * reports `failed` and is retried after compareRetryDelay (doubling up to COMPARE_RETRY_MAX_MS; a success starts over).
+ * Answers arriving after close are dropped.
  */
 export function createComparePoller(o: {
-  load: () => Promise<CompareResponse>; onState: (s: CompareState) => void; intervalMs?: number; now?: () => number;
+  load: () => Promise<CompareResponse>; onState: (s: CompareState) => void; intervalMs?: number; idleMs?: number; now?: () => number;
 }): { close(): void } {
   const interval = o.intervalMs ?? COMPARE_POLL_MS;
+  const idle = o.idleMs ?? COMPARE_IDLE_POLL_MS;
   const now = o.now ?? Date.now;
   let closed = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -262,7 +278,7 @@ export function createComparePoller(o: {
         failures = 0;
         response = r;
         o.onState({ response, failed: false });
-        if (shouldPoll(r, now())) later(interval);
+        later(shouldPoll(r, now()) ? interval : idle);
       },
       () => {
         if (closed) return;
