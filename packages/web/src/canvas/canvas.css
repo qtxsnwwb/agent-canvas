@@ -520,8 +520,8 @@ button.cc-reason:focus-visible, .cc-reason-current:focus-visible { outline: 3px 
 .cc-drawer-mark { margin-top: 8px; }
 .cc-drawer-mark .bookmark-mark { display: flex; }
 .cc-drawer-mark .bookmark-mark-note { max-width: none; }
-/* The narrow session bar: the note box takes the rest of its row. */
-@media (max-width: 760px) {
+/* The narrow session bar (styles.css; the app's from 960 px down): the note box takes the rest of its row. */
+@media (max-width: 960px) {
   .session-bar-end .bookmark-mark { flex: 1 1 auto; }
   .session-bar-end .bookmark-mark-note { max-width: none; }
 }

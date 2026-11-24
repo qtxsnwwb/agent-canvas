@@ -2,17 +2,22 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, expect, test, vi } from 'vitest';
 import type { Bookmark, BookmarkSnapshot, ExportBundle } from '@agent-canvas/shared';
-import {
-  BOOKMARK_UNDO_MS, MARKED_TEXT, NOTE_GOES_TEXT, SESSION_MARK_TEXT, STEP_MARK_TEXT, createSessionBookmarkController,
-} from '../src/bookmarks';
-import { BookmarkToggle } from '../src/canvas/BookmarkToggle';
+import { graphResolver } from '../src/anomalies';
+import { BOOKMARK_UNDO_MS } from '../src/bookmarkWrites';
+import { BookmarkToggle, noteKeyDown, type NoteKey } from '../src/canvas/BookmarkToggle';
+import { NO_STARS, sessionStars } from '../src/canvas/bookmarkMarks';
 import { Drawer } from '../src/canvas/Drawer';
 import { EMPTY_CHAIN } from '../src/canvas/chain';
 import { buildView } from '../src/canvas/view';
+import { createSessionsFeed } from '../src/client';
+import { liveSource } from '../src/liveSource';
 import { createDisplaySource, IDENTITY_MASKER } from '../src/masking';
+import {
+  MARKED_TEXT, NOTE_GOES_TEXT, SESSION_MARK_TEXT, STEP_MARK_TEXT, connectSessionBookmarks, createSessionBookmarkController,
+} from '../src/sessionBookmarks';
 import type { SessionBookmarks, SessionSource } from '../src/sessionSource';
 import { embeddedSource } from '../src/viewer/data';
-import { baseSession, mkNode } from './helpers';
+import { baseSession, fakeSocket, mkNode } from './helpers';
 
 afterEach(() => { vi.useRealTimers(); });
 
@@ -283,4 +288,150 @@ test('导出的查看器没有书签：embeddedSource 和套上遮蔽之后都�
   const f = fakeBookmarks();
   const live: SessionSource = { ...viewer, bookmarks: f.b };
   expect(createDisplaySource(live, IDENTITY_MASKER).bookmarks).toBe(f.b);
+});
+
+// ---- fix round ----
+
+test('备注刚打完就点「已收藏」：等那次保存落地再删，带撤销；撤销后书签和备注都回来', async () => {
+  vi.useFakeTimers();
+  const f = fakeBookmarks();
+  let land: (() => void) | null = null;
+  const b: SessionBookmarks = {
+    ...f.b,
+    patch: (id, note) => {
+      f.calls.push(`patch ${id} ${note}`);
+      return new Promise((r) => { land = () => r({ ...bm(id, 'n1', note), noteUpdatedAt: '2026-01-02T00:00:00.000Z' }); });
+    },
+    restore: (id) => { f.calls.push(`restore ${id}`); return Promise.resolve(bm(id, 'n1', '刚打的备注')); },
+  };
+  const c = createSessionBookmarkController(b);
+  c.setList([bm(2, 'n1')]); // marked, no note yet
+  c.startEdit('n1');
+  c.setDraft('刚打的备注');
+  void c.commitEdit(); // the blur when the button is pressed
+  const unmarking = c.toggle('n1'); // the click
+  await Promise.resolve();
+  expect(f.calls).toEqual(['patch 2 刚打的备注']); // no delete before the save has landed
+  expect(c.stateOf('n1').busy).toBe(true);
+  land!();
+  await unmarking;
+  expect(f.calls).toEqual(['patch 2 刚打的备注', 'delete 2']);
+  expect(c.stateOf('n1')).toMatchObject({ bookmark: null, undo: true });
+  await c.undo();
+  expect(c.stateOf('n1').bookmark).toMatchObject({ id: 2, note: '刚打的备注' });
+  c.close();
+});
+
+test('备注保存失败时点「已收藏」：打的字没存上也算有备注，给撤销', async () => {
+  vi.useFakeTimers();
+  const f = fakeBookmarks();
+  const c = createSessionBookmarkController(f.b);
+  c.setList([bm(2, 'n1')]);
+  c.startEdit('n1');
+  c.setDraft('长'.repeat(201));
+  f.fail(Object.assign(new Error('备注最多 200 个字，现在有 201 个'), { status: 400 }));
+  await c.commitEdit();
+  expect(c.stateOf('n1').editing?.error).toBe('备注最多 200 个字，现在有 201 个');
+  await c.toggle('n1');
+  expect(f.calls).toEqual([`patch 2 ${'长'.repeat(201)}`, 'delete 2']);
+  expect(c.stateOf('n1').undo).toBe(true);
+  c.close();
+});
+
+test('撤销失败的提示：同一处再收藏成功后不再显示', async () => {
+  vi.useFakeTimers();
+  const f = fakeBookmarks();
+  const c = createSessionBookmarkController(f.b);
+  c.setList([bm(2, 'n1', '有备注')]);
+  await c.toggle('n1');
+  f.fail(Object.assign(new Error('找不到这个书签'), { status: 404 }));
+  await c.undo();
+  expect(c.stateOf('n1').error).toBe('没能撤销：找不到这个书签');
+  await c.toggle('n1');
+  expect(c.stateOf('n1')).toMatchObject({ bookmark: { id: 10 }, error: null });
+  c.close();
+});
+
+test('note 框的 Escape：放回存着的备注，不再往外传（抽屉在 window 上听 Escape，不会被关掉）；Enter 保存；输入法组字时不管', () => {
+  const ctrl = { commitEdit: vi.fn(async () => {}), cancelEdit: vi.fn() };
+  const key = (k: string, isComposing = false) => {
+    const e = { key: k, preventDefault: vi.fn(), stopPropagation: vi.fn(), nativeEvent: { isComposing } };
+    noteKeyDown(ctrl, e as unknown as NoteKey);
+    return e;
+  };
+  const esc = key('Escape');
+  expect(esc.stopPropagation).toHaveBeenCalled();
+  expect(esc.preventDefault).toHaveBeenCalled();
+  expect(ctrl.cancelEdit).toHaveBeenCalledTimes(1);
+  const enter = key('Enter');
+  expect(enter.stopPropagation).not.toHaveBeenCalled();
+  expect(ctrl.commitEdit).toHaveBeenCalledTimes(1);
+  const composing = key('Escape', true);
+  expect(composing.stopPropagation).not.toHaveBeenCalled();
+  expect(ctrl.cancelEdit).toHaveBeenCalledTimes(1);
+});
+
+// ---- the session page's wiring (SessionCanvas: liveSource → display source → controller → toolbar and stars) ----
+
+/** p1 → s1 (agent a1: k1 → s2 (agent a2: j1)), one turn. */
+function nestedGraph() {
+  const n = (id: string, kind: 'prompt' | 'tool' | 'subagent', agentId: string | null, t: number, childAgentId: string | null = null) => ({
+    ...mkNode(id, new Date(Date.parse('2026-01-01T00:00:00Z') + t * 1000).toISOString()), kind, agentId, childAgentId,
+    turnId: agentId === null ? 't1' : null,
+  });
+  const nodes = [n('p1', 'prompt', null, 0), n('s1', 'subagent', null, 1, 'a1'), n('k1', 'tool', 'a1', 2), n('s2', 'subagent', 'a1', 3, 'a2'), n('j1', 'tool', 'a2', 4)];
+  return { nodes: Object.fromEntries(nodes.map((x) => [x.id, x])), edges: {} };
+}
+
+test('会话页：这个会话的 bookmarks 推送触发重新取，工具栏变「已收藏」，概览的轮次和两层子代理卡片出星标；别的会话的推送不取', async () => {
+  vi.useFakeTimers();
+  const sock = fakeSocket();
+  const g = nestedGraph();
+  let lists: Bookmark[][] = [[]];
+  const fetchBookmarks = vi.fn(async (sessionId: string) => { expect(sessionId).toBe('s1'); return lists[0]!; });
+  const source = createDisplaySource(
+    liveSource({ getSession: () => baseSession, getGraph: () => g, subscribe: () => () => {} }, { feed: createSessionsFeed(() => sock), fetchBookmarks }),
+    IDENTITY_MASKER,
+  );
+  const ctrl = createSessionBookmarkController(source.bookmarks!);
+  const stop = connectSessionBookmarks(source.bookmarks!, ctrl);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(fetchBookmarks).toHaveBeenCalledTimes(1);
+  const toolbar = () => renderToStaticMarkup(createElement(BookmarkToggle, { ctrl, nodeId: null }));
+  const view = buildView(source.getGraph(), new Map(), undefined, { mode: 'outline' });
+  const stars = () => sessionStars(ctrl.shown().filter((b) => b.nodeId !== null), view, source.getGraph(), graphResolver(source.getGraph()), null);
+  expect(toolbar()).toContain(SESSION_MARK_TEXT);
+  expect(stars()).toBe(NO_STARS);
+
+  // Marked in another tab: the server pushes, this page refetches.
+  lists = [[bm(1, null, '别处标的'), bm(2, 'j1')]];
+  sock.receive({ type: 'bookmarks', sessionIds: ['other'] });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(fetchBookmarks).toHaveBeenCalledTimes(1);
+  sock.receive({ type: 'bookmarks', sessionIds: ['s1'] });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(fetchBookmarks).toHaveBeenCalledTimes(2);
+  expect(toolbar()).toContain(MARKED_TEXT);
+  expect(toolbar()).toContain('value="别处标的"');
+  expect([...stars().keys()].sort()).toEqual([`turn:${view.turns[0]!.key}`, 's1', 's2'].sort());
+
+  // Removed elsewhere: gone here too.
+  lists = [[]];
+  sock.receive({ type: 'bookmarks', sessionIds: ['s1'] });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(toolbar()).toContain(SESSION_MARK_TEXT);
+  expect(stars()).toBe(NO_STARS);
+  stop();
+  expect(sock.closed).toBe(true); // the page's only listener of this feed left
+});
+
+test('会话页（导出的查看器，source.bookmarks 为 null）：没有按钮，没有星标', () => {
+  const bundle = { session: baseSession, nodes: Object.values(nestedGraph().nodes), edges: [], details: {}, truncations: {}, unreadable: [] } as unknown as ExportBundle;
+  const source = createDisplaySource(embeddedSource(bundle, () => { throw new Error('no layout here'); }), IDENTITY_MASKER);
+  expect(source.bookmarks).toBeNull();
+  // What SessionCanvas renders and computes without bookmarks: no controller, so no toggle and no resolver.
+  expect(renderToStaticMarkup(createElement(BookmarkToggle, { ctrl: null, nodeId: null }))).toBe('');
+  const view = buildView(source.getGraph(), new Map(), undefined, { mode: 'outline' });
+  expect(sessionStars([{ nodeId: 'j1' }], view, source.getGraph(), null, null)).toBe(NO_STARS);
+  expect(renderToStaticMarkup(createElement(Drawer, drawerProps(null)))).not.toContain('bookmark');
 });

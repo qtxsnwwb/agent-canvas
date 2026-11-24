@@ -705,6 +705,13 @@ a.bookmark-link:hover .bookmark-note { text-decoration: underline; }
   .session-bar { flex-wrap: wrap; row-gap: 6px; padding: 6px 12px; }
   .session-bar-end { flex: 1 1 100%; margin-left: 0; flex-wrap: wrap; gap: 6px 8px; }
 }
+/* The app's session page has more controls than the exported viewer (the bookmark button and its note box among
+   them): its bar takes the narrow layout from 960 px down, like the header's two rows, so the title keeps a line of its
+   own instead of being squeezed beside three rows of buttons. */
+@media (min-width: 761px) and (max-width: 960px) {
+  .session-bar.session-bar-app { flex-wrap: wrap; row-gap: 6px; padding: 6px 12px; }
+  .session-bar-app .session-bar-end { flex: 1 1 100%; margin-left: 0; flex-wrap: wrap; justify-content: flex-start; gap: 6px 8px; }
+}
 
 /* The header's masking switch (spec 5): at the end of the header; while on, filled and labelled 遮蔽中. It takes the
    room the title and the links leave (min-width 0: it may get narrower than its content); its button keeps its size and
@@ -731,9 +738,9 @@ a.bookmark-link:hover .bookmark-note { text-decoration: underline; }
 /* The session bar's export button, then the canvas's own buttons (rendered into .session-bar-tools): one flow of
    buttons in the bar's end, wrapping together (as in the exported viewer, whose end is the toolbar itself). */
 .session-bar-tools { display: contents; }
-/* Above the narrow layout, while the buttons (the bookmark's note box among them) do not fit beside the title on one
-   line, they wrap onto a second line inside the bar's right-hand end, right-aligned, instead of running off the window.
-   The title gives way first (ellipsis), down to a few characters. */
+/* Above the narrow layout, while the buttons do not fit beside the title on one line, they wrap onto a second line
+   inside the bar's right-hand end, right-aligned, instead of running off the window. The title gives way first
+   (ellipsis), down to a few characters. */
 @media (min-width: 761px) {
   /* Basis 0: the title takes what the buttons leave (up to its own width), so they never give way for it. */
   .session-bar h2 { flex: 1 1 0; max-width: max-content; min-width: 5em; }

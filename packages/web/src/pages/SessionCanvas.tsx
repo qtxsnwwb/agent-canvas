@@ -8,9 +8,11 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExterna
 import { createPortal } from 'react-dom';
 import type { Bookmark } from '@agent-canvas/shared';
 import type { SessionBookmarks, SessionSource } from '../sessionSource';
-import { createSessionBookmarkController, type SessionBookmarkController } from '../bookmarks';
+import {
+  NO_SUBSCRIBE, connectSessionBookmarks, createSessionBookmarkController, type SessionBookmarkController,
+} from '../sessionBookmarks';
 import { BookmarkToggle } from '../canvas/BookmarkToggle';
-import { NO_STARS, bookmarkMarks, bookmarksUntil, stableStars, type StarMarks } from '../canvas/bookmarkMarks';
+import { NO_STARS, sessionStars, stableStars, type StarMarks } from '../canvas/bookmarkMarks';
 import { Canvas, type CanvasFocus } from '../canvas/Canvas';
 import { FilePanel } from '../canvas/FilePanel';
 import { AnomalyPanel, useSessionAnomalies } from '../canvas/AnomalyPanel';
@@ -37,7 +39,6 @@ import { scopeKey, scopeOf, snapshotClock, stepChain, stepTicking, waterfallCloc
 import { NODE_MISSING_NOTE, nearestTurnNode, nextNodeTarget, nodeJumpAction, type NodeTarget } from '../nodeJump';
 import { useNow } from '../useNow';
 
-const NO_SUBSCRIBE = (): (() => void) => () => {};
 const NO_BOOKMARKS: readonly Bookmark[] = [];
 const noBookmarks = (): readonly Bookmark[] => NO_BOOKMARKS;
 
@@ -50,8 +51,7 @@ function useSessionBookmarks(b: SessionBookmarks | null): SessionBookmarkControl
   const ctrl = useMemo(() => (b === null ? null : createSessionBookmarkController(b)), [b]);
   useEffect(() => {
     if (ctrl === null || b === null) return;
-    const stop = b.watch((list) => ctrl.setList(list));
-    return () => { stop(); ctrl.close(); };
+    return connectSessionBookmarks(b, ctrl);
   }, [ctrl, b]);
   return ctrl;
 }
@@ -108,7 +108,8 @@ function DensitySwitch({ compact, disabled, onChange }: { compact: boolean; disa
 /**
  * The session page's canvas and panels, fed from a SessionSource: the live one in the app (SessionPage below), the
  * embedded one in an exported file (viewer/Viewer.tsx). A source without files or anomalies hides that button and its
- * panel (and the card markers); one without bookmarks hides the toolbar's and the drawer's bookmark buttons and the stars; a snapshot source (`live` false) shows nothing as progressing.
+ * panel (and the card markers); one without bookmarks hides the toolbar's and the drawer's bookmark buttons and the
+ * stars; a snapshot source (`live` false) shows nothing as progressing.
  *
  * Memoized on `source` and the info bar's slot for the view switch, so the info bar's per-second and per-update
  * re-renders do not reach React Flow; it re-renders when the canvas snapshot or the selection changes. Every handler
@@ -183,7 +184,8 @@ export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, file
   // ---- bookmarks (bookmarks spec 5): the toolbar's and the drawer's buttons, the stars on the cards ----
   const bookmarks = useSessionBookmarks(source.bookmarks);
   // The same array until the list or what was done here changes (typing a note does not re-render the page).
-  const shownBookmarks = useSyncExternalStore(bookmarks?.subscribe ?? NO_SUBSCRIBE, bookmarks?.shown ?? noBookmarks, bookmarks?.shown ?? noBookmarks);
+  const shownSnapshot = bookmarks?.shown ?? noBookmarks;
+  const shownBookmarks = useSyncExternalStore(bookmarks?.subscribe ?? NO_SUBSCRIBE, shownSnapshot, shownSnapshot);
   const stepBookmarks = useMemo(() => shownBookmarks.filter((b) => b.nodeId !== null), [shownBookmarks]);
   const [focus, setFocus] = useState<CanvasFocus | null>(null);
   const focusSeq = useRef(0);
@@ -241,9 +243,8 @@ export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, file
   const starResolver = useMemo(() => (hasStepBookmarks ? graphResolver(graphNow) : null), [hasStepBookmarks, graphNow]);
   const lastStars = useRef<StarMarks>(NO_STARS);
   const stars = useMemo(() => {
-    if (starResolver === null) return (lastStars.current = NO_STARS);
-    const reached = bookmarksUntil(stepBookmarks, graphNow, replayMs);
-    return (lastStars.current = stableStars(lastStars.current, bookmarkMarks(reached, markView, graphNow, starResolver)));
+    const next = sessionStars(stepBookmarks, markView, graphNow, starResolver, replayMs);
+    return (lastStars.current = stableStars(lastStars.current, next));
   }, [starResolver, stepBookmarks, graphNow, markView, replayMs]);
   // With nothing selected the panel follows the latest turn (until it is closed). In the outline view every view node
   // is a turn card or a subagent, so a selection always has a scope.

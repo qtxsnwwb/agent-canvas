@@ -19,7 +19,10 @@ export interface SessionBookmarks {
    * app's `bookmarks` push); a failed fetch keeps the last list. Returns the stop.
    */
   watch(onList: (bookmarks: readonly Bookmark[] | null) => void): () => void;
-  /** Bookmarks the session (`nodeId` null) or one of its steps; `created` false: it was bookmarked already (that one). */
+  /**
+   * Bookmarks the session (`nodeId` null) or one of its steps; `created` false: it was bookmarked already (that one
+   * is answered).
+   */
   create(nodeId: string | null, note?: string): Promise<{ created: boolean; bookmark: Bookmark }>;
   /** The note as typed (the server normalizes it; a failure carries its text). */
   patch(id: number, note: string): Promise<Bookmark>;

@@ -1,22 +1,39 @@
 import { useSyncExternalStore, type KeyboardEvent } from 'react';
 import {
-  MARKED_TEXT, NOTE_GOES_TEXT, SESSION_MARK_TEXT, STEP_MARK_TEXT, type MarkState, type SessionBookmarkController,
-} from '../bookmarks';
+  MARKED_TEXT, NOTE_GOES_TEXT, NO_SUBSCRIBE, SESSION_MARK_TEXT, STEP_MARK_TEXT, type MarkState, type SessionBookmarkController,
+} from '../sessionBookmarks';
 
-const NO_SUBSCRIBE = (): (() => void) => () => {};
 const NO_VERSION = (): number => 0;
 
+/** The parts of a key event the note box reads. */
+export type NoteKey = Pick<KeyboardEvent<HTMLInputElement>, 'key' | 'preventDefault' | 'stopPropagation'> & {
+  nativeEvent: { isComposing: boolean };
+};
+
 /**
- * The note box beside a bookmarked place's button: Enter or leaving it saves (once), Escape puts the stored note back
- * (and stays in the box: the drawer's own Escape does not close it then). It takes the focus when the place was just
- * marked here.
+ * The note box's keys: Enter saves (once, see commitEdit); Escape puts the stored note back and goes no further — the
+ * drawer closes on an Escape that reaches the window, and this one must not close it. Nothing while an input method is
+ * composing.
  */
-function NoteBox({ ctrl, nodeId, s, label }: { ctrl: SessionBookmarkController; nodeId: string | null; s: MarkState; label: string }) {
-  const onKeyDown = (e: KeyboardEvent<HTMLInputElement>): void => {
-    if (e.nativeEvent.isComposing) return;
-    if (e.key === 'Enter') { e.preventDefault(); void ctrl.commitEdit(); }
-    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); ctrl.cancelEdit(); }
-  };
+export function noteKeyDown(ctrl: Pick<SessionBookmarkController, 'commitEdit' | 'cancelEdit'>, e: NoteKey): void {
+  if (e.nativeEvent.isComposing) return;
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    void ctrl.commitEdit();
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    e.stopPropagation();
+    ctrl.cancelEdit();
+  }
+}
+
+/**
+ * The note box beside a bookmarked place's button: Enter or leaving it saves (once), Escape puts the stored note back.
+ * It takes the focus when the place was just marked here.
+ */
+function NoteBox({ ctrl, nodeId, s, label }: {
+  ctrl: SessionBookmarkController; nodeId: string | null; s: MarkState; label: string;
+}) {
   const editing = s.editing;
   return (
     <input className="bookmark-mark-note" aria-label={label} placeholder="写一句备注（可不填），回车保存"
@@ -24,7 +41,7 @@ function NoteBox({ ctrl, nodeId, s, label }: { ctrl: SessionBookmarkController; 
       readOnly={editing?.saving === true} aria-invalid={editing?.error != null ? true : undefined}
       onFocus={() => ctrl.startEdit(nodeId)}
       onChange={(e) => { ctrl.startEdit(nodeId); ctrl.setDraft(e.target.value); }}
-      onKeyDown={onKeyDown} onBlur={() => void ctrl.commitEdit()} />
+      onKeyDown={(e) => noteKeyDown(ctrl, e)} onBlur={() => void ctrl.commitEdit()} />
   );
 }
 

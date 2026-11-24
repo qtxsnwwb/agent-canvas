@@ -118,7 +118,7 @@ export function SessionPage({ sessionId, filePath = null, nodeId = null, notice 
   const shownFilePath = filePath === null ? null : masker.text(filePath);
   return (
     <div className="session-page">
-      <div className="session-bar">
+      <div className="session-bar session-bar-app">
         <a href={`#/p/${encodeURIComponent(session.projectId)}`}>← 返回项目</a>
         <h2 title={session.title ?? session.id}>{session.title ?? session.id.slice(0, 8)}</h2>
         <span className={`status status-${status.status}`}>{status.label}</span>

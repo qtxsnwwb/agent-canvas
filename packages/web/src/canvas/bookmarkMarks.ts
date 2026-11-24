@@ -2,17 +2,20 @@
  * Which cards of the canvas get a bookmark star (bookmarks spec 5). Pure; the session page feeds it its bookmarks, the
  * canvas view and the graph, and hands the result to the canvas (Canvas `bookmarkMarks`).
  *
- * A bookmarked step marks its own card when the view draws one. Otherwise it is rolled up the way the anomaly markers
- * are (anomalies.ts cardMarks): the turn card it belongs to (a collapsed turn, every turn in 概览) and every subagent card
- * on its dispatch chain that the view draws. A step (or a dispatch on its chain) folded into a turn's or an expanded
- * agent's “更早的 N 个节点” marks that card instead: the view lists what each fold holds (TurnView / AgentGroup
- * `foldedIds`). The members of a 精简 run are not listed by the view (the runs stay inside the canvas model), so a step
- * merged into a run marks only the cards above it that are drawn (none while its turn is expanded). A session bookmark
- * marks no card. The 时间线 view and the waterfall draw no stars.
+ * A bookmarked step marks its own card when the view draws one. Otherwise it is rolled up the way the anomaly
+ * markers are (anomalies.ts cardMarks): the turn card it belongs to (a collapsed turn, every turn in 概览) and every
+ * subagent card on its dispatch chain that the view draws. A step (or a dispatch on its chain) folded into a turn's or
+ * an expanded agent's “更早的 N 个节点” marks that card instead: the view lists what each fold holds (TurnView /
+ * AgentGroup `foldedIds`). The members of a 精简 run are not listed by the view (the runs stay inside the canvas
+ * model), so a step merged into a run marks only the cards above it that are drawn (none while its turn is expanded).
+ * A session bookmark marks no card. The 时间线 view and the waterfall draw no stars.
  */
 import type { Bookmark, Graph } from '@agent-canvas/shared';
 import { dispatchingTurn, type AnomalyResolver } from '../anomalies';
 import type { CanvasView } from './view';
+
+/** What of the canvas view the stars need. */
+type MarkView = Pick<CanvasView, 'nodes' | 'turns' | 'agentGroups'>;
 
 /** A card's star: how many bookmarks it stands for, and the text appended to the card's accessible name. */
 export interface StarMark {
@@ -32,7 +35,7 @@ const own = (graph: Graph, id: string) => (Object.prototype.hasOwnProperty.call(
  * `r`: a resolver over it (anomalies.ts graphResolver), asked only for steps the view does not draw.
  */
 export function bookmarkMarks(
-  bookmarks: readonly Pick<Bookmark, 'nodeId'>[], view: Pick<CanvasView, 'nodes' | 'turns' | 'agentGroups'>, graph: Graph,
+  bookmarks: readonly Pick<Bookmark, 'nodeId'>[], view: MarkView, graph: Graph,
   r: AnomalyResolver,
 ): StarMarks {
   let folds: Map<string, string> | null = null;
@@ -86,7 +89,22 @@ export function bookmarkMarks(
   return new Map([...counts].map(([id, count]) => [id, { count, label: starLabel(count) }]));
 }
 
-/** The replay view: the bookmarks whose step the replay time has reached (an unreadable time counts as 0). null: all. */
+/**
+ * The session page's stars (SessionCanvas): the step bookmarks the replay time has reached (`replayMs` null: not
+ * replaying) on the cards of `view`. `r` null: no step bookmarks (no resolver was made), no stars.
+ */
+export function sessionStars(
+  bookmarks: readonly Pick<Bookmark, 'nodeId'>[], view: MarkView, graph: Graph,
+  r: AnomalyResolver | null, replayMs: number | null,
+): StarMarks {
+  if (r === null) return NO_STARS;
+  return bookmarkMarks(bookmarksUntil(bookmarks, graph, replayMs), view, graph, r);
+}
+
+/**
+ * The replay view: the bookmarks whose step the replay time has reached (an unreadable time counts as 0). `timeMs`
+ * null: all of them.
+ */
 export function bookmarksUntil<T extends Pick<Bookmark, 'nodeId'>>(bookmarks: readonly T[], graph: Graph, timeMs: number | null): readonly T[] {
   if (timeMs === null) return bookmarks;
   return bookmarks.filter((b) => {

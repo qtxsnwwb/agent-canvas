@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { GraphNode } from '@agent-canvas/shared';
-import type { SessionBookmarkController } from '../bookmarks';
+import type { SessionBookmarkController } from '../sessionBookmarks';
 import type { StepDetail } from '../sessionSource';
 import { BookmarkToggle } from './BookmarkToggle';
 import { NODE_STATUS_LABEL } from '../labels';
