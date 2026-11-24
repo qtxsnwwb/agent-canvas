@@ -4,6 +4,8 @@ import {
   type AnomalyListResponse,
   type AttentionHidden,
   type AttentionResponse,
+  type Bookmark,
+  type BookmarkListResponse,
   type ClientMessage,
   type ContentSearchResponse,
   type Diagnostics,
@@ -46,21 +48,44 @@ async function getJson<T>(path: string): Promise<T> {
 }
 
 /** Sends JSON; a non-2xx answer throws an Error whose message is the server's `error` text when it has one. */
-async function sendJson<T>(method: 'PUT' | 'POST', path: string, body?: unknown): Promise<T> {
-  const res = await fetch(path, {
+async function sendJson<T>(method: 'PUT' | 'POST' | 'PATCH' | 'DELETE', path: string, body?: unknown): Promise<T> {
+  const res = await send(method, path, body);
+  if (!res.ok) throw await failureFrom(path, res);
+  return (await res.json()) as T;
+}
+
+function send(method: 'PUT' | 'POST' | 'PATCH' | 'DELETE', path: string, body?: unknown): Promise<Response> {
+  return fetch(path, {
     method,
     ...(body === undefined ? {} : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
   });
-  if (!res.ok) {
-    let message = `${path}: HTTP ${res.status}`;
-    try {
-      const j = (await res.json()) as { error?: unknown; message?: unknown };
-      if (typeof j.error === 'string' && j.error !== '') message = j.error;
-      else if (typeof j.message === 'string' && j.message !== '') message = j.message;
-    } catch { /* keep the generic text */ }
-    throw Object.assign(new Error(message), { status: res.status }) as HttpError;
+}
+
+/** A non-2xx answer as an HttpError whose message is the server's `error` (else `message`) text when it has one. */
+async function failureFrom(path: string, res: Response): Promise<HttpError> {
+  let message = `${path}: HTTP ${res.status}`;
+  try {
+    const j = (await res.json()) as { error?: unknown; message?: unknown };
+    if (typeof j.error === 'string' && j.error !== '') message = j.error;
+    else if (typeof j.message === 'string' && j.message !== '') message = j.message;
+  } catch { /* keep the generic text */ }
+  return Object.assign(new Error(message), { status: res.status }) as HttpError;
+}
+
+/**
+ * POST /api/bookmarks: `created` false when the place was bookmarked already (409; `bookmark` is the existing one). Other
+ * failures throw an HttpError with the server's text (400: the note's problem; 404: no such session or step).
+ */
+async function createBookmark(sessionId: string, nodeId: string | null, note?: string): Promise<{ created: boolean; bookmark: Bookmark }> {
+  const path = '/api/bookmarks';
+  const res = await send('POST', path, note === undefined ? { sessionId, nodeId } : { sessionId, nodeId, note });
+  if (res.status === 409) {
+    const j = (await res.json().catch(() => null)) as { bookmark?: Bookmark } | null;
+    if (j?.bookmark !== undefined) return { created: false, bookmark: j.bookmark };
+    throw Object.assign(new Error(`${path}: HTTP 409`), { status: 409 }) as HttpError;
   }
-  return (await res.json()) as T;
+  if (!res.ok) throw await failureFrom(path, res);
+  return { created: true, bookmark: (await res.json()) as Bookmark };
 }
 
 const enc = encodeURIComponent;
@@ -101,6 +126,19 @@ export const api = {
   /** Undo a "知道了". */
   restoreAttention: (key: string) => sendJson<AttentionResponse>('POST', '/api/attention/restore', { key }),
   saveAttentionSettings: (autoHideHours: number) => sendJson<AttentionResponse>('PUT', '/api/attention/settings', { autoHideHours }),
+  /**
+   * Bookmarks (bookmarks spec 7), newest first; `sessionId`: one session's only. The writes always send a JSON body (`{}`
+   * when there is nothing to send: the server's same-origin guard wants one); a failure throws an HttpError with the
+   * server's text.
+   */
+  bookmarks: async (sessionId?: string): Promise<Bookmark[]> =>
+    (await getJson<BookmarkListResponse>(sessionId === undefined ? '/api/bookmarks' : `/api/bookmarks?sessionId=${enc(sessionId)}`)).bookmarks,
+  createBookmark,
+  /** The note as typed: the server normalizes it (a 400 says what is wrong). */
+  patchBookmark: (id: number, note: string) => sendJson<Bookmark>('PATCH', `/api/bookmarks/${id}`, { note }),
+  /** Soft delete: restorable (restoreBookmark) for a day. */
+  deleteBookmark: (id: number) => sendJson<{ ok: true }>('DELETE', `/api/bookmarks/${id}`, {}),
+  restoreBookmark: (id: number) => sendJson<Bookmark>('POST', `/api/bookmarks/${id}/restore`, {}),
   /**
    * POST /api/sessions/:id/mask/learned: the secret values the server learned from the whole session, for the page's
    * masker (memory only; never logged or stored).
@@ -425,6 +463,9 @@ export interface LiveAttention {
   close(): void;
 }
 
+/** openLivePushed's fromPush answer for a push that says "changed, fetch again" without the value. */
+const REFETCH: unique symbol = Symbol('refetch');
+
 /** A value kept live by openLivePushed: answers and pushes are applied in order of their start. */
 interface LivePushed<T> {
   /** Pushes received so far: an answer to a request started at a lower count is older than the value shown. */
@@ -448,8 +489,11 @@ interface LivePushed<T> {
  */
 function openLivePushed<T, P>(o: {
   fetch: () => Promise<T>;
-  /** The pushed value in `msg`, or undefined when the message is not one. */
-  fromPush: (msg: ServerMessage) => T | undefined;
+  /**
+   * The pushed value in `msg`, or undefined when the message is not one. REFETCH: the message says the value changed
+   * without carrying it; it counts as a push (an answer to a request started before it is not applied) and fetches again.
+   */
+  fromPush: (msg: ServerMessage) => T | undefined | typeof REFETCH;
   onState: (value: T | null, problem: P | null) => void;
   problemOf: (e: unknown) => P;
   feed: SessionsFeed;
@@ -505,7 +549,8 @@ function openLivePushed<T, P>(o: {
       const pushed = o.fromPush(msg);
       if (pushed === undefined) return;
       pushes += 1;
-      show(pushed);
+      if (pushed === REFETCH) load();
+      else show(pushed);
     },
     open: () => load(),
   });
@@ -585,6 +630,34 @@ export function openLiveToday(
     fetch: deps.fetchToday ?? api.today,
     fromPush: (msg) => (msg.type === 'today' ? msg.usage : undefined),
     onState: (usage, problem) => onState({ usage, failed: problem !== null }),
+    problemOf: () => true,
+    feed: feedOf(deps),
+  });
+  return { refresh: () => live.refresh(), close: () => live.close() };
+}
+
+/** The bookmarks as a page shows them: the last list received, and whether the last fetch failed. */
+export interface BookmarksLiveState {
+  /** null until the first list arrives. */
+  bookmarks: Bookmark[] | null;
+  /** The last fetch failed (it is retried); `bookmarks` is the last list received, if any. */
+  failed: boolean;
+}
+
+/**
+ * The bookmarks, live (bookmarks spec 7), by openLivePushed: fetched once subscribed and after every reconnect, and again
+ * on every `bookmarks` push (it names the sessions whose bookmarks changed, not the list). `sessionId`: one session's
+ * bookmarks only, refetched only when a push names that session. A failed fetch sets `failed` and keeps the last list.
+ */
+export function openLiveBookmarks(
+  onState: (s: BookmarksLiveState) => void,
+  deps: { sessionId?: string; fetchBookmarks?: () => Promise<Bookmark[]>; feed?: SessionsFeed; createSocket?: () => WebSocketLike } = {},
+): { refresh(): void; close(): void } {
+  const { sessionId } = deps;
+  const live = openLivePushed<Bookmark[], true>({
+    fetch: deps.fetchBookmarks ?? (() => api.bookmarks(sessionId)),
+    fromPush: (msg) => (msg.type === 'bookmarks' && (sessionId === undefined || msg.sessionIds.includes(sessionId)) ? REFETCH : undefined),
+    onState: (bookmarks, problem) => onState({ bookmarks, failed: problem !== null }),
     problemOf: () => true,
     feed: feedOf(deps),
   });

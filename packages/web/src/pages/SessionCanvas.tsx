@@ -91,7 +91,7 @@ function DensitySwitch({ compact, disabled, onChange }: { compact: boolean; disa
  * re-renders do not reach React Flow; it re-renders when the canvas snapshot or the selection changes. Every handler
  * passed to Canvas is stable.
  */
-export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, filePath, nodeId, onTurnChange }: {
+export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, filePath, nodeId, notice = null, onTurnChange }: {
   source: SessionSource; toolbar: HTMLElement | null;
   /**
    * Told the turn the selection belongs to (a turn card, or any node of the turn, in any view) with its label as the
@@ -102,6 +102,8 @@ export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, file
   filePath: string | null;
   /** The deep link's node (`#/s/<id>/n/<nodeId>`): selected and brought into view, again whenever it changes. */
   nodeId: string | null;
+  /** Shown in the node note when the canvas opens (the 书签 page: the bookmarked step is gone); a node address replaces it. */
+  notice?: string | null;
 }) {
   const canvas = useCanvas(source);
   // ---- the 时间线 view (page state, not a ViewMode: it replaces the canvas, whose mode is kept for coming back) ----
@@ -464,7 +466,7 @@ export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, file
   // Once per navigation, when the canvas model exists (the graph is loaded before this page is mounted): the node is shown
   // like a step picked in the file panel. Graph updates do not run it again (the effect depends on the target only).
   const [nodeTarget, setNodeTarget] = useState<NodeTarget | null>(() => nextNodeTarget(null, nodeId));
-  const [nodeNote, setNodeNote] = useState<string | null>(null);
+  const [nodeNote, setNodeNote] = useState<string | null>(notice);
   const handledNode = useRef(0);
   useEffect(() => { setNodeTarget((t) => nextNodeTarget(t, nodeId)); }, [nodeId]);
   const ready = canvas.ready;

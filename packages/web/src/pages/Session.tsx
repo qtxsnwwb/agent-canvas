@@ -11,7 +11,10 @@ import { sessionLoadState } from '../sessionLoad';
 import { useNow } from '../useNow';
 import { SessionCanvas } from './SessionCanvas';
 
-export function SessionPage({ sessionId, filePath = null, nodeId = null }: { sessionId: string; filePath?: string | null; nodeId?: string | null }) {
+/** `notice`: a note shown once when the page opens (the 书签 page's 「这一步已经不在了」). */
+export function SessionPage({ sessionId, filePath = null, nodeId = null, notice = null }: {
+  sessionId: string; filePath?: string | null; nodeId?: string | null; notice?: string | null;
+}) {
   const [live, setLive] = useState<LiveSession | null>(null);
   /** The failure of openLiveSession (null while there is none); see sessionLoadState. */
   const [error, setError] = useState<unknown>(null);
@@ -125,7 +128,7 @@ export function SessionPage({ sessionId, filePath = null, nodeId = null }: { ses
           <div className="session-bar-tools" ref={setToolbar} />
         </div>
       </div>
-      <SessionCanvas key={session.id} source={source} toolbar={toolbar} filePath={shownFilePath} nodeId={nodeId} onTurnChange={setTurn} />
+      <SessionCanvas key={session.id} source={source} toolbar={toolbar} filePath={shownFilePath} nodeId={nodeId} notice={notice} onTurnChange={setTurn} />
       {exportOpen && <ExportDialog sessionId={session.id} turn={turn} onClose={() => setExportOpen(false)} />}
     </div>
   );

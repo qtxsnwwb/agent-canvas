@@ -1,9 +1,11 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { headerCount } from './attention';
+import { nextSessionNotice, type SessionNotice } from './bookmarks';
 import { api, openLiveAttention, openLiveToday, type AttentionLiveState, type LiveAttention, type LiveToday, type TodayLiveState } from './client';
 import { MaskProvider, MaskSwitch, useMask } from './MaskContext';
 import { Anomalies } from './pages/Anomalies';
 import { Attention } from './pages/Attention';
+import { Bookmarks } from './pages/Bookmarks';
 import { Diagnostics } from './pages/Diagnostics';
 import { Files } from './pages/Files';
 import { Notifications } from './pages/Notifications';
@@ -29,8 +31,14 @@ export function App() {
 function AppBody() {
   const mask = useMask();
   const [route, setRoute] = useState<Route>(() => parseHash(location.hash));
+  // A notice the 书签 page hands to the session it opens (the bookmarked step is gone): shown there once.
+  const [sessionNotice, setSessionNotice] = useState<SessionNotice | null>(null);
   useEffect(() => {
-    const onHash = (): void => setRoute(parseHash(location.hash));
+    const onHash = (): void => {
+      const next = parseHash(location.hash);
+      setRoute(next);
+      setSessionNotice((n) => nextSessionNotice(n, next));
+    };
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
@@ -93,6 +101,7 @@ function AppBody() {
           待处理{waiting !== null && <span className="header-count" aria-hidden="true">{waiting}</span>}
         </a>
         <TodayHeaderLink usage={today.usage} />
+        <a className="header-link header-link-next" href="#/bookmarks" aria-current={route.page === 'bookmarks' ? 'page' : undefined}>书签</a>
         <a className="header-link header-link-next" href="#/stats" aria-current={route.page === 'stats' ? 'page' : undefined}>统计</a>
         <a className="header-link header-link-next" href="#/files" aria-current={route.page === 'files' ? 'page' : undefined}>文件</a>
         <a className="header-link header-link-next" href="#/anomalies" aria-current={route.page === 'anomalies' ? 'page' : undefined}>异常</a>
@@ -105,7 +114,8 @@ function AppBody() {
       {!mask.ready ? (
         <p className="muted session-loading">加载中…</p>
       ) : route.page === 'session' ? (
-        <SessionPage key={route.sessionId} sessionId={route.sessionId} filePath={route.filePath ?? null} nodeId={route.nodeId ?? null} />
+        <SessionPage key={route.sessionId} sessionId={route.sessionId} filePath={route.filePath ?? null} nodeId={route.nodeId ?? null}
+          notice={sessionNotice !== null && sessionNotice.arrived && sessionNotice.sessionId === route.sessionId ? sessionNotice.text : null} />
       ) : route.page === 'diagnostics' ? (
         <Diagnostics />
       ) : route.page === 'stats' ? (
@@ -114,6 +124,8 @@ function AppBody() {
         <Files />
       ) : route.page === 'anomalies' ? (
         <Anomalies query={route.query} />
+      ) : route.page === 'bookmarks' ? (
+        <Bookmarks onStepGone={(sessionId, text) => setSessionNotice({ sessionId, text, arrived: false })} />
       ) : route.page === 'attention' ? (
         <Attention live={attention} actions={attentionActions} />
       ) : route.page === 'notifications' ? (
