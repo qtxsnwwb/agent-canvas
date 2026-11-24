@@ -15,8 +15,11 @@ export const TODAY_THROTTLE_MS = 30_000;
 export const TODAY_META_KEY = 'todayUsage';
 
 export interface TodayServiceDeps {
-  /** The stats page's summary cache (StatsService.summaryCache()): only changed sessions are read again. */
-  cache: Pick<SessionSummaryCache<SessionSummary>, 'snapshot'>;
+  /**
+   * The stats page's summary cache (StatsService.summaryCache()): only changed sessions are read again, while it is
+   * within its bounds (overBounds() false).
+   */
+  cache: Pick<SessionSummaryCache<SessionSummary>, 'snapshot' | 'overBounds'>;
   store: Pick<Store, 'getMeta' | 'setMeta'>;
   /** The line (the notification settings' usageLineTokens, 0 -> null), read at every computation. */
   line: () => number | null;
@@ -88,6 +91,9 @@ function parseState(raw: string | null): OverState | null {
  *   nothing changed and nothing is open. get() never waits for the throttle: it answers with the latest result, after
  *   computing it first when the window has passed and a change is pending or (start-up work done) the latest result is
  *   from an earlier minute (a quiet day: asOf and usualMain brought up to date by the reader, not by a timer).
+ * - Past the cache's bounds (cache.overBounds(): every snapshot would read the sessions it cannot keep again): no
+ *   change-driven or tick computation; get() still computes (with the same 30 s window), so does midnight, a settings
+ *   change and the baseline after start-up work. Back within the bounds, the timed computations resume.
  * - Start-up work (ready() false: the initial scan, a rebuild, an import; checked at construction too): no change-driven,
  *   tick or midnight computation; changes stay noted and ready() is checked every TODAY_THROTTLE_MS instead. Once it
  *   holds, one baseline computation runs, so the first change after it is judged against what start-up left.
@@ -178,6 +184,15 @@ export class TodayService {
   }
 
   // ---------------------------------------------------------------- internals
+
+  /** The cache cannot keep every summary: a timed computation would read the overflow sessions again each time. */
+  private overBounds(): boolean {
+    try {
+      return this.deps.cache.overBounds();
+    } catch {
+      return false;
+    }
+  }
 
   /** The result was computed in an earlier minute than now's (time zone offsets are whole minutes). */
   private olderMinute(usage: TodayUsage): boolean {
@@ -326,7 +341,7 @@ export class TodayService {
       if (this.timer === null) this.arm(this.now() + TODAY_THROTTLE_MS);
       return;
     }
-    if (!this.dirty && !this.growing) {
+    if ((!this.dirty && !this.growing) || this.overBounds()) {
       this.clearTimer();
       return;
     }
@@ -352,7 +367,7 @@ export class TodayService {
       return;
     }
     // Start-up work just ended: the baseline (needBaseline is set). Otherwise a pending change or a growing turn.
-    if (this.waiting || this.dirty || this.growing) this.request(false).catch(() => undefined);
+    if (this.waiting || ((this.dirty || this.growing) && !this.overBounds())) this.request(false).catch(() => undefined);
   }
 
   private clearTimer(): void {

@@ -15,6 +15,9 @@ import { TodayHeaderLink } from './TodayHeaderLink';
 
 export { parseHash, type Route } from './route';
 
+/** A layout effect in the browser; a plain one when rendered on the server (tests), which has no layout to measure. */
+const useClientLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect;
+
 export function App() {
   return (
     <MaskProvider>
@@ -70,7 +73,7 @@ function AppBody() {
   // The header's measured height in --header-real (the session page subtracts it; --header-h until measured): on a
   // phone the links take a third row. Not --header-h itself, which sizes the header (that would never shrink again).
   const headerRef = useRef<HTMLElement>(null);
-  useLayoutEffect(() => {
+  useClientLayoutEffect(() => {
     const el = headerRef.current;
     if (el === null || typeof ResizeObserver === 'undefined') return;
     const root = document.documentElement;

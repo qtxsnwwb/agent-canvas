@@ -70,9 +70,13 @@ class World {
       return d === undefined ? null : { session: d.session, nodes: [...d.nodes], seq: this.seq };
     },
   };
-  readonly cache = new SessionSummaryCache<SessionSummary>(this.source, {
-    summarize: summarizeSession, weight: (s) => s.calls.length, capacity: 1000, maxWeight: 1e9, yieldAfterMs: 1e9, closedMessage: 'closed',
-  });
+  readonly cache: SessionSummaryCache<SessionSummary>;
+  /** `capacity`: most summaries the cache keeps (small to test past its bounds). */
+  constructor(capacity = 1000) {
+    this.cache = new SessionSummaryCache<SessionSummary>(this.source, {
+      summarize: summarizeSession, weight: (s) => s.calls.length, capacity, maxWeight: 1e9, yieldAfterMs: 1e9, closedMessage: 'closed',
+    });
+  }
   /** When set, a snapshot (already taken from the cache) is handed over only once it resolves. */
   hold: Promise<void> | null = null;
   /** What the service is given: the cache, its snapshots counted (one per recompute). */
@@ -83,6 +87,7 @@ class World {
       if (this.hold !== null) await this.hold;
       return snap;
     },
+    overBounds: () => this.cache.overBounds(),
   };
 
   session(id: string, o: Partial<Session> = {}): Session {
@@ -190,6 +195,16 @@ describe('TodayService: throttle', () => {
     expect(await r.svc.get()).toBe(u);
     expect(r.world.snapshots).toBe(1);
     await r.clock.advance(5 * MIN);
+    expect(r.world.snapshots).toBe(1);
+  });
+
+  test('get() after the window but in the same minute, with nothing changed: the same result, no recompute', async () => {
+    const r = rig({ now: T0 + 5 * MIN }); // 10:05:00
+    r.world.turn('s1', T0 - H, 100, 50);
+    const u = await r.svc.get();
+    expect(r.world.snapshots).toBe(1);
+    await r.clock.advance(40 * S); // 10:05:40: past the 30 s window, same minute
+    expect(await r.svc.get()).toBe(u);
     expect(r.world.snapshots).toBe(1);
   });
 
@@ -615,5 +630,64 @@ describe('TodayService: settingsChanged() while a recompute is in flight', () =>
     expect(r.updates.at(-1)).toMatchObject({ main: 1600, lineTokens: 3000, over: false });
     expect(r.store.state()).toEqual({ day: '2026-11-24', line: 3000, over: false });
     expect(r.crosses).toEqual([]);
+  });
+});
+
+describe('TodayService: past the summary cache bounds', () => {
+  test('no change-driven or tick computation while the cache cannot keep every summary; get() still computes (30 s window)', async () => {
+    const r = rig({ world: new World(2) });
+    r.world.turn('a', T0 - H, 10, 0);
+    r.world.turn('b', T0 - H, 10, 0);
+    r.world.turn('c', T0 - 10 * MIN, 10, 0, { status: 'running', lastActivityAt: iso(T0) }); // an open turn: would tick
+    expect((await r.svc.get()).main).toBe(30);
+    expect(r.world.cache.overBounds()).toBe(true);
+    const reads = r.world.reads;
+    expect(reads).toBe(3);
+    for (let i = 0; i < 10; i++) {
+      r.note(r.world.turn('a', T0 - H, 10, 0));
+      await r.clock.advance(30 * S);
+    }
+    await r.clock.advance(5 * MIN);
+    expect(r.world.snapshots).toBe(1);
+    expect(r.world.reads).toBe(reads);
+    // On request: computed (past the window), reading the sessions the cache could not keep.
+    expect((await r.svc.get()).main).toBe(130);
+    expect(r.world.snapshots).toBe(2);
+    // Within the window: the latest, no recompute.
+    r.note(r.world.turn('a', T0 - H, 10, 0));
+    await r.clock.advance(10 * S);
+    expect((await r.svc.get()).main).toBe(130);
+    expect(r.world.snapshots).toBe(2);
+  });
+
+  test('within the bounds the same changes recompute on the timer (control), and overBounds stays false', async () => {
+    const r = rig({ world: new World(3) });
+    r.world.turn('a', T0 - H, 10, 0);
+    r.world.turn('b', T0 - H, 10, 0);
+    r.world.turn('c', T0 - H, 10, 0);
+    await r.svc.get();
+    expect(r.world.cache.overBounds()).toBe(false);
+    r.note(r.world.turn('a', T0 - H, 10, 0));
+    await r.clock.advance(TODAY_THROTTLE_MS);
+    expect(r.world.snapshots).toBe(2);
+    expect(r.world.reads).toBe(4); // only the changed session read again
+  });
+
+  test('back within the bounds (a session gone): timed computations resume', async () => {
+    const r = rig({ world: new World(2) });
+    r.world.turn('a', T0 - H, 10, 0);
+    r.world.turn('b', T0 - H, 10, 0);
+    r.world.turn('c', T0 - H, 10, 0);
+    await r.svc.get();
+    expect(r.world.cache.overBounds()).toBe(true);
+    r.note(r.world.remove('c'));
+    await r.clock.advance(TODAY_THROTTLE_MS);
+    expect(r.world.snapshots).toBe(1);
+    expect((await r.svc.get()).main).toBe(20);
+    expect(r.world.cache.overBounds()).toBe(false);
+    r.note(r.world.turn('a', T0 - H, 10, 0));
+    await r.clock.advance(TODAY_THROTTLE_MS);
+    expect(r.world.snapshots).toBe(3);
+    expect(r.updates.at(-1)!.main).toBe(30);
   });
 });

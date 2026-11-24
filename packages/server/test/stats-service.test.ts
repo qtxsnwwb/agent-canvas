@@ -133,8 +133,10 @@ describe('StatsService', () => {
     const src = new FakeSource();
     for (const id of ['a', 'b', 'c']) src.add(id, 1);
     const svc = make(src, 2);
+    expect(svc.summaryCache().overBounds()).toBe(false); // no snapshot yet
     expect((await svc.get(Q)).totals.toolCalls).toBe(3);
     expect(svc.cacheSize()).toBe(2);
+    expect(svc.summaryCache().overBounds()).toBe(true);
     src.reads = [];
     expect((await svc.get(Q)).totals.toolCalls).toBe(3);
     expect(src.reads).toEqual(['c']);
@@ -149,6 +151,7 @@ describe('StatsService', () => {
     expect((await svc.get(Q)).totals.toolCalls).toBe(16);
     expect(svc.retainedCallCount()).toBe(6);
     expect(svc.cacheSize()).toBe(2);
+    expect(svc.summaryCache().overBounds()).toBe(true);
     src.reads = [];
     await svc.get(Q);
     expect(src.reads).toEqual(['c']);
@@ -164,6 +167,7 @@ describe('StatsService', () => {
     const svc = make(src);
     expect((await svc.get(Q)).totals.sessions).toBe(3000);
     expect(svc.cacheSize()).toBe(3000);
+    expect(svc.summaryCache().overBounds()).toBe(false);
     src.reads = [];
     await svc.get({ ...Q, range: 'all' });
     expect(src.reads).toEqual([]);

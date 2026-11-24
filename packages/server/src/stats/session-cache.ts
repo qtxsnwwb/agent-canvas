@@ -83,6 +83,8 @@ export class SessionSummaryCache<S> {
   /** Caches this one hands its session reads to (shareReadsWith). */
   private readonly companions = new Set<SessionSummaryCache<any>>();
   private closed = false;
+  /** The last completed refresh could not keep every listed session's summary (see overBounds). */
+  private overflowed = false;
 
   constructor(private readonly source: SessionSummarySource, private readonly options: SessionSummaryCacheOptions<S>) {
     this.capacity = Math.max(1, options.capacity);
@@ -110,6 +112,15 @@ export class SessionSummaryCache<S> {
   /** Stops a refresh in progress at its next session or page boundary; every later call is refused. */
   close(): void {
     this.closed = true;
+  }
+
+  /**
+   * Past the bounds: the last completed snapshot could not keep every listed session's summary (more sessions than
+   * `capacity`, or more weight than `maxWeight`), so the next one reads those sessions again although nothing changed.
+   * False before the first snapshot. Cheap (a flag set by the refresh).
+   */
+  overBounds(): boolean {
+    return this.overflowed;
   }
 
   isClosed(): boolean {
@@ -251,6 +262,7 @@ export class SessionSummaryCache<S> {
         failed++;
       }
     }
+    this.overflowed = entries.some((e) => !this.cache.has(e.session.id));
     return { entries, failed };
   }
 
