@@ -14,6 +14,7 @@ import {
   type Diagnostics,
   type FileOnlyOrigin,
   type FileSourceStatus,
+  type NotificationSettings,
   type NotificationSettingsResponse,
   type NotificationTestResponse,
   type Origin,
@@ -112,6 +113,15 @@ export function createTodayService(deps: {
     ...(deps.dayKey !== undefined ? { dayKey: deps.dayKey } : {}),
     ...(deps.timers !== undefined ? { timers: deps.timers } : {}),
   });
+}
+
+/**
+ * Whether a notification settings change concerns today's usage: the line moved (recolour now), or the usage
+ * notification was turned on (master and `usage`; a crossing since the last computation must not be caught up on).
+ */
+export function todaySettingsChanged(before: NotificationSettings, after: NotificationSettings): boolean {
+  const on = (s: NotificationSettings): boolean => s.enabled && s.usage;
+  return before.usageLineTokens !== after.usageLineTokens || (!on(before) && on(after));
 }
 
 /**
@@ -722,9 +732,10 @@ export function buildServer(deps: {
     app.put('/api/notifications/settings', async (req, reply) => {
       // While the database is being compacted (VACUUM) writes are held; a settings change would only live in memory.
       if (pipeline.writesHeld()) return reply.code(503).send({ error: '数据库正在整理，稍后再试' });
+      const before = notifications.getSettings().settings;
       const result = notifications.putSettings(req.body);
       if (!result.ok) return reply.code(400).send({ error: result.error });
-      today.settingsChanged(); // the line may have changed
+      if (todaySettingsChanged(before, result.response.settings)) today.settingsChanged();
       return result.response;
     });
     // Always 200: a delivery failure is not a client error.

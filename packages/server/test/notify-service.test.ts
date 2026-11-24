@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { DEFAULT_NOTIFICATION_SETTINGS, type Origin, type SeqChange, type Session, type TodayUsage } from '@agent-canvas/shared';
 import type { DeliveryStatus, NotificationMessage } from '../src/notify/desktop.js';
-import { NotificationService, TEST_BODY, TEST_TITLE, TICK_MS, type ServiceNotifier, type Timers } from '../src/notify/service.js';
+import { NotificationService, TEST_BODY, TEST_TITLE, TICK_MS, type ServiceNotifier } from '../src/notify/service.js';
+import type { Timers } from '../src/timers.js';
 import { loadNotificationSettings, NOTIFICATIONS_META_KEY } from '../src/notify/settings.js';
 import { openStore, type Store } from '../src/store/store.js';
 import type { PollSource } from '../src/sources/poll.js';

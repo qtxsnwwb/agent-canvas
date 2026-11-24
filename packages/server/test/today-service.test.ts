@@ -1,18 +1,12 @@
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
-import { performance } from 'node:perf_hooks';
 import { afterEach, describe, expect, test } from 'vitest';
-import type { Change, GraphNode, Origin, SeqChange, Session, TodayUsage } from '@agent-canvas/shared';
-import { FilesService } from '../src/files/service.js';
-import type { Timers } from '../src/notify/service.js';
-import { StatsService, storeStatsSource, type StatsSource } from '../src/stats/service.js';
+import type { GraphNode, Origin, SeqChange, Session, TodayUsage } from '@agent-canvas/shared';
 import { SessionSummaryCache, type SessionSummarySource } from '../src/stats/session-cache.js';
 import { summarizeSession, type SessionSummary } from '../src/stats/summary.js';
 import { TODAY_META_KEY, TODAY_THROTTLE_MS, TodayService } from '../src/stats/today-service.js';
-import { openStore } from '../src/store/store.js';
+import type { Timers } from '../src/timers.js';
 
 // Invented data only; a fake clock and fake timers (injected), days are UTC days unless a test says otherwise.
+// Review Focus 2 (a running 100,000-node session) is in today-service.timing.test.ts.
 
 const S = 1000;
 const MIN = 60 * S;
@@ -79,8 +73,17 @@ class World {
   readonly cache = new SessionSummaryCache<SessionSummary>(this.source, {
     summarize: summarizeSession, weight: (s) => s.calls.length, capacity: 1000, maxWeight: 1e9, yieldAfterMs: 1e9, closedMessage: 'closed',
   });
+  /** When set, a snapshot (already taken from the cache) is handed over only once it resolves. */
+  hold: Promise<void> | null = null;
   /** What the service is given: the cache, its snapshots counted (one per recompute). */
-  readonly counted = { snapshot: () => { this.snapshots++; return this.cache.snapshot(); } };
+  readonly counted = {
+    snapshot: async () => {
+      this.snapshots++;
+      const snap = await this.cache.snapshot();
+      if (this.hold !== null) await this.hold;
+      return snap;
+    },
+  };
 
   session(id: string, o: Partial<Session> = {}): Session {
     return this.data.get(id)?.session ?? {
@@ -453,83 +456,133 @@ describe('TodayService: crossing the line', () => {
   });
 });
 
-describe('TodayService: a running 100,000-node session (Review Focus 2)', () => {
-  const NODES = 100_000;
-  test(`changes every second for 60 s: its summary read at most 3 times; one recompute timed`, { timeout: 120_000 }, async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-today-big-'));
-    const store = openStore(path.join(dir, 'today.db'));
-    try {
-      const sid = 'big-1';
-      const start = T0 - 2 * H;
-      const session: Session = {
-        id: sid, projectId: 'p-big', origin: 'claude', cwd: null, title: null, gitBranch: null, status: 'running', sourceDeleted: false,
-        startedAt: iso(start), lastActivityAt: iso(T0),
-      };
-      const node = (i: number, at: number): GraphNode => ({
-        id: `${sid}-n${i}`, sessionId: sid, turnId: `${sid}-t${Math.floor(i / 60)}`, agentId: null, parentId: null,
-        kind: i % 60 === 0 ? 'prompt' : i % 2 === 0 ? 'tool' : 'text', status: i % 60 === 0 || i % 2 === 1 ? null : 'succeeded',
-        timestamp: iso(at), confirmed: true, title: 'x', summary: 'x'.repeat(80), toolName: i % 60 !== 0 && i % 2 === 0 ? 'Bash' : null,
-        toolUseId: null, messageId: `${sid}-m${i}`, durationMs: i % 60 !== 0 && i % 2 === 0 ? 100 : null, endedAt: null,
-        usage: i % 60 !== 0 && i % 2 === 1 ? { inputTokens: 10, cachedInputTokens: 100, outputTokens: 2 } : null,
-        systemSubtype: null, childAgentId: null,
-      });
-      const step = Math.floor((2 * H) / NODES);
-      const changes: Change[] = [{ type: 'session_upserted', session }];
-      for (let i = 0; i < NODES; i++) changes.push({ type: 'node_added', node: node(i, start + i * step), detail: {} });
-      for (let i = 0; i < changes.length; i += 10_000) store.applyChanges(changes.slice(i, i + 10_000));
+describe('TodayService: start-up work', () => {
+  const grow = async (r: Rig, tokens: number): Promise<void> => {
+    r.note(r.world.turn('s1', T0 - H, tokens, 0));
+    await r.clock.advance(TODAY_THROTTLE_MS);
+  };
 
-      let reads = 0;
-      const base = storeStatsSource(store);
-      const source: StatsSource = { ...base, readSession: (id, stopped) => { reads++; return base.readSession(id, stopped); } };
-      const clock = new Clock();
-      const stats = new StatsService(source, { now: () => clock.now, dayKey: utcDay });
-      // As buildServer wires them: each stats read of the session also builds its file summary (same stretch).
-      const files = new FilesService(storeStatsSource(store));
-      files.shareReadsWith(stats);
-      const svc = new TodayService({
-        cache: stats.summaryCache(), store, line: () => null, ready: () => true, now: () => clock.now, dayKey: utcDay, timers: clock.timers,
-      });
-      services.push(svc);
-
-      // One recompute (the first: the session read and summarized) — wall time and longest event-loop stall.
-      let last = performance.now();
-      let stallMs = 0;
-      const probe = setInterval(() => {
-        const t = performance.now();
-        stallMs = Math.max(stallMs, t - last);
-        last = t;
-      }, 1);
-      const t = performance.now();
-      const first = await svc.get();
-      const wallMs = performance.now() - t;
-      clearInterval(probe);
-      stallMs = Math.max(stallMs, performance.now() - last);
-      expect(first.turns).toBeGreaterThan(1000);
-
-      let n = NODES;
-      for (let sec = 1; sec <= 60; sec++) {
-        const committed = store.applyChanges([
-          { type: 'session_upserted', session: { ...session, lastActivityAt: iso(clock.now) } },
-          { type: 'node_added', node: node(n++, clock.now), detail: {} },
-        ]);
-        stats.noteChanges(committed);
-        files.noteChanges(committed);
-        svc.noteChanges(committed);
-        await clock.advance(S);
-        await svc.get(); // waits for a recompute in flight (the paged read takes many event-loop turns)
-      }
-      const latest = await svc.get();
-      console.log(
-        `today: one recompute of a ${NODES.toLocaleString('en')}-node running session: ${wallMs.toFixed(0)} ms wall, ` +
-          `longest event-loop stall ${stallMs.toFixed(0)} ms (stats + file summaries); summary reads over 60 s of changes every second: ${reads}`,
-      );
-      expect(reads).toBeLessThanOrEqual(3);
-      expect(latest.turns).toBeGreaterThanOrEqual(first.turns);
-      stats.close();
-      files.close();
-    } finally {
-      store.close();
-      await fs.promises.rm(dir, { recursive: true, force: true, maxRetries: 20 }).catch(() => undefined);
+  test('no recompute while start-up work goes on despite changes; one baseline right after it is done; the next crossing reports', async () => {
+    const r = rig({ line: 1000, ready: false });
+    for (let i = 0; i < 20; i++) {
+      r.note(r.world.turn('s1', T0 - H, 100, 0));
+      await r.clock.advance(15 * S);
     }
+    await r.clock.advance(5 * 60 * S);
+    expect(r.world.snapshots).toBe(0);
+    expect(r.world.reads).toBe(0);
+    // Done: within one check period, one baseline computation (2,000 tokens, over the line: colour only).
+    r.set.ready = true;
+    await r.clock.advance(TODAY_THROTTLE_MS);
+    expect(r.world.snapshots).toBe(1);
+    expect(r.updates.at(-1)).toMatchObject({ main: 2000, over: true });
+    expect(r.crosses).toEqual([]);
+    expect(r.store.state()).toEqual({ day: '2026-11-24', line: 1000, over: true });
+    await r.clock.advance(5 * 60 * S);
+    expect(r.world.snapshots).toBe(1);
+  });
+
+  test('a quiet start (no change, no request): the baseline still runs once start-up is done, so the first change can report', async () => {
+    const r = rig({ line: 1000, ready: false });
+    r.world.turn('s1', T0 - H, 600, 0);
+    await r.clock.advance(2 * 60 * S);
+    expect(r.world.snapshots).toBe(0);
+    r.set.ready = true;
+    await r.clock.advance(TODAY_THROTTLE_MS);
+    expect(r.world.snapshots).toBe(1);
+    expect(r.updates.at(-1)).toMatchObject({ main: 600, over: false });
+    await grow(r, 500);
+    expect(r.crosses).toHaveLength(1);
+    expect(r.crosses[0]).toMatchObject({ main: 1100, lineTokens: 1000 });
+  });
+
+  test('an import later in the day: changes wait, the crossing it causes is consumed by the baseline after it', async () => {
+    const r = rig({ line: 1000 });
+    await r.svc.get();
+    await grow(r, 400);
+    const before = r.world.snapshots;
+    r.set.ready = false; // importing
+    for (let i = 0; i < 10; i++) {
+      r.note(r.world.turn('s1', T0 - H, 100, 0));
+      await r.clock.advance(10 * S);
+    }
+    await r.clock.advance(2 * 60 * S);
+    expect(r.world.snapshots).toBe(before);
+    r.set.ready = true;
+    await r.clock.advance(TODAY_THROTTLE_MS);
+    expect(r.world.snapshots).toBe(before + 1);
+    expect(r.updates.at(-1)).toMatchObject({ main: 1400, over: true });
+    expect(r.crosses).toEqual([]);
+  });
+
+  test('get() still computes on demand while start-up work goes on (a crossing seen then is consumed)', async () => {
+    const r = rig({ line: 1000, ready: false });
+    r.world.turn('s1', T0 - H, 400, 0);
+    expect(await r.svc.get()).toMatchObject({ main: 400, over: false });
+    r.note(r.world.turn('s1', T0 - H, 800, 0));
+    await r.clock.advance(TODAY_THROTTLE_MS);
+    expect(r.world.snapshots).toBe(1);
+    expect(await r.svc.get()).toMatchObject({ main: 1200, over: true });
+    expect(r.world.snapshots).toBe(2);
+    r.set.ready = true;
+    await grow(r, 100);
+    expect(r.crosses).toEqual([]);
+  });
+
+  test('midnight during start-up work computes nothing; the baseline after it gives the new day', async () => {
+    const r = rig({ now: Date.parse('2026-11-24T23:59:00.000Z') });
+    await r.svc.get();
+    r.set.ready = false;
+    r.note(r.world.turn('s1', Date.parse('2026-11-24T23:00:00.000Z'), 5, 5));
+    await r.clock.advance(2 * 60 * S);
+    expect(r.world.snapshots).toBe(1);
+    r.set.ready = true;
+    await r.clock.advance(TODAY_THROTTLE_MS);
+    expect(r.world.snapshots).toBe(2);
+    expect(r.updates.at(-1)!.day).toBe('2026-11-25');
+  });
+});
+
+describe('TodayService: settingsChanged() while a recompute is in flight', () => {
+  test('it is queued after the running one and merged as a baseline into a computation already queued', async () => {
+    const r = rig({ line: 1000 });
+    let release!: () => void;
+    r.world.hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const first = r.svc.get(); // in flight: the snapshot is taken (empty), then held
+    await flush();
+    r.note(r.world.turn('s1', T0 - H, 1500, 0)); // after its snapshot: needs another computation
+    await r.clock.advance(TODAY_THROTTLE_MS); // the throttled one is queued behind the running one
+    r.svc.settingsChanged(); // merged into the queued one: it becomes a baseline
+    r.world.hold = null;
+    release();
+    await first;
+    await flush();
+    expect(r.world.snapshots).toBe(2);
+    expect(r.updates.map((u) => u.main)).toEqual([0, 1500]);
+    expect(r.updates.at(-1)).toMatchObject({ over: true });
+    expect(r.crosses).toEqual([]); // a growth crossing, but judged by the settings' baseline
+  });
+
+  test('alone, it runs after the running computation with the line read then', async () => {
+    const r = rig({ line: 1000 });
+    r.world.turn('s1', T0 - H, 1500, 0);
+    await r.svc.get();
+    let release!: () => void;
+    r.world.hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    r.note(r.world.turn('s1', T0 - H, 100, 0));
+    await r.clock.advance(TODAY_THROTTLE_MS); // a computation in flight, held
+    r.set.line = 3000;
+    r.svc.settingsChanged();
+    r.world.hold = null;
+    release();
+    await flush();
+    expect(r.world.snapshots).toBe(3);
+    expect(r.updates.at(-1)).toMatchObject({ main: 1600, lineTokens: 3000, over: false });
+    expect(r.store.state()).toEqual({ day: '2026-11-24', line: 3000, over: false });
+    expect(r.crosses).toEqual([]);
   });
 });

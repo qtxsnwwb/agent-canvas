@@ -125,8 +125,16 @@ function callDuration(n: GraphNode): number | null {
 /** Duration of a turn at `nowMs` (see SummaryTurn and the spec: in progress counts to now, cut 15 min after activity). */
 export function turnDurationMs(turn: SummaryTurn, nowMs: number): number {
   let end = turn.endMs;
-  if (turn.open) end = Math.max(end, nowMs - turn.lastActivityMs <= STALE_AFTER_MS ? nowMs : turn.lastActivityMs);
+  if (turn.open) end = Math.max(end, turnGrowing(turn, nowMs) ? nowMs : turn.lastActivityMs);
   return Math.max(0, end - turn.startMs);
+}
+
+/**
+ * An open turn whose duration (turnDurationMs) still grows with the clock: active within STALE_AFTER_MS. Past that it
+ * stays at its last activity.
+ */
+export function turnGrowing(turn: SummaryTurn, nowMs: number): boolean {
+  return turn.open && nowMs - turn.lastActivityMs <= STALE_AFTER_MS;
 }
 
 /**

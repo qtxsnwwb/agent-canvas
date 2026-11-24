@@ -1,12 +1,15 @@
-import { STALE_AFTER_MS, type SeqChange, type TodayUsage } from '@agent-canvas/shared';
-import { realTimers, type Timers } from '../notify/service.js';
+import type { SeqChange, TodayUsage } from '@agent-canvas/shared';
 import type { Store } from '../store/store.js';
+import { realTimers, type Timers } from '../timers.js';
 import { localDayKey } from './aggregate.js';
 import type { SessionSummaryCache, SummaryEntry } from './session-cache.js';
-import type { SessionSummary } from './summary.js';
+import { turnGrowing, type SessionSummary } from './summary.js';
 import { computeToday } from './today.js';
 
-/** Recompute at most this often while sessions change, and this often while today has a growing open turn. */
+/**
+ * Recompute at most this often while sessions change, and this often while today has a growing open turn; while the
+ * start-up work is going on, how often it is checked for being over.
+ */
 export const TODAY_THROTTLE_MS = 30_000;
 /** meta key of the over-state (JSON of OverState). */
 export const TODAY_META_KEY = 'todayUsage';
@@ -17,7 +20,10 @@ export interface TodayServiceDeps {
   store: Pick<Store, 'getMeta' | 'setMeta'>;
   /** The line (the notification settings' usageLineTokens, 0 -> null), read at every computation. */
   line: () => number | null;
-  /** Start-up work done and not importing: a crossing seen while false is consumed, never reported later. */
+  /**
+   * Start-up work done and not importing. While false nothing is computed on a timer (a get() still computes) and a
+   * crossing is consumed, never reported later; once true again, one baseline computation follows.
+   */
   ready: () => boolean;
   /** Usage grew past the line (at most once per day and line); the notification service decides about its switches. */
   onCross?: (usage: TodayUsage) => void;
@@ -49,11 +55,11 @@ function nextDayStart(nowMs: number, dayKey: (ms: number) => string): number {
   return hi;
 }
 
-/** A turn started today that is open and still growing (turnDurationMs measures it up to now): it needs a tick. */
+/** A turn started today whose duration still grows (turnGrowing, the rule of turnDurationMs): it needs a tick. */
 function growingToday(entries: readonly SummaryEntry<SessionSummary>[], today: string, nowMs: number, dayKey: (ms: number) => string): boolean {
   for (const { summary } of entries) {
     for (const t of summary.turns) {
-      if (t.open && t.dated && nowMs - t.lastActivityMs <= STALE_AFTER_MS && dayKey(t.startMs) === today) return true;
+      if (t.dated && turnGrowing(t, nowMs) && dayKey(t.startMs) === today) return true;
     }
   }
   return false;
@@ -80,11 +86,15 @@ function parseState(raw: string | null): OverState | null {
  *   every TODAY_THROTTLE_MS while today has a growing open turn (the summaries come from the cache, nothing is read
  *   again), once at the next local day start (from `dayKey`), and at once on settingsChanged(). Never on a timer when
  *   nothing changed and nothing is open. get() never waits for the throttle: it answers with the latest result.
+ * - Start-up work (ready() false: the initial scan, a rebuild, an import; checked at construction too): no change-driven,
+ *   tick or midnight computation; changes stay noted and ready() is checked every TODAY_THROTTLE_MS instead. Once it
+ *   holds, one baseline computation runs, so the first change after it is judged against what start-up left.
  * - Over-state (meta TODAY_META_KEY, `{ day, line, over }`): after each computation, when the stored day or line is not
  *   today's / the current one, or nothing is stored, the state starts again from the current value without a report;
  *   otherwise `over` stays true once reached (so the same day and line report at most once) and an under -> over step
- *   is reported through onCross, unless this is the first computation since construction, a settingsChanged() one, or
- *   ready() is false (then the crossing is consumed: never reported later).
+ *   is reported through onCross, unless the computation is a baseline: the first one since construction or since
+ *   ready() was last seen false, a settingsChanged() one, or one while ready() is false (the crossing is consumed then,
+ *   never reported later).
  * - onUpdate listeners get every result that differs from the previous one (asOf aside).
  */
 export class TodayService {
@@ -108,13 +118,19 @@ export class TodayService {
   private midnight: unknown = null;
   /** undefined: not read from meta yet. */
   private state: OverState | null | undefined = undefined;
-  private computedOnce = false;
+  /** The next computation while ready is a baseline: none yet since construction, or ready() was seen false since. */
+  private needBaseline = true;
+  /** ready() was seen false: the timer only checks it, and a baseline computation follows once it holds. */
+  private waiting = false;
   private closed = false;
 
   constructor(private readonly deps: TodayServiceDeps) {
     this.now = deps.now ?? Date.now;
     this.dayKey = deps.dayKey ?? localDayKey;
     this.timers = deps.timers ?? realTimers;
+    // Start-up work in progress (start(): before the initial scan): the baseline follows once it is over, also when no
+    // change or request comes first. Nothing is computed here.
+    if (!this.isReady()) this.schedule();
   }
 
   /** The latest result; computed first when there is none yet, or when a change is pending and the window has passed. */
@@ -130,6 +146,7 @@ export class TodayService {
   noteChanges(changes: readonly SeqChange[]): void {
     if (changes.length === 0 || this.closed) return;
     this.dirty = true;
+    this.isReady(); // an import starting: wait instead of recomputing
     this.schedule();
   }
 
@@ -153,6 +170,21 @@ export class TodayService {
   }
 
   // ---------------------------------------------------------------- internals
+
+  /** deps.ready(), noting a false answer (wait, then a baseline). A throwing check counts as not ready. */
+  private isReady(): boolean {
+    let ready = false;
+    try {
+      ready = this.deps.ready();
+    } catch {
+      // not ready
+    }
+    if (!ready) {
+      this.needBaseline = true;
+      this.waiting = true;
+    }
+    return ready;
+  }
 
   private request(baseline: boolean): Promise<void> {
     if (this.closed) return Promise.resolve();
@@ -199,7 +231,12 @@ export class TodayService {
     const line = this.deps.line();
     const usage: TodayUsage = { ...base, lineTokens: line, over: base.main !== null && line !== null && base.main >= line };
     this.growing = growingToday(snapshot.entries, base.day, nowMs, this.dayKey);
-    this.judge(usage, baseline);
+    const ready = this.isReady();
+    this.judge(usage, baseline || this.needBaseline || !ready);
+    if (ready) {
+      this.needBaseline = false;
+      this.waiting = false;
+    }
     this.latest = usage;
     const { asOf: _asOf, ...rest } = usage;
     const key = JSON.stringify(rest);
@@ -217,15 +254,13 @@ export class TodayService {
     this.armMidnight();
   }
 
-  /** The over-state rule (see the class comment). */
+  /** The over-state rule (see the class comment); a baseline never reports. */
   private judge(usage: TodayUsage, baseline: boolean): void {
     const stored = this.loadState();
-    const first = !this.computedOnce;
-    this.computedOnce = true;
     const same = stored !== null && stored.day === usage.day && stored.line === usage.lineTokens;
     const was = same && stored.over;
     const next: OverState = { day: usage.day, line: usage.lineTokens, over: was || usage.over };
-    const cross = same && !baseline && !first && !was && usage.over && this.deps.ready();
+    const cross = same && !baseline && !was && usage.over;
     if (!same || next.over !== stored.over) this.saveState(next);
     if (cross) {
       try {
@@ -257,22 +292,44 @@ export class TodayService {
     }
   }
 
-  /** Arms the throttled recompute for a pending change or a growing open turn; none otherwise. */
+  /**
+   * Arms the timer: while waiting for the start-up work, a check TODAY_THROTTLE_MS from now (an armed one is kept, so a
+   * stream of changes never pushes it back); else the throttled recompute for a pending change or a growing open turn;
+   * none otherwise.
+   */
   private schedule(): void {
     if (this.closed) return;
+    if (this.waiting) {
+      if (this.timer === null) this.arm(this.now() + TODAY_THROTTLE_MS);
+      return;
+    }
     if (!this.dirty && !this.growing) {
       this.clearTimer();
       return;
     }
     const at = this.lastRunAt + TODAY_THROTTLE_MS;
     if (this.timer !== null && this.timerAt === at) return;
+    this.arm(at);
+  }
+
+  private arm(at: number): void {
     this.clearTimer();
     this.timerAt = at;
     this.timer = this.timers.setTimeout(() => {
       this.timer = null;
       this.timerAt = null;
-      if (this.dirty || this.growing) this.request(false).catch(() => undefined);
+      this.onTimer();
     }, Math.max(0, at - this.now()));
+  }
+
+  private onTimer(): void {
+    if (this.closed) return;
+    if (!this.isReady()) {
+      this.schedule(); // check again later; the noted changes wait
+      return;
+    }
+    // Start-up work just ended: the baseline (needBaseline is set). Otherwise a pending change or a growing turn.
+    if (this.waiting || this.dirty || this.growing) this.request(false).catch(() => undefined);
   }
 
   private clearTimer(): void {
@@ -287,6 +344,12 @@ export class TodayService {
     const nowMs = this.now();
     this.midnight = this.timers.setTimeout(() => {
       this.midnight = null;
+      if (!this.isReady()) {
+        // During start-up work: the baseline that follows it computes the new day.
+        this.schedule();
+        this.armMidnight();
+        return;
+      }
       void this.request(false).catch(() => undefined).finally(() => this.armMidnight());
     }, Math.max(1, nextDayStart(nowMs, this.dayKey) - nowMs));
   }

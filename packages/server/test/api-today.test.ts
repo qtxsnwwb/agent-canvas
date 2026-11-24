@@ -8,11 +8,12 @@ import { DEFAULT_NOTIFICATION_SETTINGS, type ServerMessage, type TodayUsage } fr
 import { buildServer, createTodayService } from '../src/api/server.js';
 import { loadConfig, type Config } from '../src/config.js';
 import type { DeliveryStatus, NotificationMessage } from '../src/notify/desktop.js';
-import { NotificationService, type ServiceNotifier, type Timers } from '../src/notify/service.js';
+import { NotificationService, type ServiceNotifier } from '../src/notify/service.js';
 import { Pipeline } from '../src/pipeline.js';
 import { StatsService, storeStatsSource } from '../src/stats/service.js';
 import { TODAY_THROTTLE_MS, type TodayService } from '../src/stats/today-service.js';
 import { openStore, type RawEvent, type Store } from '../src/store/store.js';
+import type { Timers } from '../src/timers.js';
 import { assistantBlock, userPrompt } from './fixtures.js';
 
 // In-memory store, temp dirs, a fake notifier, a fake clock and fake timers for the today service; port 0 only.
@@ -114,6 +115,8 @@ describe('今天的用量接口', () => {
     notifier = new FakeNotifier();
     notifications = new NotificationService({ store, pipeline, notifier });
     stats = new StatsService(storeStatsSource(store), { now: () => now, dayKey: utcDay });
+    // The start-up work is over unless a test says otherwise (a bare pipeline never runs its initial scan).
+    vi.spyOn(pipeline, 'startupDone').mockReturnValue(true);
     today = createTodayService({ store, pipeline, cache: stats.summaryCache(), notifications, now: () => now, dayKey: utcDay, timers });
     app = buildServer({ store, pipeline, config, notifications, stats, today });
     notifications.start('http://127.0.0.1:4999');
@@ -190,6 +193,29 @@ describe('今天的用量接口', () => {
     await advance(TODAY_THROTTLE_MS);
     await sleep(50);
     expect(notifier.sent).toHaveLength(1);
+  });
+
+  test('只改了别的设置（例如卡住阈值）：不重算，上次计算之后涨过线的照常提醒', async () => {
+    expect((await putSettings({ ...DEFAULT_NOTIFICATION_SETTINGS, enabled: true, usageLineTokens: 20 })).statusCode).toBe(200);
+    await turn('s1', T0 - 3600_000);
+    await turn('s1', T0 - 1800_000);
+    expect((await putSettings({ ...DEFAULT_NOTIFICATION_SETTINGS, enabled: true, usageLineTokens: 20, stuckMinutes: 30 })).statusCode).toBe(200);
+    await advance(TODAY_THROTTLE_MS);
+    await vi.waitFor(() => expect(notifier.sent).toHaveLength(1));
+    expect(notifier.sent[0]!.body).toBe('新输入 + 输出 30，提醒线 20');
+  });
+
+  test('打开用量提醒之前涨过线的：打开时不补发，之后也不发', async () => {
+    expect((await putSettings({ ...DEFAULT_NOTIFICATION_SETTINGS, enabled: true, usage: false, usageLineTokens: 20 })).statusCode).toBe(200);
+    await turn('s1', T0 - 3600_000);
+    await turn('s1', T0 - 1800_000);
+    expect((await putSettings({ ...DEFAULT_NOTIFICATION_SETTINGS, enabled: true, usage: true, usageLineTokens: 20 })).statusCode).toBe(200);
+    await vi.waitFor(async () => expect((await get('/api/today')).json()).toMatchObject({ main: 30, over: true }));
+    await advance(TODAY_THROTTLE_MS);
+    await turn('s1', T0 - 900_000);
+    await advance(TODAY_THROTTLE_MS);
+    await sleep(50);
+    expect(notifier.sent).toEqual([]);
   });
 
   test('没有通知服务的服务器（嵌入、测试）：线从存着的通知设置读', async () => {
