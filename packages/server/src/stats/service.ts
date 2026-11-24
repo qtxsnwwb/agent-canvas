@@ -86,7 +86,9 @@ export function parseStatsQuery(query: Record<string, unknown>): StatsQuery | { 
 export const STATS_CACHE_CAPACITY = 20_000;
 /**
  * Most per-call entries (SummaryCall, ≈100 B each) kept across all cached summaries: ≈100 MB worst case. The real
- * 210,000-node dataset has ≈100,000 calls. Turns are per prompt and small.
+ * 210,000-node dataset has ≈100,000 calls. Turns (SummaryTurn, one per prompt) are not weighed: each costs roughly
+ * 300-500 B with its prompt head (≤ 80 code points, kept for the compare page), on top of this bound (an estimate:
+ * 100,000 cached turns ≈ 30-50 MB).
  */
 export const STATS_CACHE_MAX_CALLS = 1_000_000;
 /** Building summaries gives the event loop a turn once this much time has passed since the last one. */

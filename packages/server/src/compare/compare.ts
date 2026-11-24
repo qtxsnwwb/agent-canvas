@@ -17,13 +17,23 @@ import {
   type CompareTurnSide,
   type Session,
 } from '@agent-canvas/shared';
-import type { SessionFilesSummary } from '../files/summary.js';
+import { changesOf, type SessionFilesSummary } from '../files/summary.js';
+import { callCounted, sessionTotals, statsRange, type SessionTotals } from '../stats/aggregate.js';
 import { turnDurationMs, type SessionSummary } from '../stats/summary.js';
 
 /**
  * Two sessions side by side (spec 2026-11-24-compare-design.md 4; CompareResponse in shared): a pure function of each
- * side's stats summary, file summary and the clock. A missing side (null) pairs as an empty session.
+ * side's stats summary, file summary, the clock and the day function (the stats page's local day). A missing side
+ * (null) pairs as an empty session. The totals and the by-tool rows count what the stats page counts with range `all`
+ * (stats/aggregate.ts sessionTotals, callCounted).
  */
+
+/** The day function and clock every number is taken at. */
+export interface CompareClock {
+  nowMs: number;
+  /** Local day (`YYYY-MM-DD`) of a time, as the stats page's (localDayKey). */
+  dayKey: (ms: number) => string;
+}
 
 /** One side's input: the session record read with the nodes, its stats summary, its file summary (null: none). */
 export interface CompareInput {
@@ -34,29 +44,9 @@ export interface CompareInput {
 
 const cmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
-/** The stats page's numbers for one session at `nowMs` (see CompareSide). */
-export function compareSide(session: Session, summary: SessionSummary, nowMs: number): CompareSide {
-  let activeMs = 0;
-  let turns = 0;
-  let input = 0;
-  let cachedInput = 0;
-  let output = 0;
-  for (const t of summary.turns) {
-    if (t.dated) {
-      turns++;
-      activeMs += turnDurationMs(t, nowMs);
-    }
-    input += t.inputTokens;
-    cachedInput += t.cachedInputTokens;
-    output += t.outputTokens;
-  }
-  for (const x of summary.extras) {
-    input += x.inputTokens;
-    cachedInput += x.cachedInputTokens;
-    output += x.outputTokens;
-  }
-  let failed = 0;
-  for (const c of summary.calls) if (c.failed) failed++;
+/** The stats page's numbers for one session (see CompareSide); `totals`: sessionTotals of it, when already computed. */
+export function compareSide(session: Session, summary: SessionSummary, clock: CompareClock, totals?: SessionTotals): CompareSide {
+  const { activeMs, turns, toolCalls, failed, tokens } = totals ?? sessionTotals(summary, 'all', clock.nowMs, clock.dayKey);
   return {
     sessionId: session.id,
     title: sessionName(session),
@@ -68,16 +58,23 @@ export function compareSide(session: Session, summary: SessionSummary, nowMs: nu
     activeMs,
     turns,
     steps: summary.nodeCount,
-    toolCalls: summary.calls.length,
+    toolCalls,
     failed,
     subagents: summary.subagentCount,
-    tokens: summary.usageNodes === 0 ? null : { input, cachedInput, output },
+    tokens,
   };
 }
 
-function toolCounts(summary: SessionSummary | undefined): Map<string, CompareToolCounts> {
+/** One side's input with its sessionTotals (range `all`). */
+type Counted = CompareInput & { totals: SessionTotals };
+
+/** Calls per tool name: the calls the stats page counts (callCounted, range `all`). */
+function toolCounts(side: Counted | undefined, clock: CompareClock): Map<string, CompareToolCounts> {
   const out = new Map<string, CompareToolCounts>();
-  for (const c of summary?.calls ?? []) {
+  if (side === undefined) return out;
+  const { inRange } = statsRange('all', clock.nowMs, clock.dayKey);
+  for (const c of side.summary.calls) {
+    if (!callCounted(c, side.totals.turnIn, inRange, clock.dayKey)) continue;
     let row = out.get(c.toolName);
     if (row === undefined) out.set(c.toolName, (row = { calls: 0, failed: 0 }));
     row.calls++;
@@ -86,9 +83,9 @@ function toolCounts(summary: SessionSummary | undefined): Map<string, CompareToo
   return out;
 }
 
-function pairTools(left: SessionSummary | undefined, right: SessionSummary | undefined): Pick<CompareResponse, 'tools' | 'otherTools'> {
-  const l = toolCounts(left);
-  const r = toolCounts(right);
+function pairTools(left: Counted | undefined, right: Counted | undefined, clock: CompareClock): Pick<CompareResponse, 'tools' | 'otherTools'> {
+  const l = toolCounts(left, clock);
+  const r = toolCounts(right, clock);
   const names = new Set([...l.keys(), ...r.keys()]);
   const rows: CompareToolRow[] = [...names].map((toolName) => ({ toolName, left: l.get(toolName) ?? null, right: r.get(toolName) ?? null }));
   const sum = (row: CompareToolRow): number => (row.left?.calls ?? 0) + (row.right?.calls ?? 0);
@@ -107,7 +104,8 @@ function turnSide(summary: SessionSummary | undefined, i: number, nowMs: number)
   return {
     promptNodeId: t.promptNodeId,
     promptHead: t.promptHead,
-    activeMs: turnDurationMs(t, nowMs),
+    // An undated turn starts at an unknown time (0 here): no duration rather than decades.
+    activeMs: t.dated ? turnDurationMs(t, nowMs) : null,
     toolCalls: t.toolCalls,
     tokens: summary.usageNodes === 0 ? null : t.inputTokens + t.outputTokens,
   };
@@ -134,7 +132,7 @@ function filesByKey(input: CompareInput | null): Map<string, { path: string; cou
     const rel = relativeToDir(f.path, input.session.cwd);
     const key = isWindowsStylePath(f.path) ? rel.toLowerCase() : rel;
     const reads = f.counts.read;
-    const changes = f.counts.edit + f.counts.write + f.counts.delete;
+    const changes = changesOf(f.counts);
     const known = out.get(key);
     if (known === undefined) out.set(key, { path: rel, counts: { reads, changes } });
     else {
@@ -188,15 +186,19 @@ function pairFiles(left: CompareInput | null, right: CompareInput | null): Compa
 export function buildCompare(
   left: CompareInput | null,
   right: CompareInput | null,
-  options: { sameSession: boolean; nowMs: number },
+  options: CompareClock & { sameSession: boolean },
 ): CompareResponse {
-  const { nowMs } = options;
+  const clock: CompareClock = { nowMs: options.nowMs, dayKey: options.dayKey };
+  const counted = (x: CompareInput | null): Counted | undefined =>
+    x === null ? undefined : { ...x, totals: sessionTotals(x.summary, 'all', clock.nowMs, clock.dayKey) };
+  const l = counted(left);
+  const r = counted(right);
   return {
-    left: left === null ? null : compareSide(left.session, left.summary, nowMs),
-    right: right === null ? null : compareSide(right.session, right.summary, nowMs),
+    left: l === undefined ? null : compareSide(l.session, l.summary, clock, l.totals),
+    right: r === undefined ? null : compareSide(r.session, r.summary, clock, r.totals),
     sameSession: options.sameSession,
-    ...pairTools(left?.summary, right?.summary),
-    ...pairTurns(left?.summary, right?.summary, nowMs),
+    ...pairTools(l, r, clock),
+    ...pairTurns(left?.summary, right?.summary, clock.nowMs),
     files: pairFiles(left, right),
   };
 }

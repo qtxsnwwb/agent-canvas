@@ -4,13 +4,17 @@ import type { Origin, SessionStatus } from './model.js';
  * GET /api/compare?a=<sessionId>&b=<sessionId> (spec 2026-11-24-compare-design.md, sections 4 and 5): two sessions'
  * numbers side by side, computed from the stats page's session summary and the file page's file summary.
  *
- * Definitions (the stats page's, on the same summary):
- * - activeMs: Σ turnDurationMs(turn, now) over the session's dated turns (in progress counts to now, cut 15 min after
- *   the last activity); turns: dated turns.
- * - steps: every node of the session; toolCalls / failed: tool and subagent calls (subagent-internal ones included) /
- *   those failed or denied; subagents: dispatch nodes (`kind === 'subagent'`).
- * - tokens: the stats page's three categories summed over the session's turns and extras; null when the session has
- *   no token data (no node carries usage).
+ * Definitions: a side's activeMs, turns, toolCalls, failed and tokens are exactly what the stats page totals for the
+ * session with range `all` (server stats/aggregate.ts sessionTotals): its turns and extras dated on a day up to today.
+ * - activeMs: Σ turnDurationMs(turn, now) over those turns (in progress counts to now, cut 15 min after the last
+ *   activity); turns: their number.
+ * - toolCalls / failed: tool and subagent calls (subagent-internal ones included) / those failed or denied, of those
+ *   turns and extras.
+ * - tokens: the stats page's three categories summed over those turns and extras; null when the session has no token
+ *   data (no node carries usage) or nothing of it is counted.
+ * - steps: every node of the session; subagents: dispatch nodes (`kind === 'subagent'`).
+ * - The by-tool rows count the same calls; the by-turn rows list every turn of the session (an undated one too: its
+ *   activeMs null).
  *
  * Content: session titles, prompt heads (≤ 80 code points, a cut one ends in `…`), file paths and cwds; the page masks
  * them by rule.
@@ -57,7 +61,8 @@ export interface CompareTurnSide {
   promptNodeId: string | null;
   /** The prompt node's summary (else title), whitespace collapsed, ≤ 80 code points (a cut one ends in `…`); '' without a prompt. */
   promptHead: string;
-  activeMs: number;
+  /** turnDurationMs at answer time; null for an undated turn (its start is unknown: the page shows 「—」). */
+  activeMs: number | null;
   toolCalls: number;
   /** New input + output of the turn; null when the session has no token data. */
   tokens: number | null;

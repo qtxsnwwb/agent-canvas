@@ -108,10 +108,14 @@ export const UNKNOWN_TOOL = '(unknown)';
  */
 export const PROMPT_HEAD_MAX_CHARS = 80;
 
-/** A prompt node's head: its summary (else its title), whitespace runs folded to one space, cut as PROMPT_HEAD_MAX_CHARS says. */
+/**
+ * A prompt node's head: its summary (else, when that is empty or whitespace only, its title), whitespace runs folded to
+ * one space and trimmed, cut as PROMPT_HEAD_MAX_CHARS says.
+ */
 export function promptHeadOf(node: Pick<GraphNode, 'summary' | 'title'>): string {
-  const raw = node.summary !== '' ? node.summary : node.title;
-  const cps = [...raw.replace(/\s+/g, ' ').trim()];
+  const fold = (text: string): string => text.replace(/\s+/g, ' ').trim();
+  const summary = fold(node.summary);
+  const cps = [...(summary !== '' ? summary : fold(node.title))];
   return cps.length <= PROMPT_HEAD_MAX_CHARS ? cps.join('') : `${cps.slice(0, PROMPT_HEAD_MAX_CHARS - 1).join('')}…`;
 }
 

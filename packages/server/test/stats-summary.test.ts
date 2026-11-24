@@ -266,7 +266,7 @@ describe('tokens', () => {
 });
 
 // The prompt heads (compare page) are the one exception: see 'the prompt heads are the only conversation content'.
-test('the summary carries no conversation content', () => {
+test('the summary carries no conversation content but the prompt heads (tool inputs, replies: none)', () => {
   const s = summarizeSession(session(), [node('p1', 0, { kind: 'prompt', turnId: 'T1', summary: 'the prompt head' }), tool('a', 1, 'T1')]);
   expect(JSON.stringify(s)).not.toContain('secret prompt text');
 });
@@ -317,6 +317,11 @@ describe('compare fields (spec 2026-11-24-compare-design.md 4)', () => {
       node('p2', 10, { kind: 'prompt', turnId: 'T2', summary: '', title: 'Prompt' }),
     ]);
     expect(s.turns.map((t) => [t.promptNodeId, t.promptHead])).toEqual([['p1', 'fix the CI timeout'], ['p2', 'Prompt']]);
+  });
+
+  test('promptHead: a whitespace-only summary counts as empty (the title is used)', () => {
+    const s = summarizeSession(session(), [node('p1', 0, { kind: 'prompt', turnId: 'T1', summary: ' \n\t ', title: '  Prompt  title ' })]);
+    expect(s.turns[0]!.promptHead).toBe('Prompt title');
   });
 
   test('a turn without a prompt node (a prelude) has promptNodeId null and an empty head', () => {

@@ -1,5 +1,6 @@
 import type { CompareResponse } from '@agent-canvas/shared';
 import type { SessionFilesSummary } from '../files/summary.js';
+import { localDayKey } from '../stats/aggregate.js';
 import type { SessionSummaryCache } from '../stats/session-cache.js';
 import type { SessionSummary } from '../stats/summary.js';
 import { buildCompare, type CompareInput } from './compare.js';
@@ -25,6 +26,8 @@ export interface CompareServiceDeps {
    */
   files: SessionSummaryCache<SessionFilesSummary>;
   now?: () => number;
+  /** Local day of a time (default localDayKey, as the stats page's). */
+  dayKey?: (ms: number) => string;
 }
 
 /**
@@ -33,9 +36,11 @@ export interface CompareServiceDeps {
  */
 export class CompareService {
   private readonly now: () => number;
+  private readonly dayKey: (ms: number) => string;
 
   constructor(private readonly deps: CompareServiceDeps) {
     this.now = deps.now ?? Date.now;
+    this.dayKey = deps.dayKey ?? localDayKey;
   }
 
   private async side(sessionId: string): Promise<CompareInput | null> {
@@ -48,6 +53,6 @@ export class CompareService {
 
   async compare(a: string, b: string): Promise<CompareResponse> {
     const [left, right] = await Promise.all([this.side(a), this.side(b)]);
-    return buildCompare(left, right, { sameSession: a === b, nowMs: this.now() });
+    return buildCompare(left, right, { sameSession: a === b, nowMs: this.now(), dayKey: this.dayKey });
   }
 }

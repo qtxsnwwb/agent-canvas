@@ -15,7 +15,7 @@ import { CompareService } from '../src/compare/service.js';
 import { summarizeSessionFiles, type SessionFilesSummary } from '../src/files/summary.js';
 import { aggregateStats } from '../src/stats/aggregate.js';
 import { SessionSummaryCache, type SessionSummarySource } from '../src/stats/session-cache.js';
-import { summarizeSession, turnDurationMs, type SessionSummary } from '../src/stats/summary.js';
+import { summarizeSession, type SessionSummary } from '../src/stats/summary.js';
 
 // Invented sessions only. The clock: 2026-11-24 12:00 UTC.
 const NOW = Date.parse('2026-11-24T12:00:00.000Z');
@@ -47,8 +47,9 @@ const callNode = (ms: number, turnId: string | null, toolName: string, o: Partia
 function input(session: Session, nodes: GraphNode[]): CompareInput {
   return { session, summary: summarizeSession(session, nodes), files: summarizeSessionFiles(session, nodes) };
 }
-const pair = (left: CompareInput | null, right: CompareInput | null, nowMs = NOW) =>
-  buildCompare(left, right, { sameSession: left !== null && right !== null && left.session.id === right.session.id, nowMs });
+const CLOCK = { nowMs: NOW, dayKey: utcDay };
+const pair = (left: CompareInput | null, right: CompareInput | null) =>
+  buildCompare(left, right, { sameSession: left !== null && right !== null && left.session.id === right.session.id, ...CLOCK });
 
 /** A session with calls of the given tools (`[name, calls, failed]`) in one turn. */
 function withTools(id: string, tools: [string, number, number][], o: Partial<Session> = {}): CompareInput {
@@ -75,7 +76,7 @@ describe('sides', () => {
       n(start + H + 31 * S, { turnId: 'T2', messageId: 'm2', usage: { inputTokens: 50, cachedInputTokens: 500, outputTokens: 5 } }),
     ];
     const session = mkSession('s-full-id-123456', { title: null, cwd: '/w/app', status: 'idle', lastActivityAt: iso(start + H + 31 * S) });
-    const side = compareSide(session, summarizeSession(session, nodes), NOW);
+    const side = compareSide(session, summarizeSession(session, nodes), CLOCK);
     expect(side).toEqual({
       sessionId: 's-full-id-123456', title: 's-full-i', origin: 'claude', projectId: 'p1', cwd: '/w/app', status: 'idle',
       lastActivityAt: iso(start + H + 31 * S),
@@ -86,16 +87,52 @@ describe('sides', () => {
 
   test('a session without token data: tokens null (per session, whatever its origin)', () => {
     const session = mkSession('s1', { origin: 'claude', title: 'Has a title' });
-    const side = compareSide(session, summarizeSession(session, [promptNode(NOW - H, 'T1', 'x')]), NOW);
+    const side = compareSide(session, summarizeSession(session, [promptNode(NOW - H, 'T1', 'x')]), CLOCK);
     expect(side.tokens).toBeNull();
     expect(side.title).toBe('Has a title');
+  });
+
+  test('the totals leave out what the stats page leaves out: an undated turn, an undated extra, a turn after today', () => {
+    const start = NOW - 3 * H;
+    const usage = { inputTokens: 5, cachedInputTokens: 50, outputTokens: 1 };
+    const nodes = [
+      // Undated turn (epoch prompt) with a real-time call and usage.
+      promptNode(Date.parse('1970-01-01T00:00:00.000Z'), 'TU', 'epoch'),
+      callNode(start + 1 * S, 'TU', 'Bash'),
+      n(start + 2 * S, { turnId: 'TU', messageId: 'mu', usage }),
+      // A counted turn.
+      promptNode(start + MIN, 'T1', 'counted'),
+      callNode(start + MIN + S, 'T1', 'Read', { status: 'failed' }),
+      n(start + 2 * MIN, { turnId: 'T1', messageId: 'm1', usage }),
+      // A turn dated after today.
+      promptNode(NOW + 2 * 24 * H, 'TF', 'future'),
+      callNode(NOW + 2 * 24 * H + S, 'TF', 'Edit'),
+      n(NOW + 2 * 24 * H + 2 * S, { turnId: 'TF', messageId: 'mf', usage }),
+      // An undated extra (session exit at an unparseable time) with usage.
+      n(0, { kind: 'system', systemSubtype: 'shutdown', timestamp: 'garbage', messageId: 'mx', usage }),
+    ];
+    const session = mkSession('s1');
+    const summary = summarizeSession(session, nodes);
+    expect(compareSide(session, summary, CLOCK)).toMatchObject({
+      turns: 1, activeMs: MIN, toolCalls: 1, failed: 1, steps: nodes.length, tokens: { input: 5, cachedInput: 50, output: 1 },
+    });
+    // The by-tool rows count the same calls; the by-turn rows list every turn.
+    const r = pair({ session, summary, files: null }, null);
+    expect(r.tools).toEqual([{ toolName: 'Read', left: { calls: 1, failed: 1 }, right: null }]);
+    expect(r.turns.map((t) => t.left?.promptHead)).toEqual(['epoch', 'counted', 'future']);
+  });
+
+  test('a session with token data but nothing counted: tokens null, as the stats page shows it', () => {
+    const session = mkSession('s1');
+    const nodes = [promptNode(0, 'TU', 'epoch'), n(NOW - H, { turnId: 'TU', usage: { inputTokens: 1, outputTokens: 1 } })];
+    expect(compareSide(session, summarizeSession(session, nodes), CLOCK)).toMatchObject({ turns: 0, activeMs: 0, tokens: null });
   });
 
   test('a running session: its open turn counts to now', () => {
     const start = NOW - 5 * MIN;
     const session = mkSession('s1', { status: 'running', lastActivityAt: iso(NOW - MIN) });
     const nodes = [promptNode(start, 'T1', 'x'), callNode(NOW - MIN, 'T1', 'Bash', { status: 'running', durationMs: null })];
-    expect(compareSide(session, summarizeSession(session, nodes), NOW).activeMs).toBe(5 * MIN);
+    expect(compareSide(session, summarizeSession(session, nodes), CLOCK).activeMs).toBe(5 * MIN);
   });
 });
 
@@ -174,6 +211,17 @@ describe('by turn', () => {
     expect(r.turns[0]!.right).toEqual({ promptNodeId: right.summary.turns[0]!.promptNodeId, promptHead: 'prompt 1', activeMs: MIN, toolCalls: 0, tokens: null });
     expect(r.turns[1]!.right).toBeNull();
     expect(r.turns[2]!.right).toBeNull();
+  });
+
+  test('an undated turn (epoch prompt, real-time tool): activeMs null (not decades), its calls and tokens kept', () => {
+    const nodes = [
+      promptNode(Date.parse('1970-01-01T00:00:00.000Z'), 'TU', 'epoch prompt'),
+      callNode(NOW - H, 'TU', 'Bash', { endedAt: iso(NOW - H + 5 * S) }),
+      n(NOW - H + 10 * S, { turnId: 'TU', usage: { inputTokens: 30, cachedInputTokens: 300, outputTokens: 3 } }),
+    ];
+    const r = pair(input(mkSession('a'), nodes), null);
+    expect(r.turns).toHaveLength(1);
+    expect(r.turns[0]!.left).toMatchObject({ promptHead: 'epoch prompt', activeMs: null, toolCalls: 1, tokens: 33 });
   });
 
   test('a turn without a prompt (prelude): promptNodeId null, head empty', () => {
@@ -335,8 +383,13 @@ function rng(seed: number): () => number {
   };
 }
 
-/** A random invented session: turns, calls of several statuses, subagents (resolved or not), usage with repeated message ids. */
-function randomSession(rand: () => number, id: string, origin: Origin, projectId: string): { session: Session; nodes: GraphNode[] } {
+/**
+ * A random invented session: turns, calls of several statuses, subagents (resolved or not), usage with repeated message
+ * ids. By `index`: 1 mod 4 adds an undated turn (unparseable or epoch prompt, real-time calls and usage), 2 mod 4 a turn
+ * dated after today, 3 mod 4 an undated extra (a session exit at an unparseable time — an extra when it carries usage —
+ * and an unparseable internal call when there is no turn; index 7 has none).
+ */
+function randomSession(rand: () => number, id: string, origin: Origin, projectId: string, index: number): { session: Session; nodes: GraphNode[] } {
   const pick = <T>(xs: readonly T[]): T => xs[Math.floor(rand() * xs.length)]!;
   const int = (lo: number, hi: number): number => lo + Math.floor(rand() * (hi - lo + 1));
   const nodes: GraphNode[] = [];
@@ -344,7 +397,7 @@ function randomSession(rand: () => number, id: string, origin: Origin, projectId
   const running = rand() < 0.3;
   let t = NOW - int(1, 20) * 24 * H - int(0, 23) * H;
   let msg = 0;
-  const turnCount = int(0, 6);
+  const turnCount = index % 8 === 7 ? 0 : int(0, 6); // index 7: no turn, so its undated internal call is an extra
   for (let i = 0; i < turnCount; i++) {
     const key = `${id}-T${i}`;
     nodes.push(promptNode(t, key, `prompt ${i}`));
@@ -370,6 +423,24 @@ function randomSession(rand: () => number, id: string, origin: Origin, projectId
     }
     t += int(1, 60) * MIN;
   }
+  const usageNode = (at: number, o: Partial<GraphNode> = {}): GraphNode =>
+    n(at, { messageId: `${id}-m${++msg}`, usage: withUsage ? { inputTokens: int(0, 900), cachedInputTokens: int(0, 9000), outputTokens: int(0, 90) } : null, ...o });
+  if (index % 4 === 1) {
+    const at = t - int(1, 5) * H;
+    nodes.push(promptNode(0, `${id}-TU`, 'undated', { timestamp: pick(['garbage', '1970-01-01T00:00:00.000Z']) }));
+    nodes.push(callNode(at, `${id}-TU`, pick(['Bash', 'Read']), { status: pick(['succeeded', 'failed'] as const) }));
+    nodes.push(usageNode(at + 1, { turnId: `${id}-TU` }));
+  }
+  if (index % 4 === 2) {
+    const at = NOW + int(1, 3) * 24 * H;
+    nodes.push(promptNode(at, `${id}-TF`, 'future'));
+    nodes.push(callNode(at + S, `${id}-TF`, pick(['Bash', 'Edit']), { status: pick(['succeeded', 'denied'] as const) }));
+    nodes.push(usageNode(at + 2 * S, { turnId: `${id}-TF` }));
+  }
+  if (index % 4 === 3) {
+    nodes.push(usageNode(0, { kind: 'system', systemSubtype: 'shutdown', timestamp: 'garbage' }));
+    if (turnCount === 0) nodes.push(callNode(0, null, 'Read', { agentId: `${id}-undated-orphan`, timestamp: 'nope' }));
+  }
   // Sometimes internal nodes with no turn at all (extras), sometimes a session exit carrying usage.
   if (turnCount === 0 && rand() < 0.5) nodes.push(callNode(t, null, 'Read', { agentId: `${id}-orphan` }));
   if (withUsage && rand() < 0.3) nodes.push(n(t + 2, { kind: 'system', systemSubtype: 'shutdown', usage: { inputTokens: 7, cachedInputTokens: 70, outputTokens: 1 } }));
@@ -388,25 +459,34 @@ describe('consistency with the stats page (aggregateStats, range all, the only s
     const rand = rng(seed);
     // One session per origin and project, so the stats page's per-origin token rule is this session's.
     const entries = ORIGINS.map((origin, i) => {
-      const { session, nodes } = randomSession(rand, `s${seed}-${i}`, origin, `proj-${i}`);
+      const { session, nodes } = randomSession(rand, `s${seed}-${i}`, origin, `proj-${i}`, i);
       return { session, summary: summarizeSession(session, nodes) };
     });
     for (const { session, summary } of entries) {
       const stats = aggregateStats({
         entries, failedSessions: 0, projects: [], range: 'all', origin: session.origin, projectId: session.projectId, nowMs: NOW, dayKey: utcDay,
       });
-      const side = compareSide(session, summary, NOW);
+      const side = compareSide(session, summary, CLOCK);
       expect({ activeMs: side.activeMs, turns: side.turns, toolCalls: side.toolCalls, failed: side.failed, tokens: side.tokens }).toEqual({
         activeMs: stats.totals.activeMs, turns: stats.totals.turns, toolCalls: stats.totals.toolCalls, failed: stats.totals.failed,
         tokens: stats.totals.tokens,
       });
-      // The turn rows add up to the side (every turn is dated here).
-      const rows = buildCompare({ session, summary, files: null }, null, { sameSession: false, nowMs: NOW }).turns;
-      expect(rows.reduce((a, r) => a + r.left!.activeMs, 0)).toBe(summary.turns.slice(0, COMPARE_TURNS_MAX).reduce((a, x) => a + turnDurationMs(x, NOW), 0));
+      // The turn rows (at most 50 here) add up to the stats page's activeMs once undated rows (null) and turns after
+      // today are left out.
+      const rows = buildCompare({ session, summary, files: null }, null, { sameSession: false, ...CLOCK }).turns;
+      expect(rows).toHaveLength(summary.turns.length);
+      const today = utcDay(NOW);
+      const rowSum = rows.reduce((a, r, i) => a + (utcDay(summary.turns[i]!.startMs) > today ? 0 : r.left!.activeMs ?? 0), 0);
+      expect(rowSum).toBe(stats.totals.activeMs);
+      expect(rows.every((r, i) => (r.left!.activeMs === null) === !summary.turns[i]!.dated)).toBe(true);
     }
-    // The seeds cover sessions with and without token data, running ones, and ones without turns.
+    // The seeds cover sessions with and without token data, running ones, ones without turns, undated turns and
+    // extras, turns after today.
     expect(entries.some((e) => e.summary.usageNodes === 0)).toBe(true);
     expect(entries.some((e) => e.summary.usageNodes > 0)).toBe(true);
+    expect(entries.some((e) => e.summary.turns.some((t) => !t.dated))).toBe(true);
+    expect(entries.some((e) => e.summary.extras.some((x) => !x.dated))).toBe(true);
+    expect(entries.some((e) => e.summary.turns.some((t) => utcDay(t.startMs) > utcDay(NOW)))).toBe(true);
   });
 });
 
@@ -442,7 +522,7 @@ describe('CompareService', () => {
     source.sessionsById.set('a', { session: a.session, nodes: [promptNode(NOW - H, 'T', 'x'), callNode(NOW - H + 1, 'T', 'Read', { files: [{ path: '/w/app/x.ts', action: 'read' }] })] });
     source.sessionsById.set('b', { session: b.session, nodes: [promptNode(NOW - H, 'T', 'y'), callNode(NOW - H + 1, 'T', 'Bash')] });
     const { stats, files } = caches(source);
-    const svc = new CompareService({ stats, files, now: () => NOW });
+    const svc = new CompareService({ stats, files, now: () => NOW, dayKey: utcDay });
 
     const first = await svc.compare('a', 'b');
     expect(source.reads.sort()).toEqual(['a', 'b']);
@@ -467,7 +547,7 @@ describe('CompareService', () => {
     const a = withTools('a', [['Bash', 1, 0]]);
     source.sessionsById.set('a', { session: a.session, nodes: [promptNode(NOW - H, 'T', 'x'), callNode(NOW - H + 1, 'T', 'Bash')] });
     const { stats, files } = caches(source);
-    const svc = new CompareService({ stats, files, now: () => NOW });
+    const svc = new CompareService({ stats, files, now: () => NOW, dayKey: utcDay });
 
     const missing = await svc.compare('a', 'nope');
     expect(missing.left?.sessionId).toBe('a');
@@ -476,7 +556,7 @@ describe('CompareService', () => {
 
     source.reads = [];
     const fresh = caches(source);
-    const same = await new CompareService({ stats: fresh.stats, files: fresh.files, now: () => NOW }).compare('a', 'a');
+    const same = await new CompareService({ stats: fresh.stats, files: fresh.files, now: () => NOW, dayKey: utcDay }).compare('a', 'a');
     expect(source.reads).toEqual(['a']);
     expect(same.sameSession).toBe(true);
     expect(same.left).toEqual(same.right);

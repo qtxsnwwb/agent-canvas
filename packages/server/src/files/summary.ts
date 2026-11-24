@@ -79,7 +79,8 @@ export interface SessionFilesSummary {
   truncatedNodes: number;
 }
 
-const changesOf = (c: FileActionCounts): number => c.edit + c.write + c.delete;
+/** A file's changes: edit + write + delete touches (SessionFile.changes). */
+export const changesOf = (c: FileActionCounts): number => c.edit + c.write + c.delete;
 
 /** Sorts by changes desc, then last time desc (null last), then path asc. */
 function compareFiles(a: SummaryFile, b: SummaryFile): number {
