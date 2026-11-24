@@ -178,7 +178,7 @@ export function ComparePageView({ view, failed, onSwap, onChange }: ComparePageV
 
 /**
  * `#/compare/<a>/<b>` (compare spec 4): the two sessions' numbers, refetched every 5 s while a side is running or
- * waiting for a permission. Texts masked by rule with the switch on (the cross-session lists' masker: no learned
+ * waiting for a permission, every 60 s otherwise while the page is open. Texts masked by rule with the switch on (the cross-session lists' masker: no learned
  * values). 「交换左右」 swaps the address; 「换一个」 opens the picker for the right side.
  */
 export function ComparePage({ a, b }: { a: string; b: string }) {
