@@ -234,6 +234,14 @@ export function stepTurn(current: number | null, key: string, count: number): nu
   }
 }
 
+/**
+ * What the main bar's live region says for the turn shown (index `turn`): which turn and when it started. Nothing that
+ * moves with the clock (a running turn's end, the turn count), so a ticking session is not re-announced every second.
+ */
+export function turnAnnouncement(turn: number, span: { startMs: number }): string {
+  return `第 ${turn + 1} 轮，${clockText(span.startMs)} 开始`;
+}
+
 // ---- the axis ----
 
 export interface AxisScale {
@@ -422,7 +430,7 @@ function MainTrack({ thread: t, scale, turnSpans, describedBy, onPickScope }: {
       {spansOn(t.waitingSpans, scale, 'cc-tl-waiting')}
       {span !== undefined && <span className="cc-tl-turnfocus" style={{ left: pct(a), width: pct(Math.max(0, b - a)) }} />}
       <span className="visually-hidden" aria-live="polite">
-        {span !== undefined ? `第 ${turn! + 1} 轮（共 ${turnSpans.length} 轮）：${clockText(span.startMs)} 到 ${clockText(span.endMs)}` : ''}
+        {span !== undefined ? turnAnnouncement(turn!, span) : ''}
       </span>
     </div>
   );
@@ -448,7 +456,8 @@ const Row = memo(function Row({ row, scale, turnSpans, onPickScope }: {
           )}
         {t.id.startsWith(UNMATCHED_PREFIX) && <span className="cc-tl-tag">未配上</span>}
         {t.open && <span className="cc-tl-open">进行中</span>}
-        <span id={detailsId} className="visually-hidden">{details}</span>
+        {/* Read as the row's description (aria-describedby); hidden from reading in order so it is not read twice. */}
+        <span id={detailsId} className="visually-hidden" aria-hidden="true">{details}</span>
       </div>
       {main
         ? <MainTrack thread={t} scale={scale} turnSpans={turnSpans} describedBy={detailsId} onPickScope={onPickScope} />

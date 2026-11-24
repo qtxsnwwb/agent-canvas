@@ -11,8 +11,11 @@ import { isBackgroundStep, parseMs, stepSpan, type WaterfallClock } from './wate
  * - Blocking: when a thread is held up by one of its agents. Every origin but Codex: a dispatch blocks its thread from
  *   its start until the earlier of its end and the first step of that thread recorded after it that is not part of the
  *   dispatch's message (same messageId; without a messageId, a fork sibling: the same parentId) - another dispatch
- *   included. A background dispatch so stops blocking once its thread carries on. A main-thread dispatch still open
- *   blocks no later than the main thread's "now". Codex: dispatches and follow-ups never block; a `wait_agent` step
+ *   included. A background dispatch so stops blocking once its thread carries on. When it did, and ended (not open)
+ *   after the thread's own work placed before its end stopped, it blocks again from then (not before the cut) to its
+ *   end (an agent thread: no later than its own dispatches' end): the thread sat idle until the agent's notice woke it.
+ *   That second block does not extend the turn. A main-thread dispatch still open blocks no later than the main
+ *   thread's "now". Codex: dispatches and follow-ups never block; a `wait_agent` step
  *   blocks for its interval, on the agents its input names (read from its summary), else on the thread's own agents
  *   active during it. Only agents of the waiting thread's own tree count: an orphan never gets wait time.
  * - Total: the union of the turns' intervals. A turn runs from its first step to the later of its last main-thread step
@@ -240,6 +243,14 @@ export function computeAgentTimeline(
   /** Main-thread turn key -> the latest end of the main thread's blocking that starts in it. */
   const blockEnd = new Map<string, number>();
   for (const th of threads.values()) {
+    // Non-Codex: the latest end of the thread's own work (steps other than dispatches) up to each step, by placement.
+    const workEnd = codex ? null : workEndPrefix(th.steps);
+    // An agent thread waits on its agents no longer than it is itself at work for its parent (an orphan: its own work).
+    let ownEnd = Infinity;
+    if (th !== main && workEnd !== null) {
+      ownEnd = workEnd.length > 0 ? workEnd[workEnd.length - 1]! : -Infinity;
+      for (const p of th.points) if (p.at !== null && p.endMs > ownEnd) ownEnd = p.endMs;
+    }
     for (const s of th.steps) {
       if (s.at === null) continue;
       let end = s.startMs;
@@ -248,7 +259,17 @@ export function computeAgentTimeline(
         const cut = carriesOnAt(th.steps, s);
         if (cut !== null && cut < end) end = cut;
         if (th === main && s.open) end = Math.min(end, Math.max(s.startMs, clock.nowMs));
-        if (end > s.startMs) th.blocks.push({ startMs: s.startMs, endMs: end, key: end, blocker: targetOf.get(s)!.id });
+        const blocker = targetOf.get(s)!.id;
+        if (end > s.startMs) th.blocks.push({ startMs: s.startMs, endMs: end, key: end, blocker });
+        // The thread carried on, then sat idle until the agent ended (woken by its notice): that idle time waits on it
+        // too. From the later of the cut and the end of the thread's own last work placed before the agent's end; not
+        // part of the turn's end (blockEnd), so time after a turn's end stays nobody's wait.
+        if (cut !== null && cut < s.endMs && !s.open) {
+          const agentEnd = Math.min(s.endMs, ownEnd);
+          const i = lowerBound(th.steps, s.endMs);
+          const idleFrom = Math.max(cut, i > 0 ? workEnd![i - 1]! : -Infinity);
+          if (idleFrom < agentEnd) th.blocks.push({ startMs: idleFrom, endMs: agentEnd, key: s.endMs, blocker });
+        }
       } else if (isWait(s.node) && s.endMs > s.startMs) {
         // All the wait's agents share its interval, so only the one ending last (ties: the smaller id) can hold it.
         let best: Block | null = null;
@@ -485,6 +506,21 @@ function lowerBound(steps: readonly Entry[], ms: number): number {
     else hi = mid;
   }
   return lo;
+}
+
+/**
+ * For each index of `steps` (by placement): the latest end among steps[0..i] that are placed and not dispatches (the
+ * thread's own work); -Infinity before any. Non-Codex only (there is no wait_agent to leave out).
+ */
+function workEndPrefix(steps: readonly Step[]): Float64Array {
+  const out = new Float64Array(steps.length);
+  let max = -Infinity;
+  for (let i = 0; i < steps.length; i++) {
+    const x = steps[i]!;
+    if (x.at !== null && x.node.kind !== 'subagent' && x.endMs > max) max = x.endMs;
+    out[i] = max;
+  }
+  return out;
 }
 
 /** First index of `spans` (by time, not overlapping) that ends after `ms`. */

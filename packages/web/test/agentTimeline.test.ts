@@ -5,7 +5,7 @@ import type { ExportBundle, Graph, GraphNode, NodeKind, Origin, Session } from '
 import { computeAgentTimeline, type AgentTimeline, type AgentTimelineResult, type ThreadTime } from '../src/canvas/agentTime';
 import {
   AgentTimelineView, TIMELINE_NO_AGENTS, TIMELINE_NO_TIMES, TIMELINE_NO_TIMES_DOUBAO, axisScale, compactStepCounts, panelTitle,
-  scopeOfNode, stepTurn, threadScope, threadTooltip, timelineRowModel, timelineRows, turnAt, turnGroupings,
+  scopeOfNode, stepTurn, threadScope, threadTooltip, timelineRowModel, timelineRows, turnAnnouncement, turnAt, turnGroupings,
   type AgentTimelineViewProps,
 } from '../src/canvas/AgentTimeline';
 import {
@@ -507,7 +507,34 @@ describe('highlight, running style, keyboard and names', () => {
     const described = new RegExp(`id="${id}"[^>]*>([^<]*)<`).exec(html)![1]!;
     expect(described.length).toBeGreaterThan(0);
     expect(described).toContain('步骤');
+    // Read once, as the description: the hidden text itself is out of the reading order (every row's, the main one's too).
+    const hidden = [...html.matchAll(/<span id="[^"]+" class="visually-hidden"([^>]*)>/g)];
+    expect(hidden.length).toBe(tl.root.children.length + 1);
+    for (const m of hidden) expect(m[1]).toContain('aria-hidden="true"');
     expect(html).toMatch(/class="cc-tl-track cc-tl-main-track"[^>]*tabindex="0"|tabindex="0"[^>]*class="cc-tl-track cc-tl-main-track"/);
+  });
+
+  test("the main bar's live region names the turn and its start only, so a running session is not re-announced every tick", () => {
+    const g2 = graph([
+      prompt('p1', 't1', 0), text('x', 't1', null, 1500),
+      prompt('p2', 't2', 10_000), tool('u', 't2', null, 10_000, null),
+    ]);
+    const at = (now: number): AgentTimeline => {
+      const running = sessionOf('claude', { status: 'running', lastActivityAt: iso(now) });
+      const r = computeAgentTimeline(g2, running, waterfallClock(running, EPOCH + now));
+      if (!r.available) throw new Error('expected a timeline');
+      return r;
+    };
+    const before = at(12_000);
+    const after = at(13_000);
+    expect(after.turnSpans[1]!.endMs).toBeGreaterThan(before.turnSpans[1]!.endMs); // the turn grows with the clock
+    const said = turnAnnouncement(1, before.turnSpans[1]!);
+    expect(turnAnnouncement(1, after.turnSpans[1]!)).toBe(said); // but what is announced does not
+    expect(said).toMatch(/^第 2 轮，.+ 开始$/);
+    expect(said).not.toContain('到');
+    // Nothing is announced until the reader moves to a turn.
+    const html = render(props({ result: before, graph: g2 }));
+    expect(html).toMatch(/<span class="visually-hidden" aria-live="polite"><\/span>/);
   });
 
   test('arrow keys move between turns on the main bar (from none: the first or the last), Home / End', () => {

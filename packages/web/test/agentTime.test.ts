@@ -233,7 +233,7 @@ describe('blocking by origin (spec 3.1, Background detection)', () => {
     expectInvariant(tl);
   });
 
-  test('Cursor (no message ids): calls of one batch share their parent; a step with another parent carries on', () => {
+  test('Cursor (no message ids): calls of one batch share their parent; a step with another parent carries on, and the idle time after it still waits', () => {
     // Cursor batches parallel calls under one parent (cursor.ts), at slightly different times.
     const batch = timeline(graph([
       prompt('p1', 't1', 0),
@@ -252,20 +252,133 @@ describe('blocking by origin (spec 3.1, Background detection)', () => {
       tool('next', 't1', null, 1001, 3000, { parentId: 'd1' }),
       text('x', 't1', 6500, { parentId: 'next' }),
     ]), 'cursor');
-    expect(thread(later, 'A').waitMs).toBe(1);
+    // 1000-1001 before the next step; then the main thread works to 3000 and sits idle until A ends at 6000 (resume block).
+    expect(thread(later, 'A').waitMs).toBe(3001);
+    expect(later.mainOwnMs).toBe(3499); // 0-1000, 1001-3000, 6000-6500
     expectInvariant(later);
   });
 
-  test('Grok (no message ids, every node chained to the one before): a call right after a dispatch carries on', () => {
+  test('Grok (no message ids, every node chained to the one before): a call right after a dispatch carries on; once it ends, the wait resumes', () => {
     // Grok gives no batch marker (grok.ts parentOf: always the previous node), so a call issued with the dispatch cannot
-    // be told from the next message: it ends the block (a known limit).
+    // be told from the next message: it cuts the block at 1200. When the call ends at 3000 the main thread sits idle
+    // until A ends at 6000, which waits on A again (the resume block).
     const tl = timeline(graph([
       prompt('p1', 't1', 0),
       dispatch('d1', 't1', null, 'A', 1000, 6000, { parentId: 'p1' }),
       tool('c2', 't1', null, 1200, 3000, { parentId: 'd1' }),
       text('x', 't1', 6500, { parentId: 'c2' }),
     ]), 'grok');
-    expect(thread(tl, 'A').waitMs).toBe(200);
+    expect(thread(tl, 'A').waitMs).toBe(3200); // 1000-1200, 3000-6000
+    expect(tl.mainOwnMs).toBe(3300); // 0-1000, 1200-3000, 6000-6500
+    expectInvariant(tl);
+  });
+
+  test('Grok parallel dispatches (each chained to the one before): the one ending last takes the wait', () => {
+    // d2 is recorded 1 ms after d1 and chained to it, so it cuts d1's first block at 1001; d1 then blocks again from
+    // 1001 (the main thread did nothing else) to A's end, and that block ends last.
+    const tl = timeline(graph([
+      prompt('p1', 't1', 0),
+      dispatch('d1', 't1', null, 'A', 1000, 9000, { parentId: 'p1' }),
+      dispatch('d2', 't1', null, 'B', 1001, 5000, { parentId: 'd1' }),
+      tool('a1', null, 'A', 1100, 8900),
+      tool('b1', null, 'B', 1100, 4900),
+      text('x', 't1', 9500, { parentId: 'd2' }),
+    ]), 'grok');
+    expect(tl.totalMs).toBe(9500);
+    expect(thread(tl, 'A').waitMs).toBe(8000); // 1000-9000
+    expect(thread(tl, 'B').waitMs).toBe(0); // B ends at 5000, inside A's wait
+    expect(tl.mainOwnMs).toBe(1500); // 0-1000, 9000-9500
+    expect(tl.longestWaitId).toBe('A');
+    expectInvariant(tl);
+  });
+
+  test('a main-thread system notice during a foreground wait no longer ends it (Qwen / Cursor completion notices)', () => {
+    // Qwen / Cursor record another agent's completion as a main-thread system node; one at 3000 cuts A's block (a later
+    // step of another message), but the main thread did nothing after it, so 3000-9000 waits on A again.
+    for (const origin of ['qwen', 'cursor'] as const) {
+      const tl = timeline(graph([
+        prompt('p1', 't1', 0),
+        dispatch('d1', 't1', null, 'A', 1000, 9000, { messageId: origin === 'qwen' ? 'm1' : null, parentId: 'p1' }),
+        tool('a1', null, 'A', 1100, 8900),
+        node('notice', 'system', 't1', null, 3000, { parentId: 'd1', title: 'notice' }),
+        text('x', 't1', 9500, { messageId: origin === 'qwen' ? 'm2' : null, parentId: 'notice' }),
+      ]), origin);
+      expect(thread(tl, 'A').waitMs).toBe(8000); // 1000-9000
+      expect(tl.mainOwnMs).toBe(1500); // 0-1000, 9000-9500
+      expectInvariant(tl);
+    }
+  });
+
+  test('Claude background agents woken back by their notices: the idle main thread waits on each until it ends (final review, Important 1)', () => {
+    // Prompt at 0; one message launches three background agents at 2000; the main thread replies "launched, will
+    // report" at 4000 and stops. The agents end at 200000 (fast), 400000 (mid), 600000 (slow); each notice wakes the main
+    // thread (205000, 405000, 620000), all in the same turn.
+    const tl = timeline(graph([
+      prompt('p1', 't1', 0),
+      dispatch('dF', 't1', null, 'fast', 2000, 200_000, { messageId: 'm1', title: 'Fast audit' }),
+      dispatch('dM', 't1', null, 'mid', 2000, 400_000, { messageId: 'm1', title: 'Mid audit' }),
+      dispatch('dS', 't1', null, 'slow', 2000, 600_000, { messageId: 'm1', title: 'Slow audit' }),
+      prompt('fp', null, 2100, 'fast'), tool('f1', null, 'fast', 2200, 200_000),
+      prompt('mp', null, 2100, 'mid'), tool('m1t', null, 'mid', 2200, 400_000),
+      prompt('sp', null, 2100, 'slow'), tool('s1', null, 'slow', 2200, 600_000),
+      text('launched', 't1', 4000, { messageId: 'm2' }),
+      text('woke1', 't1', 205_000, { messageId: 'm3' }),
+      text('woke2', 't1', 405_000, { messageId: 'm4' }),
+      text('woke3', 't1', 620_000, { messageId: 'm5' }),
+    ]));
+    expect(tl.turns).toBe(1);
+    expect(tl.totalMs).toBe(620_000);
+    // 2000-4000: all three launches block until the reply (equal ends: the smaller id, fast). Then the main thread is
+    // idle: 4000-200000 waits on fast; 205000-400000 on mid; 405000-600000 on slow. The 5 s / 5 s / 20 s after each
+    // notice are the main thread's own.
+    expect(thread(tl, 'fast').waitMs).toBe(198_000); // 2000-200000
+    expect(thread(tl, 'mid').waitMs).toBe(195_000); // 205000-400000
+    expect(thread(tl, 'slow').waitMs).toBe(195_000); // 405000-600000
+    expect(tl.mainOwnMs).toBe(32_000); // 0-2000, 200000-205000, 400000-405000, 600000-620000
+    expect(tl.mainWaitMs).toBe(588_000);
+    expect(rel(tl.root.waitingSpans)).toEqual([[2000, 200_000], [205_000, 400_000], [405_000, 600_000]]);
+    expect(tl.longestWaitId).toBe('fast');
+    expect(thread(tl, 'slow').ownMs).toBe(598_000);
+    expectInvariant(tl);
+  });
+
+  test('an agent that launched a background agent of its own waits on it no longer than it is itself dispatched', () => {
+    // X (foreground, 1000-5000) launches Y in the background at 1500, carries on at 2000, last works at 4900 and is done
+    // at 5000; Y runs to 9000. X's idle wait on Y is 4900-5000 only: after its own dispatch ended it waits on nothing.
+    const tl = timeline(graph([
+      prompt('p1', 't1', 0),
+      dispatch('dX', 't1', null, 'X', 1000, 5000, { messageId: 'm1' }),
+      dispatch('dY', null, 'X', 'Y', 1500, 9000, { messageId: 'xm1' }),
+      text('x1', null, 2000, { agentId: 'X', messageId: 'xm2' }),
+      text('x2', null, 4900, { agentId: 'X', messageId: 'xm3' }),
+      tool('y1', null, 'Y', 1600, 9000),
+      text('reply', 't1', 5500, { messageId: 'm2' }),
+    ]));
+    expect(rel(thread(tl, 'X').waitingSpans)).toEqual([[1500, 2000], [4900, 5000]]);
+    expect(thread(tl, 'Y').waitMs).toBe(600); // 1500-2000, 4900-5000
+    expect(thread(tl, 'X').waitMs).toBe(3400); // the rest of 1000-5000
+    expect(tl.mainOwnMs).toBe(1500); // 0-1000, 5000-5500
+    expectInvariant(tl);
+  });
+
+  test('a background agent outliving turn 1 leaves turn 2 alone; one ending while the main thread works waits on nothing', () => {
+    const tl = timeline(graph([
+      prompt('p1', 't1', 0),
+      dispatch('d1', 't1', null, 'bg', 1000, 50_000, { messageId: 'm1' }),
+      tool('b1', null, 'bg', 1100, 50_000),
+      text('reply', 't1', 2000, { messageId: 'm2' }),
+      prompt('p2', 't2', 100_000),
+      dispatch('d2', 't2', null, 'bg2', 100_200, 150_000, { messageId: 'm3' }),
+      tool('c1', null, 'bg2', 100_300, 150_000),
+      tool('work', 't2', null, 100_500, 160_000, { messageId: 'm4' }),
+      text('x2', 't2', 161_000, { messageId: 'm5' }),
+    ]));
+    // Turn 1 [0, 2000]: the idle 2000-50000 lies after its end, so nobody's wait. Turn 2 [100000, 161000]: bg2 blocks
+    // 100200-100500 (until the main thread's next message), and the main thread is at work when bg2 ends.
+    expect(tl.totalMs).toBe(63_000);
+    expect(thread(tl, 'bg').waitMs).toBe(1000); // 1000-2000
+    expect(thread(tl, 'bg2').waitMs).toBe(300); // 100200-100500
+    expect(tl.mainOwnMs).toBe(61_700);
     expectInvariant(tl);
   });
 
