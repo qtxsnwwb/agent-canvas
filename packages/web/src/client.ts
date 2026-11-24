@@ -28,6 +28,7 @@ import {
   type SessionAnomaliesResponse,
   type SessionFilesResponse,
   type StatsResponse,
+  type TodayUsage,
 } from '@agent-canvas/shared';
 import { attentionProblem, attentionRetryDelay } from './attention';
 
@@ -90,6 +91,8 @@ export const api = {
   /** `query` is built by anomalies.ts `anomaliesQueryString`. */
   anomalies: (query: string) => getJson<AnomalyListResponse>(`/api/anomalies?${query}`),
   anomalyCounts: () => getJson<AnomalyCountsResponse>('/api/anomalies/counts'),
+  /** Today's usage (GET /api/today; the header and the stats page's 今天 block). */
+  today: () => getJson<TodayUsage>('/api/today'),
   exportSettings: () => getJson<ExportSettingsResponse>('/api/export/settings'),
   /** The attention state (GET /api/attention); `hidden` true adds the hidden list (`?hidden=1`). */
   attention: (hidden?: true) => getJson<AttentionResponse>(hidden === true ? '/api/attention?hidden=1' : '/api/attention'),
@@ -376,7 +379,7 @@ export function createSessionsFeed(createSocket: () => WebSocketLike): SessionsF
 }
 
 let browserFeed: SessionsFeed | null = null;
-/** The app's one sessions-scope socket (the home page's session list and the attention state share it). */
+/** The app's one sessions-scope socket (the home page's session list, the attention state and today's usage share it). */
 function sharedSessionsFeed(): SessionsFeed {
   browserFeed ??= createSessionsFeed(createBrowserSocket);
   return browserFeed;
@@ -509,6 +512,86 @@ export function openLiveAttention(
       const r = await fetchHidden();
       return pushes === startedAt ? r.hidden : null;
     },
+    close() {
+      closed = true;
+      cancelRetry();
+      unlisten();
+    },
+  };
+}
+
+/** Today's usage as the app shows it: the last result received, and whether the last fetch failed. */
+export interface TodayLiveState {
+  usage: TodayUsage | null;
+  /** The last fetch failed (it is retried); `usage` is the last one received, if any. */
+  failed: boolean;
+}
+
+/**
+ * Today's usage, live (spec 2026-11-24-today-usage-design.md 6), like openLiveAttention: fetched once the sessions-scope
+ * subscription is in place and again after every reconnect (nothing is pushed on subscribe), then replaced by each
+ * `today` message. A failed fetch keeps the last result, is marked, and is retried after attentionRetryDelay; a push
+ * cancels the retry. A fetch whose request started before the latest push is older than that push and is not applied.
+ */
+export function openLiveToday(
+  onState: (s: TodayLiveState) => void,
+  deps: { fetchToday?: () => Promise<TodayUsage>; feed?: SessionsFeed; createSocket?: () => WebSocketLike } = {},
+): { close(): void } {
+  const fetchToday = deps.fetchToday ?? api.today;
+  let closed = false;
+  let usage: TodayUsage | null = null;
+  let failed = false;
+  /** Pushes received so far: an answer to a request started at a lower count is older than the result shown. */
+  let pushes = 0;
+  let failures = 0;
+  let inFlight = false;
+  let again = false;
+  let retry: ReturnType<typeof setTimeout> | null = null;
+  const cancelRetry = (): void => {
+    if (retry !== null) clearTimeout(retry);
+    retry = null;
+  };
+  const show = (u: TodayUsage): void => {
+    cancelRetry();
+    failures = 0;
+    usage = u;
+    failed = false;
+    onState({ usage, failed });
+  };
+  const load = (): void => {
+    if (closed) return;
+    if (inFlight) { again = true; return; }
+    cancelRetry();
+    inFlight = true;
+    const startedAt = pushes;
+    fetchToday().then(
+      (u) => {
+        if (closed) return;
+        if (pushes === startedAt) { show(u); return; }
+        failures = 0;
+        if (failed) { failed = false; onState({ usage, failed }); }
+      },
+      () => {
+        if (closed || pushes !== startedAt) return; // a push since: the result shown is current
+        failures += 1;
+        failed = true;
+        onState({ usage, failed });
+        retry = setTimeout(() => { retry = null; load(); }, attentionRetryDelay(failures));
+      },
+    ).finally(() => {
+      inFlight = false;
+      if (again && !closed) { again = false; load(); }
+    });
+  };
+  const unlisten = feedOf(deps).listen({
+    message(msg) {
+      if (msg.type !== 'today' || closed) return;
+      pushes += 1;
+      show(msg.usage);
+    },
+    open: () => load(),
+  });
+  return {
     close() {
       closed = true;
       cancelRetry();
