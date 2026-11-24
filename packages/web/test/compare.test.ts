@@ -4,7 +4,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import type { CompareResponse, CompareSide, SearchHit, Session } from '@agent-canvas/shared';
 import {
-  ALL_PROJECTS_TEXT, COMPARE_BUTTON_TEXT, COMPARE_POLL_MS, CWDS_DIFFER_TEXT, NOT_FOUND_TEXT, NO_TURN_TEXT, REFRESH_FAILED_TEXT,
+  ALL_PROJECTS_TEXT, COMPARE_BUTTON_TEXT, COMPARE_POLL_MS, COMPARE_RETRY_MAX_MS, CWDS_DIFFER_TEXT, compareRetryDelay, isPlainClick, NOT_FOUND_TEXT, NO_TURN_TEXT, REFRESH_FAILED_TEXT,
   SAME_SESSION_TEXT, TURNS_TRUNCATED_TEXT, betterSide, compareView, createComparePoller, filterPickerRows, pickerList, pickerRows,
   searchPickerRows, shouldPoll, type CompareState,
 } from '../src/compare';
@@ -188,7 +188,7 @@ describe('the page view', () => {
       expect(text(row.right), row.label).toBe('—');
       expect(bold(row.left), row.label).toEqual([]);
     }
-    const html = renderToStaticMarkup(createElement(ComparePageView, { view: v, loading: false, failed: false, onSwap: () => {}, onChange: () => {} }));
+    const html = renderToStaticMarkup(createElement(ComparePageView, { view: v, failed: false, onSwap: () => {}, onChange: () => {} }));
     expect(html).toContain(NOT_FOUND_TEXT);
     expect(html).toContain('修 CI 超时');
   });
@@ -198,7 +198,7 @@ describe('the page view', () => {
     const v = compareView(r, { a: 'left-1', b: 'left-1' }, IDENTITY_MASKER, NOW);
     expect(v.sameSession).toBe(true);
     for (const row of v.totals) expect([...bold(row.left), ...bold(row.right)], row.label).toEqual([]);
-    const html = renderToStaticMarkup(createElement(ComparePageView, { view: v, loading: false, failed: false, onSwap: () => {}, onChange: () => {} }));
+    const html = renderToStaticMarkup(createElement(ComparePageView, { view: v, failed: false, onSwap: () => {}, onChange: () => {} }));
     expect(html).toContain(SAME_SESSION_TEXT);
   });
 
@@ -215,14 +215,14 @@ describe('the page view', () => {
     expect(v.heads[0]!.cwd).toContain('‹已遮蔽·');
     expect(v.turns[0]!.left!.head).toContain('‹已遮蔽·');
     expect(v.files.groups[0]!.rows[0]!.path).toContain('‹已遮蔽·');
-    const html = renderToStaticMarkup(createElement(ComparePageView, { view: v, loading: false, failed: false, onSwap: () => {}, onChange: () => {} }));
+    const html = renderToStaticMarkup(createElement(ComparePageView, { view: v, failed: false, onSwap: () => {}, onChange: () => {} }));
     expect(html).not.toContain('北极星');
     expect(html).not.toContain(encodeURIComponent('北极星'));
   });
 
   test('the page: title row buttons, the totals table, a failed refresh keeps the result with one line', () => {
     const v = compareView(response(), IDS, IDENTITY_MASKER, NOW);
-    const html = renderToStaticMarkup(createElement(ComparePageView, { view: v, loading: false, failed: true, onSwap: () => {}, onChange: () => {} }));
+    const html = renderToStaticMarkup(createElement(ComparePageView, { view: v, failed: true, onSwap: () => {}, onChange: () => {} }));
     expect(html).toContain('交换左右');
     expect(html).toContain('换一个');
     expect(html).toContain('<strong>12 分 30 秒</strong>');
@@ -240,19 +240,42 @@ describe('polling', () => {
   const idle = (): CompareResponse => response();
 
   test('shouldPoll: while either side runs or waits for a permission', () => {
-    expect(shouldPoll(idle())).toBe(false);
-    expect(shouldPoll(running())).toBe(true);
-    expect(shouldPoll(response({ right: side({ status: 'awaiting_permission' }) }))).toBe(true);
-    expect(shouldPoll(response({ right: side({ status: 'awaiting_input' }) }))).toBe(false);
-    expect(shouldPoll(response({ left: null, right: null }))).toBe(false);
+    const at = Date.parse(side().lastActivityAt) + 1000;
+    expect(shouldPoll(idle(), at)).toBe(false);
+    expect(shouldPoll(running(), at)).toBe(true);
+    expect(shouldPoll(response({ right: side({ status: 'awaiting_permission' }) }), at)).toBe(true);
+    expect(shouldPoll(response({ right: side({ status: 'awaiting_input' }) }), at)).toBe(false);
+    expect(shouldPoll(response({ left: null, right: null }), at)).toBe(false);
   });
+
+  test('a stale “running” side (长时间无活动) is not live: no note, no polling', async () => {
+    // Last activity a day before NOW: the pages show 长时间无活动, so the page neither says it is updating nor refetches.
+    const stale = (): CompareResponse => response({ left: side({ status: 'running', lastActivityAt: '2026-11-23T10:00:00Z' }) });
+    expect(shouldPoll(stale(), NOW)).toBe(false);
+    const v = compareView(stale(), IDS, IDENTITY_MASKER, NOW);
+    expect(v.heads[0]!.statusLabel).toBe('长时间无活动');
+    expect(v.live).toBe(false);
+    const html = renderToStaticMarkup(createElement(ComparePageView, { view: v, failed: false, onSwap: () => {}, onChange: () => {} }));
+    expect(html).not.toContain('正在进行');
+    vi.useFakeTimers();
+    const load = vi.fn(() => Promise.resolve(stale()));
+    const p = createComparePoller({ load, onState: () => {}, now: () => NOW });
+    await vi.advanceTimersByTimeAsync(COMPARE_POLL_MS * 5);
+    expect(load).toHaveBeenCalledTimes(1);
+    p.close();
+    // The same side fresh is live.
+    expect(compareView(running(), IDS, IDENTITY_MASKER, Date.parse(side().lastActivityAt) + 1000).live).toBe(true);
+  });
+
+  // Answer time just after the running side's last activity: a fresh “running”.
+  const fresh = (): number => Date.parse(side().lastActivityAt) + 1000;
 
   test('refetches every 5 s while running, stops once both are idle', async () => {
     vi.useFakeTimers();
     const answers = [running(), running(), idle()];
     const load = vi.fn(() => Promise.resolve(answers.shift() ?? idle()));
     const states: CompareState[] = [];
-    const p = createComparePoller({ load, onState: (s) => states.push(s) });
+    const p = createComparePoller({ load, onState: (s) => states.push(s), now: fresh });
     await vi.advanceTimersByTimeAsync(0);
     expect(load).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(COMPARE_POLL_MS - 1);
@@ -276,7 +299,7 @@ describe('polling', () => {
       .mockRejectedValueOnce(new Error('down'))
       .mockResolvedValueOnce(idle());
     const states: CompareState[] = [];
-    const p = createComparePoller({ load, onState: (s) => states.push(s) });
+    const p = createComparePoller({ load, onState: (s) => states.push(s), now: fresh });
     await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(COMPARE_POLL_MS);
     expect(states.at(-1)).toEqual({ response: first, failed: true });
@@ -293,7 +316,7 @@ describe('polling', () => {
       .mockResolvedValueOnce(running())
       .mockImplementationOnce(() => new Promise<CompareResponse>((r) => { resolve = r; }));
     const onState = vi.fn();
-    const p = createComparePoller({ load, onState });
+    const p = createComparePoller({ load, onState, now: fresh });
     await vi.advanceTimersByTimeAsync(COMPARE_POLL_MS);
     expect(load).toHaveBeenCalledTimes(2);
     p.close();
@@ -301,6 +324,41 @@ describe('polling', () => {
     await vi.advanceTimersByTimeAsync(COMPARE_POLL_MS * 3);
     expect(load).toHaveBeenCalledTimes(2);
     expect(onState).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('retries', () => {
+  test('the wait doubles from 5 s per failure in a row, capped at 60 s', () => {
+    expect([1, 2, 3, 4, 5, 6, 50].map((n) => compareRetryDelay(n))).toEqual([5_000, 10_000, 20_000, 40_000, 60_000, 60_000, 60_000]);
+    expect(COMPARE_RETRY_MAX_MS).toBe(60_000);
+  });
+
+  test('a first load that keeps failing is retried with growing waits; a success starts over', async () => {
+    vi.useFakeTimers();
+    const load = vi.fn<() => Promise<CompareResponse>>()
+      .mockRejectedValueOnce(new Error('down')).mockRejectedValueOnce(new Error('down')).mockRejectedValueOnce(new Error('down'))
+      .mockResolvedValueOnce(response({ left: side({ status: 'running' }) }))
+      .mockRejectedValueOnce(new Error('down'))
+      .mockResolvedValue(response());
+    const states: CompareState[] = [];
+    const p = createComparePoller({ load, onState: (s) => states.push(s), now: () => Date.parse(side().lastActivityAt) + 1000 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(states.at(-1)).toEqual({ response: null, failed: true });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(load).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(load).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(load).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(load).toHaveBeenCalledTimes(4); // succeeded, a side running: the next one in 5 s
+    expect(states.at(-1)!.failed).toBe(false);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(load).toHaveBeenCalledTimes(5); // failed once more: the wait starts over at 5 s
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(load).toHaveBeenCalledTimes(6);
+    p.close();
   });
 });
 
@@ -319,6 +377,23 @@ describe('the picker', () => {
     expect(rows.map((r) => r.id)).toEqual(['new', 'mid', 'old']);
     expect(rows[0]).toMatchObject({ title: 'Fix CI timeout', originLabel: 'Codex', time: '30 分钟前', href: compareHash('cur', 'new') });
     expect(rows[1]!.title).toBe('mid');
+  });
+
+  test('from 换一个: the session already on the right is not offered again', () => {
+    expect(pickerRows(sessions, 'cur', IDENTITY_MASKER, NOW, 'new').map((r) => r.id)).toEqual(['mid', 'old']);
+    const hits = [{ session: s('new', 'Fix CI timeout', '2026-11-24T09:30:00Z'), matches: [] }, { session: s('far', 'CI', '2026-11-22T09:00:00Z'), matches: [] }];
+    expect(searchPickerRows(hits, 'cur', IDENTITY_MASKER, NOW, 'new').map((r) => r.id)).toEqual(['far']);
+    const base = { currentId: 'cur', projectId: 'p1', sessions, m: IDENTITY_MASKER, nowMs: NOW, otherId: 'new' };
+    expect(pickerList({ ...base, allProjects: false, query: 'fix', search: null })).toEqual({ state: 'message', text: '没有符合筛选的会话' });
+    expect(pickerList({ ...base, allProjects: true, query: 'CI', search: { q: 'CI', hits, error: null } })).toMatchObject({ state: 'rows', rows: [{ id: 'far' }] });
+  });
+
+  test('a row closes the picker only on a plain left click', () => {
+    const click = { button: 0, metaKey: false, ctrlKey: false, shiftKey: false, altKey: false };
+    expect(isPlainClick(click)).toBe(true);
+    for (const other of [{ button: 1 }, { ctrlKey: true }, { metaKey: true }, { shiftKey: true }, { altKey: true }]) {
+      expect(isPlainClick({ ...click, ...other }), JSON.stringify(other)).toBe(false);
+    }
   });
 
   test('the filter matches the title literally (ASCII letters without case)', () => {
@@ -364,16 +439,17 @@ describe('the picker', () => {
 });
 
 describe('the viewer', () => {
-  test('the exported viewer offers no 「对比…」: its source has nothing for it, and only the app’s session page renders the button', () => {
+  test('the exported viewer’s source has nothing a 「对比…」 would use', () => {
     const bundle = { session: baseSession, nodes: [], edges: [], details: {}, truncations: {}, unreadable: [] };
     const source = embeddedSource(bundle as never, () => { throw new Error('no layout here'); });
     expect(Object.keys(source).some((k) => /compare/i.test(k))).toBe(false);
-    const read = (p: string): string => fs.readFileSync(new URL(p, import.meta.url), 'utf8');
-    for (const p of ['../src/viewer/Viewer.tsx', '../src/viewer/main.tsx', '../src/pages/SessionCanvas.tsx']) {
-      expect(read(p), p).not.toContain('ComparePicker');
-      expect(read(p), p).not.toContain('COMPARE_BUTTON_TEXT');
-    }
-    expect(read('../src/pages/Session.tsx')).toContain('COMPARE_BUTTON_TEXT');
     expect(COMPARE_BUTTON_TEXT).toBe('对比…');
+  });
+
+  // The built viewer (`pnpm build`): the whole page an exported file carries. Skipped before a build.
+  const template = new URL('../dist/viewer-template.html', import.meta.url);
+  test.skipIf(!fs.existsSync(template))('the built viewer carries no 「对比…」, no picker and no compare page', () => {
+    const html = fs.readFileSync(template, 'utf8');
+    for (const text of [COMPARE_BUTTON_TEXT, ALL_PROJECTS_TEXT, '交换左右', '/api/compare', '#/compare/']) expect(html, text).not.toContain(text);
   });
 });

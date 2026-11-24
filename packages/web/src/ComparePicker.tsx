@@ -8,7 +8,7 @@
 import { useEffect, useId, useRef, useState, type RefObject } from 'react';
 import type { Session } from '@agent-canvas/shared';
 import { api } from './client';
-import { ALL_PROJECTS_TEXT, pickerList, type PickerList } from './compare';
+import { ALL_PROJECTS_TEXT, isPlainClick, pickerList, type PickerList } from './compare';
 import { useMask } from './MaskContext';
 import { OriginBadge } from './OriginBadge';
 import { createSearcher, type SearchResult } from './search';
@@ -60,8 +60,8 @@ export function ComparePickerView({ query, allProjects, list, onQuery, onAllProj
           <ul className="compare-picker-list">
             {list.rows.map((r) => (
               <li key={r.id}>
-                {/* A plain click navigates and closes; the route change then replaces the page anyway. */}
-                <a className="compare-picker-row" href={r.href} onClick={onClose}>
+                {/* A plain left click navigates here and closes; one opening another tab or window leaves it open. */}
+                <a className="compare-picker-row" href={r.href} onClick={(e) => { if (isPlainClick(e)) onClose(); }}>
                   <span className="compare-picker-title">{r.title}</span>
                   <span className="compare-picker-meta">
                     <OriginBadge origin={r.origin} />
@@ -80,9 +80,12 @@ export function ComparePickerView({ query, allProjects, list, onQuery, onAllProj
 
 /**
  * The picker for `currentId` (the left side): `projectId` its project (null when unknown: the all-projects search
- * only). Opens as a modal with the focus in the filter box; Escape or × closes it and the focus goes back where it was.
+ * only); `otherId` the session already on the right (the compare page's 换一个), not offered again. Opens as a modal
+ * with the focus in the filter box; Escape or × closes it and the focus goes back where it was.
  */
-export function ComparePicker({ currentId, projectId, onClose }: { currentId: string; projectId: string | null; onClose(): void }) {
+export function ComparePicker({ currentId, projectId, otherId = null, onClose }: {
+  currentId: string; projectId: string | null; otherId?: string | null; onClose(): void;
+}) {
   const { list: m } = useMask();
   const now = useNow();
   const dialogRef = useRef<HTMLDialogElement>(null);
@@ -124,7 +127,7 @@ export function ComparePicker({ currentId, projectId, onClose }: { currentId: st
     if (on) searcher.current?.query(query);
     inputRef.current?.focus();
   };
-  const list = pickerList({ allProjects, query, currentId, projectId, sessions, search, m, nowMs: now });
+  const list = pickerList({ allProjects, query, currentId, projectId, otherId, sessions, search, m, nowMs: now });
   return (
     <ComparePickerView query={query} allProjects={allProjects} list={list} onQuery={onQuery} onAllProjects={onAllProjects}
       onClose={onClose} dialogRef={dialogRef} inputRef={inputRef} />

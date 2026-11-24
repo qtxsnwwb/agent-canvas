@@ -152,7 +152,6 @@ function Body({ view }: { view: CompareView }) {
 export interface ComparePageViewProps {
   /** null before the first answer. */
   view: CompareView | null;
-  loading: boolean;
   /** The last request failed (it is retried). */
   failed: boolean;
   onSwap(): void;
@@ -160,7 +159,7 @@ export interface ComparePageViewProps {
 }
 
 /** The page as rendered from its state (no fetching: ComparePage below does that). */
-export function ComparePageView({ view, loading, failed, onSwap, onChange }: ComparePageViewProps) {
+export function ComparePageView({ view, failed, onSwap, onChange }: ComparePageViewProps) {
   return (
     <div className="stats compare-page">
       <div className="stats-head compare-head">
@@ -172,7 +171,7 @@ export function ComparePageView({ view, loading, failed, onSwap, onChange }: Com
       </div>
       {failed && <p className="error stats-state" role="status">{view === null ? LOAD_FAILED_TEXT : REFRESH_FAILED_TEXT}</p>}
       {view !== null && view.live && <p className="muted compare-live" role="status">有一边正在进行，数字每 5 秒更新一次。</p>}
-      {view === null ? (!failed && loading && <p className="muted stats-state">加载中…</p>) : <Body view={view} />}
+      {view === null ? (!failed && <p className="muted stats-state">加载中…</p>) : <Body view={view} />}
     </div>
   );
 }
@@ -195,9 +194,9 @@ export function ComparePage({ a, b }: { a: string; b: string }) {
   const left = state.response?.left ?? null;
   return (
     <>
-      <ComparePageView view={view} loading={state.response === null} failed={state.failed}
+      <ComparePageView view={view} failed={state.failed}
         onSwap={() => { location.hash = compareHash(b, a); }} onChange={() => setPicking(true)} />
-      {picking && <ComparePicker currentId={a} projectId={left?.projectId ?? null} onClose={() => setPicking(false)} />}
+      {picking && <ComparePicker currentId={a} projectId={left?.projectId ?? null} otherId={b} onClose={() => setPicking(false)} />}
     </>
   );
 }

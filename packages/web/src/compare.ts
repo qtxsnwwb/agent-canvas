@@ -34,6 +34,14 @@ export const turnLabel = (index: number): string => `第 ${index} 轮`;
 
 /** How often the page refetches while a side is running or waiting for a permission. */
 export const COMPARE_POLL_MS = 5_000;
+/** The longest wait before retrying a failed request (the waits double from COMPARE_POLL_MS up to this). */
+export const COMPARE_RETRY_MAX_MS = 60_000;
+
+/** The wait before retrying after `failures` failed requests in a row (1, 2, …): 5 s, 10 s, 20 s, 40 s, then 60 s. */
+export function compareRetryDelay(failures: number, intervalMs = COMPARE_POLL_MS): number {
+  const n = Math.max(1, Math.floor(failures));
+  return Math.min(COMPARE_RETRY_MAX_MS, intervalMs * 2 ** Math.min(n - 1, 16));
+}
 
 // ---- the 「更好」 bold ----
 
@@ -183,9 +191,12 @@ const FILE_GROUPS: readonly { key: FileGroupView['key']; label: string }[] = [
   { key: 'both', label: '两边都碰过' }, { key: 'onlyLeft', label: '只有左边' }, { key: 'onlyRight', label: '只有右边' },
 ];
 
-/** Whether the page refetches: a side is running or waiting for a permission. */
-export function shouldPoll(r: CompareResponse): boolean {
-  return [r.left, r.right].some((s) => s !== null && (s.status === 'running' || s.status === 'awaiting_permission'));
+/**
+ * Whether the page refetches at `nowMs`: a side is running (as the pages show it: a `running` session quiet for longer
+ * than the stale cut shows 长时间无活动 and does not count) or waiting for a permission.
+ */
+export function shouldPoll(r: CompareResponse, nowMs: number): boolean {
+  return [r.left, r.right].some((s) => s !== null && (effectiveStatus(s, nowMs) === 'running' || s.status === 'awaiting_permission'));
 }
 
 /**
@@ -213,7 +224,7 @@ export function compareView(r: CompareResponse, ids: { a: string; b: string }, m
   return {
     heads: [head(l, '左', ids.a, m, nowMs), head(rt, '右', ids.b, m, nowMs)],
     sameSession: r.sameSession,
-    live: shouldPoll(r),
+    live: shouldPoll(r, nowMs),
     totals: totals(l, rt),
     tools,
     turns: r.turns.map((t) => ({ index: t.index, label: turnLabel(t.index), left: turnCell(t.left, l, m), right: turnCell(t.right, rt, m) })),
@@ -228,31 +239,36 @@ export function compareView(r: CompareResponse, ids: { a: string; b: string }, m
 export interface CompareState { response: CompareResponse | null; failed: boolean }
 
 /**
- * Loads the comparison now, then again every `intervalMs` (COMPARE_POLL_MS) while shouldPoll says a side is running;
- * stops once both are idle (or closed). A failed request keeps the last answer, reports `failed` and is retried after
- * the same interval. Answers arriving after close are dropped.
+ * Loads the comparison now, then again every `intervalMs` (COMPARE_POLL_MS) while shouldPoll says a side is running
+ * (judged at answer time, `now`); stops once both are idle (or closed). A failed request keeps the last answer, reports
+ * `failed` and is retried after compareRetryDelay (doubling up to COMPARE_RETRY_MAX_MS; a success starts over). Answers
+ * arriving after close are dropped.
  */
 export function createComparePoller(o: {
-  load: () => Promise<CompareResponse>; onState: (s: CompareState) => void; intervalMs?: number;
+  load: () => Promise<CompareResponse>; onState: (s: CompareState) => void; intervalMs?: number; now?: () => number;
 }): { close(): void } {
   const interval = o.intervalMs ?? COMPARE_POLL_MS;
+  const now = o.now ?? Date.now;
   let closed = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let response: CompareResponse | null = null;
-  const later = (): void => { timer = setTimeout(() => { timer = null; run(); }, interval); };
+  let failures = 0;
+  const later = (ms: number): void => { timer = setTimeout(() => { timer = null; run(); }, ms); };
   const run = (): void => {
     if (closed) return;
     o.load().then(
       (r) => {
         if (closed) return;
+        failures = 0;
         response = r;
         o.onState({ response, failed: false });
-        if (shouldPoll(r)) later();
+        if (shouldPoll(r, now())) later(interval);
       },
       () => {
         if (closed) return;
+        failures += 1;
         o.onState({ response, failed: true });
-        later();
+        later(compareRetryDelay(failures, interval));
       },
     );
   };
@@ -283,6 +299,12 @@ export interface PickerRow {
   href: string;
 }
 
+/** The parts of a click that say whether it opens a link here (a plain left click) or elsewhere. */
+export interface ClickLike { button: number; metaKey: boolean; ctrlKey: boolean; shiftKey: boolean; altKey: boolean }
+
+/** A plain left click (the picker closes; a click that opens the link in another tab or window leaves it open). */
+export const isPlainClick = (e: ClickLike): boolean => e.button === 0 && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey;
+
 const byActivityDesc = (a: Session, b: Session): number =>
   a.lastActivityAt < b.lastActivityAt ? 1 : a.lastActivityAt > b.lastActivityAt ? -1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 
@@ -294,14 +316,22 @@ function pickerRow(s: Session, currentId: string, m: PageMasker, nowMs: number, 
   };
 }
 
-/** The same project's sessions (the home page's list), newest activity first, without the current one. */
-export function pickerRows(sessions: readonly Session[], currentId: string, m: PageMasker, nowMs: number): PickerRow[] {
-  return sessions.filter((s) => s.id !== currentId).sort(byActivityDesc).map((s) => pickerRow(s, currentId, m, nowMs, false));
+/**
+ * The same project's sessions (the home page's list), newest activity first, without the current one and without
+ * `otherId` (the right side the compare page's 换一个 replaces; null from the session page).
+ */
+export function pickerRows(
+  sessions: readonly Session[], currentId: string, m: PageMasker, nowMs: number, otherId: string | null = null,
+): PickerRow[] {
+  return sessions.filter((s) => s.id !== currentId && s.id !== otherId).sort(byActivityDesc)
+    .map((s) => pickerRow(s, currentId, m, nowMs, false));
 }
 
-/** The search endpoint's session hits (all projects), in its order, without the current one. */
-export function searchPickerRows(hits: readonly SearchHit[], currentId: string, m: PageMasker, nowMs: number): PickerRow[] {
-  return hits.filter((h) => h.session.id !== currentId).map((h) => pickerRow(h.session, currentId, m, nowMs, true));
+/** The search endpoint's session hits (all projects), in its order, without the current one and without `otherId`. */
+export function searchPickerRows(
+  hits: readonly SearchHit[], currentId: string, m: PageMasker, nowMs: number, otherId: string | null = null,
+): PickerRow[] {
+  return hits.filter((h) => h.session.id !== currentId && h.session.id !== otherId).map((h) => pickerRow(h.session, currentId, m, nowMs, true));
 }
 
 const lowerAscii = (s: string): string => s.replace(/[A-Z]+/g, (c) => c.toLowerCase());
@@ -321,6 +351,8 @@ export type PickerList = { state: 'loading' } | { state: 'message'; text: string
  */
 export function pickerList(o: {
   allProjects: boolean; query: string; currentId: string; projectId: string | null;
+  /** The session already on the right (from the compare page's 换一个): not offered again. */
+  otherId?: string | null;
   sessions: readonly Session[] | null | 'failed'; search: SearchResult | null; m: PageMasker; nowMs: number;
 }): PickerList {
   const q = o.query.trim();
@@ -328,13 +360,13 @@ export function pickerList(o: {
     if (Array.from(q).length < SEARCH_MIN_CHARS) return { state: 'message', text: `至少输入 ${SEARCH_MIN_CHARS} 个字` };
     if (o.search === null || o.search.q !== q) return { state: 'loading' };
     if (o.search.error !== null) return { state: 'message', text: `检索失败：${o.m.text(o.search.error)}` };
-    const rows = searchPickerRows(o.search.hits ?? [], o.currentId, o.m, o.nowMs);
+    const rows = searchPickerRows(o.search.hits ?? [], o.currentId, o.m, o.nowMs, o.otherId ?? null);
     return rows.length === 0 ? { state: 'message', text: '没有匹配的会话' } : { state: 'rows', rows };
   }
   if (o.projectId === null) return { state: 'message', text: `不知道是哪个项目，请勾选「${ALL_PROJECTS_TEXT}」` };
   if (o.sessions === null) return { state: 'loading' };
   if (o.sessions === 'failed') return { state: 'message', text: '这个项目的会话没能加载出来' };
-  const all = pickerRows(o.sessions, o.currentId, o.m, o.nowMs);
+  const all = pickerRows(o.sessions, o.currentId, o.m, o.nowMs, o.otherId ?? null);
   if (all.length === 0) return { state: 'message', text: '这个项目没有别的会话' };
   const rows = filterPickerRows(all, q);
   return rows.length === 0 ? { state: 'message', text: '没有符合筛选的会话' } : { state: 'rows', rows };
