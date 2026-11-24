@@ -1,5 +1,5 @@
 import { ORIGINS, type Origin, type Session, type StatsTokens, type TodayOrigin, type TodayUsage } from '@agent-canvas/shared';
-import { addDays, localDayKey } from './aggregate.js';
+import { addDays, localDayKey, noTokenDataOrigins } from './aggregate.js';
 import { turnDurationMs, type SessionSummary } from './summary.js';
 
 /**
@@ -18,14 +18,7 @@ export function computeToday(
 ): Omit<TodayUsage, 'lineTokens' | 'over'> {
   const today = dayKey(nowMs);
 
-  // Token data is a property of all entries (the stats page's rule).
-  const withSessions = new Set<Origin>();
-  const withUsage = new Set<Origin>();
-  for (const { session, summary } of entries) {
-    withSessions.add(session.origin);
-    if (summary.usageNodes > 0) withUsage.add(session.origin);
-  }
-  const noData = (o: Origin): boolean => withSessions.has(o) && !withUsage.has(o);
+  const noData = new Set(noTokenDataOrigins(entries));
 
   // First whole minute of a local day (days are monotonic in time; a day starts within 26 h before any of its instants).
   const startCache = new Map<string, number>();
@@ -44,6 +37,7 @@ export function computeToday(
     return lo;
   };
   const minuteOfDay = (ms: number): number => Math.floor(ms / MIN) - dayStartMin(ms);
+  // Minutes since local midnight (an hour off wall-clock on a DST-change day); a turn in the same minute as now is not counted (strict <).
   const nowMinute = minuteOfDay(nowMs);
 
   const first = addDays(today, -7);
@@ -51,7 +45,8 @@ export function computeToday(
   let usualTotal = 0;
   let usualSeen = false;
 
-  const book = (origin: Origin, atMs: number, input: number, output: number, cachedInput: number, turns: number, activeMs: number): void => {
+  const book = (origin: Origin, atMs: number, p: { input: number; output: number; cachedInput: number; turns: number; activeMs: number }): void => {
+    const { input, output, cachedInput, turns, activeMs } = p;
     const day = dayKey(atMs);
     if (day === today) {
       let a = acc.get(origin);
@@ -61,7 +56,7 @@ export function computeToday(
       a.input += input;
       a.cachedInput += cachedInput;
       a.output += output;
-    } else if (day >= first && day < today && !noData(origin)) {
+    } else if (day >= first && day < today && !noData.has(origin)) {
       usualSeen = true;
       if (minuteOfDay(atMs) < nowMinute) usualTotal += input + output;
     }
@@ -69,10 +64,10 @@ export function computeToday(
 
   for (const { session, summary } of entries) {
     for (const t of summary.turns) {
-      if (t.dated) book(session.origin, t.startMs, t.inputTokens, t.outputTokens, t.cachedInputTokens, 1, turnDurationMs(t, nowMs));
+      if (t.dated) book(session.origin, t.startMs, { input: t.inputTokens, output: t.outputTokens, cachedInput: t.cachedInputTokens, turns: 1, activeMs: turnDurationMs(t, nowMs) });
     }
     for (const x of summary.extras) {
-      if (x.dated) book(session.origin, x.atMs, x.inputTokens, x.outputTokens, x.cachedInputTokens, 0, 0);
+      if (x.dated) book(session.origin, x.atMs, { input: x.inputTokens, output: x.outputTokens, cachedInput: x.cachedInputTokens, turns: 0, activeMs: 0 });
     }
   }
 
@@ -84,7 +79,7 @@ export function computeToday(
   for (const origin of ORIGINS) {
     const a = acc.get(origin);
     if (a === undefined) continue;
-    const data = !noData(origin);
+    const data = !noData.has(origin);
     byOrigin.push({
       origin, turns: a.turns, activeMs: a.activeMs,
       tokens: data ? { input: a.input, cachedInput: a.cachedInput, output: a.output } : null,
