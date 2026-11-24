@@ -5,7 +5,6 @@ import {
   type Bookmark,
   type BookmarkSnapshot,
   type GraphNode,
-  type Project,
   type Session,
 } from '@agent-canvas/shared';
 import { permissionText } from '../attention/explain.js';
@@ -19,8 +18,11 @@ import type { Store, StoredBookmark } from '../store/store.js';
 
 /** A deleted bookmark can be restored this long; after it, the next write removes it for good. */
 export const BOOKMARK_PURGE_AFTER_MS = 24 * 60 * 60_000;
-/** Length of a non-tool step's label: the first this many code points of its summary. */
-export const STEP_LABEL_SUMMARY_CHARS = 80;
+/**
+ * Longest step label, in code points: a non-tool step's label is the first this many of its summary; a tool or
+ * subagent step's label is cut to this many, its last one then `…`.
+ */
+export const STEP_LABEL_MAX_CHARS = 80;
 
 const SESSION_NOT_FOUND = '找不到这个会话';
 const NODE_NOT_FOUND = '找不到这一步';
@@ -33,13 +35,12 @@ export type BookmarkResult = { ok: true; status: 200 | 201; bookmark: Bookmark }
 
 /** A step's one-line label (BookmarkSnapshot.stepLabel). */
 export function stepLabel(node: GraphNode): string {
-  const label =
-    node.kind === 'tool' || node.kind === 'subagent'
-      ? permissionText(node.toolName, node.title, node.summary)
-      : node.summary !== ''
-        ? [...node.summary].slice(0, STEP_LABEL_SUMMARY_CHARS).join('')
-        : node.title;
-  return label.replace(/\s+/g, ' ').trim();
+  const oneLine = (text: string): string => text.replace(/\s+/g, ' ').trim();
+  if (node.kind === 'tool' || node.kind === 'subagent') {
+    const cps = [...oneLine(permissionText(node.toolName, node.title, node.summary))];
+    return cps.length <= STEP_LABEL_MAX_CHARS ? cps.join('') : `${cps.slice(0, STEP_LABEL_MAX_CHARS - 1).join('')}…`;
+  }
+  return node.summary !== '' ? oneLine([...node.summary].slice(0, STEP_LABEL_MAX_CHARS).join('')) : oneLine(node.title);
 }
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -70,8 +71,8 @@ export class BookmarksService {
 
   /**
    * Not deleted ones, of one session or all, by createdAt descending then id descending, each with what exists now.
-   * Indexed reads only: a session by id and a node by primary key per row (each once per call), and the project list
-   * once when a row needs a project name.
+   * Indexed reads only: a session by id (once per distinct session), a node by primary key per step row, and one
+   * project's session cwds (Store.projectCwd) once per distinct project.
    */
   list(sessionId?: string): Bookmark[] {
     return this.resolve(this.store.listBookmarks(sessionId));
@@ -186,17 +187,22 @@ export class BookmarksService {
     return this.resolve([row])[0]!;
   }
 
-  /** Adds `now` to each row: one read per distinct session and node, the project list once when needed. */
+  /** Adds `now` to each row: one read per distinct session and per step, one per distinct project. */
   private resolve(rows: StoredBookmark[]): Bookmark[] {
     const sessions = new Map<string, Session | null>();
     const sessionOf = (id: string): Session | null => {
       if (!sessions.has(id)) sessions.set(id, this.store.getSession(id));
       return sessions.get(id)!;
     };
-    let projects: Map<string, Project> | null = null;
+    // The home page's name: its rule over the project's cwd as the project list gives it (not the session's own cwd).
+    const projectNames = new Map<string, string>();
     const projectName = (session: Session): string => {
-      projects ??= new Map(this.store.listProjects(this.now()).map((p) => [p.id, p]));
-      return projectDisplayName(projects.get(session.projectId) ?? { id: session.projectId, cwd: session.cwd });
+      let name = projectNames.get(session.projectId);
+      if (name === undefined) {
+        name = projectDisplayName({ id: session.projectId, cwd: this.store.projectCwd(session.projectId) });
+        projectNames.set(session.projectId, name);
+      }
+      return name;
     };
     return rows.map(({ deletedAt: _deletedAt, ...row }) => {
       const session = sessionOf(row.sessionId);

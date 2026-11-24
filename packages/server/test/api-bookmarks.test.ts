@@ -19,7 +19,14 @@ const ORIGIN = `http://${HOST}`;
 const WRITE_HEADERS = { host: HOST, origin: ORIGIN, 'content-type': 'application/json' };
 const T0 = Date.parse('2026-11-20T10:00:00.000Z');
 const iso = (ms: number): string => new Date(ms).toISOString();
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+/** Resolves once `done()` holds (checked every 5 ms); rejects after `timeoutMs`. */
+async function waitFor(done: () => boolean, what: string, timeoutMs = 5000): Promise<void> {
+  const end = Date.now() + timeoutMs;
+  while (!done()) {
+    if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
 const linesOf = (events: RawEvent[]): string => events.map((e) => (e.source === 'transcript' ? e.line : '') + '\n').join('');
 
 function configFor(tmp: string): Config {
@@ -88,6 +95,28 @@ describe('书签接口', () => {
     expect(await listed()).toEqual([t, s]);
     expect(await listed('?sessionId=s1')).toEqual([t, s]);
     expect(await listed('?sessionId=other')).toEqual([]);
+  });
+
+  test('GET：sessionId 为空或给了两个：400，不是全部列表', async () => {
+    await make({ sessionId: 's1', nodeId: null });
+    for (const query of ['?sessionId=', '?sessionId=s1&sessionId=s2']) {
+      const res = await get(`/api/bookmarks${query}`);
+      expect(res.statusCode, query).toBe(400);
+      expect(res.json().error, query).toMatch(/sessionId/);
+    }
+  });
+
+  test('DELETE / restore 不带请求体（JSON 类型）：400，说明要发 {}；不改', async () => {
+    const s = await make({ sessionId: 's1', nodeId: null });
+    for (const [method, url] of [['DELETE', `/api/bookmarks/${s.id}`], ['POST', `/api/bookmarks/${s.id}/restore`]] as const) {
+      const res = await app.inject({ method, url, headers: WRITE_HEADERS });
+      expect(res.statusCode, url).toBe(400);
+      expect(res.json(), url).toEqual({ error: '请求体不能为空：请发送 JSON，没有内容时发 {}' });
+    }
+    const broken = await send('PATCH', `/api/bookmarks/${s.id}`, '{oops');
+    expect(broken.statusCode).toBe(400);
+    expect(broken.json()).toEqual({ error: '请求体不是合法的 JSON' });
+    expect(await listed()).toEqual([s]);
   });
 
   test('POST：同一处再收藏 409 带着已有的；找不到会话或步骤 404；请求不合法 400', async () => {
@@ -193,19 +222,38 @@ describe('书签接口', () => {
       });
       return { ws, got };
     };
+    const bookmarkMessages = (got: ServerMessage[]) => got.filter((m) => m.type === 'bookmarks');
+    const changesMessages = (got: ServerMessage[]) => got.filter((m) => m.type === 'changes').length;
     const all = await connect();
     const one = await connect();
+    // The session subscription answers with the session's backlog (sinceSeq 0): its acknowledgement.
+    one.ws.send(JSON.stringify({ type: 'subscribe', scope: 'session', sessionId: 's1', sinceSeq: 0 }));
+    await waitFor(() => changesMessages(one.got) >= 1, 'the session backlog');
+    // The sessions subscription has no answer: probe with note changes (each one pushes) until one arrives.
     all.ws.send(JSON.stringify({ type: 'subscribe', scope: 'sessions' }));
-    one.ws.send(JSON.stringify({ type: 'subscribe', scope: 'session', sessionId: 's1', sinceSeq: 1e9 }));
-    await sleep(50);
+    const probe = await make({ sessionId: 's1', nodeId: tool.id });
+    for (let i = 0; bookmarkMessages(all.got).length === 0; i++) {
+      expect(i, 'the sessions subscription never took effect').toBeLessThan(50);
+      await send('PATCH', `/api/bookmarks/${probe.id}`, { note: `probe ${i}` });
+      await waitFor(() => bookmarkMessages(all.got).length > 0, 'a probe push', 100).catch(() => {});
+    }
+    const before = bookmarkMessages(all.got).length;
+
     const s = await make({ sessionId: 's1', nodeId: null });
     await send('POST', '/api/bookmarks', { sessionId: 's1', nodeId: null }); // 409: no push
     await send('PATCH', `/api/bookmarks/${s.id}`, { note: '备注' });
+    await send('PATCH', `/api/bookmarks/${s.id}`, { note: '备注' }); // unchanged: no push
     await send('DELETE', `/api/bookmarks/${s.id}`, {});
     await send('POST', `/api/bookmarks/${s.id}/restore`, {});
-    await sleep(100);
-    const bookmarkMessages = (got: ServerMessage[]) => got.filter((m) => m.type === 'bookmarks');
-    expect(bookmarkMessages(all.got)).toEqual(Array(4).fill({ type: 'bookmarks', sessionIds: ['s1'] }));
+    await send('POST', `/api/bookmarks/${s.id}/restore`, {}); // not deleted: no push
+    await waitFor(() => bookmarkMessages(all.got).length >= before + 4, 'four bookmarks messages');
+    // A round trip on each socket after the writes: whatever the writes sent them has arrived by its answer.
+    const backlogs = changesMessages(one.got);
+    one.ws.send(JSON.stringify({ type: 'subscribe', scope: 'session', sessionId: 's1', sinceSeq: 0 }));
+    await waitFor(() => changesMessages(one.got) > backlogs, 'the second session backlog');
+    await send('PATCH', `/api/bookmarks/${probe.id}`, { note: 'last' });
+    await waitFor(() => bookmarkMessages(all.got).length === before + 5, 'the last push');
+    expect(bookmarkMessages(all.got).slice(before)).toEqual(Array(5).fill({ type: 'bookmarks', sessionIds: ['s1'] }));
     expect(bookmarkMessages(one.got)).toEqual([]);
   });
 });

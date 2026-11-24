@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
+import Fastify, { type FastifyError, type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import fastifyStatic from '@fastify/static';
 import fastifyWebsocket from '@fastify/websocket';
 import {
@@ -735,7 +735,8 @@ export function buildServer(deps: {
   );
 
   // ---- bookmarks (spec 2026-11-24-bookmarks-design.md 7). Writes guarded like the export routes (sameOriginJson: the
-  // DELETE and the restore send a JSON body too, `{}`); 503 while writes are held. Answers are not cached.
+  // DELETE and the restore send a JSON body too, `{}`; an empty one is a 400 saying so); 503 while writes are held.
+  // Answers are not cached.
   /** A path id: a positive decimal integer, else null (answered 404, as an unknown id). */
   const bookmarkId = (raw: string): number | null => {
     if (!/^[1-9]\d{0,15}$/.test(raw)) return null;
@@ -753,22 +754,34 @@ export function buildServer(deps: {
     return pipeline.writesHeld() ? reply.code(503).send({ error: WRITES_HELD }) : null;
   };
   const NO_BOOKMARK = { error: '找不到这个书签' };
+  /** The write routes' body that could not be parsed: 400 with a message saying what to send. */
+  const bookmarkBodyError = (error: FastifyError, _req: FastifyRequest, reply: FastifyReply): FastifyReply => {
+    reply.header('cache-control', 'no-store');
+    if (error.code === 'FST_ERR_CTP_EMPTY_JSON_BODY') {
+      return reply.code(400).send({ error: '请求体不能为空：请发送 JSON，没有内容时发 {}' });
+    }
+    if (error.statusCode === 400) return reply.code(400).send({ error: '请求体不是合法的 JSON' });
+    return reply.send(error);
+  };
+  const bookmarkWriteOptions = { onRequest: sameOriginJson, errorHandler: bookmarkBodyError };
   app.get<{ Querystring: { sessionId?: unknown } }>('/api/bookmarks', async (req, reply) => {
     reply.header('cache-control', 'no-store');
     const { sessionId } = req.query;
-    if (sessionId !== undefined && typeof sessionId !== 'string') return reply.code(400).send({ error: 'sessionId 只能给一个' });
-    return { bookmarks: bookmarks.list(sessionId === undefined || sessionId === '' ? undefined : sessionId) };
+    if (sessionId !== undefined && (typeof sessionId !== 'string' || sessionId === '')) {
+      return reply.code(400).send({ error: 'sessionId 必须是一个非空的会话 id' });
+    }
+    return { bookmarks: bookmarks.list(sessionId) };
   });
-  app.post('/api/bookmarks', { onRequest: sameOriginJson }, async (req, reply) => {
+  app.post('/api/bookmarks', bookmarkWriteOptions, async (req, reply) => {
     return bookmarkWrite(reply) ?? bookmarkAnswer(reply, bookmarks.create(req.body));
   });
-  app.patch<{ Params: { id: string } }>('/api/bookmarks/:id', { onRequest: sameOriginJson }, async (req, reply) => {
+  app.patch<{ Params: { id: string } }>('/api/bookmarks/:id', bookmarkWriteOptions, async (req, reply) => {
     const held = bookmarkWrite(reply);
     if (held !== null) return held;
     const id = bookmarkId(req.params.id);
     return id === null ? reply.code(404).send(NO_BOOKMARK) : bookmarkAnswer(reply, bookmarks.updateNote(id, req.body));
   });
-  app.delete<{ Params: { id: string } }>('/api/bookmarks/:id', { onRequest: sameOriginJson }, async (req, reply) => {
+  app.delete<{ Params: { id: string } }>('/api/bookmarks/:id', bookmarkWriteOptions, async (req, reply) => {
     const held = bookmarkWrite(reply);
     if (held !== null) return held;
     const id = bookmarkId(req.params.id);
@@ -776,7 +789,7 @@ export function buildServer(deps: {
     if (result === null || !result.ok) return reply.code(404).send(NO_BOOKMARK);
     return { ok: true };
   });
-  app.post<{ Params: { id: string } }>('/api/bookmarks/:id/restore', { onRequest: sameOriginJson }, async (req, reply) => {
+  app.post<{ Params: { id: string } }>('/api/bookmarks/:id/restore', bookmarkWriteOptions, async (req, reply) => {
     const held = bookmarkWrite(reply);
     if (held !== null) return held;
     const id = bookmarkId(req.params.id);

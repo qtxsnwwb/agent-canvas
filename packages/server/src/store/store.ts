@@ -190,6 +190,11 @@ export interface Store {
    * lexicographically smallest; null when none does.
    */
   listProjects(nowMs: number): Project[];
+  /**
+   * The cwd listProjects gives this project (the same rule), read from its sessions only (session_project index): for
+   * naming one project without listing them all. null when none of its session cwds encodes to its id, or it has none.
+   */
+  projectCwd(projectId: string): string | null;
   /** Stored sessions per origin (a session row from before origins counts as claude); an origin with none is absent. */
   sessionCountsByOrigin(): Partial<Record<Origin, number>>;
   /** Ordered by lastActivityAt descending. */
@@ -393,6 +398,27 @@ export interface Store {
    */
   holdMetaWrites(): () => void;
   close(): void;
+}
+
+/**
+ * One project's session cwds with their session counts (Store.projectCwd): a range of the session_project index, no
+ * scan of the other projects' sessions. Exported for the query-plan test.
+ */
+export const PROJECT_CWDS_QUERY = `SELECT json_extract(body, '$.cwd') AS cwd, COUNT(*) AS n FROM session WHERE project_id = ? GROUP BY cwd`;
+
+/**
+ * A project's cwd (Project.cwd) from its sessions' cwds and how many sessions have each: among the cwds that encode to
+ * the project id (every non-alphanumeric character becomes `-`), the most frequent, ties to the smallest (JS string
+ * order); null when none does. A cwd may be given more than once (listProjects: once per origin); its counts add up.
+ */
+function projectCwdOf(projectId: string, cwdCounts: Iterable<readonly [string | null, number]>): string | null {
+  const counts = new Map<string, number>();
+  for (const [cwd, n] of cwdCounts) {
+    if (cwd !== null && cwd.replace(/[^A-Za-z0-9]/g, '-') === projectId) counts.set(cwd, (counts.get(cwd) ?? 0) + n);
+  }
+  let best: { cwd: string; n: number } | null = null;
+  for (const [cwd, n] of counts) if (best === null || n > best.n || (n === best.n && cwd < best.cwd)) best = { cwd, n };
+  return best?.cwd ?? null;
 }
 
 /** Unknown-record samples are cut to this many characters (Diagnostics.unknownRecords). */
@@ -830,6 +856,7 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
      FROM session GROUP BY project_id, cwd, origin ORDER BY project_id`,
   );
   const selectSessions = db.prepare(`SELECT body FROM session WHERE project_id = ? ORDER BY last_activity_at DESC, id`);
+  const selectProjectCwds = db.prepare(PROJECT_CWDS_QUERY).raw();
   const selectOriginCounts = db.prepare(
     `SELECT COALESCE(json_extract(body, '$.origin'), 'claude') AS origin, COUNT(*) AS n FROM session GROUP BY origin`,
   );
@@ -1324,26 +1351,25 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
         sessionCount: number;
         activeSessionCount: number;
       }[];
-      const byId = new Map<string, { project: Project; cwdCounts: Map<string, number> }>();
+      const byId = new Map<string, { project: Project; cwdCounts: [string | null, number][] }>();
       for (const r of rows) {
         let entry = byId.get(r.id);
         if (!entry) {
-          entry = { project: { id: r.id, cwd: null, sessionCount: 0, activeSessionCount: 0, origins: [] }, cwdCounts: new Map() };
+          entry = { project: { id: r.id, cwd: null, sessionCount: 0, activeSessionCount: 0, origins: [] }, cwdCounts: [] };
           byId.set(r.id, entry);
         }
         entry.project.sessionCount += r.sessionCount;
         entry.project.activeSessionCount += r.activeSessionCount;
         if (!entry.project.origins.includes(r.origin)) entry.project.origins.push(r.origin);
-        if (r.cwd !== null && r.cwd.replace(/[^A-Za-z0-9]/g, '-') === r.id) {
-          entry.cwdCounts.set(r.cwd, (entry.cwdCounts.get(r.cwd) ?? 0) + r.sessionCount);
-        }
+        entry.cwdCounts.push([r.cwd, r.sessionCount]);
       }
       return [...byId.values()].map(({ project, cwdCounts }) => {
-        let best: { cwd: string; n: number } | null = null;
-        for (const [cwd, n] of cwdCounts) if (best === null || n > best.n || (n === best.n && cwd < best.cwd)) best = { cwd, n };
         const origins = ORIGINS.filter((o) => project.origins.includes(o));
-        return { ...project, cwd: best?.cwd ?? null, origins };
+        return { ...project, cwd: projectCwdOf(project.id, cwdCounts), origins };
       });
+    },
+    projectCwd(projectId) {
+      return projectCwdOf(projectId, selectProjectCwds.all(projectId) as [string | null, number][]);
     },
     sessionCountsByOrigin() {
       const out: Partial<Record<Origin, number>> = {};

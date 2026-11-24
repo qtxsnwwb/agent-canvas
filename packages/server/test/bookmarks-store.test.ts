@@ -3,12 +3,12 @@ import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
-import { BOOKMARK_NOTE_MAX, normalizeBookmarkNote, type Bookmark, type GraphNode } from '@agent-canvas/shared';
-import { BOOKMARK_PURGE_AFTER_MS, BookmarksService } from '../src/bookmarks/service.js';
+import { BOOKMARK_NOTE_MAX, normalizeBookmarkNote, projectDisplayName, type Bookmark, type GraphNode, type Session } from '@agent-canvas/shared';
+import { BOOKMARK_PURGE_AFTER_MS, BookmarksService, STEP_LABEL_MAX_CHARS } from '../src/bookmarks/service.js';
 import { loadConfig, type Config } from '../src/config.js';
 import { Pipeline } from '../src/pipeline.js';
-import { DERIVED_TABLES } from '../src/store/schema.js';
-import { openStore, type RawEvent, type Store } from '../src/store/store.js';
+import { DERIVED_TABLES, SCHEMA_SQL } from '../src/store/schema.js';
+import { openStore, PROJECT_CWDS_QUERY, type RawEvent, type Store } from '../src/store/store.js';
 import { assistantBlock, toolResult, userPrompt } from './fixtures.js';
 
 // Invented data only: an in-memory store (a temp-dir file database for the upgrade test), session files in a temp dir.
@@ -311,6 +311,116 @@ describe('书签：存储与快照', () => {
     expect(store.getNode('s1', tool.id)).toEqual(tool);
     expect(store.getNode('s1', 'nope')).toBeNull();
     expect(store.getNode('nope', tool.id)).toBeNull();
+  });
+
+  test('工具步骤的一行摘要最多 80 个字符，截断时以 … 结尾', () => {
+    const tool = nodeOf('tool');
+    const command = `npm test -- ${'--flag '.repeat(30)}`.trim();
+    store.applyChanges([
+      { type: 'node_added', node: { ...tool, id: 'tool:long', summary: JSON.stringify({ command }) }, detail: {} },
+      { type: 'node_added', node: { ...tool, id: 'tool:fit', summary: JSON.stringify({ command: 'x'.repeat(80 - 'Bash · '.length) }) }, detail: {} },
+    ]);
+    const long = created({ sessionId: 's1', nodeId: 'tool:long' }).snapshot.stepLabel!;
+    expect(STEP_LABEL_MAX_CHARS).toBe(80);
+    expect([...long]).toHaveLength(80);
+    expect(long).toBe(`Bash · ${command}`.slice(0, 79) + '…');
+    const fit = created({ sessionId: 's1', nodeId: 'tool:fit' }).snapshot.stepLabel!;
+    expect([...fit]).toHaveLength(80);
+    expect(fit.endsWith('…')).toBe(false);
+  });
+
+  test('豆包工作的固定项目（没有工作目录）：项目名是“豆包工作”，和首页一样', () => {
+    const session = store.getSession('s1')!;
+    store.applyChanges([{ type: 'session_upserted', session: { ...session, id: 'db1', origin: 'doubao', projectId: 'doubao-work', cwd: null } }]);
+    const b = created({ sessionId: 'db1', nodeId: null });
+    expect(b.now.projectName).toBe('豆包工作');
+    expect(b.snapshot).toMatchObject({ origin: 'doubao', projectId: 'doubao-work', cwd: null });
+  });
+
+  test('项目名取项目的工作目录（首页的规则），不是会话自己的', () => {
+    const session = store.getSession('s1')!;
+    // A second session of the same project whose cwd does not encode to the project id: the project keeps /work/demo.
+    store.applyChanges([{ type: 'session_upserted', session: { ...session, id: 's2', cwd: '/work/demo/sub' } }]);
+    expect(created({ sessionId: 's2', nodeId: null }).now.projectName).toBe('demo');
+  });
+});
+
+describe('一个项目的工作目录（projectCwd）', () => {
+  let store: Store;
+  beforeEach(() => {
+    store = openStore(':memory:');
+  });
+  afterEach(() => store.close());
+
+  const sessionRow = (id: string, projectId: string, cwd: string | null, origin: Session['origin'] = 'claude'): Session => ({
+    id,
+    projectId,
+    origin,
+    cwd,
+    title: null,
+    gitBranch: null,
+    status: 'idle',
+    sourceDeleted: false,
+    startedAt: iso(T0),
+    lastActivityAt: iso(T0),
+  });
+
+  test('和 listProjects 给的一样：最多的、能编码成项目 id 的目录，并列时取较小的；跨来源合计', () => {
+    const rows: Session[] = [
+      // Most frequent of the matching ones wins, a non-matching one (sub) does not count.
+      sessionRow('a1', '-w-app', '/w/app'),
+      sessionRow('a2', '-w-app', '/w/app'),
+      sessionRow('a3', '-w-app', '/w/app/sub'),
+      sessionRow('a4', '-w-app', '/w/app/sub'),
+      sessionRow('a5', '-w-app', '/w/app/sub'),
+      sessionRow('a6', '-w-app', String.raw`\w\app`),
+      // A tie between two spellings that both encode to the id: the smaller one ('/' sorts before '\').
+      sessionRow('b1', 'C--x-y', String.raw`C:\x\y`),
+      sessionRow('b2', 'C--x-y', 'C:/x/y'),
+      // Counts add up across origins: C:\p (1 claude + 2 codex) beats C:/p (2 claude), though C:/p is the smaller.
+      sessionRow('c1', 'C--p', String.raw`C:\p`),
+      sessionRow('c2', 'C--p', String.raw`C:\p`, 'codex'),
+      sessionRow('c3', 'C--p', String.raw`C:\p`, 'codex'),
+      sessionRow('c4', 'C--p', 'C:/p'),
+      sessionRow('c5', 'C--p', 'C:/p'),
+      // A cwd of another case does not encode to the id.
+      sessionRow('c6', 'C--p', 'c:/p'),
+      sessionRow('c7', 'C--p', 'c:/p'),
+      sessionRow('c8', 'C--p', 'c:/p'),
+      sessionRow('c9', 'C--p', 'c:/p'),
+      // None encodes to the id; no cwd at all; a project with one session.
+      sessionRow('d1', 'cursor-ws1', '/elsewhere'),
+      sessionRow('e1', 'doubao-work', null, 'doubao'),
+      sessionRow('f1', '-solo', '/solo'),
+    ];
+    store.applyChanges(rows.map((session) => ({ type: 'session_upserted' as const, session })));
+    const projects = store.listProjects(T0);
+    expect(projects.map((p) => [p.id, p.cwd])).toEqual([
+      ['-solo', '/solo'],
+      ['-w-app', '/w/app'],
+      ['C--p', String.raw`C:\p`],
+      ['C--x-y', 'C:/x/y'],
+      ['cursor-ws1', null],
+      ['doubao-work', null],
+    ]);
+    for (const p of projects) {
+      expect(store.projectCwd(p.id), p.id).toBe(p.cwd);
+      expect(projectDisplayName({ id: p.id, cwd: store.projectCwd(p.id) })).toBe(projectDisplayName(p));
+    }
+    expect(store.projectCwd('no-such-project')).toBeNull();
+  });
+
+  test('只读这个项目的会话：走 session_project 索引', () => {
+    const db = new Database(':memory:');
+    try {
+      db.exec(SCHEMA_SQL);
+      const plan = (db.prepare(`EXPLAIN QUERY PLAN ${PROJECT_CWDS_QUERY}`).all('p') as { detail: string }[]).map((r) => r.detail);
+      const shown = plan.join(' | ');
+      expect(plan.some((d) => /SEARCH session USING (COVERING )?INDEX session_project \(project_id=\?\)/.test(d)), shown).toBe(true);
+      expect(plan.some((d) => /^SCAN session/.test(d)), shown).toBe(false);
+    } finally {
+      db.close();
+    }
   });
 });
 

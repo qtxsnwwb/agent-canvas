@@ -121,12 +121,18 @@ export type NotificationTestResponse = { ok: true } | { ok: false; error: string
 /** Display name of a Cursor project whose working directory could not be found (same text as the web's). */
 export const CURSOR_UNKNOWN_PROJECT_NAME = 'Cursor（未知目录）';
 
+/** The one fixed project of every Doubao Work session (no working directory in its files) and its display name. */
+export const DOUBAO_PROJECT_ID = 'doubao-work';
+export const DOUBAO_PROJECT_NAME = '豆包工作';
+
 /**
- * A project's display name, by the web's rule (home.ts projectTitle): the last segment of its directory (either
- * separator), else of its id; a Cursor project without a directory is "Cursor（未知目录）".
+ * A project's display name, the home page's rule (the web's home.ts projectTitle is this function): the last segment of
+ * its directory (either separator), else of its id; a Cursor project without a directory is "Cursor（未知目录）", the
+ * Doubao Work project without one is "豆包工作".
  */
 export function projectDisplayName(project: Pick<Project, 'id' | 'cwd'>): string {
   if (project.cwd === null && project.id.startsWith('cursor-')) return CURSOR_UNKNOWN_PROJECT_NAME;
+  if (project.cwd === null && project.id === DOUBAO_PROJECT_ID) return DOUBAO_PROJECT_NAME;
   const pathOrId = project.cwd ?? project.id;
   const parts = pathOrId.split(/[\\/]+/).filter((x) => x !== '');
   return parts[parts.length - 1] ?? pathOrId;
