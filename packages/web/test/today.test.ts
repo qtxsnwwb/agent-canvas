@@ -7,6 +7,7 @@ import { lineInputText, NOTIFICATION_KINDS, parseLineInput } from '../src/notifi
 import { NotificationsView, type NotificationsViewProps } from '../src/pages/Notifications';
 import { Stats, TodayBlock } from '../src/pages/Stats';
 import { TodayHeaderLink } from '../src/TodayHeaderLink';
+import { parseHash, USAGE_LINE_HASH } from '../src/route';
 import { headerToday, percentOfLine, todayBlock } from '../src/today';
 import { fakeSocket } from './helpers';
 
@@ -165,7 +166,7 @@ test('block rendered: rows, the 修改 link, the per-origin table', () => {
   expect(html).toContain('缓存读取');
   expect(html).toContain('轮数 37 · 工作时长 2 小时 10 分');
   expect(html).toContain('提醒线：2M（已用 60%）');
-  expect(html).toContain('href="#/notifications"');
+  expect(html).toContain('href="#/notifications/usage-line"');
   for (const th of ['来源', '新输入+输出', '缓存读取', '轮数', '工作时长']) expect(html).toContain(`>${th}</th>`);
   expect(html).toContain('Cursor 没有 token 数据，不在这个数里');
   expect(renderToStaticMarkup(createElement(TodayBlock, { live: { usage: usage({ usualMain: null }), failed: false } })))
@@ -181,6 +182,20 @@ test('block rendered: nothing today, loading, failed', () => {
   expect(empty).not.toContain('<table');
   expect(renderToStaticMarkup(createElement(TodayBlock, { live: { usage: null, failed: false } }))).toContain('加载中…');
   expect(renderToStaticMarkup(createElement(TodayBlock, { live: { usage: null, failed: true } }))).toContain('今天的用量读不出来，正在重试…');
+});
+
+test('block rendered: a failed refresh over a shown result says so in one line, the result stays', () => {
+  const html = renderToStaticMarkup(createElement(TodayBlock, { live: { usage: usage(), failed: true } }));
+  expect(html).toContain('今天的用量刷新失败，正在重试…');
+  expect(html).toContain('提醒线：2M（已用 60%）');
+  expect(renderToStaticMarkup(createElement(TodayBlock, { live: { usage: usage(), failed: false } }))).not.toContain('刷新失败');
+});
+
+test('route: 修改 opens the settings at the usage line', () => {
+  expect(parseHash('#/notifications/usage-line')).toEqual({ page: 'notifications', focus: 'usage-line' });
+  expect(parseHash(USAGE_LINE_HASH)).toEqual({ page: 'notifications', focus: 'usage-line' });
+  expect(parseHash('#/notifications')).toStrictEqual({ page: 'notifications' });
+  expect(parseHash('#/notifications/other')).toEqual({ page: 'home', projectId: null });
 });
 
 test('stats page: the block sits above the range switch and does not change with the filters', () => {
@@ -276,6 +291,25 @@ test('live: fetched once subscribed, replaced by pushes, fetched again after a r
   expect(fetchToday).toHaveBeenCalledTimes(2);
   expect(states.at(-1)).toEqual({ usage: usage({ main: 2 }), failed: false });
   live.close();
+});
+
+test('live: refresh() fetches now (the stats page opening), its answer shown unless a push came first', async () => {
+  vi.useFakeTimers();
+  const sock = fakeSocket();
+  let n = 0;
+  const fetchToday = vi.fn<Fetch>(async () => { n += 1; return usage({ main: n * 10 }); });
+  const states: TodayLiveState[] = [];
+  const live = openLiveToday((s) => states.push(s), { fetchToday, createSocket: () => sock });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(fetchToday).toHaveBeenCalledTimes(1);
+  live.refresh();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(fetchToday).toHaveBeenCalledTimes(2);
+  expect(states.at(-1)).toEqual({ usage: usage({ main: 20 }), failed: false });
+  live.close();
+  live.refresh();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(fetchToday).toHaveBeenCalledTimes(2);
 });
 
 test('live: a fetch older than a push does not overwrite it', async () => {

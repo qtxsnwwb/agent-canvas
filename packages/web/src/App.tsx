@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { headerCount } from './attention';
-import { api, openLiveAttention, openLiveToday, type AttentionLiveState, type LiveAttention, type TodayLiveState } from './client';
+import { api, openLiveAttention, openLiveToday, type AttentionLiveState, type LiveAttention, type LiveToday, type TodayLiveState } from './client';
 import { MaskProvider, MaskSwitch, useMask } from './MaskContext';
 import { Anomalies } from './pages/Anomalies';
 import { Attention } from './pages/Attention';
@@ -58,10 +58,14 @@ function AppBody() {
 
   // Today's usage, live on every page (the header's 今天 and the stats page's block) over the same subscription.
   const [today, setToday] = useState<TodayLiveState>({ usage: null, failed: false });
+  const todayLive = useRef<LiveToday | null>(null);
   useEffect(() => {
     const live = openLiveToday(setToday);
-    return () => live.close();
+    todayLive.current = live;
+    return () => { todayLive.current = null; live.close(); };
   }, []);
+  // The stats page asks for a fresh result when it opens (on a quiet day the server then brings asOf up to date).
+  const refreshToday = useMemo(() => () => todayLive.current?.refresh(), []);
 
   // The header's measured height in --header-real (the session page subtracts it; --header-h until measured): on a
   // phone the links take a third row. Not --header-h itself, which sizes the header (that would never shrink again).
@@ -102,7 +106,7 @@ function AppBody() {
       ) : route.page === 'diagnostics' ? (
         <Diagnostics />
       ) : route.page === 'stats' ? (
-        <Stats today={today} />
+        <Stats today={today} onOpen={refreshToday} />
       ) : route.page === 'files' ? (
         <Files />
       ) : route.page === 'anomalies' ? (
@@ -110,7 +114,7 @@ function AppBody() {
       ) : route.page === 'attention' ? (
         <Attention live={attention} actions={attentionActions} />
       ) : route.page === 'notifications' ? (
-        <Notifications onEnabledChange={setNotifyOn} />
+        <Notifications onEnabledChange={setNotifyOn} focus={route.focus ?? null} />
       ) : (
         <Home projectId={route.projectId} />
       )}

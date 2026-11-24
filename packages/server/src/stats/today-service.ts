@@ -85,7 +85,9 @@ function parseState(raw: string | null): OverState | null {
  * - When: the first get() or change; then at most once per TODAY_THROTTLE_MS while changes arrive (noteChanges), also
  *   every TODAY_THROTTLE_MS while today has a growing open turn (the summaries come from the cache, nothing is read
  *   again), once at the next local day start (from `dayKey`), and at once on settingsChanged(). Never on a timer when
- *   nothing changed and nothing is open. get() never waits for the throttle: it answers with the latest result.
+ *   nothing changed and nothing is open. get() never waits for the throttle: it answers with the latest result, after
+ *   computing it first when the window has passed and a change is pending or (start-up work done) the latest result is
+ *   from an earlier minute (a quiet day: asOf and usualMain brought up to date by the reader, not by a timer).
  * - Start-up work (ready() false: the initial scan, a rebuild, an import; checked at construction too): no change-driven,
  *   tick or midnight computation; changes stay noted and ready() is checked every TODAY_THROTTLE_MS instead. Once it
  *   holds, one baseline computation runs, so the first change after it is judged against what start-up left.
@@ -133,11 +135,17 @@ export class TodayService {
     if (!this.isReady()) this.schedule();
   }
 
-  /** The latest result; computed first when there is none yet, or when a change is pending and the window has passed. */
+  /**
+   * The latest result; computed first when there is none yet, or when the window has passed and either a change is
+   * pending or (start-up work done) the result is from an earlier minute: on a quiet day nothing triggers a computation,
+   * and the asOf time and the same-time average of the last one fall behind. That computation is the tick's (the
+   * summaries from the cache, only changed sessions read again); a changed result is pushed as usual.
+   */
   async get(): Promise<TodayUsage> {
     if (this.closed) throw new Error('today service closed');
     if (this.running !== null) await this.running.catch(() => undefined);
-    if (this.latest === null || (this.dirty && this.now() - this.lastRunAt >= TODAY_THROTTLE_MS)) await this.request(false);
+    const due = this.now() - this.lastRunAt >= TODAY_THROTTLE_MS;
+    if (this.latest === null || (due && (this.dirty || (this.olderMinute(this.latest) && this.readyNow())))) await this.request(false);
     if (this.latest === null) throw new Error('today service closed');
     return this.latest;
   }
@@ -170,6 +178,21 @@ export class TodayService {
   }
 
   // ---------------------------------------------------------------- internals
+
+  /** The result was computed in an earlier minute than now's (time zone offsets are whole minutes). */
+  private olderMinute(usage: TodayUsage): boolean {
+    const at = Date.parse(usage.asOf);
+    return Number.isNaN(at) || Math.floor(at / 60_000) !== Math.floor(this.now() / 60_000);
+  }
+
+  /** deps.ready() without noting a false answer (a get() does not start the wait; the timer and changes do). */
+  private readyNow(): boolean {
+    try {
+      return this.deps.ready();
+    } catch {
+      return false;
+    }
+  }
 
   /** deps.ready(), noting a false answer (wait, then a baseline). A throwing check counts as not ready. */
   private isReady(): boolean {

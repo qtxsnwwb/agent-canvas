@@ -4,7 +4,7 @@ import { api, type TodayLiveState } from '../client';
 import { ORIGIN_LOOK, stripProjects } from '../home';
 import { useMask } from '../MaskContext';
 import { linkId, maskProject, maskStats, projectFromOptionValue, projectOptionValue, type PageMasker } from '../masking';
-import { sessionNodeHash } from '../route';
+import { sessionNodeHash, USAGE_LINE_HASH } from '../route';
 import {
   DEFAULT_STATS_FILTER, STATS_FILTER_KEY, STATS_RANGE_OPTIONS, availableOrigins, bucketLabel, bucketLong, columnLayout,
   coverageNotes, dayIndexAt, seriesBucket, seriesTitle,
@@ -540,6 +540,7 @@ export function TodayBlock({ live }: { live: TodayLiveState }) {
   return (
     <section className="today-block" aria-labelledby="today-h">
       <h2 id="today-h">{b.title}</h2>
+      {live.failed && <p className="error stats-state">今天的用量刷新失败，正在重试…</p>}
       <dl className="today-figures">
         <div className="today-figure today-main">
           <dt>新输入 + 输出</dt><dd>{b.main}</dd>
@@ -556,7 +557,7 @@ export function TodayBlock({ live }: { live: TodayLiveState }) {
       {b.activity !== null && <p className="today-activity">{b.activity}</p>}
       <p className={`today-line${b.line.tone === 'over' ? ' is-over' : ''}`}>
         <span>{b.line.text}</span>
-        <a className="today-edit" href="#/notifications" aria-label="修改提醒线">修改</a>
+        <a className="today-edit" href={USAGE_LINE_HASH} aria-label="修改提醒线">修改</a>
       </p>
       {b.rows.length > 0 && (
         <div className="stats-table-wrap">
@@ -622,7 +623,10 @@ function StatsBody({ data, projectNames, m }: { data: StatsResponse; projectName
 
 type Load = { data: StatsResponse | null; loading: boolean; error: string | null };
 
-export function Stats({ today }: { today: TodayLiveState }) {
+/** `onOpen`: called once when the page opens (App: fetch today's usage now). */
+export function Stats({ today, onOpen }: { today: TodayLiveState; onOpen?: () => void }) {
+  const opened = useRef(onOpen);
+  useEffect(() => { opened.current?.(); }, []);
   const [chosen, setChosen] = useState<StatsFilter>(loadFilter);
   const [projects, setProjects] = useState<Project[] | null>(null);
   const [projectsSettled, setProjectsSettled] = useState(false);

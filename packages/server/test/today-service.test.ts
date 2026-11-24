@@ -185,10 +185,41 @@ describe('TodayService: throttle', () => {
     const u = await r.svc.get();
     expect(u).toMatchObject({ day: '2026-11-24', main: 150, turns: 1, lineTokens: null, over: false });
     expect(r.world.snapshots).toBe(1);
+    // get() without a change, in the same minute, returns the latest without recomputing.
+    await r.clock.advance(20 * S);
+    expect(await r.svc.get()).toBe(u);
+    expect(r.world.snapshots).toBe(1);
     await r.clock.advance(5 * MIN);
     expect(r.world.snapshots).toBe(1);
-    // get() without a change returns the latest without recomputing.
-    expect(await r.svc.get()).toBe(u);
+  });
+
+  test('a quiet day: get() hours later recomputes from the cache (new asOf and same-time average), pushes the change, never notifies', async () => {
+    const r = rig({ line: 100 });
+    r.world.turn('s1', T0 - H, 300, 0); // today, already over the line (the first computation is a baseline)
+    for (let d = 1; d <= 7; d++) r.world.turn('old', T0 - d * 24 * H + 2 * H, 700, 0); // 12:00 on each of the past 7 days
+    const first = await r.svc.get();
+    expect(first).toMatchObject({ asOf: iso(T0), main: 300, usualMain: 0, over: true });
+    const reads = r.world.reads;
+    await r.clock.advance(5 * H);
+    expect(r.world.snapshots).toBe(1); // nothing on a timer
+    const later = await r.svc.get();
+    expect(later).toMatchObject({ asOf: iso(T0 + 5 * H), main: 300, usualMain: 700 });
+    expect(r.world.snapshots).toBe(2);
+    expect(r.world.reads).toBe(reads); // nothing read again
+    expect(r.updates.map((u) => u.usualMain)).toEqual([0, 700]);
+    expect(r.crosses).toEqual([]);
+    // Within the window after it, the same minute: the latest as it is.
+    await r.clock.advance(10 * S);
+    expect(await r.svc.get()).toBe(later);
+    expect(r.world.snapshots).toBe(2);
+  });
+
+  test('a quiet day during start-up work: get() does not recompute an older minute', async () => {
+    const r = rig({ ready: false });
+    r.world.turn('s1', T0 - H, 300, 0);
+    const first = await r.svc.get();
+    await r.clock.advance(5 * H);
+    expect(await r.svc.get()).toBe(first);
     expect(r.world.snapshots).toBe(1);
   });
 

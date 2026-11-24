@@ -10,6 +10,8 @@ import {
 import { useNow } from '../useNow';
 
 const REFRESH_MS = 5000;
+/** The usage line's input (USAGE_LINE_HASH focuses it). */
+const USAGE_LINE_INPUT_ID = 'notify-usage-line';
 const SAVED_SHOWN_MS = 2500;
 
 export type SaveState = { kind: 'idle' } | { kind: 'saving' } | { kind: 'saved' } | { kind: 'failed'; error: string };
@@ -50,7 +52,8 @@ function DeliveryStatus({ status: raw }: { status: NotificationStatus }) {
   );
 }
 
-export function Notifications({ onEnabledChange }: { onEnabledChange?: (enabled: boolean) => void }) {
+/** `focus` `usage-line`: once the settings are shown, today's usage line is brought into view and focused. */
+export function Notifications({ onEnabledChange, focus = null }: { onEnabledChange?: (enabled: boolean) => void; focus?: 'usage-line' | null }) {
   const [settings, setSettings] = useState<NotificationSettings | null>(null);
   const [status, setStatus] = useState<NotificationStatus | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -163,6 +166,15 @@ export function Notifications({ onEnabledChange }: { onEnabledChange?: (enabled:
     );
   };
 
+  const shown = settings !== null && status !== null;
+  useEffect(() => {
+    if (!shown || focus !== 'usage-line') return;
+    const input = document.getElementById(USAGE_LINE_INPUT_ID);
+    if (!(input instanceof HTMLInputElement)) return;
+    input.scrollIntoView({ block: 'center' });
+    input.focus({ preventScroll: true });
+  }, [shown, focus]);
+
   if (settings === null || status === null) {
     return (
       <div className="notify">
@@ -271,7 +283,7 @@ export function NotificationsView({
               {k.key === 'stuck' && numberField('stuckMinutes', '卡住多久算卡住（分钟）', '最少 1 分钟', 'notify-stuck-minutes')}
               {k.key === 'usage' && (
                 <>
-                  {numberField('usageLineTokens', '提醒线（万 token）', '1 万 = 10,000；空着就是不设', 'notify-usage-line', 'notify-usage-line-d')}
+                  {numberField('usageLineTokens', '提醒线（万 token）', '1 万 = 10,000；空着就是不设', USAGE_LINE_INPUT_ID, 'notify-usage-line-d')}
                   <p id="notify-usage-line-d" className="muted">
                     提醒线不受上面的开关管：设了线，顶栏的“今天”和统计页的“今天”区块到线就变色，不发通知也会变色。
                   </p>
