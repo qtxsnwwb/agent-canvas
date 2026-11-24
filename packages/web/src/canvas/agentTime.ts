@@ -13,7 +13,7 @@ import { isBackgroundStep, parseMs, stepSpan, type WaterfallClock } from './wate
  *   dispatch's message (same messageId; without a messageId, a fork sibling: the same parentId) - another dispatch
  *   included. A background dispatch so stops blocking once its thread carries on. When it did, and ended (not open)
  *   after the thread's own work placed before its end stopped, it blocks again from then (not before the cut) to its
- *   end (an agent thread: no later than its own dispatches' end): the thread sat idle until the agent's notice woke it.
+ *   end: the thread sat idle until the agent's notice woke it.
  *   That second block does not extend the turn. A main-thread dispatch still open blocks no later than the main
  *   thread's "now". Codex: dispatches and follow-ups never block; a `wait_agent` step
  *   blocks for its interval, on the agents its input names (read from its summary), else on the thread's own agents
@@ -245,12 +245,6 @@ export function computeAgentTimeline(
   for (const th of threads.values()) {
     // Non-Codex: the latest end of the thread's own work (steps other than dispatches) up to each step, by placement.
     const workEnd = codex ? null : workEndPrefix(th.steps);
-    // An agent thread waits on its agents no longer than it is itself at work for its parent (an orphan: its own work).
-    let ownEnd = Infinity;
-    if (th !== main && workEnd !== null) {
-      ownEnd = workEnd.length > 0 ? workEnd[workEnd.length - 1]! : -Infinity;
-      for (const p of th.points) if (p.at !== null && p.endMs > ownEnd) ownEnd = p.endMs;
-    }
     for (const s of th.steps) {
       if (s.at === null) continue;
       let end = s.startMs;
@@ -260,15 +254,15 @@ export function computeAgentTimeline(
         if (cut !== null && cut < end) end = cut;
         if (th === main && s.open) end = Math.min(end, Math.max(s.startMs, clock.nowMs));
         const blocker = targetOf.get(s)!.id;
-        if (end > s.startMs) th.blocks.push({ startMs: s.startMs, endMs: end, key: end, blocker });
+        // Keyed by the agent's own end, not by the cut: of several agents blocking at once, the one ending last holds it.
+        if (end > s.startMs) th.blocks.push({ startMs: s.startMs, endMs: end, key: s.endMs, blocker });
         // The thread carried on, then sat idle until the agent ended (woken by its notice): that idle time waits on it
         // too. From the later of the cut and the end of the thread's own last work placed before the agent's end; not
         // part of the turn's end (blockEnd), so time after a turn's end stays nobody's wait.
         if (cut !== null && cut < s.endMs && !s.open) {
-          const agentEnd = Math.min(s.endMs, ownEnd);
           const i = lowerBound(th.steps, s.endMs);
           const idleFrom = Math.max(cut, i > 0 ? workEnd![i - 1]! : -Infinity);
-          if (idleFrom < agentEnd) th.blocks.push({ startMs: idleFrom, endMs: agentEnd, key: s.endMs, blocker });
+          if (idleFrom < s.endMs) th.blocks.push({ startMs: idleFrom, endMs: s.endMs, key: s.endMs, blocker });
         }
       } else if (isWait(s.node) && s.endMs > s.startMs) {
         // All the wait's agents share its interval, so only the one ending last (ties: the smaller id) can hold it.

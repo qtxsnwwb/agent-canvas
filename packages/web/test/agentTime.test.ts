@@ -328,23 +328,24 @@ describe('blocking by origin (spec 3.1, Background detection)', () => {
     ]));
     expect(tl.turns).toBe(1);
     expect(tl.totalMs).toBe(620_000);
-    // 2000-4000: all three launches block until the reply (equal ends: the smaller id, fast). Then the main thread is
-    // idle: 4000-200000 waits on fast; 205000-400000 on mid; 405000-600000 on slow. The 5 s / 5 s / 20 s after each
+    // 2000-4000: all three launches block until the reply; the one ending last, slow, holds it. Then the main thread
+    // is idle: 4000-200000 waits on fast; 205000-400000 on mid; 405000-600000 on slow. The 5 s / 5 s / 20 s after each
     // notice are the main thread's own.
-    expect(thread(tl, 'fast').waitMs).toBe(198_000); // 2000-200000
+    expect(thread(tl, 'fast').waitMs).toBe(196_000); // 4000-200000
     expect(thread(tl, 'mid').waitMs).toBe(195_000); // 205000-400000
-    expect(thread(tl, 'slow').waitMs).toBe(195_000); // 405000-600000
+    expect(thread(tl, 'slow').waitMs).toBe(197_000); // 2000-4000, 405000-600000
     expect(tl.mainOwnMs).toBe(32_000); // 0-2000, 200000-205000, 400000-405000, 600000-620000
     expect(tl.mainWaitMs).toBe(588_000);
     expect(rel(tl.root.waitingSpans)).toEqual([[2000, 200_000], [205_000, 400_000], [405_000, 600_000]]);
-    expect(tl.longestWaitId).toBe('fast');
+    expect(tl.longestWaitId).toBe('slow');
     expect(thread(tl, 'slow').ownMs).toBe(598_000);
     expectInvariant(tl);
   });
 
-  test('an agent that launched a background agent of its own waits on it no longer than it is itself dispatched', () => {
+  test('an agent that launched a background agent of its own: its row shows the idle wait inside its bar; numbers unchanged', () => {
     // X (foreground, 1000-5000) launches Y in the background at 1500, carries on at 2000, last works at 4900 and is done
-    // at 5000; Y runs to 9000. X's idle wait on Y is 4900-5000 only: after its own dispatch ended it waits on nothing.
+    // at 5000; Y runs to 9000. X's bar runs to Y's end (its dispatch is its last step); from 4900 X sits idle waiting on
+    // Y (drawn light). Main is waited on by X only until 5000, so only 4900-5000 of that reaches Y.
     const tl = timeline(graph([
       prompt('p1', 't1', 0),
       dispatch('dX', 't1', null, 'X', 1000, 5000, { messageId: 'm1' }),
@@ -354,7 +355,7 @@ describe('blocking by origin (spec 3.1, Background detection)', () => {
       tool('y1', null, 'Y', 1600, 9000),
       text('reply', 't1', 5500, { messageId: 'm2' }),
     ]));
-    expect(rel(thread(tl, 'X').waitingSpans)).toEqual([[1500, 2000], [4900, 5000]]);
+    expect(rel(thread(tl, 'X').waitingSpans)).toEqual([[1500, 2000], [4900, 9000]]);
     expect(thread(tl, 'Y').waitMs).toBe(600); // 1500-2000, 4900-5000
     expect(thread(tl, 'X').waitMs).toBe(3400); // the rest of 1000-5000
     expect(tl.mainOwnMs).toBe(1500); // 0-1000, 5000-5500
