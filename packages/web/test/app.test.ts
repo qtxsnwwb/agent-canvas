@@ -28,6 +28,18 @@ test('header: the 今天 item sits right after 待处理', async () => {
   const html = renderToStaticMarkup(createElement(App));
   const header = /<header>([\s\S]*?)<\/header>/.exec(html)?.[1] ?? '';
   const links = [...header.matchAll(/<a [^>]*href="([^"]*)"/g)].map((m) => m[1]);
-  expect(links.slice(0, 4)).toEqual(['#/', '#/attention', '#/stats', '#/stats']);
+  expect(links.slice(0, 5)).toEqual(['#/', '#/attention', '#/stats', '#/bookmarks', '#/stats']);
   expect(header).toMatch(/aria-label="待处理"[^>]*>待处理<\/a><a class="header-link header-link-next header-today"/);
+});
+
+test('header: 书签 sits right after 今天, marked current on its page', async () => {
+  vi.stubGlobal('location', { hash: '#/bookmarks', protocol: 'http:', host: '127.0.0.1:1' });
+  const { App } = await import('../src/App');
+  const html = renderToStaticMarkup(createElement(App));
+  const header = /<header>([\s\S]*?)<\/header>/.exec(html)?.[1] ?? '';
+  expect(header).toMatch(/header-today"[^>]*>今天<\/a><a class="header-link header-link-next" href="#\/bookmarks" aria-current="page">书签<\/a>/);
+  expect(html).toContain('bookmarks-page');
+  vi.stubGlobal('location', { hash: '#/stats', protocol: 'http:', host: '127.0.0.1:1' });
+  const other = renderToStaticMarkup(createElement(App));
+  expect(other).toMatch(/href="#\/bookmarks">书签<\/a>/);
 });

@@ -29,9 +29,10 @@ import type { CanvasSnapshot } from './useCanvas';
 import { forkSources, type CanvasView, type TurnSummary, type ViewEdge } from './view';
 import type { UpstreamChain } from './chain';
 import { NO_CARD_MARKS, type CardMarker, type CardMarks } from '../anomalies';
+import { NO_STARS, type StarMark, type StarMarks } from './bookmarkMarks';
 import { chainAriaLabel, isActivationKey } from './format';
 import {
-  CanvasActions, graphNodeAriaLabel, highlightClass, isActive, nodeColor, nodeTypes, summaryAriaLabel, summaryColor,
+  CanvasActions, earlierAriaLabel, graphNodeAriaLabel, highlightClass, isActive, nodeColor, nodeTypes, summaryAriaLabel, summaryColor,
   type FlowNode, type Highlight, SessionProgressing, ALL_PROGRESSING, type Progressing,
 } from './nodes';
 import { isBackgroundStep } from './waterfall';
@@ -64,6 +65,8 @@ export interface CanvasProps {
   rightCovered?: boolean;
   /** Anomaly markers on turn cards and subagent cards (see anomalies.ts cardMarks). Pass a stable object. */
   anomalyMarks?: CardMarks;
+  /** Bookmark stars by view node id (see bookmarkMarks.ts). Pass a stable object. */
+  bookmarkMarks?: StarMarks;
   /** React Flow's attribution link (default shown). The exported file hides it: nothing there navigates away. */
   attribution?: boolean;
 }
@@ -156,6 +159,7 @@ function useFlowNodes(
   chain: UpstreamChain,
   progressing: Progressing,
   marks: CardMarks,
+  stars: StarMarks,
 ): FlowNode[] {
   const cache = useRef(new Map<string, FlowNode>());
   const last = useRef<FlowNode[] | null>(null);
@@ -224,11 +228,12 @@ function useFlowNodes(
         const anomaly: CardMarker | null = vn.node.kind === 'subagent' && vn.node.childAgentId !== null
           ? marks.agents.get(vn.node.childAgentId) ?? null
           : null;
-        const ariaLabel = withAnomaly(ariaBase, anomaly);
+        const star = stars.get(vn.id) ?? null;
+        const ariaLabel = withStar(withAnomaly(ariaBase, anomaly), star);
         n = old && d && d.node === vn.node && d.innerCount === vn.innerCount && d.expanded === vn.expanded
           && d.runCount === runCount && d.thinkingMs === thinkingMs && old.ariaLabel === ariaLabel
           && d.expandable === expandable && d.container === container && d.causal === causal && d.replay === replay
-          && d.highlight === highlight && d.anomaly === anomaly
+          && d.highlight === highlight && d.anomaly === anomaly && d.star === star
           && old.zIndex === zIndex
           && samePos(old.position, position) && old.selected === selected && old.width === width && old.height === height
           ? old
@@ -242,18 +247,19 @@ function useFlowNodes(
             style: container ? CONTAINER_STYLE : undefined,
             data: {
               node: vn.node, innerCount: vn.innerCount, expanded: vn.expanded, expandable, container, causal, replay, highlight,
-              runCount, thinkingMs, anomaly,
+              runCount, thinkingMs, anomaly, star,
             },
             handles: container ? makeHandles(width, height) : handlesFor(width, height), draggable: false, connectable: false,
           };
       } else if (vn.type === 'turn_summary') {
         const anomaly = marks.turns.get(vn.summary.turnKey) ?? null;
-        const ariaLabel = withAnomaly(chainAriaLabel(
+        const star = stars.get(vn.id) ?? null;
+        const ariaLabel = withStar(withAnomaly(chainAriaLabel(
           summaryAriaLabel(vn.summary, outline, !(vn.summary.backgroundRunning ? progressing.background : progressing.main)),
           highlight === 'chain',
-        ), anomaly);
+        ), anomaly), star);
         n = old && old.type === 'turnSummary' && sameSummary(old.data.summary, vn.summary) && old.data.highlight === highlight
-          && old.data.anomaly === anomaly
+          && old.data.anomaly === anomaly && old.data.star === star
           && old.ariaLabel === ariaLabel
           && old.data.outline === outline && old.zIndex === zIndex
           && samePos(old.position, position) && old.selected === selected && old.width === width && old.height === height
@@ -262,20 +268,25 @@ function useFlowNodes(
             id: vn.id, type: 'turnSummary', position, width, height, selected, zIndex,
             ariaLabel,
             className: wrapperClass(false, highlight),
-            data: { summary: vn.summary, highlight, outline, anomaly },
+            data: { summary: vn.summary, highlight, outline, anomaly, star },
             handles: handlesFor(width, height), draggable: false, connectable: false,
           };
       } else {
         // An agent group's `earlier` node sits inside its container: it needs the group's zIndex.
-        n = old && old.type === 'earlier' && old.data.count === vn.count && old.data.toolCount === vn.toolCount
+        // Not focusable (its 展开全部 button is), but named like the other cards, with its bookmark star's text.
+        const star = stars.get(vn.id) ?? null;
+        const ariaLabel = withStar(earlierAriaLabel(vn), star);
+        n = old && old.type === 'earlier' && old.data.star === star && old.ariaLabel === ariaLabel
+          && old.data.count === vn.count && old.data.toolCount === vn.toolCount
           && old.data.failedCount === vn.failedCount && old.data.highlight === highlight && old.zIndex === zIndex
           && samePos(old.position, position) && old.width === width && old.height === height
           ? old
           : {
             id: vn.id, type: 'earlier', position, width, height, zIndex, className: wrapperClass(false, highlight),
+            ariaLabel, ariaRole: 'group',
             data: {
               turnKey: vn.turnKey, groupKey: vn.groupKey, count: vn.count, toolCount: vn.toolCount, failedCount: vn.failedCount,
-              highlight,
+              highlight, star,
             },
             handles: handlesFor(width, height), selectable: false, focusable: false, draggable: false, connectable: false,
           };
@@ -285,7 +296,12 @@ function useFlowNodes(
     }
     cache.current = next;
     return (last.current = sameElements(last.current, out));
-  }, [view, positions, turnBoxes, containerBoxes, layoutMode, selectedId, chain, progressing, marks]);
+  }, [view, positions, turnBoxes, containerBoxes, layoutMode, selectedId, chain, progressing, marks, stars]);
+}
+
+/** A card's accessible name with its bookmark star's text appended (「…，2 个书签」). */
+export function withStar(label: string, star: StarMark | null): string {
+  return star === null ? label : `${label}，${star.label}`;
 }
 
 /** A card's accessible name with its anomaly marker's text appended. */
@@ -496,9 +512,9 @@ function useDeferredFocus(): (selector: string) => void {
 
 function CanvasInner({
   snapshot, selectedId, chain, onSelect, onToggleTurn, onShowFullTurn, onToggleAgent, onFollowingChange, stopFollowingSignal,
-  progressing = ALL_PROGRESSING, focus = null, rightCovered = false, anomalyMarks = NO_CARD_MARKS, attribution = true,
+  progressing = ALL_PROGRESSING, focus = null, rightCovered = false, anomalyMarks = NO_CARD_MARKS, bookmarkMarks = NO_STARS, attribution = true,
 }: CanvasProps) {
-  const nodes = useFlowNodes(snapshot, selectedId, chain, progressing, anomalyMarks);
+  const nodes = useFlowNodes(snapshot, selectedId, chain, progressing, anomalyMarks, bookmarkMarks);
   const edges = useFlowEdges(snapshot, chain, progressing);
   const follow = useFollow(snapshot);
   const { following } = follow;

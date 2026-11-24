@@ -1,4 +1,4 @@
-import type { ExportBundle, Graph, GraphEdge, GraphNode, NodeDetail } from '@agent-canvas/shared';
+import { sessionName, type ExportBundle, type Graph, type GraphEdge, type GraphNode, type NodeDetail } from '@agent-canvas/shared';
 import { neutralizeBidi } from '../bidi';
 import type { LayoutClient } from '../canvas/layoutClient';
 import { parseHash } from '../route';
@@ -68,8 +68,8 @@ const own = <T>(record: Record<string, T>, key: string): T | undefined =>
 /**
  * The session page's source for an exported file. No subscription (nothing changes), details from the bundle (none for
  * a step without an entry; the damaged line for an unreadable one; `raw` never shown), the original size of an output
- * cut at export time. No files summary (there is no shared function computing it in the browser) and no anomalies (not
- * exported): their buttons are hidden. Edges whose ends are not both in the file are dropped.
+ * cut at export time. No files summary (there is no shared function computing it in the browser), no anomalies (not
+ * exported) and no bookmarks (not exported; bookmarks spec 5): their buttons are hidden, and no card shows a star. Edges whose ends are not both in the file are dropped.
  */
 export function embeddedSource(bundle: ExportBundle, createLayoutClient: () => LayoutClient): SessionSource {
   // fromEntries defines own properties (an id like `__proto__` stays an entry).
@@ -102,13 +102,9 @@ export function embeddedSource(bundle: ExportBundle, createLayoutClient: () => L
     nodeDetail: (nodeId) => Promise.resolve(detailOf(nodeId)),
     files: null,
     anomalies: null,
+    bookmarks: null,
     createLayoutClient,
   };
-}
-
-/** The session's name as the page shows it: its (masked) title, else the first 8 characters of its id. */
-export function sessionName(session: { id: string; title: string | null }): string {
-  return session.title ?? session.id.slice(0, 8);
 }
 
 export function exportDocumentTitle(bundle: ExportBundle): string {

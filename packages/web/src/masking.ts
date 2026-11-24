@@ -385,6 +385,8 @@ export function createDisplaySource(source: SessionSource, initial: PageMasker):
       };
     }),
     anomalies: anomalies === null ? null : () => anomalies().then((r) => maskSessionAnomalies(r, m)),
+    // As is: the session page shows only the note from it, which is never masked (the user's own words).
+    bookmarks: source.bookmarks,
     createLayoutClient: () => source.createLayoutClient(),
     ...(source.createTimelineClient !== undefined ? { createTimelineClient: () => source.createTimelineClient!() } : {}),
     setMasker(next) {

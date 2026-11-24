@@ -1,4 +1,4 @@
-import type { Graph, NodeDetail, Session, SessionAnomaliesResponse, SessionFilesResponse } from '@agent-canvas/shared';
+import type { Bookmark, Graph, NodeDetail, Session, SessionAnomaliesResponse, SessionFilesResponse } from '@agent-canvas/shared';
 import type { LayoutClient } from './canvas/layoutClient';
 import type { TimelineClient } from './canvas/timelineClient';
 
@@ -8,6 +8,28 @@ import type { TimelineClient } from './canvas/timelineClient';
  * bytes); null when it was not cut.
  */
 export interface StepDetail { detail: NodeDetail | null; outputOriginalBytes: number | null }
+
+/**
+ * One session's bookmarks as its page reads and writes them (bookmarks spec 5): the live list and the writes, bound to
+ * the session. The note is the user's own words and is never masked.
+ */
+export interface SessionBookmarks {
+  /**
+   * Calls `onList` with the session's bookmarks (null until the first list), again after every change anywhere (the
+   * app's `bookmarks` push); a failed fetch keeps the last list. Returns the stop.
+   */
+  watch(onList: (bookmarks: readonly Bookmark[] | null) => void): () => void;
+  /**
+   * Bookmarks the session (`nodeId` null) or one of its steps; `created` false: it was bookmarked already (that one
+   * is answered).
+   */
+  create(nodeId: string | null, note?: string): Promise<{ created: boolean; bookmark: Bookmark }>;
+  /** The note as typed (the server normalizes it; a failure carries its text). */
+  patch(id: number, note: string): Promise<Bookmark>;
+  /** Soft delete (restorable). */
+  remove(id: number): Promise<unknown>;
+  restore(id: number): Promise<Bookmark>;
+}
 
 /**
  * Where the session page reads one session from. Two implementations: the live one (liveSource.ts: the API and the
@@ -31,6 +53,11 @@ export interface SessionSource {
   readonly files: (() => Promise<SessionFilesResponse>) | null;
   /** The session's anomalies (button, card markers, panel); null: not available, none of them is shown. */
   readonly anomalies: (() => Promise<SessionAnomaliesResponse>) | null;
+  /**
+   * The session's bookmarks (toolbar and drawer buttons, card stars); null: not available (the exported viewer), none
+   * of them is shown.
+   */
+  readonly bookmarks: SessionBookmarks | null;
   /** A layout client for the canvas (one per canvas model; disposed with it). */
   createLayoutClient(): LayoutClient;
   /**

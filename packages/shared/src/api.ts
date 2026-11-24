@@ -184,10 +184,13 @@ export type ClientMessage =
  * expecting a backlog. Catch-up `changes` come in chunks of at most 1000; node detail is never on the socket.
  * `attention`: the attention page's whole state, to sessions-scope connections.
  * `today`: today's usage (GET /api/today's answer), to sessions-scope connections whenever it changes (asOf aside).
+ * `bookmarks`: after every bookmark write, the sessions whose bookmarks changed, to sessions-scope connections; clients
+ * refetch GET /api/bookmarks.
  */
 export type ServerMessage =
   | { type: 'hello'; epoch: string }
   | { type: 'changes'; changes: SeqChange[] }
   | { type: 'resync'; sessionId: string }
   | { type: 'attention'; response: AttentionResponse }
-  | { type: 'today'; usage: TodayUsage };
+  | { type: 'today'; usage: TodayUsage }
+  | { type: 'bookmarks'; sessionIds: string[] };

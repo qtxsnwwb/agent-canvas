@@ -33,5 +33,5 @@ test('header: the masking switch may shrink; its notes end in an ellipsis, its b
 
 test('header: the session page subtracts the measured header height (a third row on a phone), else --header-h', () => {
   expect(baseRule('.session-page')).toMatch(/height: calc\(100vh - var\(--header-real, var\(--header-h\)\)\);/);
-  expect(css).toMatch(/@media \(max-width: 900px\) \{\r?\n {2}:root \{ --header-h: 80px; \}/);
+  expect(css).toMatch(/@media \(max-width: 960px\) \{\r?\n {2}:root \{ --header-h: 80px; \}/);
 });

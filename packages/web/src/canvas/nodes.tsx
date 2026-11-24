@@ -8,6 +8,7 @@ import { replayOverlay, replayOverlayTitle } from './replay';
 import { isBackgroundStep } from './waterfall';
 import type { TurnSummary } from './view';
 import type { CardMarker } from '../anomalies';
+import type { StarMark } from './bookmarkMarks';
 
 export { KIND_LABEL } from '../labels';
 
@@ -72,6 +73,8 @@ export type GraphNodeData = {
   highlight: Highlight;
   /** A subagent card: the anomalies inside that agent (null: none). */
   anomaly: CardMarker | null;
+  /** Bookmarked: the step itself, or (a subagent card) steps inside it the view does not draw (null: none). */
+  star: StarMark | null;
 };
 /**
  * Causal view with a selection: 'chain' for nodes / edges on the selection's upstream chain, 'dim' for the rest; 'none'
@@ -81,11 +84,17 @@ export type Highlight = 'chain' | 'dim' | 'none';
 export type GraphFlowNode = Node<GraphNodeData, 'graphNode'>;
 /** `outline`: the outline view's turn card (a click selects it; there is nothing to expand). */
 /** `anomaly`: the turn's anomalies, those inside the subagents it dispatched included (null: none). */
-export type SummaryFlowNode = Node<{ summary: TurnSummary; highlight: Highlight; outline: boolean; anomaly: CardMarker | null }, 'turnSummary'>;
+/** `star`: bookmarked steps of the turn the view does not draw (null: none). */
+export type SummaryFlowNode = Node<{
+  summary: TurnSummary; highlight: Highlight; outline: boolean; anomaly: CardMarker | null; star: StarMark | null;
+}, 'turnSummary'>;
 export type HeaderFlowNode = Node<{ turnKey: string; startedAt: string; nodeCount: number; highlight: Highlight }, 'turnHeader'>;
-/** `groupKey`: the turn key, or the agent group key for the fold inside a long expanded agent (see ViewNode). */
+/**
+ * `groupKey`: the turn key, or the agent group key for the fold inside a long expanded agent (see ViewNode). `star`:
+ * bookmarked steps folded into it (null: none).
+ */
 export type EarlierFlowNode = Node<{
-  turnKey: string; groupKey: string; count: number; toolCount: number; failedCount: number; highlight: Highlight;
+  turnKey: string; groupKey: string; count: number; toolCount: number; failedCount: number; highlight: Highlight; star: StarMark | null;
 }, 'earlier'>;
 
 /** The wrapper class for a highlight state ('' for none). */
@@ -134,6 +143,15 @@ function AnomalyBadge({ marker }: { marker: CardMarker | null }) {
   );
 }
 
+/**
+ * A card's bookmark star (bookmarks spec 5): one ★ however many it stands for; the tooltip says how many. Hidden from
+ * screen readers: the card's accessible name carries the same text.
+ */
+export function StarBadge({ star }: { star: StarMark | null }) {
+  if (star === null) return null;
+  return <span className="cc-star" title={star.label} aria-hidden="true">★</span>;
+}
+
 function boxStyle(width: number | undefined, height: number | undefined, color: string): CSSProperties {
   return { width, height, ['--cc-color' as string]: color };
 }
@@ -177,6 +195,7 @@ function GraphNodeView({ data, width, height, selected }: NodeProps<GraphFlowNod
         <Handles />
         <div className="cc-row">
           <span className="cc-ellipsis cc-grow">{[kindLabel, duration].filter(Boolean).join(' · ')}</span>
+          <StarBadge star={data.star} />
           {tag}
         </div>
         <div className="cc-row cc-summary">
@@ -198,6 +217,7 @@ function GraphNodeView({ data, width, height, selected }: NodeProps<GraphFlowNod
         <Handles />
         <div className="cc-row">
           <span className="cc-ellipsis cc-grow">{text}</span>
+          <StarBadge star={data.star} />
           {tag}
         </div>
       </div>
@@ -213,6 +233,7 @@ function GraphNodeView({ data, width, height, selected }: NodeProps<GraphFlowNod
         {/* Tools and subagents show only the kind's picture (the label is kept for screen readers): the name needs the room. */}
         <span className="cc-kind" title={kindLabel}><span className="cc-kind-label">{kindLabel}</span></span>
         <span className="cc-title cc-ellipsis cc-grow">{showTitle ? node.title : ''}</span>
+        <StarBadge star={data.star} />
         {node.status !== null && <span className="cc-status">{stalled ? UNFINISHED_LABEL : NODE_STATUS_LABEL[node.status] ?? node.status}</span>}
         {duration !== '' && <span className="cc-duration">{duration}</span>}
         {thought}
@@ -305,6 +326,7 @@ function TurnSummaryView({ data, width, height, selected }: NodeProps<SummaryFlo
       <div className="cc-row">
         <span className="cc-kind">{data.outline ? '轮次' : '已折叠'}</span>
         <span className="cc-title cc-ellipsis cc-grow">{s.promptSummary || '（无提示）'}</span>
+        <StarBadge star={data.star} />
         <AnomalyBadge marker={data.anomaly} />
         {s.running && (progressing
           ? <span className="cc-status cc-running-dot">运行中</span>
@@ -319,6 +341,19 @@ function TurnSummaryView({ data, width, height, selected }: NodeProps<SummaryFlo
       </div>
     </div>
   );
+}
+
+/**
+ * A fold card's accessible name (it cannot be focused; its 展开全部 button can): what it holds. The canvas appends its
+ * bookmark star's text (withStar), as on the other cards.
+ */
+export function earlierAriaLabel(d: Pick<EarlierFlowNode['data'], 'count' | 'toolCount' | 'failedCount'>): string {
+  return nodeAriaLabel(['已折叠', `更早的 ${d.count} 个节点`, `${d.toolCount} 次工具调用`, d.failedCount > 0 ? `${d.failedCount} 个失败` : null]);
+}
+
+/** The fold card's 展开全部 button's accessible name: says so when the fold holds bookmarked steps (null: none). */
+export function showAllLabel(star: StarMark | null): string | undefined {
+  return star === null ? undefined : `展开全部（含 ${star.count} 个书签）`;
 }
 
 function EarlierView({ data, width, height }: NodeProps<EarlierFlowNode>) {
@@ -336,7 +371,8 @@ function EarlierView({ data, width, height }: NodeProps<EarlierFlowNode>) {
           更早的 {data.count} 个节点 · {data.toolCount} 次工具调用
           {data.failedCount > 0 && <span className="cc-failed"> · {data.failedCount} 个失败</span>}
         </span>
-        <button type="button" className="cc-fold nodrag nopan" onClick={onShowAll}>展开全部</button>
+        <StarBadge star={data.star} />
+        <button type="button" className="cc-fold nodrag nopan" onClick={onShowAll} aria-label={showAllLabel(data.star)}>展开全部</button>
       </div>
     </div>
   );

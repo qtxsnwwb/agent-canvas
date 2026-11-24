@@ -195,6 +195,7 @@ function fakeSource(graph: Graph, detail: NodeDetail): SessionSource & { setGrap
     nodeDetail: async () => ({ detail, outputOriginalBytes: null }),
     files: async () => files,
     anomalies: async () => anomalies,
+    bookmarks: null,
     createLayoutClient: () => { throw new Error('not used'); },
   };
 }

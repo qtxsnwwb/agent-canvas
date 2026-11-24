@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { ExportBundle } from '@agent-canvas/shared';
+import { sessionName, type ExportBundle } from '@agent-canvas/shared';
 import { OriginBadge } from '../OriginBadge';
 import { SessionCanvas } from '../pages/SessionCanvas';
 import { bannerModel } from './banner';
 import { createDisplaySource, IDENTITY_MASKER } from '../masking';
-import { embeddedSource, sessionName, viewerNodeId } from './data';
+import { embeddedSource, viewerNodeId } from './data';
 import { createInThreadLayoutClient } from './inThreadLayout';
 
 /** The top of an exported file: what it is, when it was exported, what was masked, the options, the caution line. */

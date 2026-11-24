@@ -1,4 +1,4 @@
-import { ORIGINS, type Origin, type Project } from '@agent-canvas/shared';
+import { CURSOR_UNKNOWN_PROJECT_NAME, ORIGINS, projectDisplayName, type Origin, type Project } from '@agent-canvas/shared';
 
 /** How an origin is shown: its name and the CSS class that colours its badge (styles.css, `.origin-badge`). */
 export const ORIGIN_LOOK: Record<Origin, { label: string; className: string }> = {
@@ -112,16 +112,17 @@ export function projectName(pathOrId: string): string {
 }
 
 /** Display name of a Cursor project whose working directory could not be found (id `cursor-<workspaceId>`, spec 5.4). */
-export const CURSOR_UNKNOWN_DIR_NAME = 'Cursor（未知目录）';
+export const CURSOR_UNKNOWN_DIR_NAME = CURSOR_UNKNOWN_PROJECT_NAME;
 /** The one fixed project of every Doubao Work session (no working directory in its files; spec 5.3) and its name. */
-export const DOUBAO_PROJECT_ID = 'doubao-work';
-export const DOUBAO_PROJECT_NAME = '豆包工作';
+export { DOUBAO_PROJECT_ID, DOUBAO_PROJECT_NAME } from '@agent-canvas/shared';
 
-/** A project's display name: the last segment of its directory; a Cursor project without one is "Cursor（未知目录）". */
+/**
+ * A project's display name: the last segment of its directory; a Cursor project without one is "Cursor（未知目录）", the
+ * Doubao Work project without one "豆包工作". The rule lives in shared (projectDisplayName), so the server names projects
+ * the same way (notifications, stats, bookmarks).
+ */
 export function projectTitle(project: Pick<Project, 'id' | 'cwd'>): string {
-  if (project.cwd === null && project.id.startsWith('cursor-')) return CURSOR_UNKNOWN_DIR_NAME;
-  if (project.cwd === null && project.id === DOUBAO_PROJECT_ID) return DOUBAO_PROJECT_NAME;
-  return projectName(project.cwd ?? project.id);
+  return projectDisplayName(project);
 }
 
 const AVATARS = ['🚀', '🧩', '🛠️', '🌈', '🎯', '🪄', '🧪', '🎈'] as const;

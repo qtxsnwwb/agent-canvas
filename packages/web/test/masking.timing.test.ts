@@ -21,7 +21,7 @@ test('1 MB 的详情：打开时遮蔽一次，之后不再遮', async () => {
   const detail: NodeDetail = { nodeId: 'n', input: { command: 'cat big.log' }, output: `${output}\n${output.slice(0, 300_000)}`, text: null, raw: null };
   const source: SessionSource = {
     getSession: () => baseSession, getGraph: () => ({ nodes: {}, edges: {} }), subscribe: () => () => {}, live: true,
-    nodeDetail: async () => ({ detail, outputOriginalBytes: null }), files: null, anomalies: null,
+    nodeDetail: async () => ({ detail, outputOriginalBytes: null }), files: null, anomalies: null, bookmarks: null,
     createLayoutClient: () => { throw new Error('unused'); },
   };
   const ms = createDisplaySource(source, createPageMasker({ customTerms: ['FalconProject'], numbered: true }));
@@ -49,7 +49,7 @@ test('5000 个节点：详情认出新值后重新遮蔽一遍卡片的耗时', 
   const detail: NodeDetail = { nodeId: 'n1', input: { password: secret }, output: null, text: null, raw: null };
   const source: SessionSource = {
     getSession: () => baseSession, getGraph: () => ({ nodes, edges: {} }), subscribe: () => () => {}, live: true,
-    nodeDetail: async () => ({ detail, outputOriginalBytes: null }), files: null, anomalies: null,
+    nodeDetail: async () => ({ detail, outputOriginalBytes: null }), files: null, anomalies: null, bookmarks: null,
     createLayoutClient: () => { throw new Error('unused'); },
   };
   const ms = createDisplaySource(source, createPageMasker({ customTerms: ['FalconProject'], numbered: true }));

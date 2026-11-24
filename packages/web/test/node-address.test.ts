@@ -1,7 +1,8 @@
 import { expect, test } from 'vitest';
 import { nodeAddressHash } from '@agent-canvas/shared';
 import { parseHash, sessionFileHash, sessionNodeHash } from '../src/route';
-import { nextNodeTarget, nodeJumpAction } from '../src/nodeJump';
+import { nearestTurnNode, nextNodeTarget, nodeJumpAction } from '../src/nodeJump';
+import { mkNode } from './helpers';
 
 const ids = [
   'bubble:6f1c2a9e-0b1d-4c8e-9a77-1234567890ab:0a0b0c0d-1111-2222-3333-444455556666',
@@ -68,4 +69,27 @@ test('nodeJumpAction：没有目标或已处理过不动；没准备好等；没
 
 test('通知用的节点地址（shared nodeAddressHash）与 sessionNodeHash 一致', () => {
   for (const id of ids) expect(nodeAddressHash('s/1 #x', id)).toBe(sessionNodeHash('s/1 #x', id));
+});
+
+// ---- a bookmarked step that is gone: the turn nearest its time ----
+
+test('nearestTurnNode：取时间之前（含）最后开始的主线程那一轮的第一个节点，早于所有轮时取第一轮；没有时间或没有轮为 null', () => {
+  const node = (id: string, ts: string, turnId: string | null, agentId: string | null = null) => ({ ...mkNode(id, ts), turnId, agentId });
+  const nodes = [
+    node('t1-a', '2026-11-22T10:00:00.000Z', 't1'),
+    node('t1-b', '2026-11-22T10:05:00.000Z', 't1'),
+    node('t2-a', '2026-11-22T11:00:00.000Z', 't2'),
+    node('t2-b', '2026-11-22T11:30:00.000Z', null), // belongs to t2 by time
+    node('agent-x', '2026-11-22T10:30:00.000Z', 't9', 'agent-1'), // a subagent's step: not a main turn
+    node('t3-a', '2026-11-22T12:00:00.000Z', 't3'),
+  ];
+  expect(nearestTurnNode(nodes, '2026-11-22T11:40:00.000Z')).toBe('t2-a');
+  expect(nearestTurnNode(nodes, '2026-11-22T11:00:00.000Z')).toBe('t2-a'); // starting exactly then counts
+  expect(nearestTurnNode(nodes, '2026-11-22T10:30:00.000Z')).toBe('t1-a');
+  expect(nearestTurnNode(nodes, '2026-11-23T00:00:00.000Z')).toBe('t3-a');
+  expect(nearestTurnNode(nodes, '2026-11-21T00:00:00.000Z')).toBe('t1-a'); // before every turn: the first
+  expect(nearestTurnNode(nodes, null)).toBeNull();
+  expect(nearestTurnNode(nodes, 'not a time')).toBeNull();
+  expect(nearestTurnNode([], '2026-11-22T11:00:00.000Z')).toBeNull();
+  expect(nearestTurnNode([node('agent-only', '2026-11-22T10:00:00.000Z', 't1', 'agent-1')], '2026-11-22T11:00:00.000Z')).toBeNull();
 });

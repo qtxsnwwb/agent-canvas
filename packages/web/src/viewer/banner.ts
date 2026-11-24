@@ -1,6 +1,5 @@
-import { MASK_TYPE_LABELS, MASK_TYPES, maskWarnings, type ExportBundle } from '@agent-canvas/shared';
+import { MASK_TYPE_LABELS, MASK_TYPES, maskWarnings, sessionName, type ExportBundle } from '@agent-canvas/shared';
 import { neutralizeBidi } from '../bidi';
-import { sessionName } from './data';
 
 /** The banner at the top of an exported file: what it is, the mask report, the options, the caution line. */
 

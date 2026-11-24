@@ -1,3 +1,5 @@
+import { groupTurns, type GraphNode } from '@agent-canvas/shared';
+
 /**
  * Opening a session at a node (`#/s/<id>/n/<nodeId>`): what the session page does with the address. Pure, so the
  * "once per navigation, only when the graph is there" rule can be tested without a component.
@@ -38,3 +40,22 @@ export function nodeJumpAction(
 }
 
 export const NODE_MISSING_NOTE = '没找到这一步，可能已经不在这个会话里了';
+
+/**
+ * A bookmarked step that is gone (bookmarks spec 6): the node to show instead, the first node of the main-thread turn
+ * nearest `at` (the step's time from the bookmark's snapshot): the last turn (groupTurns, as the canvas groups them)
+ * starting at or before it, else the first turn. null when `at` is null or unreadable, or the session has no turn.
+ */
+export function nearestTurnNode(nodes: Iterable<GraphNode>, at: string | null): string | null {
+  if (at === null) return null;
+  const ms = Date.parse(at);
+  if (Number.isNaN(ms)) return null;
+  const turns = groupTurns(nodes);
+  if (turns.length === 0) return null;
+  let pick = turns[0]!;
+  for (const t of turns) {
+    if (t.startMs <= ms) pick = t;
+    else break;
+  }
+  return pick.nodes[0]?.id ?? null;
+}

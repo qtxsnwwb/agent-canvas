@@ -361,6 +361,61 @@ header .header-today.is-over:hover { background: #ffd3ce; }
   .attention-row { flex-wrap: wrap; }
   .attention-row .attention-btn, .attention-reason { margin-left: 8px; margin-bottom: 6px; }
 }
+/* The 书签 page (bookmarks spec 4): rows like the attention page's, the buttons beside the link (or the plain button of a
+   bookmark whose session is gone, or the note box while editing); the 撤销 toast at the bottom of the window. */
+.stats.bookmarks-page { padding-bottom: 80px; } /* the last row can scroll above the 撤销 toast */
+.bookmarks-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 8px 16px; }
+.bookmarks-head > div { min-width: 0; }
+.bookmarks-filter {
+  box-sizing: border-box; flex: 0 1 280px; min-width: 0; max-width: 100%; padding: 4px 12px; border: 2px solid var(--edge);
+  border-radius: 999px; background: var(--card); font: 13px/20px var(--font); color: var(--ink);
+}
+.bookmarks-filter:focus-visible { outline: none; border-color: var(--grape); box-shadow: 0 2px 0 #cbb3ff; }
+.bookmarks-notice {
+  display: flex; align-items: center; gap: 8px; width: fit-content; max-width: 100%; box-sizing: border-box; margin: 0 0 12px;
+  padding: 6px 8px 6px 12px; border-radius: 10px; background: #fff3c4; color: var(--ink); font-size: 13px;
+}
+.bookmarks-notice button { border: 0; background: transparent; color: inherit; font-size: 16px; line-height: 1; cursor: pointer; padding: 0 4px; }
+.stats section.bookmarks-card { padding: 6px 8px 8px; }
+.bookmarks-items li + li { border-top: 1.5px dashed var(--line); }
+.bookmark-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0 8px; min-width: 0; }
+.bookmark-link {
+  flex: 1 1 0; display: flex; flex-direction: column; gap: 3px; min-width: 0; margin: 0; padding: 7px 8px; border: 1.5px solid transparent;
+  border-radius: 10px; background: none; color: var(--ink); font: 12.5px/1.5 var(--font); text-align: left; overflow-wrap: anywhere;
+}
+button.bookmark-link { cursor: pointer; }
+a.bookmark-link:hover, button.bookmark-link:hover { background: var(--paper); border-color: var(--line); }
+.bookmark-link:focus-visible { outline: 3px solid var(--grape); outline-offset: -2px; }
+.bookmark-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; }
+.bookmark-star { color: #e0a100; }
+.bookmark-kind { flex: none; padding: 0 7px; border-radius: 999px; background: var(--paper-deep); color: var(--ink-soft); font-size: 11px; font-weight: 700; }
+.bookmark-note { min-width: 0; font-weight: 700; color: #3a5bd9; }
+.bookmark-note.is-empty { font-weight: 400; color: var(--ink-soft); }
+a.bookmark-link:hover .bookmark-note { text-decoration: underline; }
+.bookmark-note-input {
+  box-sizing: border-box; flex: 1 1 240px; min-width: 0; padding: 2px 10px; border: 2px solid var(--edge); border-radius: 999px;
+  background: var(--card); font: inherit; color: var(--ink);
+}
+.bookmark-note-input:focus-visible { outline: none; border-color: var(--grape); box-shadow: 0 2px 0 #cbb3ff; }
+.bookmark-note-input[aria-invalid="true"] { border-color: var(--coral); }
+.bookmark-time { margin-left: auto; color: var(--ink-soft); font-size: 11.5px; white-space: nowrap; }
+.bookmark-sub { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; padding-left: 20px; min-width: 0; }
+.bookmark-step { min-width: 0; font-family: var(--mono); font-size: 12px; }
+.bookmark-badge { color: #c2410c; font-size: 12px; font-weight: 700; white-space: nowrap; }
+.bookmark-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; padding-left: 20px; min-width: 0; color: var(--ink-soft); }
+.bookmark-meta .tag { margin: 0; }
+.bookmark-actions { flex: none; display: flex; gap: 6px; margin-right: 4px; }
+.bookmark-error { flex: 1 1 100%; margin: 0 8px 6px 28px; }
+.bookmarks-toast {
+  position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 20; display: flex; align-items: center; gap: 10px;
+  max-width: calc(100vw - 32px); box-sizing: border-box; padding: 8px 10px 8px 16px; border: 2px solid var(--edge); border-radius: 999px;
+  background: var(--card); box-shadow: var(--shadow); font-size: 13px; font-weight: 600;
+}
+@media (max-width: 640px) {
+  .bookmark-link { flex-basis: 100%; }
+  .bookmark-actions { margin: 0 0 6px 8px; }
+  .bookmark-sub, .bookmark-meta { padding-left: 0; }
+}
 .notify { padding: 18px; max-width: 900px; }
 .notify h1 { font: 800 20px/1.3 var(--font-fun); margin: 0 0 4px; }
 .notify > .muted { margin: 0 0 14px; }
@@ -618,14 +673,15 @@ header .header-today.is-over:hover { background: #ffd3ce; }
 .anomaly-chip-count { padding: 0 7px; border-radius: 999px; background: var(--paper-deep); color: var(--ink-soft); font-size: 11px; font-variant-numeric: tabular-nums; }
 .anomaly-chip[aria-pressed="true"] .anomaly-chip-count { background: var(--card); color: var(--ink); }
 .stats section.anomaly-card { padding: 6px 8px 8px; }
-/* A narrower window (below 900 px, where the eight links and the switch stop fitting on one line): the header takes two
+/* A narrower window (below 960 px, where the nine links and the switch stop fitting on one line — about 935 px with a
+   three-digit count and 遮蔽中): the header takes two
    rows, every control in sight — the title and the masking switch on the first, the links on the second (the ::before
    is the line break) — so nothing is squeezed or hidden behind a sideways scroll. The header's height (--header-h, which
    the session page subtracts) is the two rows'; a window too narrow even for the links on one row (under about 450 px,
    a phone) gets a third row and a taller header: App measures the header into --header-real, which the session page
    subtracts instead (--header-h until the first measurement). Below 480 px the title keeps only its picture (the name stays for
    screen readers). */
-@media (max-width: 900px) {
+@media (max-width: 960px) {
   :root { --header-h: 80px; }
   header { height: auto; min-height: var(--header-h); padding-top: 6px; padding-bottom: 6px; flex-wrap: wrap; align-content: center; row-gap: 6px; }
   header::before { content: ""; order: 1; flex-basis: 100%; height: 0; }
@@ -648,6 +704,13 @@ header .header-today.is-over:hover { background: #ffd3ce; }
 @media (max-width: 760px) {
   .session-bar { flex-wrap: wrap; row-gap: 6px; padding: 6px 12px; }
   .session-bar-end { flex: 1 1 100%; margin-left: 0; flex-wrap: wrap; gap: 6px 8px; }
+}
+/* The app's session page has more controls than the exported viewer (the bookmark button and its note box among
+   them): its bar takes the narrow layout from 960 px down, like the header's two rows, so the title keeps a line of its
+   own instead of being squeezed beside three rows of buttons. */
+@media (min-width: 761px) and (max-width: 960px) {
+  .session-bar.session-bar-app { flex-wrap: wrap; row-gap: 6px; padding: 6px 12px; }
+  .session-bar-app .session-bar-end { flex: 1 1 100%; margin-left: 0; flex-wrap: wrap; justify-content: flex-start; gap: 6px 8px; }
 }
 
 /* The header's masking switch (spec 5): at the end of the header; while on, filled and labelled 遮蔽中. It takes the
@@ -672,9 +735,17 @@ header .header-today.is-over:hover { background: #ffd3ce; }
   .mask-toggle { padding: 2px 6px; }
 }
 
-/* The session bar's export button, then the canvas's own buttons. */
-.session-bar-tools { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-@media (max-width: 760px) { .session-bar-tools { gap: 6px 8px; } }
+/* The session bar's export button, then the canvas's own buttons (rendered into .session-bar-tools): one flow of
+   buttons in the bar's end, wrapping together (as in the exported viewer, whose end is the toolbar itself). */
+.session-bar-tools { display: contents; }
+/* Above the narrow layout, while the buttons do not fit beside the title on one line, they wrap onto a second line
+   inside the bar's right-hand end, right-aligned, instead of running off the window. The title gives way first
+   (ellipsis), down to a few characters. */
+@media (min-width: 761px) {
+  /* Basis 0: the title takes what the buttons leave (up to its own width), so they never give way for it. */
+  .session-bar h2 { flex: 1 1 0; max-width: max-content; min-width: 5em; }
+  .session-bar-end { flex: 0 1 auto; min-width: 0; flex-wrap: wrap; justify-content: flex-end; row-gap: 6px; }
+}
 
 /* The export dialog (spec 4.1): a native modal dialog that scrolls inside itself on a small screen. */
 .export-dialog {

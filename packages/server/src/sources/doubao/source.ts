@@ -1,12 +1,13 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
+import { DOUBAO_PROJECT_ID } from '@agent-canvas/shared';
 import { readGuardedLines } from '../guarded-reader.js';
 import { KEY_PREFIXES, type FileClass, type FileSource, type SourceRead } from '../source.js';
 import { parseAssignment } from './assignment.js';
 
 /** The fixed project of every Doubao Work session (spec 5.3: the files hold no working directory). */
-export const DOUBAO_PROJECT = 'doubao-work';
+export const DOUBAO_PROJECT = DOUBAO_PROJECT_ID;
 /** An assignment.md larger than this is not read (it is read whole, as a meta raw event, each time it grows). */
 export const DOUBAO_ASSIGNMENT_MAX_BYTES = 2 * 1024 * 1024;
 
