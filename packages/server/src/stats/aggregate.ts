@@ -163,6 +163,17 @@ const bySlowest = (a: StatsSlowCall, b: StatsSlowCall): number =>
 
 interface ToolAcc { origin: Origin; toolName: string; calls: number; finished: number; failed: number; durations: number[] }
 
+/** Origins with sessions but no token data (`usageNodes > 0` in none of their sessions), ORIGINS order: the stats page's rule over all entries. */
+export function noTokenDataOrigins(entries: readonly { session: Session; summary: SessionSummary }[]): Origin[] {
+  const withSessions = new Set<Origin>();
+  const withUsage = new Set<Origin>();
+  for (const { session, summary } of entries) {
+    withSessions.add(session.origin);
+    if (summary.usageNodes > 0) withUsage.add(session.origin);
+  }
+  return ORIGINS.filter((o) => withSessions.has(o) && !withUsage.has(o));
+}
+
 export function aggregateStats(input: AggregateInput): StatsResponse {
   const { range, nowMs, dayKey } = input;
   const today = dayKey(nowMs);
@@ -170,13 +181,7 @@ export function aggregateStats(input: AggregateInput): StatsResponse {
   const inRange = (day: string): boolean => day <= today && (from === null || day >= from);
 
   // Token data is a property of the whole dataset, not of the range or the filters.
-  const withSessions = new Set<Origin>();
-  const withUsage = new Set<Origin>();
-  for (const { session, summary } of input.entries) {
-    withSessions.add(session.origin);
-    if (summary.usageNodes > 0) withUsage.add(session.origin);
-  }
-  const noTokenData = ORIGINS.filter((o) => withSessions.has(o) && !withUsage.has(o));
+  const noTokenData = noTokenDataOrigins(input.entries);
   const noData = new Set(noTokenData);
 
   const totals = newAcc();

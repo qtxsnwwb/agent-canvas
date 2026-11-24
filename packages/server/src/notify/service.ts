@@ -1,4 +1,5 @@
 import {
+  formatTokens,
   nodeAddressHash,
   projectDisplayName,
   validateNotificationSettings,
@@ -12,10 +13,12 @@ import {
   type Origin,
   type SeqChange,
   type Session,
+  type TodayUsage,
 } from '@agent-canvas/shared';
 import { ABORTED_NOTE } from '../normalize/cursor.js';
 import type { Pipeline } from '../pipeline.js';
 import type { Store } from '../store/store.js';
+import { realTimers, type Timers } from '../timers.js';
 import type { DeliveryStatus, NotificationMessage, Notifier } from './desktop.js';
 import { FORGET_ANY_MS, NotificationEngine, type EngineNotification } from './engine.js';
 import { loadNotificationSettings, saveNotificationSettings } from './settings.js';
@@ -24,31 +27,14 @@ import { loadNotificationSettings, saveNotificationSettings } from './settings.j
 export const TICK_MS = 30_000;
 export const TEST_TITLE = 'Agent Canvas 测试通知';
 export const TEST_BODY = '通知工作正常。';
+/** Today's usage grew past the line (spec 2026-11-24-today-usage-design.md 5). */
+export const USAGE_TITLE = '今天的用量超过了你设的线';
+
+/** Fields a page loaded before they existed leaves out of its PUT: they keep their current values. */
+const KEPT_WHEN_MISSING = ['loop', 'failures', 'usage', 'usageLineTokens'] as const;
 
 /** What the service needs of a notifier: delivery, its state, and a bounded shutdown. */
 export type ServiceNotifier = Notifier & { status(): DeliveryStatus; close(): Promise<void> };
-
-export interface Timers {
-  setInterval(fn: () => void, ms: number): unknown;
-  clearInterval(handle: unknown): void;
-  setTimeout(fn: () => void, ms: number): unknown;
-  clearTimeout(handle: unknown): void;
-}
-
-const realTimers: Timers = {
-  setInterval: (fn, ms) => {
-    const h = setInterval(fn, ms);
-    h.unref();
-    return h;
-  },
-  clearInterval: (h) => clearInterval(h as ReturnType<typeof setInterval>),
-  setTimeout: (fn, ms) => {
-    const h = setTimeout(fn, ms);
-    h.unref();
-    return h;
-  },
-  clearTimeout: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
-};
 
 export interface NotificationServiceDeps {
   store: Pick<Store, 'getMeta' | 'setMeta' | 'listProjects' | 'getNodeDetail' | 'liveSessions' | 'latestMainPromptAt'>;
@@ -159,10 +145,12 @@ export class NotificationService {
 
   /** PUT: replaces the settings as a whole; invalid -> { ok: false, error } and nothing changes. */
   putSettings(value: unknown): { ok: true; response: NotificationSettingsResponse } | { ok: false; error: string } {
-    // A page loaded before the anomaly switches existed sends no `loop` / `failures`: they keep their current values.
+    // A page loaded before the anomaly switches (or the usage line) existed sends no `loop` / `failures` (`usage` /
+    // `usageLineTokens`): they keep their current values.
     if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
-      const o = value as Record<string, unknown>;
-      value = { ...o, ...(!('loop' in o) ? { loop: this.settings.loop } : {}), ...(!('failures' in o) ? { failures: this.settings.failures } : {}) };
+      const o = { ...(value as Record<string, unknown>) };
+      for (const key of KEPT_WHEN_MISSING) if (!(key in o)) o[key] = this.settings[key];
+      value = o;
     }
     const checked = validateNotificationSettings(value);
     if (!checked.ok) return checked;
@@ -176,6 +164,22 @@ export class NotificationService {
     }
     this.settingsError = null;
     return { ok: true, response: this.getSettings() };
+  }
+
+  /**
+   * Today's usage grew past the line (TodayService decides when): one notification when the master switch and the
+   * `usage` switch are on. Counts only, never session content; a click opens the stats page.
+   */
+  notifyUsage(usage: TodayUsage): void {
+    if (this.closing !== null || !this.settings.enabled || !this.settings.usage) return;
+    if (usage.main === null || usage.lineTokens === null) return;
+    const message = {
+      title: USAGE_TITLE,
+      body: `新输入 + 输出 ${formatTokens(usage.main)}，提醒线 ${formatTokens(usage.lineTokens)}`,
+      url: `${this.baseUrl}/#/stats`,
+    };
+    // A failure is recorded by the notifier (status); no retry.
+    this.deliver(message, 'usage').catch(() => undefined);
   }
 
   /** Sends the test notification now, whatever the switches say, also while delivery is marked unavailable. */

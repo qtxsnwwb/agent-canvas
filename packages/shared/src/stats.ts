@@ -276,3 +276,16 @@ export function usageTotal(nodes: Iterable<GraphNode>): UsageTotal {
   }
   return total;
 }
+
+const trimTenths = (x: number): string => x.toFixed(1).replace(/\.0$/, '');
+
+/**
+ * A token count in short form, as the pages write it (and the usage notification): 999 → "999", 1200 → "1.2k",
+ * 15000 → "15k", 1250000 → "1.3M"; negative or non-finite → "0".
+ */
+export function formatTokens(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return '0';
+  if (n < 1000) return String(Math.round(n));
+  if (n < 1_000_000 && Number(trimTenths(n / 1000)) < 1000) return `${trimTenths(n / 1000)}k`;
+  return `${trimTenths(n / 1_000_000)}M`;
+}

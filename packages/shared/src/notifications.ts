@@ -1,10 +1,10 @@
 import type { Project } from './model.js';
 
 /**
- * The occasions a desktop notification is sent for (spec 3; `loop` and `failures`: anomaly spec 5); `test` is the
- * settings panel's test notification.
+ * The occasions a desktop notification is sent for (spec 3; `loop` and `failures`: anomaly spec 5; `usage`: today's
+ * usage grew past the line, spec 2026-11-24-today-usage-design.md 5); `test` is the settings panel's test notification.
  */
-export type NotificationKind = 'permission' | 'finished' | 'error' | 'stuck' | 'loop' | 'failures';
+export type NotificationKind = 'permission' | 'finished' | 'error' | 'stuck' | 'loop' | 'failures' | 'usage';
 
 /** Stored in the `meta` table under `notifications` (JSON). Replaced as a whole by PUT /api/notifications/settings. */
 export interface NotificationSettings {
@@ -26,6 +26,13 @@ export interface NotificationSettings {
   loop: boolean;
   /** A running session's turn has a streak of failed calls (anomaly `failures`). Off by default. */
   failures: boolean;
+  /** Today's new input + output grew past usageLineTokens (the master switch applies). On by default. */
+  usage: boolean;
+  /**
+   * The line of today's new input + output tokens, an integer 0..NOTIFICATION_LIMITS.usageLineTokens.max; 0 = no line.
+   * It colours the header and the stats block whatever the switches say.
+   */
+  usageLineTokens: number;
 }
 
 export const DEFAULT_NOTIFICATION_SETTINGS: Readonly<NotificationSettings> = Object.freeze({
@@ -38,20 +45,23 @@ export const DEFAULT_NOTIFICATION_SETTINGS: Readonly<NotificationSettings> = Obj
   stuckMinutes: 15,
   loop: false,
   failures: false,
+  usage: true,
+  usageLineTokens: 0,
 });
 
-/** Inclusive integer ranges of the two thresholds. */
+/** Inclusive integer ranges of the number fields. */
 export const NOTIFICATION_LIMITS = Object.freeze({
   finishedMinSeconds: { min: 0, max: 86_400 },
   stuckMinutes: { min: 1, max: 1440 },
+  usageLineTokens: { min: 0, max: 100_000_000_000 },
 });
 
-const BOOLEAN_FIELDS = ['enabled', 'permission', 'finished', 'error', 'stuck', 'loop', 'failures'] as const;
-const NUMBER_FIELDS = ['finishedMinSeconds', 'stuckMinutes'] as const;
+const BOOLEAN_FIELDS = ['enabled', 'permission', 'finished', 'error', 'stuck', 'loop', 'failures', 'usage'] as const;
+const NUMBER_FIELDS = ['finishedMinSeconds', 'stuckMinutes', 'usageLineTokens'] as const;
 const FIELDS: readonly string[] = [...BOOLEAN_FIELDS, ...NUMBER_FIELDS];
 
 /**
- * Checks a complete settings object: every field present with its type, the thresholds integers in range, no other
+ * Checks a complete settings object: every field present with its type, the numbers integers in range, no other
  * field. The error is a short Chinese sentence naming the field.
  */
 export function validateNotificationSettings(value: unknown): { ok: true; settings: NotificationSettings } | { ok: false; error: string } {
@@ -76,6 +86,8 @@ export function validateNotificationSettings(value: unknown): { ok: true; settin
     stuckMinutes: o.stuckMinutes as number,
     loop: o.loop as boolean,
     failures: o.failures as boolean,
+    usage: o.usage as boolean,
+    usageLineTokens: o.usageLineTokens as number,
   };
   return { ok: true, settings };
 }

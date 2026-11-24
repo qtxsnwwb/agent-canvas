@@ -220,7 +220,7 @@ a.hero-live:hover { text-decoration: underline; }
 /* Session page: a one-line info bar, then the canvas filling the rest of the viewport. */
 .session-loading { padding: 12px 18px; }
 .session-missing { padding: 12px 18px; }
-.session-page { display: flex; flex-direction: column; height: calc(100vh - var(--header-h)); overflow: hidden; }
+.session-page { display: flex; flex-direction: column; height: calc(100vh - var(--header-real, var(--header-h))); overflow: hidden; }
 .session-bar {
   display: flex; align-items: center; gap: 12px; flex: none; min-width: 0;
   padding: 7px 16px; border-bottom: 2px solid var(--edge); background: var(--card); white-space: nowrap;
@@ -319,6 +319,12 @@ header .header-link[aria-current="page"] { background: var(--sun); }
   background: var(--ink); color: var(--card); font-size: 11px; line-height: 16px; text-align: center; font-variant-numeric: tabular-nums;
 }
 
+/* The header's 今天 item (today's usage spec 4.1): the number beside the word; at or over the line, the warning colours
+   (coral edge, light red fill, dark red text: readable on the card and never confused with the current-page yellow). */
+.header-today-num { margin-left: 5px; font-variant-numeric: tabular-nums; }
+header .header-today.is-over { border-color: var(--coral); background: #ffe3e0; color: #b42318; }
+header .header-today.is-over:hover { background: #ffd3ce; }
+
 /* The attention page (spec 5): rows like the anomaly list's; each row's buttons sit beside its link, not inside it.
    Kinds use the session status pills (等你批准 = awaiting permission, 出错中断 = failed, 卡住了 = stale, 跑完了 = idle). */
 .attention-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 8px 16px; }
@@ -364,7 +370,8 @@ header .header-link[aria-current="page"] { background: var(--sun); }
 .notify-row-body { min-width: 0; flex: 1; }
 .notify-row-title { font-weight: 700; font-size: 14px; }
 .notify-row-body p { margin: 2px 0 0; }
-.notify-field { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 13px; font-weight: 600; }
+.notify-field { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-top: 8px; font-size: 13px; font-weight: 600; }
+.notify-field label { flex: none; white-space: nowrap; }
 .notify-field input {
   box-sizing: border-box; width: 96px; padding: 4px 12px; border: 2px solid var(--edge); border-radius: 999px;
   background: var(--card); font: inherit; color: var(--ink);
@@ -426,6 +433,19 @@ header .header-link[aria-current="page"] { background: var(--sun); }
 .stats-empty { text-align: center; padding: 36px 18px !important; }
 .stats-empty-title { margin: 0 0 4px; font: 800 18px/1.3 var(--font-fun); }
 .stats-empty .muted { margin: 0; }
+/* The stats page's 今天 block (today's usage spec 4.2): above the filters, a card like the others. */
+.stats section.today-block { margin-bottom: 16px; }
+.today-figures { display: flex; flex-wrap: wrap; gap: 8px 28px; margin: 8px 0 6px; }
+.today-figure { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.today-figure dt { color: var(--ink-soft); font-size: 12px; font-weight: 700; }
+.today-figure dd { margin: 0; font: 800 17px/1.3 var(--font); font-variant-numeric: tabular-nums; }
+.today-main dd { font-size: 20px; }
+.today-activity { margin: 0 0 4px; font-size: 13px; }
+.today-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin: 0 0 10px; font-size: 13px; font-weight: 600; }
+.today-line.is-over { color: #b42318; font-weight: 800; }
+.today-edit { font-size: 12px; font-weight: 700; }
+.today-table { margin-top: 2px; }
+.today-empty { margin: 6px 0 0; color: var(--ink-soft); font-size: 13px; font-weight: 600; }
 .stats-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(116px, 1fr)); gap: 10px; }
 .stats-tile { padding: 10px 12px; border-radius: 12px; background: var(--paper); min-width: 0; }
 .stats-tile-label { color: var(--ink-soft); font-size: 12px; font-weight: 700; }
@@ -598,13 +618,14 @@ header .header-link[aria-current="page"] { background: var(--sun); }
 .anomaly-chip-count { padding: 0 7px; border-radius: 999px; background: var(--paper-deep); color: var(--ink-soft); font-size: 11px; font-variant-numeric: tabular-nums; }
 .anomaly-chip[aria-pressed="true"] .anomaly-chip-count { background: var(--card); color: var(--ink); }
 .stats section.anomaly-card { padding: 6px 8px 8px; }
-/* A narrower window (below 800 px, where the seven links and the switch stop fitting on one line): the header takes two
+/* A narrower window (below 900 px, where the eight links and the switch stop fitting on one line): the header takes two
    rows, every control in sight — the title and the masking switch on the first, the links on the second (the ::before
    is the line break) — so nothing is squeezed or hidden behind a sideways scroll. The header's height (--header-h, which
-   the session page subtracts) is the two rows'; a window too narrow even for the links on one row (under about 345 px)
-   gets a third row and a slightly taller header. Below 480 px the title keeps only its picture (the name stays for
+   the session page subtracts) is the two rows'; a window too narrow even for the links on one row (under about 450 px,
+   a phone) gets a third row and a taller header: App measures the header into --header-real, which the session page
+   subtracts instead (--header-h until the first measurement). Below 480 px the title keeps only its picture (the name stays for
    screen readers). */
-@media (max-width: 800px) {
+@media (max-width: 900px) {
   :root { --header-h: 80px; }
   header { height: auto; min-height: var(--header-h); padding-top: 6px; padding-bottom: 6px; flex-wrap: wrap; align-content: center; row-gap: 6px; }
   header::before { content: ""; order: 1; flex-basis: 100%; height: 0; }

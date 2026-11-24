@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { headerCount } from './attention';
-import { api, openLiveAttention, type AttentionLiveState, type LiveAttention } from './client';
+import { api, openLiveAttention, openLiveToday, type AttentionLiveState, type LiveAttention, type LiveToday, type TodayLiveState } from './client';
 import { MaskProvider, MaskSwitch, useMask } from './MaskContext';
 import { Anomalies } from './pages/Anomalies';
 import { Attention } from './pages/Attention';
@@ -11,8 +11,12 @@ import { Home } from './pages/Home';
 import { SessionPage } from './pages/Session';
 import { Stats } from './pages/Stats';
 import { parseHash, type Route } from './route';
+import { TodayHeaderLink } from './TodayHeaderLink';
 
 export { parseHash, type Route } from './route';
+
+/** A layout effect in the browser; a plain one when rendered on the server (tests), which has no layout to measure. */
+const useClientLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect;
 
 export function App() {
   return (
@@ -55,14 +59,40 @@ function AppBody() {
   }), []);
   const waiting = headerCount(attention.response);
 
+  // Today's usage, live on every page (the header's 今天 and the stats page's block) over the same subscription.
+  const [today, setToday] = useState<TodayLiveState>({ usage: null, failed: false });
+  const todayLive = useRef<LiveToday | null>(null);
+  useEffect(() => {
+    const live = openLiveToday(setToday);
+    todayLive.current = live;
+    return () => { todayLive.current = null; live.close(); };
+  }, []);
+  // The stats page asks for a fresh result when it opens (on a quiet day the server then brings asOf up to date).
+  const refreshToday = useMemo(() => () => todayLive.current?.refresh(), []);
+
+  // The header's measured height in --header-real (the session page subtracts it; --header-h until measured): on a
+  // phone the links take a third row. Not --header-h itself, which sizes the header (that would never shrink again).
+  const headerRef = useRef<HTMLElement>(null);
+  useClientLayoutEffect(() => {
+    const el = headerRef.current;
+    if (el === null || typeof ResizeObserver === 'undefined') return;
+    const root = document.documentElement;
+    const apply = (): void => root.style.setProperty('--header-real', `${el.offsetHeight}px`);
+    apply();
+    const ro = new ResizeObserver(apply);
+    ro.observe(el, { box: 'border-box' });
+    return () => { ro.disconnect(); root.style.removeProperty('--header-real'); };
+  }, []);
+
   return (
     <div className="app">
-      <header>
+      <header ref={headerRef}>
         <a href="#/">Agent Canvas</a>
         <a className="header-link" href="#/attention" aria-current={route.page === 'attention' ? 'page' : undefined}
           aria-label={waiting === null ? '待处理' : `待处理，${waiting} 个会话在等你`}>
           待处理{waiting !== null && <span className="header-count" aria-hidden="true">{waiting}</span>}
         </a>
+        <TodayHeaderLink usage={today.usage} />
         <a className="header-link header-link-next" href="#/stats" aria-current={route.page === 'stats' ? 'page' : undefined}>统计</a>
         <a className="header-link header-link-next" href="#/files" aria-current={route.page === 'files' ? 'page' : undefined}>文件</a>
         <a className="header-link header-link-next" href="#/anomalies" aria-current={route.page === 'anomalies' ? 'page' : undefined}>异常</a>
@@ -79,7 +109,7 @@ function AppBody() {
       ) : route.page === 'diagnostics' ? (
         <Diagnostics />
       ) : route.page === 'stats' ? (
-        <Stats />
+        <Stats today={today} onOpen={refreshToday} />
       ) : route.page === 'files' ? (
         <Files />
       ) : route.page === 'anomalies' ? (
@@ -87,7 +117,7 @@ function AppBody() {
       ) : route.page === 'attention' ? (
         <Attention live={attention} actions={attentionActions} />
       ) : route.page === 'notifications' ? (
-        <Notifications onEnabledChange={setNotifyOn} />
+        <Notifications onEnabledChange={setNotifyOn} focus={route.focus ?? null} />
       ) : (
         <Home projectId={route.projectId} />
       )}

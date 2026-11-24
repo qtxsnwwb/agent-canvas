@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
-import { DEFAULT_NOTIFICATION_SETTINGS, type Origin, type SeqChange, type Session } from '@agent-canvas/shared';
+import { DEFAULT_NOTIFICATION_SETTINGS, type Origin, type SeqChange, type Session, type TodayUsage } from '@agent-canvas/shared';
 import type { DeliveryStatus, NotificationMessage } from '../src/notify/desktop.js';
-import { NotificationService, TEST_BODY, TEST_TITLE, TICK_MS, type ServiceNotifier, type Timers } from '../src/notify/service.js';
+import { NotificationService, TEST_BODY, TEST_TITLE, TICK_MS, type ServiceNotifier } from '../src/notify/service.js';
+import type { Timers } from '../src/timers.js';
 import { loadNotificationSettings, NOTIFICATIONS_META_KEY } from '../src/notify/settings.js';
 import { openStore, type Store } from '../src/store/store.js';
 import type { PollSource } from '../src/sources/poll.js';
@@ -390,5 +391,57 @@ describe('修复轮 1', () => {
     store.setMeta(NOTIFICATIONS_META_KEY, JSON.stringify({ enabled: true, stuckMinutes: 30, futureField: 1 }));
     const loaded = loadNotificationSettings(store);
     expect(loaded).toEqual({ settings: { ...DEFAULT_NOTIFICATION_SETTINGS, enabled: true, stuckMinutes: 30 }, error: null });
+  });
+});
+
+describe('今天的用量：设置和通知', () => {
+  const usage = (main: number | null, line: number | null): TodayUsage => ({
+    day: '2026-11-12', asOf: new Date(T0).toISOString(), turns: 3, activeMs: 60_000,
+    tokens: main === null ? null : { input: main - 200_000, cachedInput: 5_000_000, output: 200_000 },
+    main, byOrigin: [], usualMain: null, lineTokens: line, over: main !== null && line !== null && main >= line,
+  });
+
+  test('默认：用量开关开，没有提醒线；旧版本存的设置读出这两项的默认值', () => {
+    expect(service.getSettings().settings).toMatchObject({ usage: true, usageLineTokens: 0 });
+    const { usage: _u, usageLineTokens: _l, ...old } = { ...DEFAULT_NOTIFICATION_SETTINGS, enabled: true };
+    store.setMeta(NOTIFICATIONS_META_KEY, JSON.stringify(old));
+    expect(make().getSettings().settings).toEqual({ ...DEFAULT_NOTIFICATION_SETTINGS, enabled: true });
+  });
+
+  test('PUT 校验两项（类型、范围，0 可以）；不带这两项的 PUT（旧页面）保留当前值', () => {
+    expect(service.putSettings({ ...DEFAULT_NOTIFICATION_SETTINGS, usage: false, usageLineTokens: 2_000_000 }).ok).toBe(true);
+    for (const bad of [{ usage: 'yes' }, { usageLineTokens: -1 }, { usageLineTokens: 1.5 }, { usageLineTokens: 100_000_000_001 }, { usageLineTokens: '1' }]) {
+      expect(service.putSettings({ ...DEFAULT_NOTIFICATION_SETTINGS, ...bad }).ok).toBe(false);
+    }
+    expect(service.getSettings().settings).toMatchObject({ usage: false, usageLineTokens: 2_000_000 });
+    const { usage: _u, usageLineTokens: _l, ...old } = { ...DEFAULT_NOTIFICATION_SETTINGS, enabled: true, stuckMinutes: 20 };
+    expect(service.putSettings(old).ok).toBe(true);
+    expect(service.getSettings().settings).toMatchObject({ enabled: true, stuckMinutes: 20, usage: false, usageLineTokens: 2_000_000 });
+    expect(loadNotificationSettings(store).settings).toMatchObject({ usage: false, usageLineTokens: 2_000_000 });
+    expect(service.putSettings({ ...service.getSettings().settings, usageLineTokens: 0 }).ok).toBe(true);
+    expect(service.getSettings().settings.usageLineTokens).toBe(0);
+  });
+
+  test('notifyUsage：总开关或用量开关关着不发；都开着发一条（标题、正文、去统计页）', async () => {
+    service.start('http://127.0.0.1:4999');
+    service.notifyUsage(usage(1_234_567, 1_000_000));
+    service.putSettings({ ...DEFAULT_NOTIFICATION_SETTINGS, enabled: true, usage: false, usageLineTokens: 1_000_000 });
+    service.notifyUsage(usage(1_234_567, 1_000_000));
+    await flush();
+    expect(notifier.sent).toEqual([]);
+    service.putSettings({ ...DEFAULT_NOTIFICATION_SETTINGS, enabled: true, usage: true, usageLineTokens: 1_000_000 });
+    service.notifyUsage(usage(1_234_567, 1_000_000));
+    await flush();
+    expect(notifier.sent).toEqual([{ title: '今天的用量超过了你设的线', body: '新输入 + 输出 1.2M，提醒线 1M', url: 'http://127.0.0.1:4999/#/stats' }]);
+    expect(service.getSettings().status.lastSentKind).toBe('usage');
+    // Without a number or a line there is nothing to say.
+    service.notifyUsage(usage(null, 1_000_000));
+    service.notifyUsage(usage(5, null));
+    await flush();
+    expect(notifier.sent).toHaveLength(1);
+    await service.close();
+    service.notifyUsage(usage(1_234_567, 1_000_000));
+    await flush();
+    expect(notifier.sent).toHaveLength(1);
   });
 });

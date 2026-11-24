@@ -1,6 +1,7 @@
 import { expect, test } from 'vitest';
 import {
   DEFAULT_NOTIFICATION_SETTINGS,
+  NOTIFICATION_LIMITS,
   projectDisplayName,
   validateNotificationSettings,
   type NotificationSettings,
@@ -19,6 +20,8 @@ test('默认值：总开关关，四种都开，60 秒，15 分钟；两种异�
     stuckMinutes: 15,
     loop: false,
     failures: false,
+    usage: true,
+    usageLineTokens: 0,
   });
 });
 
@@ -42,6 +45,13 @@ test.each([
   ['卡住阈值过大', { ...valid, stuckMinutes: 1441 }],
   ['卡住阈值是字符串', { ...valid, stuckMinutes: '15' }],
   ['NaN', { ...valid, stuckMinutes: Number.NaN }],
+  ['缺用量开关', { ...valid, usage: undefined }],
+  ['用量开关不是布尔', { ...valid, usage: 'true' }],
+  ['缺提醒线', { ...valid, usageLineTokens: undefined }],
+  ['提醒线为负', { ...valid, usageLineTokens: -1 }],
+  ['提醒线不是整数', { ...valid, usageLineTokens: 1.5 }],
+  ['提醒线过大', { ...valid, usageLineTokens: 100_000_000_001 }],
+  ['提醒线是字符串', { ...valid, usageLineTokens: '2000000' }],
 ])('不合法：%s', (_name, value) => {
   const r = validateNotificationSettings(value);
   expect(r.ok).toBe(false);
@@ -51,6 +61,14 @@ test.each([
 test('两种异常开关原样通过', () => {
   const on = { ...valid, loop: true, failures: true };
   expect(validateNotificationSettings(on)).toEqual({ ok: true, settings: on });
+});
+
+test('用量开关和提醒线：0（没有线）和上限都合法', () => {
+  expect(NOTIFICATION_LIMITS.usageLineTokens).toEqual({ min: 0, max: 100_000_000_000 });
+  for (const usageLineTokens of [0, 1, 2_000_000, 100_000_000_000]) {
+    const v = { ...valid, usage: false, usageLineTokens };
+    expect(validateNotificationSettings(v)).toEqual({ ok: true, settings: v });
+  }
 });
 
 test('项目名：与页面相同的规则', () => {

@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode, type RefObject } from 'react';
 import type { Origin, Project, StatsBucket, StatsDay, StatsResponse, StatsTokens, StatsTool } from '@agent-canvas/shared';
-import { api } from '../client';
+import { api, type TodayLiveState } from '../client';
 import { ORIGIN_LOOK, stripProjects } from '../home';
 import { useMask } from '../MaskContext';
 import { linkId, maskProject, maskStats, projectFromOptionValue, projectOptionValue, type PageMasker } from '../masking';
-import { sessionNodeHash } from '../route';
+import { sessionNodeHash, USAGE_LINE_HASH } from '../route';
 import {
   DEFAULT_STATS_FILTER, STATS_FILTER_KEY, STATS_RANGE_OPTIONS, availableOrigins, bucketLabel, bucketLong, columnLayout,
   coverageNotes, dayIndexAt, seriesBucket, seriesTitle,
@@ -13,6 +13,7 @@ import {
   serializeStatsFilter, shownNoTokenOrigins, splitTools, stackSegments, statsQueryString,
   type StatsFilter, type StatsOriginFilter,
 } from '../stats';
+import { todayBlock } from '../today';
 
 /** How many (origin, tool) bars are drawn; the rest is one line of text. */
 const TOOL_BARS = 12;
@@ -523,6 +524,68 @@ function ByProject({ data, m }: { data: StatsResponse; m: PageMasker }) {
   );
 }
 
+// ---- today (spec 2026-11-24-today-usage-design.md 4.2): not affected by the range, origin or project filters ----
+
+export function TodayBlock({ live }: { live: TodayLiveState }) {
+  const u = live.usage;
+  if (u === null) {
+    return (
+      <section className="today-block" aria-labelledby="today-h">
+        <h2 id="today-h">今天</h2>
+        {live.failed ? <p className="error stats-state">今天的用量读不出来，正在重试…</p> : <p className="muted stats-state">加载中…</p>}
+      </section>
+    );
+  }
+  const b = todayBlock(u);
+  return (
+    <section className="today-block" aria-labelledby="today-h">
+      <h2 id="today-h">{b.title}</h2>
+      {live.failed && <p className="error stats-state">今天的用量刷新失败，正在重试…</p>}
+      <dl className="today-figures">
+        <div className="today-figure today-main">
+          <dt>新输入 + 输出</dt><dd>{b.main}</dd>
+        </div>
+        {b.usual !== null && (
+          <div className="today-figure">
+            <dt>过去 7 天同一时刻平均</dt><dd>{b.usual}</dd>
+          </div>
+        )}
+        <div className="today-figure">
+          <dt>缓存读取</dt><dd>{b.cached}</dd>
+        </div>
+      </dl>
+      {b.activity !== null && <p className="today-activity">{b.activity}</p>}
+      <p className={`today-line${b.line.tone === 'over' ? ' is-over' : ''}`}>
+        <span>{b.line.text}</span>
+        <a className="today-edit" href={USAGE_LINE_HASH} aria-label="修改提醒线">修改</a>
+      </p>
+      {b.rows.length > 0 && (
+        <div className="stats-table-wrap">
+          <table className="stats-table today-table">
+            <thead>
+              <tr>
+                <th>来源</th><th className="num">新输入+输出</th><th className="num">缓存读取</th><th className="num">轮数</th><th className="num">工作时长</th>
+              </tr>
+            </thead>
+            <tbody>
+              {b.rows.map((r) => (
+                <tr key={r.origin}>
+                  <td><Swatch origin={r.origin} />{r.name}</td>
+                  <td className="num">{r.main}</td>
+                  <td className="num">{r.cached}</td>
+                  <td className="num">{r.turns}</td>
+                  <td className="num">{r.active}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {b.notes.map((n) => <p key={n} className={b.empty ? 'today-empty' : 'stats-note'}>{n}</p>)}
+    </section>
+  );
+}
+
 // ---- the page ----
 
 function StatsBody({ data, projectNames, m }: { data: StatsResponse; projectNames: Map<string, string>; m: PageMasker }) {
@@ -560,7 +623,10 @@ function StatsBody({ data, projectNames, m }: { data: StatsResponse; projectName
 
 type Load = { data: StatsResponse | null; loading: boolean; error: string | null };
 
-export function Stats() {
+/** `onOpen`: called once when the page opens (App: fetch today's usage now). */
+export function Stats({ today, onOpen }: { today: TodayLiveState; onOpen?: () => void }) {
+  const opened = useRef(onOpen);
+  useEffect(() => { opened.current?.(); }, []);
   const [chosen, setChosen] = useState<StatsFilter>(loadFilter);
   const [projects, setProjects] = useState<Project[] | null>(null);
   const [projectsSettled, setProjectsSettled] = useState(false);
@@ -615,6 +681,7 @@ export function Stats() {
           {load.data !== null ? `${rangeLabel(load.data.range)} · ` : ''}所有会话合在一起看：时间花在哪、哪些调用最慢、哪些最常失败。
         </p>
       </div>
+      <TodayBlock live={today} />
       <FilterRow filter={filter} projects={projects} m={m} onChange={change} />
       {data === null ? (
         loadError !== null

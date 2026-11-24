@@ -4,18 +4,29 @@ import { api } from '../client';
 import { createPoller } from '../diagnostics';
 import { useMask } from '../MaskContext';
 import {
-  NOTIFICATION_KINDS, deliveryLines, mergeSettings, parseNumberField,
+  NOTIFICATION_KINDS, deliveryLines, lineInputText, mergeSettings, parseLineInput, parseNumberField,
   type NumberField,
 } from '../notifications';
 import { useNow } from '../useNow';
 
 const REFRESH_MS = 5000;
+/** The usage line's input (USAGE_LINE_HASH focuses it). */
+const USAGE_LINE_INPUT_ID = 'notify-usage-line';
 const SAVED_SHOWN_MS = 2500;
 
-type SaveState = { kind: 'idle' } | { kind: 'saving' } | { kind: 'saved' } | { kind: 'failed'; error: string };
-type TestState = { kind: 'idle' } | { kind: 'sending' } | { kind: 'sent' } | { kind: 'failed'; error: string };
-type Drafts = Partial<Record<NumberField, string>>;
-type FieldErrors = Partial<Record<NumberField, string>>;
+export type SaveState = { kind: 'idle' } | { kind: 'saving' } | { kind: 'saved' } | { kind: 'failed'; error: string };
+export type TestState = { kind: 'idle' } | { kind: 'sending' } | { kind: 'sent' } | { kind: 'failed'; error: string };
+/** The typed fields: the two number fields and today's usage line (typed in 万 token). */
+export type Field = NumberField | 'usageLineTokens';
+export type Drafts = Partial<Record<Field, string>>;
+export type FieldErrors = Partial<Record<Field, string>>;
+
+/** A field's text as stored: the line in 万 token (empty for no line), the others as they are. */
+const fieldText = (field: Field, s: NotificationSettings): string =>
+  field === 'usageLineTokens' ? lineInputText(s.usageLineTokens) : String(s[field]);
+
+const parseField = (field: Field, raw: string): { ok: true; value: number } | { ok: false; error: string } =>
+  field === 'usageLineTokens' ? parseLineInput(raw) : parseNumberField(field, raw);
 
 function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -41,8 +52,8 @@ function DeliveryStatus({ status: raw }: { status: NotificationStatus }) {
   );
 }
 
-export function Notifications({ onEnabledChange }: { onEnabledChange?: (enabled: boolean) => void }) {
-  const { list: mask } = useMask();
+/** `focus` `usage-line`: once the settings are shown, today's usage line is brought into view and focused. */
+export function Notifications({ onEnabledChange, focus = null }: { onEnabledChange?: (enabled: boolean) => void; focus?: 'usage-line' | null }) {
   const [settings, setSettings] = useState<NotificationSettings | null>(null);
   const [status, setStatus] = useState<NotificationStatus | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -123,11 +134,11 @@ export function Notifications({ onEnabledChange }: { onEnabledChange?: (enabled:
     });
   }, [adopt]);
 
-  const commitField = (field: NumberField): void => {
+  const commitField = (field: Field): void => {
     const draft = drafts[field];
     const current = settingsRef.current;
     if (draft === undefined || current === null) return;
-    const parsed = parseNumberField(field, draft);
+    const parsed = parseField(field, draft);
     if (!parsed.ok) {
       setFieldErrors((e) => ({ ...e, [field]: parsed.error }));
       return;
@@ -155,6 +166,15 @@ export function Notifications({ onEnabledChange }: { onEnabledChange?: (enabled:
     );
   };
 
+  const shown = settings !== null && status !== null;
+  useEffect(() => {
+    if (!shown || focus !== 'usage-line') return;
+    const input = document.getElementById(USAGE_LINE_INPUT_ID);
+    if (!(input instanceof HTMLInputElement)) return;
+    input.scrollIntoView({ block: 'center' });
+    input.focus({ preventScroll: true });
+  }, [shown, focus]);
+
   if (settings === null || status === null) {
     return (
       <div className="notify">
@@ -163,23 +183,57 @@ export function Notifications({ onEnabledChange }: { onEnabledChange?: (enabled:
     );
   }
 
+  return (
+    <NotificationsView
+      settings={settings} status={status} loadError={loadError} drafts={drafts} fieldErrors={fieldErrors} save={save} test={test}
+      onCommit={(patch) => void commit(patch)}
+      onDraft={(field, value) => {
+        setDrafts((d) => ({ ...d, [field]: value }));
+        setFieldErrors((x) => ({ ...x, [field]: undefined }));
+      }}
+      onField={commitField}
+      onTest={sendTest}
+    />
+  );
+}
+
+export interface NotificationsViewProps {
+  settings: NotificationSettings;
+  status: NotificationStatus;
+  loadError: string | null;
+  drafts: Drafts;
+  fieldErrors: FieldErrors;
+  save: SaveState;
+  test: TestState;
+  /** Save a change of the switches. */
+  onCommit: (patch: Partial<NotificationSettings>) => void;
+  /** A typed field's text changed. */
+  onDraft: (field: Field, value: string) => void;
+  /** A typed field is done (blur, Enter): check and save it. */
+  onField: (field: Field) => void;
+  onTest: () => void;
+}
+
+/** The settings page once loaded: everything it shows comes in through the props. */
+export function NotificationsView({
+  settings, status, loadError, drafts, fieldErrors, save, test, onCommit, onDraft, onField, onTest,
+}: NotificationsViewProps) {
+  const { list: mask } = useMask();
   const off = !settings.enabled;
-  const numberField = (field: NumberField, label: string, unit: string, id: string) => {
+  // The usage line is never disabled: it colours the header and the stats block whatever the switches say.
+  const numberField = (field: Field, label: string, unit: string, id: string, describedBy?: string) => {
     const err = fieldErrors[field];
+    const described = [describedBy, err !== undefined ? `${id}-err` : undefined].filter((x) => x !== undefined).join(' ');
     return (
       <div className="notify-field">
         <label htmlFor={id}>{label}</label>
         <input
-          id={id} type="text" inputMode="numeric" autoComplete="off" disabled={off}
-          value={drafts[field] ?? String(settings[field])}
-          aria-invalid={err !== undefined} aria-describedby={err !== undefined ? `${id}-err` : undefined}
-          onChange={(e) => {
-            const value = e.target.value;
-            setDrafts((d) => ({ ...d, [field]: value }));
-            setFieldErrors((x) => ({ ...x, [field]: undefined }));
-          }}
-          onBlur={() => commitField(field)}
-          onKeyDown={(e) => { if (e.key === 'Enter') commitField(field); }}
+          id={id} type="text" inputMode="numeric" autoComplete="off" disabled={off && field !== 'usageLineTokens'}
+          value={drafts[field] ?? fieldText(field, settings)}
+          aria-invalid={err !== undefined} aria-describedby={described === '' ? undefined : described}
+          onChange={(e) => onDraft(field, e.target.value)}
+          onBlur={() => onField(field)}
+          onKeyDown={(e) => { if (e.key === 'Enter') onField(field); }}
         />
         <span className="muted">{unit}</span>
         {err !== undefined && <span id={`${id}-err`} className="notify-field-error">{err}</span>}
@@ -203,7 +257,7 @@ export function Notifications({ onEnabledChange }: { onEnabledChange?: (enabled:
         <div className="notify-row">
           <input
             id="notify-enabled" className="notify-switch" type="checkbox" checked={settings.enabled}
-            onChange={(e) => void commit({ enabled: e.target.checked })}
+            onChange={(e) => onCommit({ enabled: e.target.checked })}
           />
           <div className="notify-row-body">
             <label className="notify-row-title" htmlFor="notify-enabled">开启通知</label>
@@ -219,7 +273,7 @@ export function Notifications({ onEnabledChange }: { onEnabledChange?: (enabled:
             <input
               id={`notify-${k.key}`} className="notify-switch" type="checkbox" checked={settings[k.key]} disabled={off}
               aria-describedby={`notify-${k.key}-d notify-${k.key}-n`}
-              onChange={(e) => void commit({ [k.key]: e.target.checked })}
+              onChange={(e) => onCommit({ [k.key]: e.target.checked })}
             />
             <div className="notify-row-body">
               <label className="notify-row-title" htmlFor={`notify-${k.key}`}>{k.label}</label>
@@ -227,6 +281,14 @@ export function Notifications({ onEnabledChange }: { onEnabledChange?: (enabled:
               <p id={`notify-${k.key}-n`} className="muted">各来源：{k.note}</p>
               {k.key === 'finished' && numberField('finishedMinSeconds', '最短时长（秒）', '填 0 表示每一轮都提醒', 'notify-min-seconds')}
               {k.key === 'stuck' && numberField('stuckMinutes', '卡住多久算卡住（分钟）', '最少 1 分钟', 'notify-stuck-minutes')}
+              {k.key === 'usage' && (
+                <>
+                  {numberField('usageLineTokens', '提醒线（万 token）', '1 万 = 10,000；空着就是不设', USAGE_LINE_INPUT_ID, 'notify-usage-line-d')}
+                  <p id="notify-usage-line-d" className="muted">
+                    提醒线不受上面的开关管：设了线，顶栏的“今天”和统计页的“今天”区块到线就变色，不发通知也会变色。
+                  </p>
+                </>
+              )}
             </div>
           </div>
         ))}
@@ -234,7 +296,7 @@ export function Notifications({ onEnabledChange }: { onEnabledChange?: (enabled:
 
       <section aria-labelledby="notify-test-h">
         <h2 id="notify-test-h">试一试</h2>
-        <button type="button" className="notify-btn" disabled={test.kind === 'sending'} onClick={sendTest}>
+        <button type="button" className="notify-btn" disabled={test.kind === 'sending'} onClick={onTest}>
           {test.kind === 'sending' ? '发送中…' : '发一条测试通知'}
         </button>
         <p className={`notify-result${test.kind === 'sent' ? ' ok' : test.kind === 'failed' ? ' bad' : ''}`} role="status" aria-live="polite">

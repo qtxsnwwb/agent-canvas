@@ -28,6 +28,7 @@ import {
   type SessionAnomaliesResponse,
   type SessionFilesResponse,
   type StatsResponse,
+  type TodayUsage,
 } from '@agent-canvas/shared';
 import { attentionProblem, attentionRetryDelay } from './attention';
 
@@ -90,6 +91,8 @@ export const api = {
   /** `query` is built by anomalies.ts `anomaliesQueryString`. */
   anomalies: (query: string) => getJson<AnomalyListResponse>(`/api/anomalies?${query}`),
   anomalyCounts: () => getJson<AnomalyCountsResponse>('/api/anomalies/counts'),
+  /** Today's usage (GET /api/today; the header and the stats page's 今天 block). */
+  today: () => getJson<TodayUsage>('/api/today'),
   exportSettings: () => getJson<ExportSettingsResponse>('/api/export/settings'),
   /** The attention state (GET /api/attention); `hidden` true adds the hidden list (`?hidden=1`). */
   attention: (hidden?: true) => getJson<AttentionResponse>(hidden === true ? '/api/attention?hidden=1' : '/api/attention'),
@@ -376,7 +379,7 @@ export function createSessionsFeed(createSocket: () => WebSocketLike): SessionsF
 }
 
 let browserFeed: SessionsFeed | null = null;
-/** The app's one sessions-scope socket (the home page's session list and the attention state share it). */
+/** The app's one sessions-scope socket (the home page's session list, the attention state and today's usage share it). */
 function sharedSessionsFeed(): SessionsFeed {
   browserFeed ??= createSessionsFeed(createBrowserSocket);
   return browserFeed;
@@ -422,16 +425,108 @@ export interface LiveAttention {
   close(): void;
 }
 
+/** A value kept live by openLivePushed: answers and pushes are applied in order of their start. */
+interface LivePushed<T> {
+  /** Pushes received so far: an answer to a request started at a lower count is older than the value shown. */
+  pushes(): number;
+  /** Applies the answer to a request started at push count `startedAt`, unless a push arrived since or it is closed. */
+  answer(startedAt: number, value: T): void;
+  /** Fetches now (after the fetch in flight, if any). */
+  refresh(): void;
+  close(): void;
+}
+
 /**
- * The attention state, live (spec 5): fetched once the sessions-scope subscription is in place and again after every
- * reconnect (nothing is pushed on subscribe), then replaced by each `attention` message. A failed fetch (503 while the
- * server prepares the list, or any other failure) keeps the last state and is retried after attentionRetryDelay; a push
- * cancels the retry.
+ * A value kept live over the sessions-scope subscription: fetched once the subscription is in place and again after
+ * every reconnect (nothing is pushed on subscribe), then replaced by each push `fromPush` recognises. A failed fetch
+ * keeps the last value, reports `problemOf(error)` and is retried after attentionRetryDelay; a push cancels the retry.
  *
- * Answers and pushes come over different connections, in no fixed order. Every push counts; an answer (GET, write,
- * hidden list) whose request started before the latest push is older than that push and is not applied: a GET that then
- * succeeds only clears the problem, one that fails is not reported or retried. Nothing is lost by dropping it: the
- * server pushes every change after the state it last pushed.
+ * Answers and pushes come over different connections, in no fixed order. Every push counts; an answer whose request
+ * started before the latest push is older than that push and is not applied: a GET that then succeeds only clears the
+ * problem, one that fails is not reported or retried. Nothing is lost by dropping it: the server pushes every change
+ * after the value it last pushed.
+ */
+function openLivePushed<T, P>(o: {
+  fetch: () => Promise<T>;
+  /** The pushed value in `msg`, or undefined when the message is not one. */
+  fromPush: (msg: ServerMessage) => T | undefined;
+  onState: (value: T | null, problem: P | null) => void;
+  problemOf: (e: unknown) => P;
+  feed: SessionsFeed;
+}): LivePushed<T> {
+  let closed = false;
+  let value: T | null = null;
+  let problem: P | null = null;
+  let pushes = 0;
+  let failures = 0;
+  let inFlight = false;
+  let again = false;
+  let retry: ReturnType<typeof setTimeout> | null = null;
+  const cancelRetry = (): void => {
+    if (retry !== null) clearTimeout(retry);
+    retry = null;
+  };
+  const show = (v: T): void => {
+    cancelRetry();
+    failures = 0;
+    value = v;
+    problem = null;
+    o.onState(value, problem);
+  };
+  const load = (): void => {
+    if (closed) return;
+    if (inFlight) { again = true; return; }
+    cancelRetry();
+    inFlight = true;
+    const startedAt = pushes;
+    o.fetch().then(
+      (v) => {
+        if (closed) return;
+        if (pushes === startedAt) { show(v); return; }
+        // Older than the pushed value: keep that, only note that fetching works again.
+        failures = 0;
+        if (problem !== null) { problem = null; o.onState(value, problem); }
+      },
+      (e: unknown) => {
+        if (closed || pushes !== startedAt) return; // a push since: the value shown is current
+        failures += 1;
+        problem = o.problemOf(e);
+        o.onState(value, problem);
+        retry = setTimeout(() => { retry = null; load(); }, attentionRetryDelay(failures));
+      },
+    ).finally(() => {
+      inFlight = false;
+      if (again && !closed) { again = false; load(); }
+    });
+  };
+  const unlisten = o.feed.listen({
+    message(msg) {
+      if (closed) return;
+      const pushed = o.fromPush(msg);
+      if (pushed === undefined) return;
+      pushes += 1;
+      show(pushed);
+    },
+    open: () => load(),
+  });
+  return {
+    pushes: () => pushes,
+    answer(startedAt, v) {
+      if (!closed && pushes === startedAt) show(v);
+    },
+    refresh: load,
+    close() {
+      closed = true;
+      cancelRetry();
+      unlisten();
+    },
+  };
+}
+
+/**
+ * The attention state, live (spec 5), by openLivePushed: `attention` pushes; a failed fetch is a problem (503 while the
+ * server prepares the list, or any other failure). The writes and the hidden list follow the same rule as the GET: an
+ * answer whose request started before the latest push is not applied.
  */
 export function openLiveAttention(
   onState: (s: AttentionLiveState) => void,
@@ -442,77 +537,56 @@ export function openLiveAttention(
     createSocket?: () => WebSocketLike;
   } = {},
 ): LiveAttention {
-  const fetchAttention = deps.fetchAttention ?? (() => api.attention());
   const fetchHidden = deps.fetchHidden ?? (() => api.attention(true));
-  let closed = false;
-  let response: AttentionResponse | null = null;
-  let problem: AttentionLiveState['problem'] = null;
-  /** Pushes received so far: an answer to a request started at a lower count is older than the state shown. */
-  let pushes = 0;
-  let failures = 0;
-  let inFlight = false;
-  let again = false;
-  let retry: ReturnType<typeof setTimeout> | null = null;
-  const cancelRetry = (): void => {
-    if (retry !== null) clearTimeout(retry);
-    retry = null;
-  };
-  const show = (r: AttentionResponse): void => {
-    cancelRetry();
-    failures = 0;
-    response = r;
-    problem = null;
-    onState({ response, problem });
-  };
-  const load = (): void => {
-    if (closed) return;
-    if (inFlight) { again = true; return; }
-    cancelRetry();
-    inFlight = true;
-    const startedAt = pushes;
-    fetchAttention().then(
-      (r) => {
-        if (closed) return;
-        if (pushes === startedAt) { show(r); return; }
-        // Older than the pushed state: keep that, only note that fetching works again.
-        failures = 0;
-        if (problem !== null) { problem = null; onState({ response, problem }); }
-      },
-      (e: unknown) => {
-        if (closed || pushes !== startedAt) return; // a push since: the state shown is current
-        failures += 1;
-        problem = attentionProblem(e);
-        onState({ response, problem });
-        retry = setTimeout(() => { retry = null; load(); }, attentionRetryDelay(failures));
-      },
-    ).finally(() => {
-      inFlight = false;
-      if (again && !closed) { again = false; load(); }
-    });
-  };
-  const unlisten = feedOf(deps).listen({
-    message(msg) {
-      if (msg.type !== 'attention' || closed) return;
-      pushes += 1;
-      show(msg.response);
-    },
-    open: () => load(),
+  const live = openLivePushed<AttentionResponse, NonNullable<AttentionLiveState['problem']>>({
+    fetch: deps.fetchAttention ?? (() => api.attention()),
+    fromPush: (msg) => (msg.type === 'attention' ? msg.response : undefined),
+    onState: (response, problem) => onState({ response, problem }),
+    problemOf: attentionProblem,
+    feed: feedOf(deps),
   });
   return {
     async write(call) {
-      const startedAt = pushes;
+      const startedAt = live.pushes();
       const r = await call();
-      if (!closed && pushes === startedAt) show(r);
+      live.answer(startedAt, r);
     },
     async hidden() {
-      const startedAt = pushes;
+      const startedAt = live.pushes();
       const r = await fetchHidden();
-      return pushes === startedAt ? r.hidden : null;
+      return live.pushes() === startedAt ? r.hidden : null;
     },
-    close() {
-      closed = true;
-      cancelRetry();
-      unlisten();
-    },
+    close: () => live.close(),
   };
+}
+
+/** Today's usage as the app shows it: the last result received, and whether the last fetch failed. */
+export interface TodayLiveState {
+  usage: TodayUsage | null;
+  /** The last fetch failed (it is retried); `usage` is the last one received, if any. */
+  failed: boolean;
+}
+
+/** The live today's usage: `refresh` fetches now (the stats page on opening: the server brings a quiet day up to date). */
+export interface LiveToday {
+  refresh(): void;
+  close(): void;
+}
+
+/**
+ * Today's usage, live (spec 2026-11-24-today-usage-design.md 6), by openLivePushed: `today` pushes; a failed fetch sets
+ * `failed` and keeps the last result.
+ */
+export function openLiveToday(
+  onState: (s: TodayLiveState) => void,
+  deps: { fetchToday?: () => Promise<TodayUsage>; feed?: SessionsFeed; createSocket?: () => WebSocketLike } = {},
+): LiveToday {
+  const live = openLivePushed<TodayUsage, true>({
+    fetch: deps.fetchToday ?? api.today,
+    fromPush: (msg) => (msg.type === 'today' ? msg.usage : undefined),
+    onState: (usage, problem) => onState({ usage, failed: problem !== null }),
+    problemOf: () => true,
+    feed: feedOf(deps),
+  });
+  return { refresh: () => live.refresh(), close: () => live.close() };
 }

@@ -9,9 +9,9 @@ const status = (over: Partial<NotificationStatus> = {}): NotificationStatus => (
   available: true, lastError: null, lastErrorAt: null, lastSentAt: null, lastSentKind: null, settingsError: null, ...over,
 });
 
-test('六种通知都有名字、说明和各来源的提示', () => {
-  expect(NOTIFICATION_KINDS.map((k) => k.key)).toEqual(['permission', 'finished', 'error', 'stuck', 'loop', 'failures']);
-  expect(NOTIFICATION_KINDS.map((k) => k.label)).toEqual(['等你确认权限', '一轮跑完了', '出错中断', '卡住很久', '原地打转', '失败扎堆']);
+test('七种通知都有名字、说明和各来源的提示', () => {
+  expect(NOTIFICATION_KINDS.map((k) => k.key)).toEqual(['permission', 'finished', 'error', 'stuck', 'loop', 'failures', 'usage']);
+  expect(NOTIFICATION_KINDS.map((k) => k.label)).toEqual(['等你确认权限', '一轮跑完了', '出错中断', '卡住很久', '原地打转', '失败扎堆', '今天的新输入 + 输出超过提醒线时提醒我']);
   for (const k of NOTIFICATION_KINDS) { expect(k.hint).not.toBe(''); expect(k.note).not.toBe(''); }
   expect(NOTIFICATION_KINDS[0]!.note).toBe('需要装 hooks；Cursor 没有这个状态');
 });
@@ -28,6 +28,7 @@ test('sentKindLabel 覆盖四种和测试', () => {
   expect(sentKindLabel('stuck')).toBe('卡住很久');
   expect(sentKindLabel('test')).toBe('测试通知');
   expect(KIND_LABELS.finished).toBe('一轮跑完了');
+  expect(sentKindLabel('usage')).toBe('今天的用量超过提醒线');
 });
 
 test('parseNumberField 校验整数和范围', () => {

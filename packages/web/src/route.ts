@@ -11,7 +11,8 @@ export type Route =
    */
   | { page: 'session'; sessionId: string; filePath?: string; nodeId?: string }
   | { page: 'diagnostics' }
-  | { page: 'notifications' }
+  /** `focus`: `#/notifications/usage-line` brings today's usage line into view and focuses it (the stats block's 修改). */
+  | { page: 'notifications'; focus?: 'usage-line' }
   | { page: 'stats' }
   | { page: 'files' }
   /** The sessions waiting for the user (attention spec 5). */
@@ -33,6 +34,7 @@ export function parseHash(hash: string): Route {
   };
   if (h === '/diagnostics') return { page: 'diagnostics' };
   if (h === '/notifications') return { page: 'notifications' };
+  if (h === '/notifications/usage-line') return { page: 'notifications', focus: 'usage-line' };
   if (h === '/stats') return { page: 'stats' };
   if (h === '/files') return { page: 'files' };
   if (h === '/attention') return { page: 'attention' };
@@ -65,6 +67,9 @@ export function parseHash(hash: string): Route {
   }
   return { page: 'home', projectId: null };
 }
+
+/** The notification settings with today's usage line in view and focused. */
+export const USAGE_LINE_HASH = '#/notifications/usage-line';
 
 /** The session page. */
 export function sessionHash(sessionId: string): string {
