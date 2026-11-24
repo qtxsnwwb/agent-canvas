@@ -43,7 +43,8 @@ export function scopeKey(scope: WaterfallScope): string {
   return scope.type === 'turn' ? `turn:${scope.turnKey}` : `agent:${scope.agentId}`;
 }
 
-function parseMs(ts: string | null): number | null {
+/** A timestamp in milliseconds; null for null or a value that is not a time. */
+export function parseMs(ts: string | null): number | null {
   if (ts === null) return null;
   const ms = Date.parse(ts);
   return Number.isNaN(ms) ? null : ms;
@@ -51,6 +52,26 @@ function parseMs(ts: string | null): number | null {
 
 function isActive(node: GraphNode): boolean {
   return node.status === 'running' || node.status === 'awaiting_permission';
+}
+
+/**
+ * When one step ran (the rule of buildWaterfall). `atMs`: its timestamp, or what stands in for one that cannot be read.
+ * Tool and subagent steps run from it to `endedAt` (or to it + duration; to `nowMs` while still active). A thinking
+ * step's timestamp is when its message was recorded, so it runs for its duration up to that time. Other steps are
+ * markers (start = end). `open`: still running or awaiting permission.
+ */
+export function stepSpan(node: GraphNode, atMs: number, nowMs: number): { startMs: number; endMs: number; open: boolean } {
+  let startMs = atMs;
+  let endMs = atMs;
+  const open = isActive(node);
+  if (node.kind === 'thinking') {
+    startMs = atMs - Math.max(0, node.durationMs ?? 0);
+  } else if (open) {
+    endMs = Math.max(atMs, nowMs);
+  } else {
+    endMs = Math.max(atMs, parseMs(node.endedAt) ?? atMs + Math.max(0, node.durationMs ?? 0));
+  }
+  return { startMs, endMs, open };
 }
 
 /**
@@ -72,17 +93,7 @@ export function buildWaterfall(graph: Graph, scope: WaterfallScope, options: { c
   }
   for (const node of nodes) {
     if (options.compact && isNoise(node)) continue;
-    const at = parseMs(node.timestamp) ?? earliest ?? 0;
-    let startMs = at;
-    let endMs = at;
-    const open = isActive(node);
-    if (node.kind === 'thinking') {
-      startMs = at - Math.max(0, node.durationMs ?? 0);
-    } else if (open) {
-      endMs = Math.max(at, options.nowMs);
-    } else {
-      endMs = Math.max(at, parseMs(node.endedAt) ?? at + Math.max(0, node.durationMs ?? 0));
-    }
+    const { startMs, endMs, open } = stepSpan(node, parseMs(node.timestamp) ?? earliest ?? 0, options.nowMs);
     rows.push({ id: node.id, node, startMs, endMs, open, childAgentId: node.kind === 'subagent' ? node.childAgentId : null });
   }
   rows.sort((a, b) => a.startMs - b.startMs || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));

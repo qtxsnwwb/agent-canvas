@@ -136,13 +136,14 @@ export function forkSources(edges: readonly Pick<ViewEdge, 'from'>[], ignore?: (
   return forks;
 }
 
-interface Entry { node: GraphNode; ms: number }
+/** A node and its timestamp in milliseconds (0 when it cannot be read), as turns are grouped and ordered. */
+export interface Entry { node: GraphNode; ms: number }
 
 /**
  * Main-thread entries (sorted by time, then id) grouped into turns: a node with a turnId belongs to that turn; one
  * without belongs to the latest turn that started at or before it, or to PRELUDE_TURN when there is none.
  */
-function groupByTurn(main: Entry[]): { groups: Map<string, Entry[]>; turnOf: Map<string, string>; turnStart: Map<string, number> } {
+export function groupByTurn(main: Entry[]): { groups: Map<string, Entry[]>; turnOf: Map<string, string>; turnStart: Map<string, number> } {
   const turnStart = new Map<string, number>();
   for (const x of main) {
     const key = x.node.turnId;
@@ -188,7 +189,7 @@ function parseMs(ts: string): number {
   const ms = Date.parse(ts);
   return Number.isNaN(ms) ? 0 : ms;
 }
-function byTimeThenId(a: Entry, b: Entry): number {
+export function byTimeThenId(a: Entry, b: Entry): number {
   return a.ms - b.ms || (a.node.id < b.node.id ? -1 : a.node.id > b.node.id ? 1 : 0);
 }
 
