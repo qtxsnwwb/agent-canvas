@@ -12,3 +12,4 @@ export * from './export.js';
 export * from './attention.js';
 export * from './today.js';
 export * from './bookmarks.js';
+export * from './compare.js';
