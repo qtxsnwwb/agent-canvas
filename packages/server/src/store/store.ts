@@ -12,6 +12,7 @@ import {
   SEARCH_MIN_CHARS,
   SEARCH_SNIPPET_CHARS,
   ORIGINS,
+  type BookmarkSnapshot,
   STALE_AFTER_MS,
   type Change,
   type Diagnostics,
@@ -92,6 +93,20 @@ export type RawEvent =
  * (the pipeline skips and reports it); the other fields come from their own columns and are intact.
  */
 export type StoredRawEvent = RawEvent & { ingestId: number; origin: Origin; corrupt?: string };
+/**
+ * A bookmark row as stored (bookmark table): nodeId null for a session bookmark (node_id '' in the table); deletedAt set
+ * while it is soft-deleted. The API's Bookmark adds what exists now (bookmarks/service.ts).
+ */
+export interface StoredBookmark {
+  id: number;
+  sessionId: string;
+  nodeId: string | null;
+  note: string;
+  createdAt: string;
+  noteUpdatedAt: string | null;
+  deletedAt: string | null;
+  snapshot: BookmarkSnapshot;
+}
 /** One hook counter of one origin (Diagnostics.hookEvents without the origin). */
 export type HookEventStat = Omit<Diagnostics['hookEvents'][number], 'origin'>;
 
@@ -180,6 +195,8 @@ export interface Store {
   /** Ordered by lastActivityAt descending. */
   listSessions(projectId: string): Session[];
   getSession(sessionId: string): Session | null;
+  /** One node by its primary key (no graph load), or null when the session has no such node. */
+  getNode(sessionId: string, nodeId: string): GraphNode | null;
   /** Sessions whose stored status is running or awaiting_permission (one pass over the session rows). */
   liveSessions(): Session[];
   /** Timestamp of the session's latest main-thread prompt node (served by node_main_prompt), or null when none. */
@@ -286,6 +303,23 @@ export interface Store {
   clearAllDirty(): void;
   dirtySessionIds(): string[];
   bumpUnknown(recordType: string, sample: string): void;
+  // ---- bookmarks (bookmark table; kept by clearDerived). Validation, snapshots and timing are bookmarks/service.ts's.
+  /** Not deleted ones, of one session or all: by createdAt descending, then id descending. */
+  listBookmarks(sessionId?: string): StoredBookmark[];
+  /** The row with this id, deleted or not; null when there is none (never created, or purged). */
+  bookmarkById(id: number): StoredBookmark | null;
+  /** The row of this place (nodeId null: the session), deleted or not; null when there is none. */
+  bookmarkByTarget(sessionId: string, nodeId: string | null): StoredBookmark | null;
+  /** Inserts a row (not deleted, noteUpdatedAt null) and returns its id; the place must have no row (unique). */
+  insertBookmark(row: { sessionId: string; nodeId: string | null; note: string; createdAt: string; snapshot: BookmarkSnapshot }): number;
+  /** Sets the note and noteUpdatedAt of a row; false when there is no such row. */
+  setBookmarkNote(id: number, note: string, at: string): boolean;
+  /** Sets (soft delete) or clears (restore, null) deletedAt; false when there is no such row. */
+  setBookmarkDeleted(id: number, deletedAt: string | null): boolean;
+  /** Removes a row for good. */
+  removeBookmark(id: number): void;
+  /** Removes the rows deleted before `beforeIso` (strictly); returns how many. */
+  purgeBookmarks(beforeIso: string): number;
   getMeta(key: string): string | null;
   /** Every meta row whose key starts with `prefix` (non-empty), by key ascending. */
   metaWithPrefix(prefix: string): [string, string][];
@@ -800,6 +834,7 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     `SELECT COALESCE(json_extract(body, '$.origin'), 'claude') AS origin, COUNT(*) AS n FROM session GROUP BY origin`,
   );
   const selectSession = db.prepare(`SELECT body FROM session WHERE id = ?`).pluck();
+  const selectNodeBody = db.prepare(`SELECT body FROM node WHERE session_id = ? AND id = ?`).pluck();
   const selectLiveSessions = db
     .prepare(`SELECT body FROM session WHERE status IN ('running', 'awaiting_permission') ORDER BY last_activity_at DESC, id`)
     .pluck();
@@ -979,6 +1014,43 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
     }
   };
   const selectUnknown = db.prepare(`SELECT record_type, count, sample FROM unknown_stat ORDER BY record_type`);
+  // Bookmarks: a place is a prefix of the unique (session_id, node_id) index; the whole list is a sort of the live rows.
+  const BOOKMARK_COLUMNS = `id, session_id, node_id, note, created_at, note_updated_at, deleted_at, snapshot`;
+  const selectBookmarks = db.prepare(
+    `SELECT ${BOOKMARK_COLUMNS} FROM bookmark WHERE deleted_at IS NULL ORDER BY created_at DESC, id DESC`,
+  );
+  const selectSessionBookmarks = db.prepare(
+    `SELECT ${BOOKMARK_COLUMNS} FROM bookmark WHERE session_id = ? AND deleted_at IS NULL ORDER BY created_at DESC, id DESC`,
+  );
+  const selectBookmarkById = db.prepare(`SELECT ${BOOKMARK_COLUMNS} FROM bookmark WHERE id = ?`);
+  const selectBookmarkByTarget = db.prepare(`SELECT ${BOOKMARK_COLUMNS} FROM bookmark WHERE session_id = ? AND node_id = ?`);
+  const insertBookmark = db.prepare(
+    `INSERT INTO bookmark (session_id, node_id, note, created_at, snapshot) VALUES (@sessionId, @nodeId, @note, @createdAt, @snapshot)`,
+  );
+  const updateBookmarkNote = db.prepare(`UPDATE bookmark SET note = ?, note_updated_at = ? WHERE id = ?`);
+  const updateBookmarkDeleted = db.prepare(`UPDATE bookmark SET deleted_at = ? WHERE id = ?`);
+  const deleteBookmark = db.prepare(`DELETE FROM bookmark WHERE id = ?`);
+  const purgeBookmarks = db.prepare(`DELETE FROM bookmark WHERE deleted_at IS NOT NULL AND deleted_at < ?`);
+  interface BookmarkRow {
+    id: number;
+    session_id: string;
+    node_id: string;
+    note: string;
+    created_at: string;
+    note_updated_at: string | null;
+    deleted_at: string | null;
+    snapshot: string;
+  }
+  const toBookmark = (r: BookmarkRow): StoredBookmark => ({
+    id: r.id,
+    sessionId: r.session_id,
+    nodeId: r.node_id === '' ? null : r.node_id,
+    note: r.note,
+    createdAt: r.created_at,
+    noteUpdatedAt: r.note_updated_at,
+    deletedAt: r.deleted_at,
+    snapshot: JSON.parse(r.snapshot) as BookmarkSnapshot,
+  });
   const selectFiles = db.prepare(`SELECT file, "offset", size FROM file_offset ORDER BY file`);
 
   /**
@@ -1282,6 +1354,10 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
       return (selectSessions.all(projectId) as { body: string }[]).map((r) => JSON.parse(r.body) as Session);
     },
     getSession,
+    getNode(sessionId, nodeId) {
+      const body = selectNodeBody.get(sessionId, nodeId) as string | undefined;
+      return body === undefined ? null : (JSON.parse(body) as GraphNode);
+    },
     liveSessions() {
       return (selectLiveSessions.all() as string[]).map((body) => JSON.parse(body) as Session);
     },
@@ -1473,6 +1549,30 @@ export function openStore(dbPath: string, options: StoreOptions = {}): Store {
       upsertUnknown.run(recordType, sample.slice(0, SAMPLE_MAX));
     },
     lastHookAt,
+    listBookmarks(sessionId) {
+      const rows = (sessionId === undefined ? selectBookmarks.all() : selectSessionBookmarks.all(sessionId)) as BookmarkRow[];
+      return rows.map(toBookmark);
+    },
+    bookmarkById(id) {
+      const row = selectBookmarkById.get(id) as BookmarkRow | undefined;
+      return row === undefined ? null : toBookmark(row);
+    },
+    bookmarkByTarget(sessionId, nodeId) {
+      const row = selectBookmarkByTarget.get(sessionId, nodeId ?? '') as BookmarkRow | undefined;
+      return row === undefined ? null : toBookmark(row);
+    },
+    insertBookmark(row) {
+      return Number(
+        insertBookmark.run({ sessionId: row.sessionId, nodeId: row.nodeId ?? '', note: row.note, createdAt: row.createdAt, snapshot: JSON.stringify(row.snapshot) })
+          .lastInsertRowid,
+      );
+    },
+    setBookmarkNote: (id, note, at) => updateBookmarkNote.run(note, at, id).changes > 0,
+    setBookmarkDeleted: (id, deletedAt) => updateBookmarkDeleted.run(deletedAt, id).changes > 0,
+    removeBookmark(id) {
+      deleteBookmark.run(id);
+    },
+    purgeBookmarks: (beforeIso) => purgeBookmarks.run(beforeIso).changes,
     async settleWal() {
       if (checkpointer === null || checkpointerFailed || !db.open) return;
       if (walFileSize() <= walLimit + (options.walSettleSlackBytes ?? WAL_SETTLE_SLACK_BYTES)) return;

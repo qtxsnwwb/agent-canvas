@@ -87,6 +87,14 @@ export interface Session {
 }
 
 /**
+ * A session's name as the pages show it (home page, session page, exported viewer): its title, else the first 8
+ * characters of its id. The title itself is the normalizer's (custom title > agent name > hook title > first prompt).
+ */
+export function sessionName(session: Pick<Session, 'id' | 'title'>): string {
+  return session.title ?? session.id.slice(0, 8);
+}
+
+/**
  * activeSessionCount counts sessions in running, awaiting_input or awaiting_permission. origins: the origins of the
  * project's sessions, each once, in ORIGINS order.
  */

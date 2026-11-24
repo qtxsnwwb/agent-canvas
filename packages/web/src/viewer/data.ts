@@ -1,4 +1,4 @@
-import type { ExportBundle, Graph, GraphEdge, GraphNode, NodeDetail } from '@agent-canvas/shared';
+import { sessionName, type ExportBundle, type Graph, type GraphEdge, type GraphNode, type NodeDetail } from '@agent-canvas/shared';
 import { neutralizeBidi } from '../bidi';
 import type { LayoutClient } from '../canvas/layoutClient';
 import { parseHash } from '../route';
@@ -104,11 +104,6 @@ export function embeddedSource(bundle: ExportBundle, createLayoutClient: () => L
     anomalies: null,
     createLayoutClient,
   };
-}
-
-/** The session's name as the page shows it: its (masked) title, else the first 8 characters of its id. */
-export function sessionName(session: { id: string; title: string | null }): string {
-  return session.title ?? session.id.slice(0, 8);
 }
 
 export function exportDocumentTitle(bundle: ExportBundle): string {

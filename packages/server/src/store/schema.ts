@@ -111,6 +111,24 @@ CREATE TABLE IF NOT EXISTS unknown_stat (
   sample      TEXT NOT NULL
 );
 
+-- The user's bookmarks (spec 2026-11-24-bookmarks-design.md 7). Not derived data: not in DERIVED_TABLES, so rebuild,
+-- the automatic rebuild on start and compact keep its rows; an older build opening the database never reads it.
+-- node_id '' marks a session bookmark (nodeId null in the API), so (session_id, node_id) is one place, also for deleted
+-- rows (creating on a place whose row is soft-deleted removes that row first). AUTOINCREMENT: an id is never reused,
+-- so the undo of a purged bookmark cannot restore another one. snapshot: JSON BookmarkSnapshot, written once.
+-- deleted_at: soft delete (lists leave the row out; restore clears it); rows deleted over 24 h ago are purged on a write.
+CREATE TABLE IF NOT EXISTS bookmark (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id      TEXT NOT NULL,
+  node_id         TEXT NOT NULL,
+  note            TEXT NOT NULL,
+  created_at      TEXT NOT NULL,
+  note_updated_at TEXT,
+  deleted_at      TEXT,
+  snapshot        TEXT NOT NULL,
+  UNIQUE (session_id, node_id)
+);
+
 -- Small key/value table: epoch, last_hook_at, normalizer_version, rebuild_in_progress, hook_stat_ready, a poll
 -- source's note per unit it read completely ('poll:' + store key, e.g. poll:cursor:<id>; kept by rebuild), and the
 -- storage migration's progress ('storage:' keys, migrate-storage.ts).

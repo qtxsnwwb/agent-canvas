@@ -24,6 +24,7 @@ import {
   type ServerMessage,
 } from '@agent-canvas/shared';
 import { AttentionService } from '../attention/service.js';
+import { BookmarksService, type BookmarkResult } from '../bookmarks/service.js';
 import type { Config } from '../config.js';
 import { isForeignHookPayload } from '../hook-guard.js';
 import { ABORTED_NOTE } from '../normalize/cursor.js';
@@ -333,6 +334,8 @@ function parseClientMessage(raw: string): ClientMessage | null {
  * `today`: the service behind /api/today (default: one made by createTodayService over the stats summary cache, closed
  * with the server); fed the change stream, told when the notification settings change, its updates pushed to every
  * sessions-scope connection as `today` messages.
+ * `bookmarks`: the service behind /api/bookmarks (default: one reading `store`); after each of its writes the sessions
+ * whose bookmarks changed are pushed to every sessions-scope connection as a `bookmarks` message.
  */
 export function buildServer(deps: {
   store: Store;
@@ -350,6 +353,7 @@ export function buildServer(deps: {
   exports?: ExportService;
   attention?: AttentionService | AttentionSlot;
   today?: TodayService;
+  bookmarks?: BookmarksService;
 }): FastifyInstance {
   const { store, pipeline, config, notifications } = deps;
   const stats = deps.stats ?? new StatsService(storeStatsSource(store));
@@ -361,6 +365,7 @@ export function buildServer(deps: {
   files.shareReadsWith(stats);
   const exports = deps.exports ?? new ExportService({ store, dataDir: config.dataDir });
   const learned = new LearnedValuesService(store);
+  const bookmarks = deps.bookmarks ?? new BookmarksService({ store });
   // Built here, computed on the first request or change (not now: that would delay listening).
   const today =
     deps.today ?? createTodayService({ store, pipeline, cache: stats.summaryCache(), ...(notifications !== undefined ? { notifications } : {}) });
@@ -435,6 +440,7 @@ export function buildServer(deps: {
     pipeline.onChanges((changes) => today.noteChanges(changes)),
     today.onUpdate((usage) => pushToSessionsScope({ type: 'today', usage })),
   ];
+  const unwireBookmarks = bookmarks.onUpdate((sessionIds) => pushToSessionsScope({ type: 'bookmarks', sessionIds }));
   // The attention page (spec 4.2): not tied to the notifications (they exist in start() only).
   const wireAttention = (service: AttentionService): (() => void) => {
     const offs = [
@@ -476,6 +482,7 @@ export function buildServer(deps: {
     unsubscribeAnomalies();
     unsubscribeLearned();
     for (const off of unwireToday) off();
+    unwireBookmarks();
     if (deps.today === undefined) today.close(); // the default one is ours
     attentionSlot.bind(null);
     unwireAttention();
@@ -726,6 +733,55 @@ export function buildServer(deps: {
   app.put('/api/attention/settings', { onRequest: sameOriginJson }, async (req, reply) =>
     attentionWrite(reply, (service) => service.setAutoHideHours(field(req.body, 'autoHideHours'))),
   );
+
+  // ---- bookmarks (spec 2026-11-24-bookmarks-design.md 7). Writes guarded like the export routes (sameOriginJson: the
+  // DELETE and the restore send a JSON body too, `{}`); 503 while writes are held. Answers are not cached.
+  /** A path id: a positive decimal integer, else null (answered 404, as an unknown id). */
+  const bookmarkId = (raw: string): number | null => {
+    if (!/^[1-9]\d{0,15}$/.test(raw)) return null;
+    const n = Number(raw);
+    return Number.isSafeInteger(n) ? n : null;
+  };
+  const bookmarkAnswer = (reply: FastifyReply, result: BookmarkResult): FastifyReply => {
+    if (result.ok) return reply.code(result.status).send(result.bookmark);
+    const { ok: _ok, status, ...json } = result;
+    return reply.code(status).send(json);
+  };
+  /** The write routes' common start: no-store; 503 while the database is being compacted (writes held). */
+  const bookmarkWrite = (reply: FastifyReply): FastifyReply | null => {
+    reply.header('cache-control', 'no-store');
+    return pipeline.writesHeld() ? reply.code(503).send({ error: WRITES_HELD }) : null;
+  };
+  const NO_BOOKMARK = { error: '找不到这个书签' };
+  app.get<{ Querystring: { sessionId?: unknown } }>('/api/bookmarks', async (req, reply) => {
+    reply.header('cache-control', 'no-store');
+    const { sessionId } = req.query;
+    if (sessionId !== undefined && typeof sessionId !== 'string') return reply.code(400).send({ error: 'sessionId 只能给一个' });
+    return { bookmarks: bookmarks.list(sessionId === undefined || sessionId === '' ? undefined : sessionId) };
+  });
+  app.post('/api/bookmarks', { onRequest: sameOriginJson }, async (req, reply) => {
+    return bookmarkWrite(reply) ?? bookmarkAnswer(reply, bookmarks.create(req.body));
+  });
+  app.patch<{ Params: { id: string } }>('/api/bookmarks/:id', { onRequest: sameOriginJson }, async (req, reply) => {
+    const held = bookmarkWrite(reply);
+    if (held !== null) return held;
+    const id = bookmarkId(req.params.id);
+    return id === null ? reply.code(404).send(NO_BOOKMARK) : bookmarkAnswer(reply, bookmarks.updateNote(id, req.body));
+  });
+  app.delete<{ Params: { id: string } }>('/api/bookmarks/:id', { onRequest: sameOriginJson }, async (req, reply) => {
+    const held = bookmarkWrite(reply);
+    if (held !== null) return held;
+    const id = bookmarkId(req.params.id);
+    const result = id === null ? null : bookmarks.remove(id);
+    if (result === null || !result.ok) return reply.code(404).send(NO_BOOKMARK);
+    return { ok: true };
+  });
+  app.post<{ Params: { id: string } }>('/api/bookmarks/:id/restore', { onRequest: sameOriginJson }, async (req, reply) => {
+    const held = bookmarkWrite(reply);
+    if (held !== null) return held;
+    const id = bookmarkId(req.params.id);
+    return id === null ? reply.code(404).send(NO_BOOKMARK) : bookmarkAnswer(reply, bookmarks.restore(id));
+  });
 
   if (notifications !== undefined) {
     app.get('/api/notifications/settings', async (): Promise<NotificationSettingsResponse> => notifications.getSettings());
