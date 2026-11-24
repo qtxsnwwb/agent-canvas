@@ -13,6 +13,7 @@ export const KIND_LABELS: Record<SentKind, string> = {
   stuck: '卡住很久',
   loop: ANOMALY_LABELS.loop.name,
   failures: ANOMALY_LABELS.failures.name,
+  usage: '今天的用量超过提醒线',
   test: '测试通知',
 };
 

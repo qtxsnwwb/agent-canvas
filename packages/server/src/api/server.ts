@@ -42,6 +42,7 @@ import { LearnedValuesService, parseLearnedBody } from '../export/learned.js';
 import { maskedContentSnippet, maskedDiagnostics, maskedSessionMatch, snippetMasker } from '../export/masked-search.js';
 import { FilesService, parseFilesQuery } from '../files/service.js';
 import { parseStatsQuery, StatsService, storeStatsSource } from '../stats/service.js';
+import { TodayService, type TodayServiceDeps } from '../stats/today-service.js';
 
 const HOOK_BODY_LIMIT = 64 * 1024 * 1024;
 /** The origins `/hooks?origin=` accepts (the others install no hooks); anything else is Claude Code. */
@@ -79,6 +80,37 @@ export function createAttentionService(
     isAbortedCall: (sessionId, nodeId) => store.getNodeDetail(sessionId, nodeId)?.text === ABORTED_NOTE,
     ...(options.coalesceMs !== undefined ? { coalesceMs: options.coalesceMs } : {}),
     ...(options.log !== undefined ? { log: options.log } : {}),
+  });
+}
+
+/**
+ * The today service as the server runs it (spec 2026-11-24-today-usage-design.md 5, 6): the line is the notification
+ * settings' usageLineTokens (0: none), read at every computation from the notification service when there is one, else
+ * from the store; ready while the start-up work is done and nothing is importing; a crossing goes to the notification
+ * service, which decides by its switches.
+ */
+export function createTodayService(deps: {
+  store: Store;
+  pipeline: Pick<Pipeline, 'importing'> & { startupDone?(): boolean };
+  cache: TodayServiceDeps['cache'];
+  notifications?: NotificationService;
+  now?: () => number;
+  dayKey?: (ms: number) => string;
+  timers?: TodayServiceDeps['timers'];
+}): TodayService {
+  const { store, pipeline, notifications } = deps;
+  return new TodayService({
+    cache: deps.cache,
+    store,
+    line: () => {
+      const tokens = (notifications?.getSettings().settings ?? loadNotificationSettings(store).settings).usageLineTokens;
+      return tokens > 0 ? tokens : null;
+    },
+    ready: () => (pipeline.startupDone?.() ?? true) && !pipeline.importing(),
+    ...(notifications !== undefined ? { onCross: (usage) => notifications.notifyUsage(usage) } : {}),
+    ...(deps.now !== undefined ? { now: deps.now } : {}),
+    ...(deps.dayKey !== undefined ? { dayKey: deps.dayKey } : {}),
+    ...(deps.timers !== undefined ? { timers: deps.timers } : {}),
   });
 }
 
@@ -288,6 +320,9 @@ function parseClientMessage(raw: string): ClientMessage | null {
  * an AttentionSlot when it is created after the server (start()). Whichever it is, it is fed the change stream, the
  * re-derived sessions and the stored hooks, ticked every ATTENTION_TICK_MS, and its updates are pushed to every
  * sessions-scope WebSocket connection as `attention` messages; all of it stops when the server closes.
+ * `today`: the service behind /api/today (default: one made by createTodayService over the stats summary cache, closed
+ * with the server); fed the change stream, told when the notification settings change, its updates pushed to every
+ * sessions-scope connection as `today` messages.
  */
 export function buildServer(deps: {
   store: Store;
@@ -304,6 +339,7 @@ export function buildServer(deps: {
   /** Export and its settings (default: one reading `store`, settings in config.dataDir). */
   exports?: ExportService;
   attention?: AttentionService | AttentionSlot;
+  today?: TodayService;
 }): FastifyInstance {
   const { store, pipeline, config, notifications } = deps;
   const stats = deps.stats ?? new StatsService(storeStatsSource(store));
@@ -315,6 +351,9 @@ export function buildServer(deps: {
   files.shareReadsWith(stats);
   const exports = deps.exports ?? new ExportService({ store, dataDir: config.dataDir });
   const learned = new LearnedValuesService(store);
+  // Built here, computed on the first request or change (not now: that would delay listening).
+  const today =
+    deps.today ?? createTodayService({ store, pipeline, cache: stats.summaryCache(), ...(notifications !== undefined ? { notifications } : {}) });
   // The router refuses a path parameter longer than maxParamLength (default 100) as if the route did not exist. Node
   // ids are built from the tools' own ids — a subagent's node carries two session ids and a call id — and are often
   // longer, so their details answered 404 (or 414). Node's own limit on the request line still bounds the length.
@@ -370,22 +409,29 @@ export function buildServer(deps: {
   const unsubscribeAnomalies = pipeline.onChanges((changes) => anomalies.noteChanges(changes));
   // Learned values of a changed session are computed again on the next request.
   const unsubscribeLearned = pipeline.onChanges((changes) => learned.noteChanges(changes));
+  /** A message for every sessions-scope connection (the app's shared feed). */
+  const pushToSessionsScope = (message: ServerMessage): void => {
+    for (const conn of [...connections]) {
+      if (!conn.sessionsScope) continue;
+      try {
+        conn.send(message);
+      } catch {
+        connections.delete(conn);
+      }
+    }
+  };
+  // Today's usage (header, stats block): recomputed at most every 30 s while sessions change, pushed when it changes.
+  const unwireToday = [
+    pipeline.onChanges((changes) => today.noteChanges(changes)),
+    today.onUpdate((usage) => pushToSessionsScope({ type: 'today', usage })),
+  ];
   // The attention page (spec 4.2): not tied to the notifications (they exist in start() only).
   const wireAttention = (service: AttentionService): (() => void) => {
     const offs = [
       pipeline.onChanges((changes) => service.noteChanges(changes)),
       pipeline.onResync((sessionId) => service.noteResync(sessionId)),
       pipeline.onHookStored((sessionId) => service.noteHook(sessionId)),
-      service.onUpdate((response) => {
-        for (const conn of [...connections]) {
-          if (!conn.sessionsScope) continue;
-          try {
-            conn.send({ type: 'attention', response });
-          } catch {
-            connections.delete(conn);
-          }
-        }
-      }),
+      service.onUpdate((response) => pushToSessionsScope({ type: 'attention', response })),
     ];
     // Changes caused by time alone: a running session becoming stuck, an item passing the auto-hide limit.
     const timer = setInterval(() => {
@@ -419,6 +465,8 @@ export function buildServer(deps: {
     unsubscribeFiles();
     unsubscribeAnomalies();
     unsubscribeLearned();
+    for (const off of unwireToday) off();
+    if (deps.today === undefined) today.close(); // the default one is ours
     attentionSlot.bind(null);
     unwireAttention();
     ownAttention?.close();
@@ -559,6 +607,8 @@ export function buildServer(deps: {
     return anomalies.list(query);
   });
   app.get('/api/anomalies/counts', async () => anomalies.counts());
+  // Today's usage: counts and durations only (no conversation content); at most 30 s behind (TODAY_THROTTLE_MS).
+  app.get('/api/today', async () => today.get());
   // `mask=1`: unknown-record samples (cut raw records) masked.
   app.get<{ Querystring: { mask?: unknown } }>(
     '/api/diagnostics',
@@ -674,6 +724,7 @@ export function buildServer(deps: {
       if (pipeline.writesHeld()) return reply.code(503).send({ error: '数据库正在整理，稍后再试' });
       const result = notifications.putSettings(req.body);
       if (!result.ok) return reply.code(400).send({ error: result.error });
+      today.settingsChanged(); // the line may have changed
       return result.response;
     });
     // Always 200: a delivery failure is not a client error.

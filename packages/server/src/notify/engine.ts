@@ -93,6 +93,8 @@ const KIND_LABEL: Record<NotificationKind, string> = {
   stuck: '卡住了',
   loop: ANOMALY_LABELS.loop.name,
   failures: ANOMALY_LABELS.failures.name,
+  // Sent by NotificationService.notifyUsage, never by the engine (no session).
+  usage: '今天的用量',
 };
 /** The anomaly kinds that notify (spec 5: churn and cost never do). */
 const ANOMALY_NOTIFY_KINDS: ReadonlySet<Anomaly['kind']> = new Set(['loop', 'failures']);

@@ -1,4 +1,4 @@
-import type { Graph, GraphEdge, GraphNode, Usage } from '@agent-canvas/shared';
+import { formatTokens, type Graph, type GraphEdge, type GraphNode, type Usage } from '@agent-canvas/shared';
 import { formatDuration } from './format';
 
 export interface ReplayRange { startMs: number; endMs: number }
@@ -76,15 +76,8 @@ export function turnMarks(graph: Graph): { turnId: string; ms: number }[] {
 /** 按 messageId 去重求和；messageId 为空的节点各算一次；usage 为空的跳过。The rule lives in shared (the stats use it too). */
 export { usageTotal } from '@agent-canvas/shared';
 
-const trim = (x: number) => x.toFixed(1).replace(/\.0$/, '');
-
-/** 999 → "999"，1200 → "1.2k"，15000 → "15k"，1250000 → "1.3M"；负数或非有限数 → "0"。 */
-export function formatTokens(n: number): string {
-  if (!Number.isFinite(n) || n < 0) return '0';
-  if (n < 1000) return String(Math.round(n));
-  if (n < 1_000_000 && Number(trim(n / 1000)) < 1000) return `${trim(n / 1000)}k`;
-  return `${trim(n / 1_000_000)}M`;
-}
+/** 999 → "999"，1200 → "1.2k"，15000 → "15k"，1250000 → "1.3M"；负数或非有限数 → "0"。The function lives in shared (the server's usage notification writes counts the same way). */
+export { formatTokens } from '@agent-canvas/shared';
 
 /** `ms` clamped to the range (unchanged without a range). */
 export function clampToRange(ms: number, range: ReplayRange | null): number {

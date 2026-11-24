@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import { countedUsageNodes, groupTurns, PRELUDE_TURN_KEY, STATS_RANGES, usageTotal, type GraphNode } from '../src/index.js';
+import { countedUsageNodes, formatTokens, groupTurns, PRELUDE_TURN_KEY, STATS_RANGES, usageTotal, type GraphNode } from '../src/index.js';
 
 function mk(id: string, ts: string, o: Partial<GraphNode> = {}): GraphNode {
   return {
@@ -82,4 +82,8 @@ test('token rule: nodes in the given (snapshot) order; a non-empty messageId onc
   expect(countedUsageNodes(nodes).map((n) => n.id)).toEqual(['late', 'e1', 'e2', 'n1', 'n2', 'm2']);
   expect(usageTotal(nodes)).toEqual({ inputTokens: 131, cachedInputTokens: 1310, outputTokens: 14 });
   expect(usageTotal([])).toEqual({ inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 });
+});
+
+test('formatTokens: the token short form (shared by the pages and the usage notification)', () => {
+  expect([999, 1000, 1200, 999_949, 999_950, 1_234_567, -5, Number.NaN].map(formatTokens)).toEqual(['999', '1k', '1.2k', '999.9k', '1M', '1.2M', '0', '0']);
 });
