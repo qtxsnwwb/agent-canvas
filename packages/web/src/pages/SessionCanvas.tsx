@@ -6,7 +6,11 @@
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
-import type { SessionSource } from '../sessionSource';
+import type { Bookmark } from '@agent-canvas/shared';
+import type { SessionBookmarks, SessionSource } from '../sessionSource';
+import { createSessionBookmarkController, type SessionBookmarkController } from '../bookmarks';
+import { BookmarkToggle } from '../canvas/BookmarkToggle';
+import { NO_STARS, bookmarkMarks, bookmarksUntil, stableStars, type StarMarks } from '../canvas/bookmarkMarks';
 import { Canvas, type CanvasFocus } from '../canvas/Canvas';
 import { FilePanel } from '../canvas/FilePanel';
 import { AnomalyPanel, useSessionAnomalies } from '../canvas/AnomalyPanel';
@@ -32,6 +36,25 @@ import { ALL_PROGRESSING, type Progressing } from '../canvas/nodes';
 import { scopeKey, scopeOf, snapshotClock, stepChain, stepTicking, waterfallClock, type WaterfallScope } from '../canvas/waterfall';
 import { NODE_MISSING_NOTE, nearestTurnNode, nextNodeTarget, nodeJumpAction, type NodeTarget } from '../nodeJump';
 import { useNow } from '../useNow';
+
+const NO_SUBSCRIBE = (): (() => void) => () => {};
+const NO_BOOKMARKS: readonly Bookmark[] = [];
+const noBookmarks = (): readonly Bookmark[] => NO_BOOKMARKS;
+
+/**
+ * The session page's marking (bookmarks spec 5): one controller per source's bookmarks, fed the session's list live
+ * (SessionBookmarks.watch: the app's sessions-scope socket, refetched on each `bookmarks` push naming the session, so a
+ * bookmark made or removed elsewhere shows here too). null without bookmarks (the exported viewer).
+ */
+function useSessionBookmarks(b: SessionBookmarks | null): SessionBookmarkController | null {
+  const ctrl = useMemo(() => (b === null ? null : createSessionBookmarkController(b)), [b]);
+  useEffect(() => {
+    if (ctrl === null || b === null) return;
+    const stop = b.watch((list) => ctrl.setList(list));
+    return () => { stop(); ctrl.close(); };
+  }, [ctrl, b]);
+  return ctrl;
+}
 
 function hasKeys(obj: object): boolean {
   for (const _ in obj) return true;
@@ -85,7 +108,7 @@ function DensitySwitch({ compact, disabled, onChange }: { compact: boolean; disa
 /**
  * The session page's canvas and panels, fed from a SessionSource: the live one in the app (SessionPage below), the
  * embedded one in an exported file (viewer/Viewer.tsx). A source without files or anomalies hides that button and its
- * panel (and the card markers); a snapshot source (`live` false) shows nothing as progressing.
+ * panel (and the card markers); one without bookmarks hides the toolbar's and the drawer's bookmark buttons and the stars; a snapshot source (`live` false) shows nothing as progressing.
  *
  * Memoized on `source` and the info bar's slot for the view switch, so the info bar's per-second and per-update
  * re-renders do not reach React Flow; it re-renders when the canvas snapshot or the selection changes. Every handler
@@ -157,6 +180,11 @@ export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, file
     return (lastMarks.current = stableCardMarks(lastMarks.current, next));
   }, [anomalyData, anomalyResolver, markView, replayMs]);
   const sideOpen = filesOpen || anomaliesOpen;
+  // ---- bookmarks (bookmarks spec 5): the toolbar's and the drawer's buttons, the stars on the cards ----
+  const bookmarks = useSessionBookmarks(source.bookmarks);
+  // The same array until the list or what was done here changes (typing a note does not re-render the page).
+  const shownBookmarks = useSyncExternalStore(bookmarks?.subscribe ?? NO_SUBSCRIBE, bookmarks?.shown ?? noBookmarks, bookmarks?.shown ?? noBookmarks);
+  const stepBookmarks = useMemo(() => shownBookmarks.filter((b) => b.nodeId !== null), [shownBookmarks]);
   const [focus, setFocus] = useState<CanvasFocus | null>(null);
   const focusSeq = useRef(0);
   const [pickedStep, setPickedStep] = useState<string | null>(null);
@@ -206,6 +234,17 @@ export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, file
   /** The step open in the drawer, and the scope (scopeKey) it belongs to; it is shown only while that scope is listed. */
   const [detail, setDetail] = useState<{ id: string; scope: string } | null>(null);
   const graphNow = source.getGraph();
+  // Stars only on cards the view has (rolled up to the turn and subagent cards, or the fold, holding a step it does not
+  // draw), in the replay view only for steps the replay time has reached; none in the timeline or the waterfall. Kept
+  // referentially stable while unchanged, like the anomaly markers.
+  const hasStepBookmarks = stepBookmarks.length > 0;
+  const starResolver = useMemo(() => (hasStepBookmarks ? graphResolver(graphNow) : null), [hasStepBookmarks, graphNow]);
+  const lastStars = useRef<StarMarks>(NO_STARS);
+  const stars = useMemo(() => {
+    if (starResolver === null) return (lastStars.current = NO_STARS);
+    const reached = bookmarksUntil(stepBookmarks, graphNow, replayMs);
+    return (lastStars.current = stableStars(lastStars.current, bookmarkMarks(reached, markView, graphNow, starResolver)));
+  }, [starResolver, stepBookmarks, graphNow, markView, replayMs]);
   // With nothing selected the panel follows the latest turn (until it is closed). In the outline view every view node
   // is a turn card or a subagent, so a selection always has a scope.
   const explicitScope = outline ? scopeOf(selectedView) : null;
@@ -552,6 +591,7 @@ export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, file
     <>
       {toolbar !== null && createPortal(
         <>
+          <BookmarkToggle ctrl={bookmarks} nodeId={null} />
           {filesAvailable && (
             <button type="button" className="files-toggle" aria-pressed={filesOpen}
               onClick={toggleFiles} title="这个会话读过、改过哪些文件">文件</button>
@@ -595,6 +635,7 @@ export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, file
           focus={focus}
           rightCovered={sideOpen}
           anomalyMarks={anomalyMarks}
+          bookmarkMarks={stars}
           attribution={source.live}
           // The replay view shows history: "running" there is what was running at the replay time.
           progressing={replaying ? ALL_PROGRESSING : progressing}
@@ -612,6 +653,7 @@ export const SessionCanvas = memo(function SessionCanvas({ source, toolbar, file
             onSelect={listing ? openChainStep : setSelectedId}
             onExpandCut={expandChainCut}
             onClose={closeDrawer}
+            bookmarks={bookmarks}
           />
         )}
         {filesOpen && source.files !== null && (

@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { GraphNode } from '@agent-canvas/shared';
+import type { SessionBookmarkController } from '../bookmarks';
 import type { StepDetail } from '../sessionSource';
+import { BookmarkToggle } from './BookmarkToggle';
 import { NODE_STATUS_LABEL } from '../labels';
 import type { UpstreamChain } from './chain';
 import { formatDuration } from './format';
@@ -168,9 +170,13 @@ export interface DrawerProps {
   /** Expands the folds that cut the chain short (chain.cutAt; see expandCut). */
   onExpandCut(): void;
   onClose(): void;
+  /** The session's bookmarks (收藏这一步 and the note box at the top); null / absent: not shown (the exported viewer). */
+  bookmarks?: SessionBookmarkController | null;
 }
 
-export function Drawer({ loadDetail, node, chain, view, replay = false, stalled = false, reasoning, onSelect, onExpandCut, onClose }: DrawerProps) {
+export function Drawer({
+  loadDetail, node, chain, view, replay = false, stalled = false, reasoning, onSelect, onExpandCut, onClose, bookmarks = null,
+}: DrawerProps) {
   const closeRef = useRef<HTMLButtonElement>(null);
   // Focus the close button on open; give focus back to whatever had it when the drawer closes.
   useEffect(() => {
@@ -202,6 +208,7 @@ export function Drawer({ loadDetail, node, chain, view, replay = false, stalled 
           <span className="cc-drawer-title">{node.title}</span>
           <button ref={closeRef} type="button" className="cc-drawer-close" onClick={onClose} aria-label="关闭">×</button>
         </div>
+        {bookmarks !== null && <div className="cc-drawer-mark"><BookmarkToggle ctrl={bookmarks} nodeId={node.id} /></div>}
         <div className="cc-drawer-meta">
           {node.status !== null && (
             <span className="cc-status">

@@ -68,8 +68,8 @@ const own = <T>(record: Record<string, T>, key: string): T | undefined =>
 /**
  * The session page's source for an exported file. No subscription (nothing changes), details from the bundle (none for
  * a step without an entry; the damaged line for an unreadable one; `raw` never shown), the original size of an output
- * cut at export time. No files summary (there is no shared function computing it in the browser) and no anomalies (not
- * exported): their buttons are hidden. Edges whose ends are not both in the file are dropped.
+ * cut at export time. No files summary (there is no shared function computing it in the browser), no anomalies (not
+ * exported) and no bookmarks (not exported; bookmarks spec 5): their buttons are hidden, and no card shows a star. Edges whose ends are not both in the file are dropped.
  */
 export function embeddedSource(bundle: ExportBundle, createLayoutClient: () => LayoutClient): SessionSource {
   // fromEntries defines own properties (an id like `__proto__` stays an entry).
@@ -102,6 +102,7 @@ export function embeddedSource(bundle: ExportBundle, createLayoutClient: () => L
     nodeDetail: (nodeId) => Promise.resolve(detailOf(nodeId)),
     files: null,
     anomalies: null,
+    bookmarks: null,
     createLayoutClient,
   };
 }

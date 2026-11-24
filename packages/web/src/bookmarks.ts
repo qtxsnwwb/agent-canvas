@@ -9,6 +9,7 @@ import { writeErrorText } from './attention';
 import { ORIGIN_LOOK } from './home';
 import type { PageMasker } from './masking';
 import { sessionHash, sessionNodeHash, type Route } from './route';
+import type { SessionBookmarks } from './sessionSource';
 
 export const NO_NOTE_TEXT = '（没有备注）';
 export const BOOKMARKS_EMPTY_TEXT = '还没有书签。在会话页的工具栏收藏会话，在每一步的详情里收藏这一步。';
@@ -229,21 +230,30 @@ export interface BookmarkPageController {
   subscribe(fn: () => void): () => void;
   /** Grows whenever visible() would answer differently for the same list (a row hidden or back, a note saved). */
   revision(): number;
-  /** The list as shown: without the rows deleted here, with the notes saved here that the list does not have yet. */
+  /**
+   * The list as shown: without the rows deleted here, with the notes saved here that the list does not have yet, then
+   * the bookmarks made or restored here that it does not have yet (see add).
+   */
   visible(list: readonly Bookmark[]): Bookmark[];
   /**
    * A new list arrived: the saved notes it already has (or whose bookmark it no longer has) are forgotten, and so are the
-   * rows deleted here that it no longer has (so one restored elsewhere later shows again).
+   * rows deleted here that it no longer has (so one restored elsewhere later shows again) and the bookmarks added here
+   * that it has.
    */
   listChanged(list: readonly Bookmark[]): void;
+  /** A bookmark made here (or found made already): shown until a list has it. */
+  add(b: Bookmark): void;
   startEdit(id: number, note: string): void;
   setDraft(text: string): void;
   cancelEdit(): void;
   /** Enter or leaving the box: saves the draft (once, even when both happen); a draft equal to the note is not sent. */
   commitEdit(): Promise<void>;
-  /** Hides the row at once, shows 撤销 (replacing an earlier one; that delete stays), deletes on the server. */
-  remove(id: number): Promise<void>;
-  /** Restores the bookmark of the 撤销 shown, after its delete has been answered. */
+  /**
+   * Hides the row at once, shows 撤销 (replacing an earlier one; that delete stays), deletes on the server. `undoable`
+   * false: no 撤销 (an earlier one stays).
+   */
+  remove(id: number, undoable?: boolean): Promise<void>;
+  /** Restores the bookmark of the 撤销 shown, after its delete has been answered; shown again at once (see add). */
   undo(): Promise<void>;
   dismissToast(): void;
   /** Stops the 撤销 timer and drops the listeners (not final: React's development double mount subscribes again). */
@@ -261,6 +271,8 @@ export function createBookmarkPageController(api: BookmarkWrites): BookmarkPageC
   /** Delete requests in flight, by id: an undo waits for its delete. */
   const deleting = new Map<number, Promise<boolean>>();
   const saved = new Map<number, Bookmark>();
+  /** Made or restored here, until a list has them (by id). */
+  const added = new Map<number, Bookmark>();
   const listeners = new Set<() => void>();
   let revision = 0;
   let toastTimer: ReturnType<typeof setTimeout> | null = null;
@@ -284,24 +296,39 @@ export function createBookmarkPageController(api: BookmarkWrites): BookmarkPageC
     },
     visible(list) {
       const out: Bookmark[] = [];
-      for (const b of list) {
-        if (removed.has(b.id)) continue;
+      const inList = new Set<number>();
+      const shown = (b: Bookmark): void => {
+        if (removed.has(b.id)) return;
         const mine = saved.get(b.id);
         out.push(mine !== undefined && !caughtUp(b, mine) ? { ...b, note: mine.note, noteUpdatedAt: mine.noteUpdatedAt } : b);
+      };
+      for (const b of list) {
+        inList.add(b.id);
+        shown(b);
       }
+      for (const b of added.values()) if (!inList.has(b.id)) shown(b);
       return out;
     },
     listChanged(list) {
       const byId = new Map(list.map((b) => [b.id, b]));
       for (const [id, mine] of saved) {
         const b = byId.get(id);
-        if (b === undefined || caughtUp(b, mine)) saved.delete(id);
+        // A bookmark only added here is in no list yet: its saved note stays until one has it.
+        if (b === undefined ? !added.has(id) : caughtUp(b, mine)) saved.delete(id);
       }
       let dropped = false;
+      for (const id of added.keys()) {
+        if (byId.has(id)) { added.delete(id); dropped = true; }
+      }
       for (const id of removed) {
         if (!byId.has(id)) { removed.delete(id); dropped = true; }
       }
       if (dropped) revision += 1;
+    },
+    add(b) {
+      added.set(b.id, b);
+      revision += 1;
+      set({});
     },
     startEdit(id, note) {
       set({ editing: { id, original: note, draft: note, saving: false, error: null } });
@@ -330,19 +357,27 @@ export function createBookmarkPageController(api: BookmarkWrites): BookmarkPageC
         else set({ error: writeErrorText(err) }); // another row is being edited now: say it on the page
       }
     },
-    async remove(id) {
+    async remove(id, undoable = true) {
       if (removed.has(id)) return;
       removed.add(id);
+      // Hidden by `removed` until a list without it arrives; then gone (an undo adds the restored one back).
+      const wasAdded = added.get(id);
+      added.delete(id);
       revision += 1;
-      clearToastTimer();
       if (state.editing?.id === id) set({ editing: null });
-      set({ toast: { id }, error: null });
-      toastTimer = setTimeout(() => {
-        toastTimer = null;
-        if (state.toast?.id === id) set({ toast: null });
-      }, BOOKMARK_UNDO_MS);
+      if (undoable) {
+        clearToastTimer();
+        set({ toast: { id }, error: null });
+        toastTimer = setTimeout(() => {
+          toastTimer = null;
+          if (state.toast?.id === id) set({ toast: null });
+        }, BOOKMARK_UNDO_MS);
+      } else {
+        set({ error: null });
+      }
       const request = api.deleteBookmark(id).then(() => true, (err: unknown) => {
         removed.delete(id);
+        if (wasAdded !== undefined && !added.has(id)) added.set(id, wasAdded);
         revision += 1;
         if (state.toast?.id === id) { clearToastTimer(); set({ toast: null }); }
         set({ error: writeErrorText(err) });
@@ -360,8 +395,10 @@ export function createBookmarkPageController(api: BookmarkWrites): BookmarkPageC
       const pending = deleting.get(toast.id);
       if (pending !== undefined && !(await pending)) return; // the delete failed: the row is back already
       try {
-        await api.restoreBookmark(toast.id);
+        const restored = await api.restoreBookmark(toast.id);
         removed.delete(toast.id);
+        // Shown at once, also when the list without it arrived already (until the next list has it again).
+        added.set(restored.id, restored);
         revision += 1;
         set({});
       } catch (err) {
@@ -374,6 +411,172 @@ export function createBookmarkPageController(api: BookmarkWrites): BookmarkPageC
     },
     close() {
       clearToastTimer();
+      listeners.clear();
+    },
+  };
+}
+
+// ---- marking on the session page (bookmarks spec 5) ----
+
+export const SESSION_MARK_TEXT = '收藏会话';
+export const STEP_MARK_TEXT = '收藏这一步';
+export const MARKED_TEXT = '已收藏';
+/** Beside the button after un-marking a bookmark that had a note, with 撤销 (BOOKMARK_UNDO_MS). */
+export const NOTE_GOES_TEXT = '备注会一起删除';
+
+/** What the session page's toolbar and drawer read and write: its source's bookmarks (sessionSource.ts). */
+export type SessionBookmarkWrites = Pick<SessionBookmarks, 'create' | 'patch' | 'remove' | 'restore'>;
+
+/** One place's button and note box (the session: nodeId null; a step: its node id). */
+export interface MarkState {
+  /** The first list has arrived (until then the button cannot tell, and is disabled). */
+  ready: boolean;
+  /** The bookmark shown (null: not bookmarked). */
+  bookmark: Bookmark | null;
+  /** Marking or un-marking is in flight. */
+  busy: boolean;
+  /** The note box's edit, while it is this bookmark's. */
+  editing: BookmarkEditing | null;
+  /** 「备注会一起删除」 with 撤销 shows beside this button. */
+  undo: boolean;
+  /** Why marking, un-marking or undoing failed. */
+  error: string | null;
+  /** Marked here just now: the note box takes the focus when it appears. */
+  fresh: boolean;
+}
+
+export interface SessionBookmarkController {
+  subscribe(fn: () => void): () => void;
+  /** Grows with every change (for useSyncExternalStore: read stateOf after it). */
+  version(): number;
+  /** The session's bookmarks as shown (the list with what was done here); the same array until that changes. */
+  shown(): readonly Bookmark[];
+  /** A list from SessionBookmarks.watch (null: none yet). */
+  setList(list: readonly Bookmark[] | null): void;
+  stateOf(nodeId: string | null): MarkState;
+  /**
+   * The button: marks the place, or un-marks it (at once; with a note, 「备注会一起删除」 and 撤销 show beside the
+   * button). Ignored while the place's request is in flight or before the first list.
+   */
+  toggle(nodeId: string | null): Promise<void>;
+  /** The note box got the focus (or a key) while not editing: edit its bookmark's note. */
+  startEdit(nodeId: string | null): void;
+  setDraft(text: string): void;
+  /** Enter or leaving the box: saves once; a note equal to the stored one once normalized is not sent. */
+  commitEdit(): Promise<void>;
+  cancelEdit(): void;
+  /** 撤销: restores the bookmark un-marked last (the 书签 page's restore path). */
+  undo(): Promise<void>;
+  /** Stops the 撤销 timer and drops the listeners (not final: a later subscribe listens again). */
+  close(): void;
+}
+
+/** A place's key: the step's node id, '' for the session. */
+const placeKey = (nodeId: string | null): string => nodeId ?? '';
+
+/**
+ * The session page's marking, on top of the 书签 page's controller (createBookmarkPageController: note edits, delete
+ * with undo, the overlay of what was done here until the list has it). The list comes from SessionBookmarks.watch.
+ */
+export function createSessionBookmarkController(b: SessionBookmarkWrites): SessionBookmarkController {
+  const page = createBookmarkPageController({ patchBookmark: b.patch, deleteBookmark: b.remove, restoreBookmark: b.restore });
+  let list: readonly Bookmark[] | null = null;
+  /** Places whose create or delete is in flight. */
+  const busy = new Set<string>();
+  /** The place of the page's 撤销 (its toast's id is that place's bookmark). */
+  let undoPlace: string | null = null;
+  /** The place whose last delete or undo went through the page (its error belongs there). */
+  let pagePlace: string | null = null;
+  let failure: { place: string; text: string } | null = null;
+  let fresh: string | null = null;
+  let version = 0;
+  let cache: { list: readonly Bookmark[] | null; revision: number; out: readonly Bookmark[] } | null = null;
+  const listeners = new Set<() => void>();
+  const notify = (): void => {
+    version += 1;
+    for (const fn of [...listeners]) fn();
+  };
+  let unhook: (() => void) | null = null;
+  const shown = (): readonly Bookmark[] => {
+    const revision = page.revision();
+    if (cache === null || cache.list !== list || cache.revision !== revision) {
+      cache = { list, revision, out: page.visible(list ?? []) };
+    }
+    return cache.out;
+  };
+  const bookmarkOf = (place: string): Bookmark | null => shown().find((x) => placeKey(x.nodeId) === place) ?? null;
+  return {
+    subscribe(fn) {
+      listeners.add(fn);
+      unhook ??= page.subscribe(notify);
+      return () => void listeners.delete(fn);
+    },
+    version: () => version,
+    shown,
+    setList(next) {
+      list = next;
+      if (next !== null) page.listChanged(next);
+      notify();
+    },
+    stateOf(nodeId) {
+      const place = placeKey(nodeId);
+      const bookmark = bookmarkOf(place);
+      const s = page.state();
+      return {
+        ready: list !== null,
+        bookmark,
+        busy: busy.has(place),
+        editing: bookmark !== null && s.editing?.id === bookmark.id ? s.editing : null,
+        undo: undoPlace === place && s.toast !== null,
+        error: failure?.place === place ? failure.text : pagePlace === place ? s.error : null,
+        fresh: fresh === place,
+      };
+    },
+    async toggle(nodeId) {
+      const place = placeKey(nodeId);
+      if (list === null || busy.has(place)) return;
+      failure = null;
+      fresh = null;
+      const current = bookmarkOf(place);
+      busy.add(place);
+      notify();
+      try {
+        if (current !== null) {
+          const withNote = current.note !== '';
+          pagePlace = place;
+          if (withNote) undoPlace = place;
+          await page.remove(current.id, withNote);
+        } else {
+          // Marking again where 撤销 still shows: that bookmark is gone for good (the server purges it).
+          if (undoPlace === place) page.dismissToast();
+          const r = await b.create(nodeId);
+          fresh = place; // before the note box appears (page.add re-renders)
+          page.add(r.bookmark);
+        }
+      } catch (err) {
+        failure = { place, text: writeErrorText(err) };
+      } finally {
+        busy.delete(place);
+        notify();
+      }
+    },
+    startEdit(nodeId) {
+      const place = placeKey(nodeId);
+      if (fresh === place) fresh = null;
+      const bookmark = bookmarkOf(place);
+      if (bookmark === null || page.state().editing?.id === bookmark.id) return;
+      page.startEdit(bookmark.id, bookmark.note);
+    },
+    setDraft: (text) => page.setDraft(text),
+    commitEdit: () => page.commitEdit(),
+    cancelEdit: () => page.cancelEdit(),
+    async undo() {
+      pagePlace = undoPlace;
+      await page.undo();
+    },
+    close() {
+      page.close();
+      unhook = null;
       listeners.clear();
     },
   };

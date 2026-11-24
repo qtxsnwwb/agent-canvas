@@ -354,6 +354,24 @@ test('删除：行马上消失，出现撤销 6 秒；撤销调 restore，行回
   c.close();
 });
 
+test('撤销时列表已经没有它了：恢复的回答先显示，下一份有它的列表接手；add 的书签列表有了就不再单独记着', async () => {
+  const f = fakeWrites();
+  const c = createBookmarkPageController(f.writes);
+  await c.remove(1);
+  c.listChanged([bm({ id: 2 })]); // the list after the delete
+  await c.undo();
+  expect(c.visible([bm({ id: 2 })]).map((b) => b.id)).toEqual([2, 1]);
+  c.listChanged([bm({ id: 1 }), bm({ id: 2 })]);
+  expect(c.visible([bm({ id: 2 })]).map((b) => b.id)).toEqual([2]); // the list rules from here
+  c.add(bm({ id: 3 }));
+  expect(c.visible([bm({ id: 2 })]).map((b) => b.id)).toEqual([2, 3]);
+  await c.remove(3, false); // no 撤销 for this one
+  expect(c.state().toast).toBeNull();
+  c.listChanged([bm({ id: 2 })]);
+  expect(c.visible([bm({ id: 2 })]).map((b) => b.id)).toEqual([2]);
+  c.close();
+});
+
 test('第二次删除替换第一个撤销；第一个仍是删除的', async () => {
   vi.useFakeTimers();
   const f = fakeWrites();

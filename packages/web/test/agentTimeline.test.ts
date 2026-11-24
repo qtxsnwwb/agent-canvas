@@ -792,7 +792,7 @@ describe('masking', () => {
     ]);
     const source: SessionSource = {
       getSession: () => sessionOf('claude'), getGraph: () => raw, subscribe: () => () => {}, live: true,
-      nodeDetail: async () => ({ detail: null, outputOriginalBytes: null }), files: null, anomalies: null,
+      nodeDetail: async () => ({ detail: null, outputOriginalBytes: null }), files: null, anomalies: null, bookmarks: null,
       createLayoutClient: () => { throw new Error('unused'); },
       createTimelineClient: () => createInThreadTimelineClient(),
     };
