@@ -6,6 +6,7 @@ import { MaskProvider, MaskSwitch, useMask } from './MaskContext';
 import { Anomalies } from './pages/Anomalies';
 import { Attention } from './pages/Attention';
 import { Bookmarks } from './pages/Bookmarks';
+import { ComparePage } from './pages/Compare';
 import { Diagnostics } from './pages/Diagnostics';
 import { Files } from './pages/Files';
 import { Notifications } from './pages/Notifications';
@@ -116,6 +117,8 @@ function AppBody() {
       ) : route.page === 'session' ? (
         <SessionPage key={route.sessionId} sessionId={route.sessionId} filePath={route.filePath ?? null} nodeId={route.nodeId ?? null}
           notice={sessionNoticeFor(sessionNotice, route)} />
+      ) : route.page === 'compare' ? (
+        <ComparePage key={`${encodeURIComponent(route.a)}/${encodeURIComponent(route.b)}`} a={route.a} b={route.b} />
       ) : route.page === 'diagnostics' ? (
         <Diagnostics />
       ) : route.page === 'stats' ? (
