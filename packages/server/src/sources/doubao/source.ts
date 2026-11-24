@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
+import { DOUBAO_PROJECT_ID } from '@agent-canvas/shared';
 import { readGuardedLines } from '../guarded-reader.js';
 import { KEY_PREFIXES, type FileClass, type FileSource, type SourceRead } from '../source.js';
 import { parseAssignment } from './assignment.js';

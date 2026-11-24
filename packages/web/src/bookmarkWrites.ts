@@ -90,7 +90,7 @@ export function createBookmarkPageController(api: BookmarkWrites): BookmarkPageC
   let toastTimer: ReturnType<typeof setTimeout> | null = null;
   /** The note save in flight, if any. */
   let committing: Promise<void> | null = null;
-  const set =(next: Partial<BookmarkPageState>): void => {
+  const set = (next: Partial<BookmarkPageState>): void => {
     state = { ...state, ...next };
     for (const fn of [...listeners]) fn();
   };

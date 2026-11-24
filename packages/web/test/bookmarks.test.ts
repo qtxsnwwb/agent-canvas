@@ -162,6 +162,26 @@ test('筛选：字面匹配备注、标题、步骤摘要、项目名，不区�
   expect(ids('接入修')).toEqual([]);
 });
 
+test('文字步骤的摘要在密钥中间被截断（服务端按 79 个字加 … 截）：遮蔽开着时不露出密钥的开头，筛选也找不到这一行', () => {
+  // Invented key, assembled at run time; the cut falls inside it, as the server's stepLabel cuts (79 code points + …).
+  const key = ['sk', 'proj', 'AbCdEfGhIjKlMnOpQrStUvWxYz0123456789'].join('-');
+  const summary = `${'已经把超时调好了，'.repeat(7)}令牌 ${key}`;
+  const label = `${[...summary].slice(0, 79).join('')}…`;
+  const fragment = [...label].slice([...summary].indexOf('s', 60), 79).join('');
+  expect(fragment.startsWith('sk-proj-')).toBe(true); // the label holds the key's first characters
+  const on = createPageMasker({ customTerms: [], numbered: false });
+  const text = bm({ id: 3, note: '', snapshot: { nodeKind: 'text', toolName: null, stepLabel: label } });
+  const rows = bookmarkRows([text, bm({ id: 4, note: '别的' })], on);
+  const row = rows.find((r) => r.id === 3)!;
+  expect(row.stepLabel).not.toContain('sk-proj');
+  expect(row.stepLabel).toContain('已遮蔽');
+  expect(filterBookmarkRows(rows, fragment.slice(0, 11))).toEqual([]);
+  expect(filterBookmarkRows(rows, 'sk-proj')).toEqual([]);
+  // Off: shown as stored, found by it.
+  const plain = bookmarkRows([text], IDENTITY_MASKER);
+  expect(filterBookmarkRows(plain, fragment.slice(0, 11)).map((r) => r.id)).toEqual([3]);
+});
+
 test('筛选匹配页面上显示出来的文字：遮蔽开着时猜密钥试不出哪一行含有它；备注照样能搜', () => {
   const on = createPageMasker({ customTerms: [TERM], numbered: false });
   const rows = bookmarkRows([bm({ ...secretBookmark(), note: '部署那次' }), bm({ id: 2, note: '别的' })], on);

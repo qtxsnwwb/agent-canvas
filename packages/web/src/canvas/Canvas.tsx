@@ -32,7 +32,7 @@ import { NO_CARD_MARKS, type CardMarker, type CardMarks } from '../anomalies';
 import { NO_STARS, type StarMark, type StarMarks } from './bookmarkMarks';
 import { chainAriaLabel, isActivationKey } from './format';
 import {
-  CanvasActions, graphNodeAriaLabel, highlightClass, isActive, nodeColor, nodeTypes, summaryAriaLabel, summaryColor,
+  CanvasActions, earlierAriaLabel, graphNodeAriaLabel, highlightClass, isActive, nodeColor, nodeTypes, summaryAriaLabel, summaryColor,
   type FlowNode, type Highlight, SessionProgressing, ALL_PROGRESSING, type Progressing,
 } from './nodes';
 import { isBackgroundStep } from './waterfall';
@@ -273,13 +273,17 @@ function useFlowNodes(
           };
       } else {
         // An agent group's `earlier` node sits inside its container: it needs the group's zIndex.
+        // Not focusable (its 展开全部 button is), but named like the other cards, with its bookmark star's text.
         const star = stars.get(vn.id) ?? null;
-        n = old && old.type === 'earlier' && old.data.star === star && old.data.count === vn.count && old.data.toolCount === vn.toolCount
+        const ariaLabel = withStar(earlierAriaLabel(vn), star);
+        n = old && old.type === 'earlier' && old.data.star === star && old.ariaLabel === ariaLabel
+          && old.data.count === vn.count && old.data.toolCount === vn.toolCount
           && old.data.failedCount === vn.failedCount && old.data.highlight === highlight && old.zIndex === zIndex
           && samePos(old.position, position) && old.width === width && old.height === height
           ? old
           : {
             id: vn.id, type: 'earlier', position, width, height, zIndex, className: wrapperClass(false, highlight),
+            ariaLabel, ariaRole: 'group',
             data: {
               turnKey: vn.turnKey, groupKey: vn.groupKey, count: vn.count, toolCount: vn.toolCount, failedCount: vn.failedCount,
               highlight, star,

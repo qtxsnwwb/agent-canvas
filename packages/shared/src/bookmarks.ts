@@ -11,8 +11,9 @@ export const BOOKMARK_NOTE_MAX = 200;
 /**
  * What the bookmarked place looked like when it was bookmarked, built by the server from the store (never taken from the
  * request) and written once. sessionTitle: the home page's rule (sessionName). For a step: its kind, tool name, a
- * one-line label (a tool or subagent call: tool name and what it did, as the attention page writes it; another kind: the
- * first 80 characters of its summary, else its title) and its timestamp; all four null for a session bookmark.
+ * one-line label (a tool or subagent call: tool name and what it did, as the attention page writes it; another kind: its
+ * summary, else its title; at most 80 characters, a longer one cut to 79 and `…` so the page's masker knows it was cut)
+ * and its timestamp; all four null for a session bookmark.
  */
 export interface BookmarkSnapshot {
   sessionTitle: string;

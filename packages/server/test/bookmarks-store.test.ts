@@ -4,7 +4,7 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { BOOKMARK_NOTE_MAX, normalizeBookmarkNote, projectDisplayName, type Bookmark, type GraphNode, type Session } from '@agent-canvas/shared';
-import { BOOKMARK_PURGE_AFTER_MS, BookmarksService, STEP_LABEL_MAX_CHARS } from '../src/bookmarks/service.js';
+import { BOOKMARK_PURGE_AFTER_MS, BookmarksService, STEP_LABEL_MAX_CHARS, stepLabel } from '../src/bookmarks/service.js';
 import { loadConfig, type Config } from '../src/config.js';
 import { Pipeline } from '../src/pipeline.js';
 import { DERIVED_TABLES, SCHEMA_SQL } from '../src/store/schema.js';
@@ -108,11 +108,26 @@ describe('书签：存储与快照', () => {
     expect(b.now).toEqual({ session: true, node: true, sessionTitle: '跑一下测试', sourceDeleted: false, projectName: 'demo' });
   });
 
-  test('收藏文字步骤：一行摘要是摘要的前 80 个字符', () => {
+  test('收藏文字步骤：摘要超过 80 个字符时取前 79 个加 …（遮蔽按截断处理，跨过截断点的密钥不露头）', () => {
     const text = nodeOf('text');
     expect([...REPLY].length).toBeGreaterThan(80);
     const b = created({ sessionId: 's1', nodeId: text.id });
-    expect(b.snapshot).toMatchObject({ nodeKind: 'text', toolName: null, stepLabel: [...REPLY].slice(0, 80).join(''), nodeAt: text.timestamp });
+    expect(b.snapshot).toMatchObject({
+      nodeKind: 'text', toolName: null, stepLabel: `${[...REPLY].slice(0, 79).join('')}…`, nodeAt: text.timestamp,
+    });
+    expect([...b.snapshot.stepLabel!]).toHaveLength(80);
+  });
+
+  test('非工具步骤的一行摘要：先把空白折成一个空格再截；正好 80 个原样，81 个截成 79 个加 …；没有摘要用标题', () => {
+    const text = nodeOf('text');
+    const exactly = 'x'.repeat(80);
+    expect(stepLabel({ ...text, summary: exactly })).toBe(exactly);
+    expect(stepLabel({ ...text, summary: `${exactly}y` })).toBe(`${'x'.repeat(79)}…`);
+    // 82 code points before folding, 79 after: kept whole.
+    expect(stepLabel({ ...text, summary: `${'a'.repeat(39)}\n\n \t${'b'.repeat(39)}` })).toBe(`${'a'.repeat(39)} ${'b'.repeat(39)}`);
+    expect(stepLabel({ ...text, kind: 'thinking', summary: `  ${'思'.repeat(100)}  ` })).toBe(`${'思'.repeat(79)}…`);
+    expect(stepLabel({ ...text, kind: 'system', summary: '', title: `  压缩\n上下文 ` })).toBe('压缩 上下文');
+    expect(stepLabel({ ...text, summary: '', title: 'T'.repeat(90) })).toBe(`${'T'.repeat(79)}…`);
   });
 
   test('请求里带的 snapshot 不算数', () => {

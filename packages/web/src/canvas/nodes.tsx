@@ -343,6 +343,19 @@ function TurnSummaryView({ data, width, height, selected }: NodeProps<SummaryFlo
   );
 }
 
+/**
+ * A fold card's accessible name (it cannot be focused; its 展开全部 button can): what it holds. The canvas appends its
+ * bookmark star's text (withStar), as on the other cards.
+ */
+export function earlierAriaLabel(d: Pick<EarlierFlowNode['data'], 'count' | 'toolCount' | 'failedCount'>): string {
+  return nodeAriaLabel(['已折叠', `更早的 ${d.count} 个节点`, `${d.toolCount} 次工具调用`, d.failedCount > 0 ? `${d.failedCount} 个失败` : null]);
+}
+
+/** The fold card's 展开全部 button's accessible name: says so when the fold holds bookmarked steps (null: none). */
+export function showAllLabel(star: StarMark | null): string | undefined {
+  return star === null ? undefined : `展开全部（含 ${star.count} 个书签）`;
+}
+
 function EarlierView({ data, width, height }: NodeProps<EarlierFlowNode>) {
   const { showFullTurn } = useContext(CanvasActions);
   const onShowAll = (e: MouseEvent): void => {
@@ -359,7 +372,7 @@ function EarlierView({ data, width, height }: NodeProps<EarlierFlowNode>) {
           {data.failedCount > 0 && <span className="cc-failed"> · {data.failedCount} 个失败</span>}
         </span>
         <StarBadge star={data.star} />
-        <button type="button" className="cc-fold nodrag nopan" onClick={onShowAll}>展开全部</button>
+        <button type="button" className="cc-fold nodrag nopan" onClick={onShowAll} aria-label={showAllLabel(data.star)}>展开全部</button>
       </div>
     </div>
   );

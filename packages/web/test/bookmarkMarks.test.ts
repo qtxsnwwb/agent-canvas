@@ -5,7 +5,7 @@ import type { Graph, GraphEdge, GraphNode, NodeKind } from '@agent-canvas/shared
 import { graphResolver } from '../src/anomalies';
 import { NO_STARS, bookmarkMarks, bookmarksUntil, stableStars, starLabel } from '../src/canvas/bookmarkMarks';
 import { withStar } from '../src/canvas/Canvas';
-import { StarBadge } from '../src/canvas/nodes';
+import { StarBadge, earlierAriaLabel, showAllLabel } from '../src/canvas/nodes';
 import { buildView, TURN_FOLD_THRESHOLD, type ViewMode } from '../src/canvas/view';
 
 // Invented sessions only.
@@ -111,6 +111,15 @@ test('卡片上画一个 ★，提示和无障碍名称写数量', () => {
   expect(renderToStaticMarkup(createElement(StarBadge, { star: null }))).toBe('');
   expect(withStar('工具 · Bash · 成功', star)).toBe('工具 · Bash · 成功，2 个书签');
   expect(withStar('工具 · Bash · 成功', null)).toBe('工具 · Bash · 成功');
+});
+
+test('「更早的 N 个节点」卡片有无障碍名称，含书签数；它的「展开全部」按钮也说含几个书签', () => {
+  const star = { count: 2, label: starLabel(2) };
+  expect(withStar(earlierAriaLabel({ count: 31, toolCount: 30, failedCount: 1 }), star))
+    .toBe('已折叠：更早的 31 个节点，30 次工具调用，1 个失败，2 个书签');
+  expect(earlierAriaLabel({ count: 31, toolCount: 30, failedCount: 0 })).toBe('已折叠：更早的 31 个节点，30 次工具调用');
+  expect(showAllLabel(star)).toBe('展开全部（含 2 个书签）');
+  expect(showAllLabel(null)).toBeUndefined();
 });
 
 test('复盘：只算复盘时间已经到了的步骤', () => {

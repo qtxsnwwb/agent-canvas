@@ -19,8 +19,9 @@ import type { Store, StoredBookmark } from '../store/store.js';
 /** A deleted bookmark can be restored this long; after it, the next write removes it for good. */
 export const BOOKMARK_PURGE_AFTER_MS = 24 * 60 * 60_000;
 /**
- * Longest step label, in code points: a non-tool step's label is the first this many of its summary; a tool or
- * subagent step's label is cut to this many, its last one then `…`.
+ * Longest step label, in code points. A longer one is cut to this many, its last one then `…` — for every kind of step:
+ * the ellipsis tells the page's masker the text was cut (isCutSummary), so a secret the cut runs through is still
+ * masked (its truncated mode) instead of showing its first characters.
  */
 export const STEP_LABEL_MAX_CHARS = 80;
 
@@ -33,14 +34,17 @@ const ALREADY_BOOKMARKED = '这里已经收藏过了';
 export type BookmarkFailure = { ok: false; status: 400 | 404; error: string } | { ok: false; status: 409; error: string; bookmark: Bookmark };
 export type BookmarkResult = { ok: true; status: 200 | 201; bookmark: Bookmark } | BookmarkFailure;
 
-/** A step's one-line label (BookmarkSnapshot.stepLabel). */
+/**
+ * A step's one-line label (BookmarkSnapshot.stepLabel): a tool or subagent step's call as the attention page writes
+ * it, another step's summary (else its title); whitespace runs folded to one space, then cut to STEP_LABEL_MAX_CHARS
+ * with a trailing `…` (exactly that many are kept whole).
+ */
 export function stepLabel(node: GraphNode): string {
-  const oneLine = (text: string): string => text.replace(/\s+/g, ' ').trim();
-  if (node.kind === 'tool' || node.kind === 'subagent') {
-    const cps = [...oneLine(permissionText(node.toolName, node.title, node.summary))];
-    return cps.length <= STEP_LABEL_MAX_CHARS ? cps.join('') : `${cps.slice(0, STEP_LABEL_MAX_CHARS - 1).join('')}…`;
-  }
-  return node.summary !== '' ? oneLine([...node.summary].slice(0, STEP_LABEL_MAX_CHARS).join('')) : oneLine(node.title);
+  const raw = node.kind === 'tool' || node.kind === 'subagent'
+    ? permissionText(node.toolName, node.title, node.summary)
+    : node.summary !== '' ? node.summary : node.title;
+  const cps = [...raw.replace(/\s+/g, ' ').trim()];
+  return cps.length <= STEP_LABEL_MAX_CHARS ? cps.join('') : `${cps.slice(0, STEP_LABEL_MAX_CHARS - 1).join('')}…`;
 }
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
