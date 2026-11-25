@@ -265,8 +265,9 @@ describe('tokens', () => {
   });
 });
 
-test('the summary carries no conversation content', () => {
-  const s = summarizeSession(session(), [prompt('p1', 0, 'T1'), tool('a', 1, 'T1')]);
+// The prompt heads (compare page) are the one exception: see 'the prompt heads are the only conversation content'.
+test('the summary carries no conversation content but the prompt heads (tool inputs, replies: none)', () => {
+  const s = summarizeSession(session(), [node('p1', 0, { kind: 'prompt', turnId: 'T1', summary: 'the prompt head' }), tool('a', 1, 'T1')]);
   expect(JSON.stringify(s)).not.toContain('secret prompt text');
 });
 
@@ -283,5 +284,74 @@ describe('undated', () => {
     const s = summarizeSession(session(), [tool('i1', 0, null, { agentId: 'ag', timestamp: 'nope' })]);
     expect(s.extras[0]!.dated).toBe(false);
     expect(Number.isNaN(s.calls[0]!.atMs)).toBe(true);
+  });
+});
+
+describe('compare fields (spec 2026-11-24-compare-design.md 4)', () => {
+  test('nodeCount: every node of the session (internal ones and a session exit included)', () => {
+    const s = summarizeSession(session(), [
+      prompt('p1', 0, 'T1'),
+      tool('a', 1, 'T1'),
+      node('in', 2, { agentId: 'ag' }),
+      node('exit', 3, { kind: 'system', systemSubtype: 'shutdown' }),
+    ]);
+    expect(s.nodeCount).toBe(4);
+    expect(summarizeSession(session(), []).nodeCount).toBe(0);
+  });
+
+  test('subagentCount: dispatch nodes (kind subagent), nested ones included; tool nodes are not', () => {
+    const s = summarizeSession(session(), [
+      prompt('p1', 0, 'T1'),
+      node('d1', 1, { kind: 'subagent', turnId: 'T1', status: 'succeeded', childAgentId: 'ag1', toolName: 'Task' }),
+      node('d2', 2, { kind: 'subagent', agentId: 'ag1', status: 'succeeded', childAgentId: 'ag2', toolName: 'Task' }),
+      tool('t', 3, 'T1'),
+    ]);
+    expect(s.subagentCount).toBe(2);
+    expect(summarizeSession(session(), [prompt('p1', 0, 'T1')]).subagentCount).toBe(0);
+  });
+
+  test('promptNodeId / promptHead: the turn\'s first prompt node, its summary with whitespace collapsed', () => {
+    const s = summarizeSession(session(), [
+      node('p1', 0, { kind: 'prompt', turnId: 'T1', summary: '  fix   the\n\tCI  timeout ' }),
+      node('p1b', 5, { kind: 'prompt', turnId: 'T1', summary: 'a second prompt in the same turn' }),
+      node('p2', 10, { kind: 'prompt', turnId: 'T2', summary: '', title: 'Prompt' }),
+    ]);
+    expect(s.turns.map((t) => [t.promptNodeId, t.promptHead])).toEqual([['p1', 'fix the CI timeout'], ['p2', 'Prompt']]);
+  });
+
+  test('promptHead: a whitespace-only summary counts as empty (the title is used)', () => {
+    const s = summarizeSession(session(), [node('p1', 0, { kind: 'prompt', turnId: 'T1', summary: ' \n\t ', title: '  Prompt  title ' })]);
+    expect(s.turns[0]!.promptHead).toBe('Prompt title');
+  });
+
+  test('a turn without a prompt node (a prelude) has promptNodeId null and an empty head', () => {
+    const s = summarizeSession(session(), [node('sys', 0), prompt('p1', 5, 'T1')]);
+    expect(s.turns[0]).toMatchObject({ key: '__prelude__', promptNodeId: null, promptHead: '' });
+  });
+
+  test('promptHead: up to 80 code points kept whole; a longer one cut to 79 and `…` (code points, not UTF-16 units)', () => {
+    const exactly80 = '字'.repeat(40) + '😀'.repeat(40);
+    const longer = 'b'.repeat(79) + '😀' + 'tail';
+    const s = summarizeSession(session(), [
+      node('p1', 0, { kind: 'prompt', turnId: 'T1', summary: exactly80 }),
+      node('p2', 10, { kind: 'prompt', turnId: 'T2', summary: longer }),
+      node('p3', 20, { kind: 'prompt', turnId: 'T3', summary: '😀'.repeat(81) }),
+    ]);
+    expect(s.turns[0]!.promptHead).toBe(exactly80);
+    expect(s.turns[1]!.promptHead).toBe(`${'b'.repeat(79)}…`);
+    expect(s.turns[2]!.promptHead).toBe(`${'😀'.repeat(79)}…`);
+    expect([...s.turns[2]!.promptHead].length).toBe(80);
+  });
+
+  test('the prompt heads are the only conversation content in a summary', () => {
+    const s = summarizeSession(session(), [
+      node('p1', 0, { kind: 'prompt', turnId: 'T1', summary: 'the prompt head' }),
+      tool('a', 1, 'T1', { summary: 'SECRET TOOL INPUT' }),
+      node('r', 2, { turnId: 'T1', summary: 'SECRET REPLY' }),
+      node('th', 3, { kind: 'thinking', turnId: 'T1', summary: 'SECRET THOUGHT' }),
+    ]);
+    const json = JSON.stringify(s);
+    expect(json).toContain('the prompt head');
+    expect(json).not.toMatch(/SECRET/);
   });
 });

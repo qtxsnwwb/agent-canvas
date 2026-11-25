@@ -7,6 +7,7 @@ import {
   type Bookmark,
   type BookmarkListResponse,
   type ClientMessage,
+  type CompareResponse,
   type ContentSearchResponse,
   type Diagnostics,
   type ExportOptions,
@@ -118,6 +119,8 @@ export const api = {
   sessionFiles: (sessionId: string) => getJson<SessionFilesResponse>(`/api/sessions/${enc(sessionId)}/files`),
   /** `query` is built by files.ts `filesQueryString`. */
   files: (query: string) => getJson<ProjectFilesResponse>(`/api/files?${query}`),
+  /** Two sessions side by side (GET /api/compare): a side not found is null. */
+  compare: (a: string, b: string) => getJson<CompareResponse>(`/api/compare?a=${enc(a)}&b=${enc(b)}`),
   sessionAnomalies: (sessionId: string) => getJson<SessionAnomaliesResponse>(`/api/sessions/${enc(sessionId)}/anomalies`),
   /** `query` is built by anomalies.ts `anomaliesQueryString`. */
   anomalies: (query: string) => getJson<AnomalyListResponse>(`/api/anomalies?${query}`),

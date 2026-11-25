@@ -132,6 +132,11 @@ export class FilesService {
     this.cache.shareReadsWith(stats.summaryCache());
   }
 
+  /** The summary cache (the compare service reads single sessions from it). */
+  summaryCache(): SessionSummaryCache<SessionFilesSummary> {
+    return this.cache;
+  }
+
   /** Builds (or refreshes) every session's file summary ahead of a request (see StatsService.warm). Never rejects. */
   async warm(): Promise<void> {
     try {

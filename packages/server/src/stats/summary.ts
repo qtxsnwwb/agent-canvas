@@ -17,6 +17,9 @@ import { countedUsageNodes, groupTurns, STALE_AFTER_MS, type GraphNode, type Ori
  *   given, which must be the snapshot's node order (store rowid order).
  * - Undated: a turn whose start, or an extra whose time, is unparseable or not after 1970-01-01T00:00:00Z (a source's
  *   fallback) has `dated: false`; the aggregation leaves it out of every day and counts it in coverage.
+ * - For the compare page (spec 2026-11-24-compare-design.md 4): the node count, the dispatch count, and per turn its
+ *   prompt node and a short head of it (the one piece of conversation content here, ≤ PROMPT_HEAD_MAX_CHARS code
+ *   points per turn: small, since a summary is cached for every session). The stats aggregation never reads them.
  */
 
 export interface SummaryTurn {
@@ -43,6 +46,10 @@ export interface SummaryTurn {
   /** Input read from cache (usage.cachedInputTokens; absent on old nodes: 0). */
   cachedInputTokens: number;
   outputTokens: number;
+  /** The turn's first prompt node (by time, then id); null when it has none (a prelude). */
+  promptNodeId: string | null;
+  /** promptHeadOf that node; '' when there is none. */
+  promptHead: string;
 }
 
 /**
@@ -86,10 +93,31 @@ export interface SessionSummary {
   calls: SummaryCall[];
   /** Nodes carrying usage (before messageId deduplication): 0 means the session has no token data. */
   usageNodes: number;
+  /** Every node of the session (the compare page's 步骤). */
+  nodeCount: number;
+  /** Dispatch nodes (`kind === 'subagent'`), subagent-internal ones included (the compare page's 子代理). */
+  subagentCount: number;
 }
 
 /** The tool name of a call whose node has none (never the node title: a title could one day carry content). */
 export const UNKNOWN_TOOL = '(unknown)';
+
+/**
+ * Longest prompt head, in code points. A longer one is cut to this many, its last one then `…`: the ellipsis tells the
+ * page's masker the text was cut, so a secret the cut runs through is still masked.
+ */
+export const PROMPT_HEAD_MAX_CHARS = 80;
+
+/**
+ * A prompt node's head: its summary (else, when that is empty or whitespace only, its title), whitespace runs folded to
+ * one space and trimmed, cut as PROMPT_HEAD_MAX_CHARS says.
+ */
+export function promptHeadOf(node: Pick<GraphNode, 'summary' | 'title'>): string {
+  const fold = (text: string): string => text.replace(/\s+/g, ' ').trim();
+  const summary = fold(node.summary);
+  const cps = [...(summary !== '' ? summary : fold(node.title))];
+  return cps.length <= PROMPT_HEAD_MAX_CHARS ? cps.join('') : `${cps.slice(0, PROMPT_HEAD_MAX_CHARS - 1).join('')}…`;
+}
 
 /** Tool names are a handful of distinct strings repeated per call: share one copy (bounded table). */
 const INTERN_MAX = 10_000;
@@ -151,7 +179,9 @@ export function summarizeSession(session: Session, nodes: readonly GraphNode[]):
     let endMs = g.startMs;
     let lastActivityMs = g.startMs;
     let open = false;
+    let promptNode: GraphNode | null = null;
     for (const n of g.nodes) {
+      if (promptNode === null && n.kind === 'prompt') promptNode = n;
       const ts = parseMs(n.timestamp) ?? g.startMs;
       const end = parseMs(n.endedAt) ?? ts;
       if (end > endMs) endMs = end;
@@ -161,6 +191,7 @@ export function summarizeSession(session: Session, nodes: readonly GraphNode[]):
     return {
       key: g.key, startMs: g.startMs, dated: isDated(g.startMs), endMs, open, lastActivityMs,
       toolCalls: 0, finished: 0, failed: 0, toolMs: 0, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0,
+      promptNodeId: promptNode?.id ?? null, promptHead: promptNode === null ? '' : promptHeadOf(promptNode),
     };
   });
   const last = turns[turns.length - 1];
@@ -211,8 +242,10 @@ export function summarizeSession(session: Session, nodes: readonly GraphNode[]):
   const extras: SummaryExtra[] = [];
   const calls: SummaryCall[] = [];
   let usageNodes = 0;
+  let subagentCount = 0;
   for (const { node, ms } of sorted) {
     if (node.usage) usageNodes++;
+    if (node.kind === 'subagent') subagentCount++;
     const call = isCall(node);
     const counts = counted.has(node);
     let turn: number;
@@ -249,5 +282,8 @@ export function summarizeSession(session: Session, nodes: readonly GraphNode[]):
       finished: isFinished(node), failed: isFailed(node), durationMs,
     });
   }
-  return { sessionId: session.id, origin: session.origin, projectId: session.projectId, turns, extras, calls, usageNodes };
+  return {
+    sessionId: session.id, origin: session.origin, projectId: session.projectId, turns, extras, calls, usageNodes,
+    nodeCount: nodes.length, subagentCount,
+  };
 }

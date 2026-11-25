@@ -20,10 +20,13 @@ export type Route =
   /** The bookmarked sessions and steps (bookmarks spec 4). */
   | { page: 'bookmarks' }
   /** `query`: what follows `#/anomalies?` (the page's filter, see anomalies.ts parseAnomaliesQuery); '' when none. */
-  | { page: 'anomalies'; query: string };
+  | { page: 'anomalies'; query: string }
+  /** Two sessions side by side (compare spec 4): `a` on the left, `b` on the right. */
+  | { page: 'compare'; a: string; b: string };
 
 const FILE_SEGMENT = '/f/';
 const NODE_SEGMENT = '/n/';
+const COMPARE_PREFIX = '/compare/';
 
 export function parseHash(hash: string): Route {
   const h = hash.replace(/^#/, '');
@@ -64,6 +67,15 @@ export function parseHash(hash: string): Route {
       if (id) return { page: 'session', sessionId: id };
     }
   }
+  if (h.startsWith(COMPARE_PREFIX)) {
+    // Two encoded ids (no literal '/'), both present and decodable; anything else is the home page.
+    const parts = h.slice(COMPARE_PREFIX.length).split('/');
+    if (parts.length === 2) {
+      const a = decode(parts[0]!);
+      const b = decode(parts[1]!);
+      if (a && b) return { page: 'compare', a, b };
+    }
+  }
   if (h.startsWith('/p/')) {
     const id = decode(h.slice(3));
     if (id) return { page: 'home', projectId: id };
@@ -87,4 +99,9 @@ export function sessionFileHash(sessionId: string, path: string): string {
 /** The session page with `nodeId` selected and brought into view (parseHash gives back the same id and node id). */
 export function sessionNodeHash(sessionId: string, nodeId: string): string {
   return `${sessionHash(sessionId)}${NODE_SEGMENT}${encodeURIComponent(nodeId)}`;
+}
+
+/** The compare page with `a` on the left and `b` on the right (parseHash gives back the same ids). */
+export function compareHash(a: string, b: string): string {
+  return `#${COMPARE_PREFIX}${encodeURIComponent(a)}/${encodeURIComponent(b)}`;
 }

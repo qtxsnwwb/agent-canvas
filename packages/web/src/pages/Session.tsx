@@ -1,6 +1,8 @@
 import { useEffect, useLayoutEffect, useMemo, useReducer, useState } from 'react';
 import { api, openLiveSession, type LiveSession } from '../client';
 import { ExportDialog } from '../canvas/ExportDialog';
+import { COMPARE_BUTTON_TEXT } from '../compare';
+import { ComparePicker } from '../ComparePicker';
 import type { TurnChoice } from '../export';
 import { liveSource } from '../liveSource';
 import { sessionStatusView } from '../labels';
@@ -78,6 +80,7 @@ export function SessionPage({ sessionId, filePath = null, nodeId = null, notice 
   useEffect(() => () => setSessionLearning('idle'), [setSessionLearning]);
   const [turn, setTurn] = useState<TurnChoice | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
+  const [compareOpen, setCompareOpen] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -126,12 +129,15 @@ export function SessionPage({ sessionId, filePath = null, nodeId = null, notice 
         {session.gitBranch !== null && <span className="muted branch" title={session.gitBranch}>{session.gitBranch}</span>}
         {session.sourceDeleted && <span className="tag">源文件已删除</span>}
         <div className="session-bar-end">
+          <button type="button" className="files-toggle compare-toggle" aria-haspopup="dialog" onClick={() => setCompareOpen(true)}
+            title="选另一个会话，和这个并排比较用时、调用、token 和碰过的文件">{COMPARE_BUTTON_TEXT}</button>
           <button type="button" className="files-toggle export-toggle" aria-haspopup="dialog" onClick={() => setExportOpen(true)}
             title="把这个会话导出成 HTML 或 Markdown 文件（可遮蔽密钥）">导出</button>
           <div className="session-bar-tools" ref={setToolbar} />
         </div>
       </div>
       <SessionCanvas key={session.id} source={source} toolbar={toolbar} filePath={shownFilePath} nodeId={nodeId} notice={notice} onTurnChange={setTurn} />
+      {compareOpen && <ComparePicker currentId={session.id} projectId={session.projectId} onClose={() => setCompareOpen(false)} />}
       {exportOpen && <ExportDialog sessionId={session.id} turn={turn} onClose={() => setExportOpen(false)} />}
     </div>
   );

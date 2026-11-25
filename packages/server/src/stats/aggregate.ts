@@ -23,7 +23,7 @@ import {
   type StatsTokens,
   type StatsTool,
 } from '@agent-canvas/shared';
-import { turnDurationMs, type SessionSummary } from './summary.js';
+import { turnDurationMs, type SessionSummary, type SummaryCall, type SummaryTurn } from './summary.js';
 
 /**
  * Aggregation of session summaries into a StatsResponse: a pure function of the summaries, the range, the filters, the
@@ -174,11 +174,79 @@ export function noTokenDataOrigins(entries: readonly { session: Session; summary
   return ORIGINS.filter((o) => withSessions.has(o) && !withUsage.has(o));
 }
 
-export function aggregateStats(input: AggregateInput): StatsResponse {
-  const { range, nowMs, dayKey } = input;
+/**
+ * The stats page's range on day keys: today is `dayKey(nowMs)`; a day is in range when it is not after today and, for
+ * 7d / 30d, not before the range's first day (`from`; null for `all`).
+ */
+export function statsRange(range: StatsRange, nowMs: number, dayKey: (ms: number) => string): {
+  today: string;
+  from: string | null;
+  inRange: (day: string) => boolean;
+} {
   const today = dayKey(nowMs);
   const from = range === '7d' ? addDays(today, -6) : range === '30d' ? addDays(today, -29) : null;
-  const inRange = (day: string): boolean => day <= today && (from === null || day >= from);
+  return { today, from, inRange: (day) => day <= today && (from === null || day >= from) };
+}
+
+/** Whether the stats page counts a turn: dated, on a day in range. */
+export function turnCounted(turn: SummaryTurn, inRange: (day: string) => boolean, dayKey: (ms: number) => string): boolean {
+  return turn.dated && inRange(dayKey(turn.startMs));
+}
+
+/**
+ * Whether the stats page counts a call (by-tool table, slowest calls): a call of a turn it counts (`turnIn`, by turn
+ * index), or an extra's call whose own time is dated and on a day in range.
+ */
+export function callCounted(c: SummaryCall, turnIn: readonly boolean[], inRange: (day: string) => boolean, dayKey: (ms: number) => string): boolean {
+  return c.turn >= 0 ? turnIn[c.turn] === true : c.atMs > 0 && inRange(dayKey(c.atMs));
+}
+
+/** One session's share of the stats totals (sessionTotals). */
+export interface SessionTotals {
+  /** By turn index: whether the stats page counts the turn (turnCounted). */
+  turnIn: boolean[];
+  turns: number;
+  activeMs: number;
+  toolCalls: number;
+  failed: number;
+  /** null when the session has no token data (usageNodes 0) or nothing of it is counted (the stats page's `—`). */
+  tokens: StatsTokens | null;
+}
+
+/**
+ * What aggregateStats's totals give for `range` when this session is the only one in scope: its counted turns (dated,
+ * on a day in range: turns, activeMs at `nowMs`, calls, failures, tokens) and its dated extras on a day in range
+ * (calls, failures, tokens).
+ */
+export function sessionTotals(summary: SessionSummary, range: StatsRange, nowMs: number, dayKey: (ms: number) => string): SessionTotals {
+  const { inRange } = statsRange(range, nowMs, dayKey);
+  const out: SessionTotals = { turnIn: [], turns: 0, activeMs: 0, toolCalls: 0, failed: 0, tokens: null };
+  const tokens = { input: 0, cachedInput: 0, output: 0 };
+  let counted = false;
+  const add = (part: { toolCalls: number; failed: number; inputTokens: number; cachedInputTokens: number; outputTokens: number }): void => {
+    counted = true;
+    out.toolCalls += part.toolCalls;
+    out.failed += part.failed;
+    tokens.input += part.inputTokens;
+    tokens.cachedInput += part.cachedInputTokens;
+    tokens.output += part.outputTokens;
+  };
+  for (const t of summary.turns) {
+    const inScope = turnCounted(t, inRange, dayKey);
+    out.turnIn.push(inScope);
+    if (!inScope) continue;
+    out.turns++;
+    out.activeMs += turnDurationMs(t, nowMs);
+    add(t);
+  }
+  for (const x of summary.extras) if (x.dated && inRange(dayKey(x.atMs))) add(x);
+  if (counted && summary.usageNodes > 0) out.tokens = tokens;
+  return out;
+}
+
+export function aggregateStats(input: AggregateInput): StatsResponse {
+  const { range, nowMs, dayKey } = input;
+  const { today, from, inRange } = statsRange(range, nowMs, dayKey);
 
   // Token data is a property of the whole dataset, not of the range or the filters.
   const noTokenData = noTokenDataOrigins(input.entries);
@@ -227,8 +295,9 @@ export function aggregateStats(input: AggregateInput): StatsResponse {
       const duration = turnDurationMs(t, nowMs);
       const part: Part = { ...t, turns: 1, activeMs: duration };
       record(session, day, part, 1, duration);
-      turnIn.push(inRange(day));
-      if (inRange(day)) {
+      const counted = turnCounted(t, inRange, dayKey);
+      turnIn.push(counted);
+      if (counted) {
         let list = turnDurations.get(session.origin);
         if (!list) turnDurations.set(session.origin, (list = []));
         list.push(duration);
@@ -239,7 +308,7 @@ export function aggregateStats(input: AggregateInput): StatsResponse {
       else undated++;
     }
     for (const c of summary.calls) {
-      if (!(c.turn >= 0 ? turnIn[c.turn] : c.atMs > 0 && inRange(dayKey(c.atMs)))) continue;
+      if (!callCounted(c, turnIn, inRange, dayKey)) continue;
       const key = `${session.origin}\u0000${c.toolName}`;
       let tool = tools.get(key);
       if (!tool) tools.set(key, (tool = { origin: session.origin, toolName: c.toolName, calls: 0, finished: 0, failed: 0, durations: [] }));

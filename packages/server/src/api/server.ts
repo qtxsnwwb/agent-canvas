@@ -39,6 +39,7 @@ import { KEY_PREFIXES } from '../sources/source.js';
 import { storageStatus, type StorageDiagnostics } from '../store/migrate-storage.js';
 import { SAMPLE_MAX, type Store } from '../store/store.js';
 import { AnomaliesService, parseAnomalyListQuery } from '../anomalies/service.js';
+import { CompareService, parseCompareQuery } from '../compare/service.js';
 import { ExportService, type ExportAnswer } from '../export/service.js';
 import { LearnedValuesService, parseLearnedBody } from '../export/learned.js';
 import { maskedContentSnippet, maskedDiagnostics, maskedSessionMatch, snippetMasker } from '../export/masked-search.js';
@@ -363,6 +364,8 @@ export function buildServer(deps: {
   // put three summaries of a large session in one synchronous stretch (measured: 450 ms instead of 250 ms for a
   // 100,000-node session) and make every background recompute of a running session rebuild its stats too.
   files.shareReadsWith(stats);
+  // Two sessions side by side from the same two caches (one read of a session builds both summaries).
+  const compare = new CompareService({ stats: stats.summaryCache(), files: files.summaryCache() });
   const exports = deps.exports ?? new ExportService({ store, dataDir: config.dataDir });
   const learned = new LearnedValuesService(store);
   const bookmarks = deps.bookmarks ?? new BookmarksService({ store });
@@ -602,6 +605,14 @@ export function buildServer(deps: {
     const result = await files.session(req.params.id);
     if (result === null) return reply.code(404).send({ error: 'session not found' });
     return result;
+  });
+  // Two sessions side by side (spec 2026-11-24-compare-design.md 4, 5): counts, durations, tool names, paths, session
+  // titles and each turn's prompt head (≤ 80 code points; the page masks them). An unknown id is a null side (200);
+  // a missing, empty or repeated a / b: 400.
+  app.get<{ Querystring: Record<string, unknown> }>('/api/compare', async (req, reply) => {
+    const query = parseCompareQuery(req.query);
+    if ('error' in query) return reply.code(400).send({ error: query.error });
+    return compare.compare(query.a, query.b);
   });
   // Paths, counts, times, session titles and ids only. 400 for a missing projectId or a bad parameter; an unknown
   // project is an empty result. importing: pipeline.importing() at answer time.
