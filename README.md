@@ -123,6 +123,8 @@ agent-canvas --version
 
 按 `Ctrl+C` 停止。同一个数据目录同时只能运行一个服务。想装 Codex 或 Cursor 的 hooks 的话，需要用这种方式安装（见下）。
 
+想让它登录后自动在后台运行：`agent-canvas service install`（见[使用手册 · 后台常驻](./docs/manual.md#后台常驻)）。
+
 升级和卸载：
 
 ```bash

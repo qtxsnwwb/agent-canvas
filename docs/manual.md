@@ -69,6 +69,86 @@ agent-canvas listening on http://127.0.0.1:4317
 
 升级 agent-canvas 后，如果推导规则的版本变了（或上次重建被中断），`start` 会在开始监听前自动重建派生数据，先打印 `agent-canvas rebuilding derived data (reason: …)`，再打印正常的监听地址。2026-11-10 在一份真实数据上测得：升级时有 14 个会话被自动重新推导（这是一次测量，不是保证）。
 
+## 后台常驻
+
+让服务登录后自动在后台启动，不弹窗口，意外退出时被拉起来。只为当前用户运行，登录之后才有；不是系统服务。
+
+**要先全局安装或用源码目录：** `npm install -g @qtxsnwwb/agent-canvas`，或在源码目录里用 `node packages/server/dist/cli.js`。用 `npx` 临时运行时 `service install` 会拒绝，因为登记的命令里要写程序的绝对路径。
+
+### 命令
+
+| 命令 | 做什么 |
+| --- | --- |
+| `agent-canvas service install [--port <n>] [--yes]` | 登记自动启动，并马上启动。会先列出要写的文件和内容并询问；非交互终端要加 `--yes` |
+| `agent-canvas service uninstall [--yes]` | 停掉服务、取消登记、删除服务清单。数据库、日志和设置都不动 |
+| `agent-canvas service status` | 显示服务是否在运行（进程号、端口、版本、已运行多久）、自动启动是否已安装、日志位置 |
+| `agent-canvas service start` | 启动已安装的后台服务 |
+| `agent-canvas service stop` | 停止正在运行的服务（在终端里用 `start` 启动的也可以） |
+| `agent-canvas service restart` | 先停止，再启动 |
+
+- 退出码：`status` 在服务运行时是 0，没有运行是 3；其他命令成功是 0，失败是 1。
+- 还没安装就 `service start` 或 `restart`，会提示先运行 `service install`，退出码 1。
+- 已经装过再运行 `install` 是更新：会先写“更新已有的安装”。
+- 日常用 `service stop`、`service start`、`service restart`，不用自己去找系统的启动项。
+
+### 各系统怎么登记
+
+| 系统 | 机制 | 位置 |
+| --- | --- | --- |
+| Windows | 当前用户的启动项：注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 里的值 `AgentCanvas` | 启动脚本 `<数据目录>\service\launcher.js` |
+| macOS | LaunchAgent | `~/Library/LaunchAgents/io.github.qtxsnwwb.agent-canvas.plist` |
+| Linux | systemd 用户服务 | `~/.config/systemd/user/agent-canvas.service`（设了 `$XDG_CONFIG_HOME` 就在它下面） |
+
+另外 `install` 会写一份服务清单，记下登记的内容，`status`、`stop`、`uninstall` 靠它找到数据目录：Windows `%APPDATA%\agent-canvas\service.json`，macOS `~/Library/Application Support/agent-canvas/service.json`，Linux `$XDG_CONFIG_HOME/agent-canvas/service.json`（默认 `~/.config/agent-canvas/service.json`）。
+
+**Windows：**
+
+- 登录后由 `wscript.exe` 运行一个 JScript 启动脚本，脚本在后台隐藏运行服务，没有窗口。
+- 这个启动项在任务管理器的“启动应用”里能看到，也能在那里停用。停用后再运行 `install`，它仍是停用的（Windows 记住了你的选择），要回到那里重新启用；`status` 会写“在任务管理器里被停用”。
+- 服务异常退出（退出码不是 0）后，启动脚本等 5、10、20、40、60 秒再启动，之后每次等 60 秒；一次运行超过 10 分钟，等待重新从 5 秒算起。正常退出不再启动。
+- 需要 Windows Script Host。被系统策略禁用时，`install` 会说明原因并拒绝。
+
+**macOS：** 服务以非 0 退出码退出时，launchd 会再启动它，两次启动至少隔 10 秒；正常退出不再启动。
+
+**Linux：** 服务异常退出后，systemd 等 5 秒再启动（`Restart=on-failure`）。
+
+- 只在你登录时运行（没有设 linger），和“登录后启动”一致。
+- 没有 systemd 用户实例的环境（WSL、容器等），`install` 会拒绝。
+- 桌面通知需要 systemd 用户环境里有会话的显示变量和 D-Bus 变量（如 `DISPLAY`、`DBUS_SESSION_BUS_ADDRESS`）；没有的话服务照常运行，但弹不出通知。可以用 `systemctl --user import-environment` 导入。
+
+### 停止
+
+- `service stop` 会请求服务自己退出，最多等 30 秒，不会强行杀进程；超时就报“服务没有在 30 秒内退出”，退出码 1。
+- 它同时取消系统的“退出后再启动”：Windows 写一个停止标记让启动脚本不再重启，macOS 卸载登记，Linux 停掉 systemd 服务。所以一个反复崩溃的服务也能用它停下来。下次登录会重新启动；不想要就 `service uninstall`。
+- 服务正在重建数据或压缩数据库时，`stop` 不会停它（提示“做完会自己退出”）。旧版本、或不是后台常驻启动的服务，`stop` 也停不了，请在它的终端里按 Ctrl+C。
+- 控制钥匙：每次启动，服务会在数据目录里写一个随机的 `control.key`（只有当前用户可读写，Windows 上沿用数据目录继承的权限）。`stop` 凭它向服务发停止请求；网页读不到这个文件，也发不出这个请求。所以别把数据目录放在多人共享的位置：能读这个文件的人就能停止服务。
+
+### 日志
+
+- 后台运行时没有终端，服务输出的内容写到 `<数据目录>/logs/service.log`，每行前面带时间。意外崩溃（未捕获的错误）也写在这里，然后服务退出并被拉起来。
+- 文件到 5 MB 就改名为 `service.log.1`（覆盖更早的那个）并重新开始写，所以日志最多约 10 MB；单独一行特别长时可能略多。
+- `service status` 最后一行写着日志位置。
+
+### 记下的环境变量
+
+服务不是从你的终端启动的，看不到终端里的环境变量。`install` 会把下面这些变量里当时已设置的记进登记：
+
+`AGENT_CANVAS_DATA_DIR`、`AGENT_CANVAS_PROJECTS_DIR`、`AGENT_CANVAS_CODEX_DIR`、`AGENT_CANVAS_CURSOR_DB`、`AGENT_CANVAS_GEMINI_DIR`、`AGENT_CANVAS_GROK_DIR`、`AGENT_CANVAS_COPILOT_DIR`、`AGENT_CANVAS_DSH_DIR`、`AGENT_CANVAS_WORKBUDDY_DIR`、`AGENT_CANVAS_CODEBUDDY_DIR`、`AGENT_CANVAS_DOUBAO_DIR`、`AGENT_CANVAS_QWEN_DIR`、`GEMINI_CLI_HOME`、`GROK_HOME`、`COPILOT_HOME`、`DSH_HOME`、`WORKBUDDY_CONFIG_DIR`、`CODEBUDDY_CONFIG_DIR`、`QWEN_RUNTIME_DIR`、`QWEN_HOME`
+
+- 空字符串也会记下（它表示“不读取这个来源”）。
+- 改了其中任何一个，要在新的环境里再运行一次 `service install`，后台服务才会用新的值。
+- 已安装的服务用着另一个数据目录并且正在运行时，换了数据目录再 `install` 会拒绝，先运行 `service stop`。
+
+### 升级
+
+全局安装升级后（`npm install -g @qtxsnwwb/agent-canvas@latest`）运行 `agent-canvas service restart`，后台的服务才会换成新版本。程序路径不变，不需要重新 `install`。
+
+### 测试情况
+
+- Windows 的后台启动脚本在真机上测过（真实的 wscript）；真实安装（写注册表、注销再登录）还待人工核对。
+- macOS 没有在 Mac 上测过。
+- Linux 只测了生成的文件和命令，没有在真实的 systemd 上跑过。
+
 ## 首页与检索
 
 首页按项目列出会话，项目内按最近活动时间排序。
