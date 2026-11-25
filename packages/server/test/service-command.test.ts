@@ -220,6 +220,18 @@ describe('service install', () => {
     expect(readManifest(system)?.port).toBe(45005);
   });
 
+  test('装好的服务在另一个数据目录里运行：拒绝，什么都不写', async () => {
+    const other = path.join(tmp, 'service-data');
+    writeManifest(system, manifest({ dataDir: other, port: 45008 }));
+    const before = await fs.readFile(manifestPath(system), 'utf8');
+    await holdLock({ command: 'start', version: '0.5.0', service: true, port: 45008 }, other);
+    expect(await run(['install', '--port', '45009', '--yes'])).toBe(1);
+    expect(err).toEqual([`已有服务在运行（进程号 ${process.pid}，数据目录 ${other}）；先运行 agent-canvas service stop 停掉它，再重新安装`]);
+    expect(out).toEqual([]);
+    expect(calls).toEqual([]);
+    expect(await fs.readFile(manifestPath(system), 'utf8')).toBe(before);
+  });
+
   test('服务 15 秒内没起来：退出 1，指向日志', async () => {
     let clock = 0;
     system.now = () => clock;

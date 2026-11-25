@@ -96,13 +96,22 @@ async function install(c: Context, args: string[]): Promise<number> {
     return 1;
   }
   const def = shellDefinition(c, port);
+  // The installed service runs on its own data dir: installing for another one would start a second service there.
+  const previous = readManifest(system);
+  if (previous !== null && previous.dataDir !== def.dataDir) {
+    const old = readLock(previous.dataDir);
+    if (old !== null && old.command === 'start') {
+      io.err(`已有服务在运行（进程号 ${old.pid}，数据目录 ${previous.dataDir}）；先运行 agent-canvas service stop 停掉它，再重新安装`);
+      return 1;
+    }
+  }
   const reason = await backend.check(def);
   if (reason !== null) {
     io.err(reason);
     return 1;
   }
   const file = manifestPath(system);
-  if (readManifest(system) !== null) io.out('更新已有的安装');
+  if (previous !== null) io.out('更新已有的安装');
   for (const line of backend.plan(def)) io.out(line);
   io.out(`写服务清单：${file}`);
   if (!(await confirmed(c, values.yes === true, '非交互终端下需要加 --yes 才会写入'))) return 1;
