@@ -604,6 +604,8 @@ export interface MainDeps {
   serviceSystem?: ServiceSystem;
   /** The backend `service` uses (default: the system's own); null: not supported. */
   serviceBackend?: ServiceBackend | null;
+  /** The node `service install` writes into the service's command line (default process.execPath). */
+  nodePath?: string;
 }
 
 /**
@@ -745,7 +747,7 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
       system: deps.serviceSystem ?? realServiceSystem(),
       io: deps.hooksIo ?? terminalIo(),
       cliPath: deps.cliPath ?? defaultCliPath(),
-      nodePath: process.execPath,
+      nodePath: deps.nodePath ?? process.execPath,
       backend: deps.serviceBackend,
       usage: USAGE,
     });

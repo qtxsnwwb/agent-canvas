@@ -1,3 +1,4 @@
+import { realpathSync, symlinkSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import net from 'node:net';
 import os from 'node:os';
@@ -53,7 +54,10 @@ async function freePort(): Promise<number> {
   return port;
 }
 
-const CLI = path.join('C:', 'agent-canvas', 'dist', 'cli.js');
+/** This installation's cli.js as the commands get it: a real (empty) file in the temp directory. */
+let CLI: string;
+/** process.execPath without links, as install records it. */
+const NODE = realpathSync(process.execPath);
 
 const exists = (file: string): Promise<boolean> => fs.stat(file).then(() => true, () => false);
 
@@ -95,6 +99,9 @@ function manifest(over: Partial<ServiceManifest> = {}): ServiceManifest {
 beforeEach(async () => {
   tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-service-command-'));
   dataDir = path.join(tmp, 'data');
+  CLI = path.join(tmp, 'agent-canvas', 'dist', 'cli.js');
+  await fs.mkdir(path.dirname(CLI), { recursive: true });
+  await fs.writeFile(CLI, '');
   const home = path.join(tmp, 'home');
   await fs.mkdir(path.join(tmp, 'projects'), { recursive: true });
   await fs.mkdir(home, { recursive: true });
@@ -222,8 +229,8 @@ describe('service install', () => {
     expect(await run(['install', '--port', '45003'])).toBe(0);
     expect(calls).toEqual(['check', 'register', 'start']);
     const m = readManifest(system);
-    expect(m).toMatchObject({ version: 1, port: 45003, dataDir, cliPath: CLI, nodePath: process.execPath, where: backend.where, platform: system.platform });
-    expect(m?.argv).toEqual([process.execPath, CLI, 'start', '--port', '45003', '--log-file', path.join(dataDir, 'logs', 'service.log'), '--service']);
+    expect(m).toMatchObject({ version: 1, port: 45003, dataDir, cliPath: CLI, nodePath: NODE, where: backend.where, platform: system.platform });
+    expect(m?.argv).toEqual([NODE, CLI, 'start', '--port', '45003', '--log-file', path.join(dataDir, 'logs', 'service.log'), '--service']);
     expect(out.join('\n')).toContain('计划：运行');
     expect(out.join('\n')).not.toContain('更新已有的安装');
     const port = readLock(dataDir)?.port;
@@ -285,6 +292,16 @@ describe('service install', () => {
     expect(m.env).toEqual({ AGENT_CANVAS_DATA_DIR: abs, AGENT_CANVAS_PROJECTS_DIR: path.join(tmp, 'projects'), QWEN_HOME: path.join(system.home, 'qwen'), AGENT_CANVAS_CODEX_DIR: '' });
     expect(m.argv).toContain(path.join(abs, 'logs', 'service.log'));
     expect(readLock(abs)?.port).toBeGreaterThan(0);
+  });
+
+  test('记下 node 的真实路径（不经过链接）', async () => {
+    const link = path.join(tmp, 'node-link');
+    symlinkSync(path.dirname(process.execPath), link, 'junction');
+    const viaLink = path.join(link, path.basename(process.execPath));
+    expect(await run(['install', '--yes'], { nodePath: viaLink })).toBe(0);
+    expect(readManifest(system)?.nodePath).toBe(NODE);
+    expect(readManifest(system)?.argv[0]).toBe(NODE);
+    expect(NODE).not.toBe(viaLink);
   });
 
   test('服务 15 秒内没起来：退出 1，指向日志', async () => {
@@ -362,6 +379,53 @@ describe('service status', () => {
     await holdLock({ command: 'start', version: '0.5.0', service: true, port }, other);
     expect(await run(['status'])).toBe(0);
     expect(out[0]).toMatch(new RegExp(`^服务：正在运行（进程号 ${process.pid}，端口 ${port}，版本 0\\.5\\.0`));
+  });
+});
+
+const missingProgram = (p: string): string => `登记的程序不存在：${p}；请重新运行 agent-canvas service install`;
+
+describe('登记的程序不存在（换了 Node 版本、卸载了、用 pnpm 装的）', () => {
+  test('status：照常打印，再说明；没在运行退出 3', async () => {
+    const gone = path.join(tmp, 'gone', 'cli.js');
+    writeManifest(system, manifest({ cliPath: gone }));
+    expect(await run(['status'])).toBe(3);
+    expect(out[0]).toBe('服务：没有运行');
+    expect(out).toHaveLength(3);
+    expect(err).toEqual([missingProgram(gone)]);
+  });
+
+  test('status：服务在运行时退出 1', async () => {
+    const gone = path.join(tmp, 'gone', 'node.exe');
+    writeManifest(system, manifest({ nodePath: gone }));
+    await holdLock({ command: 'start', version: '0.5.0', service: true, port: await listeningPort() });
+    expect(await run(['status'])).toBe(1);
+    expect(out[0]).toMatch(/^服务：正在运行/);
+    expect(err).toEqual([missingProgram(gone)]);
+  });
+
+  test('start：说明并退出 1，不启动', async () => {
+    const gone = path.join(tmp, 'gone', 'cli.js');
+    writeManifest(system, manifest({ cliPath: gone }));
+    expect(await run(['start'])).toBe(1);
+    expect(err).toEqual([missingProgram(gone)]);
+    expect(calls).toEqual([]);
+  });
+
+  test('restart：说明并退出 1，不停正在运行的服务', async () => {
+    const gone = path.join(tmp, 'gone', 'node.exe');
+    writeManifest(system, manifest({ nodePath: gone }));
+    await launch(manifest());
+    expect(await run(['restart'])).toBe(1);
+    expect(err).toEqual([missingProgram(gone)]);
+    expect(calls).toEqual([]);
+    expect(readLock(dataDir)).not.toBeNull();
+  });
+
+  test('stop 照常停', async () => {
+    writeManifest(system, manifest({ cliPath: path.join(tmp, 'gone', 'cli.js') }));
+    await launch(manifest());
+    expect(await run(['stop'])).toBe(0);
+    expect(out).toEqual(['已停止']);
   });
 });
 

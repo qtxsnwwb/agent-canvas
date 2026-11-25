@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import { parseArgs } from 'node:util';
 import { isNpxPath, PACKAGE_NAME } from '../cli-commands.js';
 import { loadConfig } from '../config.js';
@@ -56,15 +57,38 @@ interface Context extends ServiceCommandOptions {
   backend: ServiceBackend | null;
 }
 
+/** `p` without symbolic links or junctions (a version manager's `current` link may point elsewhere later); `p` when that fails. */
+function realPath(p: string): string {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return p;
+  }
+}
+
 /**
  * The definition from the current shell: its data directory, the given port (default: the configured one). Relative
- * paths in the recorded variables are made absolute against the current directory (absoluteServiceEnv).
+ * paths in the recorded variables are made absolute against the current directory (absoluteServiceEnv); node is
+ * recorded by its real path.
  */
 function shellDefinition(c: Context, port?: number): ServiceDefinition {
   const { system } = c;
   const env = absoluteServiceEnv(system.env, { cwd: system.cwd?.() ?? process.cwd(), home: system.home, platform: system.platform });
-  return serviceDefinition({ env, port: port ?? loadConfig(env).port, nodePath: c.nodePath, cliPath: c.cliPath });
+  return serviceDefinition({ env, port: port ?? loadConfig(env).port, nodePath: realPath(c.nodePath), cliPath: c.cliPath });
 }
+
+/**
+ * The first of the installed service's programs (node, cli.js) that no longer exists, or null. Switching Node versions
+ * (nvm, fnm, volta), uninstalling, or installing with pnpm moves them; the registration then starts nothing.
+ */
+function missingProgram(manifest: ServiceManifest): string | null {
+  for (const p of [manifest.nodePath, manifest.cliPath]) {
+    if (!fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
+const missingProgramMessage = (p: string): string => `登记的程序不存在：${p}；请重新运行 agent-canvas service install`;
 
 /** The service to act on: the installed one (manifest), else the one the current shell would run. */
 function currentDefinition(c: Context): { def: ServiceDefinition; manifest: ServiceManifest | null } {
@@ -195,8 +219,9 @@ async function uninstall(c: Context, args: string[]): Promise<number> {
   return 0;
 }
 
+/** Exit code: 0 while a service runs, 3 otherwise; 1 when it runs but the installed programs are gone. */
 async function status(c: Context): Promise<number> {
-  const { def } = currentDefinition(c);
+  const { def, manifest } = currentDefinition(c);
   const { backend } = c;
   const { holder, stale } = await readServiceLock(def.dataDir);
   const { lines, code } = statusLines({
@@ -209,10 +234,15 @@ async function status(c: Context): Promise<number> {
     kind: backend?.kind ?? null,
   });
   for (const line of lines) c.io.out(line);
+  const missing = manifest !== null ? missingProgram(manifest) : null;
+  if (missing !== null) {
+    c.io.err(missingProgramMessage(missing));
+    return code === 0 ? 1 : 3;
+  }
   return code;
 }
 
-/** The installed service, or null after saying why there is none to start. */
+/** The installed service, or null after saying why there is none to start (also when its programs are gone). */
 function installed(c: Context): { manifest: ServiceManifest; backend: ServiceBackend } | null {
   const manifest = readManifest(c.system);
   if (manifest === null) {
@@ -221,6 +251,11 @@ function installed(c: Context): { manifest: ServiceManifest; backend: ServiceBac
   }
   if (c.backend === null) {
     c.io.err(UNSUPPORTED);
+    return null;
+  }
+  const missing = missingProgram(manifest);
+  if (missing !== null) {
+    c.io.err(missingProgramMessage(missing));
     return null;
   }
   return { manifest, backend: c.backend };
