@@ -83,10 +83,14 @@ agent-canvas listening on http://127.0.0.1:4317
 | `agent-canvas service uninstall [--yes]` | 停掉服务、取消登记、删除服务清单。数据库、日志和设置都不动 |
 | `agent-canvas service status` | 显示服务是否在运行（进程号、端口、版本、已运行多久）、自动启动是否已安装、日志位置 |
 | `agent-canvas service start` | 启动已安装的后台服务 |
-| `agent-canvas service stop` | 停止正在运行的服务（在终端里用 `start` 启动的也可以） |
+| `agent-canvas service stop` | 停止正在运行的服务（在终端里用 `start` 启动的也可以，只要它用的是同一个数据目录，见下） |
 | `agent-canvas service restart` | 先停止，再启动 |
 
 - 退出码：`status` 在服务运行时是 0，没有运行是 3；其他命令成功是 0，失败是 1。
+- 装了后台常驻时，这些命令按安装时的数据目录办；没装时按当前终端的设置（`AGENT_CANVAS_DATA_DIR`）。所以 `service stop` 只能停掉用同一个数据目录的服务：装了时是安装时的数据目录，没装时是当前终端的。
+- 登记的程序（node 或 `cli.js`）不在原处了（换了 Node 版本、卸载了），`status`、`start`、`restart` 会提示“登记的程序不存在：…；请重新运行 agent-canvas service install”，退出码 1（`status` 在服务没有运行时是 3）。
+- 服务刚启动、还没开始监听时（升级后第一次启动可能要先重建数据，要几分钟），`install`、`start`、`restart` 等 15 秒后会说“服务还在启动（可能在重建数据），看日志：…”，退出码 0；这时 `stop` 会说“服务正在启动……稍后再试”，退出码 1。
+- Windows 注销或关机时会直接结束服务，留下锁文件；如果锁里的进程号后来被别的程序用上，`status` 会写“没有运行（锁文件残留，进程号 N）”。下次后台启动时服务会自己接管这个残留的锁，不用手动处理。
 - 还没安装就 `service start` 或 `restart`，会提示先运行 `service install`，退出码 1。
 - 已经装过再运行 `install` 是更新：会先写“更新已有的安装”。
 - 日常用 `service stop`、`service start`、`service restart`，不用自己去找系统的启动项。
@@ -136,12 +140,23 @@ agent-canvas listening on http://127.0.0.1:4317
 `AGENT_CANVAS_DATA_DIR`、`AGENT_CANVAS_PROJECTS_DIR`、`AGENT_CANVAS_CODEX_DIR`、`AGENT_CANVAS_CURSOR_DB`、`AGENT_CANVAS_GEMINI_DIR`、`AGENT_CANVAS_GROK_DIR`、`AGENT_CANVAS_COPILOT_DIR`、`AGENT_CANVAS_DSH_DIR`、`AGENT_CANVAS_WORKBUDDY_DIR`、`AGENT_CANVAS_CODEBUDDY_DIR`、`AGENT_CANVAS_DOUBAO_DIR`、`AGENT_CANVAS_QWEN_DIR`、`GEMINI_CLI_HOME`、`GROK_HOME`、`COPILOT_HOME`、`DSH_HOME`、`WORKBUDDY_CONFIG_DIR`、`CODEBUDDY_CONFIG_DIR`、`QWEN_RUNTIME_DIR`、`QWEN_HOME`
 
 - 空字符串也会记下（它表示“不读取这个来源”）。
+- 相对路径按运行 `install` 时的当前目录记成绝对路径。
 - 改了其中任何一个，要在新的环境里再运行一次 `service install`，后台服务才会用新的值。
 - 已安装的服务用着另一个数据目录并且正在运行时，换了数据目录再 `install` 会拒绝，先运行 `service stop`。
 
 ### 升级
 
-全局安装升级后（`npm install -g @qtxsnwwb/agent-canvas@latest`）运行 `agent-canvas service restart`，后台的服务才会换成新版本。程序路径不变，不需要重新 `install`。
+按这个顺序：
+
+```bash
+agent-canvas service stop
+npm install -g @qtxsnwwb/agent-canvas@latest
+agent-canvas service start
+```
+
+先停是因为服务运行时 Windows 可能拒绝替换它正在用的文件。用 npm 全局安装升级时程序路径不变，不需要重新 `install`。
+
+登记里记的是 node 和 `cli.js` 的绝对路径（node 记的是去掉链接后的真实路径）。换了 Node 版本（nvm、fnm、volta 等）或者改用 pnpm 安装后，这些路径会变，要再运行一次 `agent-canvas service install`；`service status` 发现登记的程序不在了会提示。
 
 ### 测试情况
 
