@@ -10,7 +10,7 @@ import { loadConfig } from '../src/config.js';
 
 const TOOL_KEYS = ['geminiDir', 'grokDir', 'copilotDir', 'deepseekDir', 'workbuddyDirs', 'codebuddyDir', 'doubaoDirs', 'qwenDir'] as const;
 /** Tests of the resolution rules themselves: they read the resolved paths, never the directories. */
-const RESOLUTION_TESTS = new Set(['config.test.ts', 'config-more-sources.test.ts', 'config-more-sources-cn.test.ts', 'config-qwen.test.ts', 'no-real-tool-dirs.test.ts']);
+const RESOLUTION_TESTS = new Set(['config.test.ts', 'config-more-sources.test.ts', 'config-more-sources-cn.test.ts', 'config-qwen.test.ts', 'service-core.test.ts', 'no-real-tool-dirs.test.ts']);
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const home = path.resolve(os.homedir()).toLowerCase();
 const underHome = (p: string | null | readonly string[]): boolean =>
