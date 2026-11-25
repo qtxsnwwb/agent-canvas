@@ -100,7 +100,7 @@ agent-canvas service restart
   服务没跑时写“没有运行”；自动启动没装写“没有安装”。Windows 上启动项在任务管理器里被停用时写“已安装，但在任务管理器里被停用”（读 `StartupApproved\Run`）。退出码：在跑 0，没跑 3（与常见服务工具一致）。
 - **start**：自动启动装了：通过系统机制启动（Windows 运行启动项命令，macOS `launchctl kickstart`，Linux `systemctl --user start`）。没装：提示先 `install`，或在终端用 `agent-canvas start`。已经在跑：说明并退出码 0。
 - **stop**：让正在运行的服务（不管是后台的还是终端里的）正常收尾后退出，见第 5 节。服务退出码为 0，所以三个系统都不会把它拉起来；下次登录照常启动。
-  - **也取消待定的重启**（决定）：服务刚崩溃、系统正在等着重启它时（Windows 启动脚本在等待，systemd 在 `RestartSec` 里，launchd 在节流间隔里），那一刻没有进程，但几秒后它又会回来。所以装了自动启动时，`stop` 同时让系统那一侧停下：Linux `systemctl --user stop agent-canvas.service`；macOS `launchctl kill SIGTERM gui/<uid>/<标签>` 后再 `bootout`（下次登录时 launchd 会从 `~/Library/LaunchAgents` 重新加载）；Windows 在 `<数据目录>/service/` 下放一个“已停止”标记，启动脚本每次重启前先看，有标记就退出循环，`start` 和下次登录（启动项命令先删标记）会清掉它。这样一直崩溃的服务（例如端口被占、数据库打不开）也能用 `stop` 停住。
+  - **也取消待定的重启**（决定）：服务刚崩溃、系统正在等着重启它时（Windows 启动脚本在等待，systemd 在 `RestartSec` 里，launchd 在节流间隔里），那一刻没有进程，但几秒后它又会回来。所以装了自动启动时，`stop` 同时让系统那一侧停下：Linux `systemctl --user stop agent-canvas.service`；macOS `launchctl bootout gui/<uid>/<标签>`（它会给仍在运行的进程发 SIGTERM；下次登录时 launchd 会从 `~/Library/LaunchAgents` 重新加载）；Windows 在 `<数据目录>/service/` 下放一个“已停止”标记，启动脚本每次重启前先看，有标记就退出循环，`start` 和下次登录（启动项命令先删标记）会清掉它。这样一直崩溃的服务（例如端口被占、数据库打不开）也能用 `stop` 停住。
   - 没在跑、也没有待定的重启时说明，退出码 0。
 - **restart**：`stop` 再 `start`；升级后用（全局安装升级后路径不变，从源码运行时重新构建后）。
 
