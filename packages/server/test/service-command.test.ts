@@ -253,6 +253,27 @@ describe('service install', () => {
     expect(await fs.readFile(manifestPath(system), 'utf8')).toBe(before);
   });
 
+  test('装好的服务在另一个数据目录、没在运行：登记前先取消它那边待定的重启', async () => {
+    const other = path.join(tmp, 'service-data');
+    writeManifest(system, manifest({ dataDir: other, port: 45008 }));
+    const cancelled: string[] = [];
+    const cancel = backend.cancelRestart.bind(backend);
+    backend.cancelRestart = async (def) => {
+      cancelled.push(def.dataDir);
+      await cancel(def);
+    };
+    expect(await run(['install', '--port', '45009', '--yes'])).toBe(0);
+    expect(calls).toEqual(['check', 'cancelRestart:not-running', 'register', 'start']);
+    expect(cancelled).toEqual([other]);
+    expect(readManifest(system)?.dataDir).toBe(dataDir);
+  });
+
+  test('重新安装在同一个数据目录：不取消重启', async () => {
+    writeManifest(system, manifest({ port: 45008 }));
+    expect(await run(['install', '--port', '45009', '--yes'])).toBe(0);
+    expect(calls).toEqual(['check', 'register', 'start']);
+  });
+
   test('服务 15 秒内没起来：退出 1，指向日志', async () => {
     let clock = 0;
     system.now = () => clock;

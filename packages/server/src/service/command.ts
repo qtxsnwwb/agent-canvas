@@ -139,6 +139,9 @@ async function install(c: Context, args: string[]): Promise<number> {
   io.out(`写服务清单：${file}`);
   if (!(await confirmed(c, values.yes === true, '非交互终端下需要加 --yes 才会写入'))) return 1;
 
+  // The previous installation ran on another data dir and is not running (checked above): its launcher or the system
+  // could still be waiting to restart it there.
+  if (previous !== null && previous.dataDir !== def.dataDir) await backend.cancelRestart(previous);
   await backend.register(def);
   writeManifest(system, { ...def, version: 1, platform: system.platform, where: backend.where, installedAt: new Date(system.now()).toISOString() });
   io.out(`已登记：${backend.where}`);
