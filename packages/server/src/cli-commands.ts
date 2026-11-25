@@ -22,7 +22,7 @@ import {
   type HooksCliIo,
 } from './hooks-cli.js';
 import { acquireLock, isStaleService, LockHeldError, removeStaleLock } from './lock.js';
-import { captureProcessOutput, logCrashes, openLogFile, type LogFile } from './logfile.js';
+import { closeEarlyProcessLog, openProcessLog, takeProcessLog, type ProcessLog } from './logfile.js';
 import { NORMALIZER_VERSION } from './normalize/version.js';
 import { DesktopNotifier } from './notify/desktop.js';
 import { NotificationService, type ServiceNotifier } from './notify/service.js';
@@ -622,15 +622,11 @@ async function startCommand(args: string[], deps: MainDeps): Promise<number> {
   const exit = deps.exit ?? ((code: number): void => process.exit(code));
   const out = (line: string): void => void process.stdout.write(`${line}\n`);
   const err = (line: string): void => void process.stderr.write(`${line}\n`);
-  let log: LogFile | null = null;
-  let restoreOutput: (() => void) | null = null;
-  let uninstallCrashLog: (() => void) | null = null;
+  let processLog: ProcessLog | null = null;
   const stopLogging = (): void => {
-    uninstallCrashLog?.();
-    uninstallCrashLog = null;
-    restoreOutput?.();
-    restoreOutput = null;
-    log?.close();
+    processLog?.stop();
+    processLog = null;
+    closeEarlyProcessLog(); // one the entry opened that was not taken over (the arguments were refused)
   };
   let service = false;
   let removeSignalHandlers = (): void => undefined;
@@ -642,12 +638,8 @@ async function startCommand(args: string[], deps: MainDeps): Promise<number> {
     });
     service = values.service === true;
     const logFile = values['log-file'];
-    if (logFile !== undefined) {
-      log = openLogFile(logFile);
-      restoreOutput = captureProcessOutput(log);
-      // Node prints a crash straight to the terminal (not through process.stderr.write): put it in the log instead.
-      uninstallCrashLog = logCrashes(log, exit);
-    }
+    // The entry (cli.ts) opens it before loading this module, so that a failure to load is logged too: taken over.
+    if (logFile !== undefined) processLog = takeProcessLog(logFile) ?? openProcessLog(logFile, exit);
     const overrides: Partial<Config> = {};
     if (values.port !== undefined) {
       const port = Number(values.port);

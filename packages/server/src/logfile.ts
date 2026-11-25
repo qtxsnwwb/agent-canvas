@@ -82,14 +82,18 @@ export function openLogFile(file: string, opts: { maxBytes?: number; now?: () =>
   };
 }
 
+/** What Node would print for `reason`: an error's stack, else its text. */
+function describeFailure(reason: unknown): string {
+  return reason instanceof Error ? (reason.stack ?? `${reason.name}: ${reason.message}`) : String(reason);
+}
+
 /**
  * Writes a crash (an uncaught exception or unhandled rejection: what Node would print before dying) to `log`, then
  * exits with code 1 so the service manager restarts the service. Returns the function that removes the handlers.
  */
 export function logCrashes(log: LogFile, exit: (code: number) => void): () => void {
   const crashed = (kind: string) => (reason: unknown): void => {
-    const detail = reason instanceof Error ? (reason.stack ?? `${reason.name}: ${reason.message}`) : String(reason);
-    log.write(`agent-canvas: ${kind}: ${detail}\n`);
+    log.write(`agent-canvas: ${kind}: ${describeFailure(reason)}\n`);
     exit(1);
   };
   const onException = crashed('uncaught exception');
@@ -127,4 +131,92 @@ export function captureProcessOutput(log: LogFile): () => void {
       s.write = originals[i]!;
     });
   };
+}
+
+/**
+ * The `--log-file` of a `start` command line (`argv` without node and the script; no command, or only options, is
+ * `start` too, as main reads it), given as `--log-file <file>` or `--log-file=<file>`; null otherwise.
+ */
+export function startLogFile(argv: readonly string[]): string | null {
+  const first = argv[0];
+  const implied = first === undefined || (first.startsWith('--') && first !== '--version' && first !== '--help');
+  const args = implied ? argv : first === 'start' ? argv.slice(1) : null;
+  if (args === null) return null;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg === '--log-file') {
+      const value = args[i + 1];
+      return value !== undefined && value !== '' && !value.startsWith('-') ? value : null;
+    }
+    if (arg.startsWith('--log-file=')) return arg.slice('--log-file='.length) || null;
+  }
+  return null;
+}
+
+/** This process's output going to a log file: openLogFile, captureProcessOutput and logCrashes together. */
+export interface ProcessLog {
+  readonly file: string;
+  readonly log: LogFile;
+  /** Writes a failure before the commands could run (loading them) to the log, then exits 1. */
+  fail(reason: unknown): void;
+  /** Puts the output and the crash handlers back and closes the log; once. */
+  stop(): void;
+}
+
+export function openProcessLog(file: string, exit: (code: number) => void): ProcessLog {
+  const log = openLogFile(file);
+  const restoreOutput = captureProcessOutput(log);
+  // Node prints a crash straight to the terminal (not through process.stderr.write): put it in the log instead.
+  const uninstallCrashLog = logCrashes(log, exit);
+  let stopped = false;
+  return {
+    file,
+    log,
+    fail(reason) {
+      log.write(`agent-canvas: load failed: ${describeFailure(reason)}\n`);
+      exit(1);
+    },
+    stop() {
+      if (stopped) return;
+      stopped = true;
+      uninstallCrashLog();
+      restoreOutput();
+      log.close();
+    },
+  };
+}
+
+/** The log the entry (cli.ts) opened before loading the commands, until `start` takes it over. */
+let early: ProcessLog | null = null;
+
+/**
+ * cli.ts, before it loads the commands: for a `start` with `--log-file`, opens that log now, so a failure to load them
+ * (a native module built for another Node version, say) is written there too, not to a terminal the background service
+ * does not have. Null for any other command line. `start` takes it over with takeProcessLog.
+ */
+export function openEarlyProcessLog(argv: readonly string[], exit: (code: number) => void): ProcessLog | null {
+  const file = startLogFile(argv);
+  if (file === null) return null;
+  early?.stop();
+  early = openProcessLog(file, exit);
+  return early;
+}
+
+/** Closes the log the entry opened, if nobody took it over. */
+export function closeEarlyProcessLog(): void {
+  early?.stop();
+  early = null;
+}
+
+/**
+ * The log the entry opened, when it is `file`: it then belongs to the caller (once). One for another file is closed,
+ * and null returned: the caller opens its own.
+ */
+export function takeProcessLog(file: string): ProcessLog | null {
+  const taken = early;
+  early = null;
+  if (taken === null) return null;
+  if (taken.file === file) return taken;
+  taken.stop();
+  return null;
 }

@@ -7,6 +7,7 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { main, start, type MainDeps, type Running } from '../src/cli.js';
 import { CONTROL_HEADER, CONTROL_KEY_FILE, readControlKey } from '../src/control.js';
 import { lockPath, readLock } from '../src/lock.js';
+import { openEarlyProcessLog } from '../src/logfile.js';
 import type { DeliveryStatus, NotificationMessage } from '../src/notify/desktop.js';
 import type { ServiceNotifier } from '../src/notify/service.js';
 
@@ -263,4 +264,24 @@ test('start() 失败时撤掉两个信号的监听', async () => {
   expect((await runCaptured(['start', '--port', '0', '--service'])).code).toBe(1);
   expect(process.listeners('SIGTERM')).toEqual(before.term);
   expect(process.listeners('SIGINT')).toEqual(before.int);
+});
+
+test('--log-file：入口已经打开了同一个日志（载入命令之前）时，start 接着用它，不再打开第二次', async () => {
+  const file = path.join(tmp, 'logs', 'service.log');
+  const crashListeners = (): number => process.listenerCount('uncaughtException') + process.listenerCount('unhandledRejection');
+  const before = crashListeners();
+  const argv = ['start', '--port', '0', '--log-file', file, '--service'];
+  const early = openEarlyProcessLog(argv, (code) => void exits.push(code));
+  expect(early).not.toBeNull();
+  const stdoutWrite = process.stdout.write;
+  expect(await main(argv, deps)).toBe(-1);
+  expect(crashListeners()).toBe(before + 2); // the entry's handlers only
+  expect(process.stdout.write).toBe(stdoutWrite); // still the entry's capture, not wrapped again
+  const res = await requestStop();
+  expect(res.status).toBe(202);
+  await waitForShutdown();
+  expect(crashListeners()).toBe(before);
+  expect(process.stdout.write).not.toBe(stdoutWrite); // restored
+  const lines = (await fs.readFile(file, 'utf8')).split('\n').filter((l) => l.includes('agent-canvas listening on'));
+  expect(lines).toHaveLength(1);
 });

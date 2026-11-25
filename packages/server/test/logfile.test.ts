@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, expect, it, test } from 'vitest';
-import { captureProcessOutput, LOG_MAX_BYTES, logCrashes, openLogFile } from '../src/logfile.js';
+import { captureProcessOutput, LOG_MAX_BYTES, logCrashes, openEarlyProcessLog, openLogFile, startLogFile, takeProcessLog } from '../src/logfile.js';
 
 let tmp: string;
 const T = '2026-11-25T10:00:00.000Z';
@@ -133,4 +133,52 @@ test('logCrashes：未捕获的异常和未处理的 rejection 带时间写进�
   );
   expect(process.listeners('uncaughtException')).toEqual(before.exc);
   expect(process.listeners('unhandledRejection')).toEqual(before.rej);
+});
+
+test('startLogFile：只认 start（含省略命令、只给选项）的 --log-file', () => {
+  expect(startLogFile(['start', '--port', '4400', '--log-file', '/l/service.log', '--service'])).toBe('/l/service.log');
+  expect(startLogFile(['start', '--log-file=/l/a.log'])).toBe('/l/a.log');
+  expect(startLogFile(['--port', '4400', '--log-file', '/l/b.log'])).toBe('/l/b.log');
+  expect(startLogFile(['start', '--port', '4400'])).toBeNull();
+  expect(startLogFile(['start', '--log-file'])).toBeNull();
+  expect(startLogFile(['start', '--log-file', '--service'])).toBeNull();
+  expect(startLogFile(['hook-forward', '--log-file', '/l/c.log'])).toBeNull();
+  expect(startLogFile(['rebuild', '--log-file', '/l/c.log'])).toBeNull();
+  expect(startLogFile(['--version'])).toBeNull();
+  expect(startLogFile([])).toBeNull();
+});
+
+test('openEarlyProcessLog：载入命令之前就写日志；载入失败写进日志并以 1 退出；takeProcessLog 交给 start 一次', async () => {
+  const file = path.join(tmp, 'logs', 'service.log');
+  const exits: number[] = [];
+  const before = process.listenerCount('uncaughtException') + process.listenerCount('unhandledRejection');
+  expect(openEarlyProcessLog(['rebuild'], (code) => void exits.push(code))).toBeNull();
+  const early = openEarlyProcessLog(['start', '--port', '4400', '--log-file', file, '--service'], (code) => void exits.push(code))!;
+  try {
+    expect(early).not.toBeNull();
+    expect(process.listenerCount('uncaughtException') + process.listenerCount('unhandledRejection')).toBe(before + 2);
+    process.stderr.write('before loading\n');
+    const failure = new Error('The module was compiled against a different Node.js version');
+    failure.stack = 'Error: The module was compiled against a different Node.js version\n    at load (better-sqlite3)';
+    early.fail(failure);
+    expect(exits).toEqual([1]);
+    // start asks for another file: not this one, which is then closed (stop() below is a no-op).
+    expect(takeProcessLog(path.join(tmp, 'other.log'))).toBeNull();
+    expect(process.listenerCount('uncaughtException') + process.listenerCount('unhandledRejection')).toBe(before);
+  } finally {
+    early.stop();
+  }
+  expect(process.listenerCount('uncaughtException') + process.listenerCount('unhandledRejection')).toBe(before);
+  const text = await fs.readFile(file, 'utf8');
+  expect(text).toMatch(/^\S+ before loading$/m);
+  expect(text).toMatch(/^\S+ agent-canvas: load failed: Error: The module was compiled against a different Node\.js version$/m);
+  expect(text).toMatch(/^\S+     at load \(better-sqlite3\)$/m);
+
+  const again = openEarlyProcessLog(['start', '--log-file', file], () => undefined)!;
+  try {
+    expect(takeProcessLog(file)).toBe(again);
+    expect(takeProcessLog(file)).toBeNull();
+  } finally {
+    again.stop();
+  }
 });

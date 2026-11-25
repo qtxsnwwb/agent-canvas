@@ -7,6 +7,7 @@
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { hookForwardProcess } from './hook-forward.js';
+import { openEarlyProcessLog } from './logfile.js';
 import type * as Commands from './cli-commands.js';
 
 export type { MainDeps, Running, StartOptions } from './cli-commands.js';
@@ -23,7 +24,19 @@ function isEntryPoint(): boolean {
 
 const entry = isEntryPoint();
 const forwardOnly = entry && process.argv[2] === 'hook-forward';
-const commands: typeof Commands | null = forwardOnly ? null : await import('./cli-commands.js');
+// The background service (`start --log-file <file>`) logs from before the commands are loaded: a failure to load them
+// (a native module built for another Node version, say) goes to its log, not to a terminal it does not have. `start`
+// takes this log over (logfile.ts takeProcessLog). hook-forward never takes --log-file.
+const early = entry && !forwardOnly ? openEarlyProcessLog(process.argv.slice(2), (code) => process.exit(code)) : null;
+let commands: typeof Commands | null = null;
+if (!forwardOnly) {
+  try {
+    commands = await import('./cli-commands.js');
+  } catch (err) {
+    if (early === null) throw err;
+    early.fail(err); // logged, exit 1
+  }
+}
 const loaded = (): typeof Commands => commands!;
 
 export const fileSources: typeof Commands.fileSources = (...args) => loaded().fileSources(...args);
