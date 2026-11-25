@@ -67,7 +67,8 @@ describe('storage_format', () => {
     vi.stubEnv('AGENT_CANVAS_PROJECTS_DIR', path.join(tmp, 'projects'));
     vi.stubEnv('AGENT_CANVAS_CODEX_DIR', '');
     const errors: string[] = [];
-    vi.spyOn(console, 'error').mockImplementation((line: string) => void errors.push(line));
+    // start writes to process.stderr directly (as console.error does), so --log-file can capture it.
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk: string | Uint8Array) => errors.push(String(chunk)) > 0);
     expect(await main(['start', '--port', '0'])).toBe(1);
     expect(errors.join('\n')).toMatch(/newer version/);
     await expect(fs.stat(path.join(dataDir, 'agent-canvas.lock'))).rejects.toThrow(); // lock released
