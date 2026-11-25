@@ -107,7 +107,8 @@ const USAGE = `Usage:
                                      Stop it and remove that registration (the data, logs and settings stay)
   agent-canvas service status       Whether the service runs and starts at login, and its log (exit 3: not running)
   agent-canvas service start        Start the installed background service
-  agent-canvas service stop         Stop the running service (also one started in a terminal)
+  agent-canvas service stop         Stop the running service; one started in a terminal too when it uses the same data
+                                     directory as the installed service (the current shell's when none is installed)
   agent-canvas service restart      Stop it, then start the installed background service
 `;
 
