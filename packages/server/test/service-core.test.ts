@@ -11,7 +11,7 @@ import { lockPath, type LockHolder } from '../src/lock.js';
 import type { DeliveryStatus, NotificationMessage } from '../src/notify/desktop.js';
 import type { ServiceNotifier } from '../src/notify/service.js';
 import { formatUptime, readServiceLock, statusLines, stopRunning, waitForStart } from '../src/service/client.js';
-import { pickServiceEnv, serviceDefinition } from '../src/service/definition.js';
+import { absoluteServiceEnv, pickServiceEnv, serviceDefinition } from '../src/service/definition.js';
 import { manifestPath, readManifest, removeManifest, writeManifest, type ServiceManifest } from '../src/service/manifest.js';
 
 /*
@@ -132,6 +132,22 @@ describe('serviceDefinition', () => {
 
   test('without AGENT_CANVAS_DATA_DIR the data dir is the default one', () => {
     expect(serviceDefinition({ env: {}, port: 4317, nodePath: 'n', cliPath: 'c' }).dataDir).toBe(loadConfig({}).dataDir);
+  });
+});
+
+describe('absoluteServiceEnv', () => {
+  const home = path.join(os.tmpdir(), 'install-home');
+  test('resolves every non-empty path variable against cwd; keeps empty and absolute ones and other variables', () => {
+    const cwd = path.join(os.tmpdir(), 'install-cwd');
+    const abs = path.join(os.tmpdir(), 'abs-dir');
+    const env = absoluteServiceEnv({ AGENT_CANVAS_DATA_DIR: 'd', GROK_HOME: path.join('a', 'b'), AGENT_CANVAS_CODEX_DIR: '', COPILOT_HOME: abs, PATH: 'bin' }, { cwd, home, platform: process.platform });
+    expect(env).toEqual({ AGENT_CANVAS_DATA_DIR: path.join(cwd, 'd'), GROK_HOME: path.join(cwd, 'a', 'b'), AGENT_CANVAS_CODEX_DIR: '', COPILOT_HOME: abs, PATH: 'bin' });
+  });
+
+  test('a leading ~ in the Qwen variables is the home directory, as Qwen Code reads them', () => {
+    const cwd = path.join(os.tmpdir(), 'install-cwd');
+    const env = absoluteServiceEnv({ QWEN_HOME: '~/q', QWEN_RUNTIME_DIR: '~', AGENT_CANVAS_QWEN_DIR: 'rel', GROK_HOME: '~/g' }, { cwd, home, platform: process.platform });
+    expect(env).toEqual({ QWEN_HOME: path.join(home, 'q'), QWEN_RUNTIME_DIR: home, AGENT_CANVAS_QWEN_DIR: path.join(cwd, 'rel'), GROK_HOME: path.join(cwd, '~', 'g') });
   });
 });
 

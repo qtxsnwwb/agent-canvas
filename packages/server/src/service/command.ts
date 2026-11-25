@@ -5,7 +5,7 @@ import type { HooksCliIo } from '../hooks-cli.js';
 import { readLock, type LockHolder } from '../lock.js';
 import { serviceBackend } from './backend.js';
 import { readServiceLock, statusLines, stopRunning, waitForStart, type StopResult } from './client.js';
-import { serviceDefinition } from './definition.js';
+import { absoluteServiceEnv, serviceDefinition } from './definition.js';
 import { manifestPath, readManifest, removeManifest, writeManifest, type ServiceManifest } from './manifest.js';
 import type { ServiceBackend, ServiceDefinition, ServiceSystem } from './types.js';
 
@@ -56,9 +56,14 @@ interface Context extends ServiceCommandOptions {
   backend: ServiceBackend | null;
 }
 
-/** The definition from the current shell: its data directory, the given port (default: the configured one). */
+/**
+ * The definition from the current shell: its data directory, the given port (default: the configured one). Relative
+ * paths in the recorded variables are made absolute against the current directory (absoluteServiceEnv).
+ */
 function shellDefinition(c: Context, port?: number): ServiceDefinition {
-  return serviceDefinition({ env: c.system.env, port: port ?? loadConfig(c.system.env).port, nodePath: c.nodePath, cliPath: c.cliPath });
+  const { system } = c;
+  const env = absoluteServiceEnv(system.env, { cwd: system.cwd?.() ?? process.cwd(), home: system.home, platform: system.platform });
+  return serviceDefinition({ env, port: port ?? loadConfig(env).port, nodePath: c.nodePath, cliPath: c.cliPath });
 }
 
 /** The service to act on: the installed one (manifest), else the one the current shell would run. */

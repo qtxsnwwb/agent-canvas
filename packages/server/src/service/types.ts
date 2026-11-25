@@ -14,6 +14,8 @@ export interface ServiceSystem {
   spawnDetached(command: string, args: string[]): void;
   sleep(ms: number): Promise<void>;
   now(): number;
+  /** The current directory, which relative paths in the environment are relative to (default process.cwd()). */
+  cwd?(): string;
 }
 
 export function realServiceSystem(): ServiceSystem {
@@ -38,6 +40,7 @@ export function realServiceSystem(): ServiceSystem {
     },
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     now: () => Date.now(),
+    cwd: () => process.cwd(),
   };
 }
 

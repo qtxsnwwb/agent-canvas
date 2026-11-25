@@ -274,6 +274,19 @@ describe('service install', () => {
     expect(calls).toEqual(['check', 'register', 'start']);
   });
 
+  test('相对路径的变量按安装时的当前目录记成绝对路径，数据目录也按它算', async () => {
+    system.env = { ...system.env, AGENT_CANVAS_DATA_DIR: 'rel-data', AGENT_CANVAS_PROJECTS_DIR: 'projects', QWEN_HOME: '~/qwen', AGENT_CANVAS_CODEX_DIR: '' };
+    system.cwd = () => tmp;
+    expect(await run(['install', '--yes'])).toBe(0);
+    const m = readManifest(system)!;
+    const abs = path.join(tmp, 'rel-data');
+    expect(m.dataDir).toBe(abs);
+    expect(m.logFile).toBe(path.join(abs, 'logs', 'service.log'));
+    expect(m.env).toEqual({ AGENT_CANVAS_DATA_DIR: abs, AGENT_CANVAS_PROJECTS_DIR: path.join(tmp, 'projects'), QWEN_HOME: path.join(system.home, 'qwen'), AGENT_CANVAS_CODEX_DIR: '' });
+    expect(m.argv).toContain(path.join(abs, 'logs', 'service.log'));
+    expect(readLock(abs)?.port).toBeGreaterThan(0);
+  });
+
   test('服务 15 秒内没起来：退出 1，指向日志', async () => {
     let clock = 0;
     system.now = () => clock;
