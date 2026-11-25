@@ -62,7 +62,8 @@ export function launcherSource(o: {
     `var marker = ${jsString(o.markerPath)};`,
     `var backoff = [${backoff.join(', ')}];`,
     `var resetAfter = ${resetAfter};`,
-    'function stopped() { return fso.FileExists(marker); }',
+    // Also stops when this script is gone: uninstall writes the marker, then deletes the whole service directory.
+    'function stopped() { return fso.FileExists(marker) || !fso.FileExists(WScript.ScriptFullName); }',
     'function now() { return new Date().getTime(); }',
     'function wait(ms) {',
     '  var end = now() + ms;',

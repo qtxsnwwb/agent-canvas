@@ -97,6 +97,17 @@ describe.skipIf(process.platform !== 'win32')('launcher under wscript', () => {
     expect(runs()).toBe(2);
   });
 
+  test('removing its own script during the wait ends the launcher within 2 s, without another run', async () => {
+    // Uninstall in a crash loop: the marker is written and the service directory deleted a moment later.
+    const child = startLauncher({ codes: '1', backoffMs: [100, 30_000] });
+    await until(() => runs() === 2, 15_000 * TIMING_SCALE);
+    await new Promise((r) => setTimeout(r, 500));
+    // unlinkSync, not rmSync: Node 25.2's rmSync crashes the process (0xC0000409) on a non-ASCII path.
+    fs.unlinkSync(path.join(dir, 'launcher.js'));
+    await exited(child, 2_000 * TIMING_SCALE);
+    expect(runs()).toBe(2);
+  });
+
   test('deletes a marker left from before when it starts', async () => {
     fs.writeFileSync(marker(), '');
     const child = startLauncher({ codes: '0', backoffMs: [100] });
