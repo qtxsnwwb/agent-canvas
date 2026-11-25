@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { removeSync } from '../fs-remove.js';
 import type { ServiceBackend, ServiceDefinition, ServiceSystem } from './types.js';
 
 /*
@@ -119,9 +120,9 @@ export function windowsBackend(system: ServiceSystem, o: { runKey?: string; appr
         const result = await system.run(wscript, ['//B', '//Nologo', probe]).catch(() => null);
         return result?.code === 7 ? null : WSH_UNAVAILABLE;
       } finally {
-        fs.rmSync(probe, { force: true });
+        removeSync(probe);
         // Checking writes nothing that stays: remove the directories the probe needed.
-        if (created !== undefined) fs.rmSync(created, { recursive: true, force: true });
+        if (created !== undefined) removeSync(created, { recursive: true });
       }
     },
 
@@ -152,11 +153,11 @@ export function windowsBackend(system: ServiceSystem, o: { runKey?: string; appr
       const result = await system.run(reg, ['delete', runKey, '/v', RUN_VALUE, '/f']);
       // 1: the value is not there (or could not be deleted; `state` tells which).
       if (result.code !== 0 && result.code !== 1) throw new Error(`删除注册表启动项失败（reg delete 退出码 ${result.code}）`);
-      fs.rmSync(serviceDir(def), { recursive: true, force: true });
+      removeSync(serviceDir(def), { recursive: true });
     },
 
     async start(def) {
-      fs.rmSync(markerPath(def), { force: true });
+      removeSync(markerPath(def));
       system.spawnDetached(wscript, ['//B', '//Nologo', launcherPath(def)]);
     },
 

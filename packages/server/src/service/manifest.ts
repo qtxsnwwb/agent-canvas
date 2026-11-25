@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { removeSync } from '../fs-remove.js';
 import type { ServiceDefinition, ServiceSystem } from './types.js';
 
 /** The registration manifest (spec 5): what `install` set up, at a place that does not depend on the data directory. */
@@ -64,5 +65,5 @@ export function writeManifest(system: ManifestSystem, manifest: ServiceManifest)
 }
 
 export function removeManifest(system: ManifestSystem): void {
-  fs.rmSync(manifestPath(system), { force: true });
+  removeSync(manifestPath(system));
 }

@@ -4,6 +4,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { STALE_AFTER_MS, type Change, type Origin, type SeqChange } from '@agent-canvas/shared';
 import type { Config } from './config.js';
+import { removeSync } from './fs-remove.js';
 import { NORMALIZER_FACTORIES, NormalizerRegistry, type NormalizerFactories } from './normalize/registry.js';
 import type { BatchItem } from './normalize/types.js';
 import { NORMALIZER_VERSION } from './normalize/version.js';
@@ -333,7 +334,7 @@ export class Pipeline {
       });
       for (const id of sessions) this.dirty.add(id);
     }
-    fs.rmSync(file, { force: true });
+    removeSync(file);
     return sessions;
   }
 

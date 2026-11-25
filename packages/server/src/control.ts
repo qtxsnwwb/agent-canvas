@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { removeSync } from './fs-remove.js';
 
 /**
  * The service's control key (spec 2026-11-25-background-service-design.md 5): a random key written to the data
@@ -24,7 +25,7 @@ export function createControlKey(dataDir: string): string {
   const key = crypto.randomBytes(32).toString('hex');
   const file = keyPath(dataDir);
   // Removed first: an existing file keeps its mode on overwrite, and that mode may be looser.
-  fs.rmSync(file, { force: true });
+  removeSync(file);
   fs.writeFileSync(file, key, { mode: 0o600, flag: 'wx' });
   return key;
 }
@@ -42,7 +43,7 @@ export function readControlKey(dataDir: string): string | null {
 /** Removes `<dataDir>/control.key` when it still holds `key` (a newer service's key stays). Never throws. */
 export function removeControlKey(dataDir: string, key: string): void {
   try {
-    if (readControlKey(dataDir) === key) fs.rmSync(keyPath(dataDir), { force: true });
+    if (readControlKey(dataDir) === key) removeSync(keyPath(dataDir));
   } catch {
     // best effort: the next start replaces it
   }

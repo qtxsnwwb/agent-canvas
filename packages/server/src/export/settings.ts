@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { validateCustomTerms, type ExportSettings, type ExportSettingsResponse } from '@agent-canvas/shared';
+import { removeSync } from '../fs-remove.js';
 
 /** The export settings (custom masking terms) in the data directory. */
 export const EXPORT_SETTINGS_FILE = 'export-settings.json';
@@ -42,7 +43,7 @@ export function saveExportSettings(dataDir: string, settings: ExportSettings): v
     fs.writeFileSync(tmp, `${JSON.stringify({ customTerms: settings.customTerms }, null, 2)}\n`, 'utf8');
     fs.renameSync(tmp, file);
   } catch (err) {
-    fs.rmSync(tmp, { force: true });
+    removeSync(tmp);
     throw err;
   }
 }

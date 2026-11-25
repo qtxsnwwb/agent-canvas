@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { removeSync } from './fs-remove.js';
 
 /** The command that holds the lock: the service, or one of the maintenance commands that must not run beside it. */
 export type LockCommand = 'start' | 'rebuild' | 'compact';
@@ -96,7 +97,7 @@ function rewrite(file: string, content: string): void {
     fs.writeFileSync(tmp, content);
     fs.renameSync(tmp, file);
   } catch {
-    fs.rmSync(tmp, { force: true });
+    removeSync(tmp);
     fs.writeFileSync(file, content);
   }
 }
@@ -131,7 +132,7 @@ export function acquireLock(dataDir: string, info: LockInfo): Lock {
       return {
         release() {
           // Only remove the file if it is still ours.
-          if (ours()) fs.rmSync(file, { force: true });
+          if (ours()) removeSync(file);
         },
         setPort(port) {
           if (!ours()) return;
@@ -145,7 +146,7 @@ export function acquireLock(dataDir: string, info: LockInfo): Lock {
     }
     const holder = readHolder(file);
     if (holder !== null && isAlive(holder.pid)) throw new LockHeldError(holder, file);
-    fs.rmSync(file, { force: true }); // stale (holder gone) or unreadable: take it over
+    removeSync(file); // stale (holder gone) or unreadable: take it over
   }
   throw new Error(`could not take the lock file ${file}`);
 }
