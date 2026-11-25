@@ -32,7 +32,7 @@ const STOP_MESSAGES: Record<StopResult, { text: string; code: 0 | 1 }> = {
   stopped: { text: '已停止', code: 0 },
   'not-running': { text: '没有在运行', code: 0 },
   timeout: { text: '服务没有在 30 秒内退出', code: 1 },
-  'old-version': { text: '服务在运行，但不能用这个命令停止（版本较旧，或不是后台常驻启动的）：请在它的终端里按 Ctrl+C', code: 1 },
+  'old-version': { text: '服务在运行，但不能用这个命令停止（版本较旧）：请在它的终端里按 Ctrl+C', code: 1 },
   maintenance: { text: '正在重建数据 / 压缩数据库，做完会自己退出', code: 1 },
   unreachable: { text: '连不上服务', code: 1 },
 };

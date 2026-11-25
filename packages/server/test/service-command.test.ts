@@ -328,7 +328,7 @@ describe('service stop', () => {
   test('旧版本的服务：说明按 Ctrl+C，退出 1', async () => {
     await holdLock({ command: 'start', version: '0.4.0', service: false, port: null });
     expect(await run(['stop'])).toBe(1);
-    expect(err).toEqual(['服务在运行，但不能用这个命令停止（版本较旧，或不是后台常驻启动的）：请在它的终端里按 Ctrl+C']);
+    expect(err).toEqual(['服务在运行，但不能用这个命令停止（版本较旧）：请在它的终端里按 Ctrl+C']);
   });
 
   test('正在重建 / 压缩：退出 1', async () => {
