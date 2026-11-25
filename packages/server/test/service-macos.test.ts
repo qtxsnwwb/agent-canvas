@@ -14,6 +14,8 @@ type Answer = { code: number; stdout?: string; stderr?: string } | 'enoent';
 let tmp: string;
 let calls: Call[];
 let answer: (c: Call) => Answer;
+let clock: number;
+let sleeps: number[];
 
 function fakeSystem(uid: number | null = 501): ServiceSystem {
   return {
@@ -31,8 +33,11 @@ function fakeSystem(uid: number | null = 501): ServiceSystem {
     spawnDetached: () => {
       throw new Error('macOS must not spawn detached');
     },
-    sleep: async () => undefined,
-    now: () => 0,
+    sleep: async (ms) => {
+      sleeps.push(ms);
+      clock += ms;
+    },
+    now: () => clock,
   };
 }
 
@@ -56,6 +61,8 @@ const cmds = () => calls.map((c) => [c.command, ...c.args].join(' '));
 beforeEach(() => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-service-mac-'));
   calls = [];
+  clock = 0;
+  sleeps = [];
   answer = () => ({ code: 0 });
 });
 afterEach(() => {
@@ -155,16 +162,52 @@ describe('macosBackend', () => {
     expect(plan).toContain(`launchctl bootstrap gui/501 ${plistFile()}`);
   });
 
-  test('register writes the plist, boots out (failure ignored), then bootstraps', async () => {
-    answer = (c) => (c.args[0] === 'bootout' ? { code: 113 } : { code: 0 });
+  // The job is unloaded as far as launchd is concerned: bootout may fail, print fails.
+  const unloaded = (c: Call): Answer => (c.args[0] === 'bootout' || c.args[0] === 'print' ? { code: 113 } : { code: 0 });
+
+  test('register writes the plist, boots out (failure ignored), checks it is gone, then bootstraps', async () => {
+    answer = unloaded;
     await macosBackend(fakeSystem()).register(definition());
     expect(fs.readFileSync(plistFile(), 'utf8')).toBe(EXPECTED);
-    expect(cmds()).toEqual([`launchctl bootout ${target}`, `launchctl bootstrap gui/501 ${plistFile()}`]);
+    expect(cmds()).toEqual([`launchctl bootout ${target}`, `launchctl print ${target}`, `launchctl bootstrap gui/501 ${plistFile()}`]);
+    expect(sleeps).toEqual([]);
   });
 
-  test('register fails when bootstrap fails', async () => {
-    answer = (c) => (c.args[0] === 'bootstrap' ? { code: 5, stderr: 'Bootstrap failed' } : { code: 0 });
-    await expect(macosBackend(fakeSystem()).register(definition())).rejects.toThrow(/bootstrap.*5/);
+  test('register waits (500 ms polls) until print fails, then bootstraps', async () => {
+    let prints = 0;
+    answer = (c) => (c.args[0] === 'print' ? { code: ++prints <= 2 ? 0 : 113 } : { code: 0 });
+    await macosBackend(fakeSystem()).register(definition());
+    expect(cmds()).toEqual([
+      `launchctl bootout ${target}`,
+      `launchctl print ${target}`,
+      `launchctl print ${target}`,
+      `launchctl print ${target}`,
+      `launchctl bootstrap gui/501 ${plistFile()}`,
+    ]);
+    expect(sleeps).toEqual([500, 500]);
+  });
+
+  test('register still bootstraps when the job is still loaded after 15 s', async () => {
+    answer = (c) => (c.args[0] === 'print' ? { code: 0 } : { code: 0 });
+    await macosBackend(fakeSystem()).register(definition());
+    expect(sleeps.reduce((a, b) => a + b, 0)).toBe(15000);
+    expect(cmds().at(-1)).toBe(`launchctl bootstrap gui/501 ${plistFile()}`);
+    expect(cmds().filter((c) => c.includes('bootstrap'))).toHaveLength(1);
+  });
+
+  test('register retries bootstrap: fails once, then succeeds', async () => {
+    let tries = 0;
+    answer = (c) => (c.args[0] === 'print' ? { code: 113 } : c.args[0] === 'bootstrap' ? { code: ++tries === 1 ? 5 : 0 } : { code: 0 });
+    await macosBackend(fakeSystem()).register(definition());
+    expect(cmds().filter((c) => c.includes('bootstrap'))).toHaveLength(2);
+    expect(sleeps).toEqual([1000]);
+  });
+
+  test('register throws after 3 failed bootstrap attempts, naming the exit code', async () => {
+    answer = (c) => (c.args[0] === 'print' ? { code: 113 } : c.args[0] === 'bootstrap' ? { code: 37, stderr: 'Bootstrap failed' } : { code: 0 });
+    await expect(macosBackend(fakeSystem()).register(definition())).rejects.toThrow('launchctl bootstrap 失败（退出码 37）');
+    expect(cmds().filter((c) => c.includes('bootstrap'))).toHaveLength(3);
+    expect(sleeps).toEqual([1000, 1000]);
   });
 
   test('start: loaded -> kickstart only', async () => {
@@ -188,6 +231,7 @@ describe('macosBackend', () => {
 
   test('unregister boots out, then deletes the plist', async () => {
     const b = macosBackend(fakeSystem());
+    answer = unloaded;
     await b.register(definition());
     calls = [];
     answer = () => ({ code: 113 });
@@ -200,6 +244,7 @@ describe('macosBackend', () => {
   test('state follows the plist file', async () => {
     const b = macosBackend(fakeSystem());
     expect(await b.state(definition())).toBe('absent');
+    answer = unloaded;
     await b.register(definition());
     expect(await b.state(definition())).toBe('installed');
     await b.unregister(definition());

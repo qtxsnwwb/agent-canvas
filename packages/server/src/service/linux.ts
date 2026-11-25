@@ -17,6 +17,12 @@ function quote(s: string): string {
   return `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '%%').replace(/\$/g, '$$$$')}"`;
 }
 
+/** An Environment= value word: no `$` change (Environment= does no variable expansion); `%` is still a specifier. */
+function quoteEnv(s: string): string {
+  if (/[\r\n]/.test(s)) throw new Error(`启动命令和环境变量里不能有换行：${JSON.stringify(s)}`);
+  return `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '%%')}"`;
+}
+
 export function unitSource(def: ServiceDefinition): string {
   return [
     '[Unit]',
@@ -24,7 +30,7 @@ export function unitSource(def: ServiceDefinition): string {
     '',
     '[Service]',
     `ExecStart=${def.argv.map(quote).join(' ')}`,
-    ...Object.entries(def.env).map(([k, v]) => `Environment=${quote(`${k}=${v}`)}`),
+    ...Object.entries(def.env).map(([k, v]) => `Environment=${quoteEnv(`${k}=${v}`)}`),
     'Restart=on-failure',
     'RestartSec=5',
     '',

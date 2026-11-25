@@ -10,6 +10,8 @@ import type { ServiceBackend, ServiceDefinition, ServiceSystem } from './types.j
 
 export const LAUNCH_AGENT_LABEL = 'io.github.qtxsnwwb.agent-canvas';
 
+const UNLOAD_WAIT_MS = 15000;
+const BOOTSTRAP_ATTEMPTS = 3;
 const NO_LAUNCHCTL = '没有找到 launchctl，不能装后台常驻';
 
 function xml(s: string): string {
@@ -67,6 +69,31 @@ export function macosBackend(system: ServiceSystem): ServiceBackend {
     if (result.code !== 0) throw new Error(`launchctl bootstrap 失败（退出码 ${result.code}）：${result.stderr.trim()}`);
   };
 
+  /*
+   * After bootout the old job may still be exiting; bootstrapping then fails (5, 37), or succeeds while the old process
+   * still holds the lock so the new one exits 0 and nothing runs. Wait until launchd no longer knows the job. If it
+   * is still loaded after 15 s, go on and try bootstrap anyway: its retries and error then report the real problem.
+   */
+  const waitUnloaded = async () => {
+    const deadline = system.now() + UNLOAD_WAIT_MS;
+    for (;;) {
+      const loaded = await system.run('launchctl', ['print', target()]).catch(() => null);
+      if (loaded === null || loaded.code !== 0) return;
+      if (system.now() >= deadline) return;
+      await system.sleep(500);
+    }
+  };
+  const bootstrapWithRetry = async () => {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await bootstrap();
+      } catch (error) {
+        if (attempt >= BOOTSTRAP_ATTEMPTS) throw error;
+        await system.sleep(1000);
+      }
+    }
+  };
+
   return {
     kind: 'macos',
     where: `macOS 登录项（${plistPath}）`,
@@ -94,7 +121,8 @@ export function macosBackend(system: ServiceSystem): ServiceBackend {
       fs.mkdirSync(path.dirname(plistPath), { recursive: true });
       fs.writeFileSync(plistPath, plistSource(def));
       await bootout();
-      await bootstrap();
+      await waitUnloaded();
+      await bootstrapWithRetry();
     },
 
     async unregister() {

@@ -74,11 +74,10 @@ RestartSec=5
 WantedBy=default.target
 `;
 
-function unescapeWord(s: string): string {
-  return s.replace(/\\([\\"])|%%|\$\$/g, (m, c: string | undefined) => (c !== undefined ? c : m[0]!));
-}
-function words(line: string): string[] {
-  return [...line.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((m) => unescapeWord(m[1]!));
+/** ExecStart words undo `\\`, `\"`, `%%` and `$$`; Environment= words undo `\\`, `\"` and `%%` only (`$` is literal there). */
+function words(line: string, dollar: boolean): string[] {
+  const re = dollar ? /\\([\\"])|%%|\$\$/g : /\\([\\"])|%%/g;
+  return [...line.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1]!.replace(re, (x, c: string | undefined) => (c !== undefined ? c : x[0]!)));
 }
 
 describe('unitSource', () => {
@@ -94,12 +93,19 @@ describe('unitSource', () => {
     const argv = ['/home/张 三/node', 'a & b', '<x>', '100%', '$HOME', 'back\\slash', 'q"uote', "it's"];
     const env = { K: '张 三 & <v> % $ \\ "' };
     const text = unitSource({ ...definition(), argv, env });
-    expect(words(/^ExecStart=(.*)$/m.exec(text)![1]!)).toEqual(argv);
-    expect(words(/^Environment=(.*)$/m.exec(text)![1]!)).toEqual([`K=${env.K}`]);
+    expect(words(/^ExecStart=(.*)$/m.exec(text)![1]!, true)).toEqual(argv);
+    expect(words(/^Environment=(.*)$/m.exec(text)![1]!, false)).toEqual([`K=${env.K}`]);
     expect(text).toContain('"100%%"');
     expect(text).toContain('"$$HOME"');
     expect(text).toContain('"back\\\\slash"');
     expect(text).toContain('"q\\"uote"');
+  });
+
+  test('a $ in an env value is written as is (no variable expansion there), unlike in ExecStart', () => {
+    const text = unitSource({ ...definition(), argv: ['/usr/bin/node', '$HOME'], env: { K: '/home/u/$dir' } });
+    expect(text).toContain('Environment="K=/home/u/$dir"');
+    expect(text).not.toContain('$$dir');
+    expect(text).toContain('ExecStart="/usr/bin/node" "$$HOME"');
   });
 
   test('a newline in a value is refused', () => {
