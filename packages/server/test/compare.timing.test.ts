@@ -104,6 +104,8 @@ test('compare: two 100,000-node sessions — first call within the bound, the se
   } finally {
     await app?.close();
     store.close();
-    await fsp.rm(dir, { recursive: true, force: true, maxRetries: 5 });
+    // Best effort, as today-service.timing does: the closed store's checkpointer thread lets go of the file a moment
+    // later, and Windows refuses to unlink a file still open (EBUSY on CI).
+    await fsp.rm(dir, { recursive: true, force: true, maxRetries: 20 }).catch(() => undefined);
   }
 });
