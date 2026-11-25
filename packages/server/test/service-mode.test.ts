@@ -235,3 +235,32 @@ test('不带 --service：锁文件残留时照旧报错（终端里的 start 不
   expect(r.stderr).toContain('already running with this data directory');
   expect(readLock(dataDir)?.pid).toBe(pid);
 });
+
+test('start() 返回前收到 SIGTERM：记下，start() 一返回就收尾，以 0 退出', async () => {
+  const before = { term: process.listeners('SIGTERM'), int: process.listeners('SIGINT') };
+  const spy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+  let result: Promise<number>;
+  try {
+    result = main(['start', '--port', '0', '--service'], deps);
+    // start() has not resolved yet (it waits for listen): the handlers are already there.
+    const added = process.listeners('SIGTERM').filter((l) => !before.term.includes(l));
+    expect(added).toHaveLength(1);
+    expect(process.listeners('SIGINT').filter((l) => !before.int.includes(l))).toHaveLength(1);
+    expect(exits).toEqual([]);
+    (added[0] as () => void)();
+    expect(await result).toBe(-1);
+  } finally {
+    spy.mockRestore();
+  }
+  await waitForShutdown();
+  expect(process.listeners('SIGTERM')).toEqual(before.term);
+  expect(process.listeners('SIGINT')).toEqual(before.int);
+});
+
+test('start() 失败时撤掉两个信号的监听', async () => {
+  const before = { term: process.listeners('SIGTERM'), int: process.listeners('SIGINT') };
+  await holdLock('compact');
+  expect((await runCaptured(['start', '--port', '0', '--service'])).code).toBe(1);
+  expect(process.listeners('SIGTERM')).toEqual(before.term);
+  expect(process.listeners('SIGINT')).toEqual(before.int);
+});

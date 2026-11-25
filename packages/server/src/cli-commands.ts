@@ -607,7 +607,8 @@ export interface MainDeps {
 }
 
 /**
- * `agent-canvas start`: runs the service until Ctrl+C, SIGTERM or a stop request, which all close it and exit 0.
+ * `agent-canvas start`: runs the service until Ctrl+C, SIGTERM or a stop request, which all close it and exit 0 (a
+ * signal during the start-up closes it once started).
  * `--log-file`: everything the process prints goes to that file (logfile.ts) from the first line on, and so does a
  * crash (an uncaught exception or unhandled rejection), after which the process exits 1 to be restarted. `--service`
  * (recorded in the lock): when the lock is held, exit 0 if its holder is another service (the system must not keep
@@ -630,6 +631,7 @@ async function startCommand(args: string[], deps: MainDeps): Promise<number> {
     log?.close();
   };
   let service = false;
+  let removeSignalHandlers = (): void => undefined;
   try {
     const { values } = parseArgs({
       args,
@@ -652,11 +654,16 @@ async function startCommand(args: string[], deps: MainDeps): Promise<number> {
     }
     let app: Running | null = null;
     let stopping = false;
+    /** A signal arrived before start() returned: shut down as soon as it does. */
+    let stopRequested = false;
     const shutdown = (): void => {
-      if (stopping || app === null) return;
+      if (stopping) return;
+      if (app === null) {
+        stopRequested = true;
+        return;
+      }
       stopping = true;
-      process.removeListener('SIGINT', shutdown);
-      process.removeListener('SIGTERM', shutdown);
+      removeSignalHandlers();
       void app.close().then(
         () => {
           stopLogging();
@@ -669,6 +676,15 @@ async function startCommand(args: string[], deps: MainDeps): Promise<number> {
         },
       );
     };
+    removeSignalHandlers = (): void => {
+      process.removeListener('SIGINT', shutdown);
+      process.removeListener('SIGTERM', shutdown);
+    };
+    // Before start(): a signal during the start-up (a rebuild after an upgrade can take minutes; the signal is handled
+    // once the event loop is free) is recorded, and the service closes as soon as start() returns. With a handler
+    // installed, a POSIX signal no longer ends the process outright; `once`: a second one still does.
+    process.once('SIGINT', shutdown);
+    process.once('SIGTERM', shutdown);
     const startOptions: StartOptions = {
       ...deps.startOptions,
       service,
@@ -689,10 +705,10 @@ async function startCommand(args: string[], deps: MainDeps): Promise<number> {
       app = await start(overrides, startOptions);
     }
     out(`agent-canvas listening on ${app.url}`);
-    process.once('SIGINT', shutdown);
-    process.once('SIGTERM', shutdown);
+    if (stopRequested) shutdown();
     return -1; // keep running
   } catch (e) {
+    removeSignalHandlers();
     let code = 1;
     if (service && e instanceof LockHeldError) {
       const { pid, command } = e.holder;

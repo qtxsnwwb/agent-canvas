@@ -2,7 +2,7 @@ import { CONTROL_HEADER, readControlKey } from '../control.js';
 import { holderResponds, isStaleService, readLock, type LockHolder } from '../lock.js';
 import type { ServiceBackend } from './types.js';
 
-export type StopResult = 'stopped' | 'not-running' | 'stale' | 'timeout' | 'unreachable' | 'old-version' | 'maintenance';
+export type StopResult = 'stopped' | 'not-running' | 'stale' | 'starting' | 'timeout' | 'unreachable' | 'old-version' | 'maintenance';
 
 const POLL_MS = 200;
 const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -20,8 +20,9 @@ export async function readServiceLock(dataDir: string): Promise<{ holder: LockHo
 /**
  * Asks the running service to stop (spec 5): `POST /api/control/stop` on the port in the lock, with the control key,
  * then waits until the lock is released. `stale`: the lock was left by a service that is gone (nothing to stop);
- * `old-version`: the holder is a service from before the stop request existed (no port or no key file);
- * `maintenance`: a rebuild or compaction holds the lock, which is not stopped from here.
+ * `old-version`: the holder is a service from before the stop request existed (its lock records no version);
+ * `starting`: a service that has no port or no control key yet (opening the database, possibly a rebuild that takes
+ * minutes); `maintenance`: a rebuild or compaction holds the lock, which is not stopped from here.
  */
 export async function stopRunning(
   dataDir: string,
@@ -31,9 +32,10 @@ export async function stopRunning(
   const holder = readLock(dataDir);
   if (holder === null) return 'not-running';
   if (holder.command !== 'start') return 'maintenance';
+  if (holder.version === null) return 'old-version';
   if (await isStaleService(holder)) return 'stale';
   const key = readControlKey(dataDir);
-  if (holder.port === null || key === null) return 'old-version';
+  if (holder.port === null || key === null) return 'starting';
   try {
     const res = await doFetch(`http://127.0.0.1:${holder.port}/api/control/stop`, {
       method: 'POST',

@@ -2,6 +2,7 @@ import { parseArgs } from 'node:util';
 import { isNpxPath, PACKAGE_NAME } from '../cli-commands.js';
 import { loadConfig } from '../config.js';
 import type { HooksCliIo } from '../hooks-cli.js';
+import { readLock, type LockHolder } from '../lock.js';
 import { serviceBackend } from './backend.js';
 import { readServiceLock, statusLines, stopRunning, waitForStart, type StopResult } from './client.js';
 import { serviceDefinition } from './definition.js';
@@ -26,16 +27,30 @@ const UNSUPPORTED = '这个系统不支持后台常驻（只支持 Windows、mac
 const NOT_INSTALLED_START = '还没有安装后台常驻：先运行 agent-canvas service install，或在终端里用 agent-canvas start';
 const START_TIMEOUT_MS = 15_000;
 
-/** What `stop` says for each result, and its exit code (`stale`: see stopMessage). */
-const STOP_MESSAGES: Record<StopResult, { text: string; code: 0 | 1 }> = {
-  stopped: { text: '已停止', code: 0 },
-  'not-running': { text: '没有在运行', code: 0 },
-  stale: { text: '没有在运行（锁文件残留）', code: 0 },
-  timeout: { text: '服务没有在 30 秒内退出', code: 1 },
-  'old-version': { text: '服务在运行，但不能用这个命令停止（版本较旧）：请在它的终端里按 Ctrl+C', code: 1 },
-  maintenance: { text: '正在重建数据 / 压缩数据库，做完会自己退出', code: 1 },
-  unreachable: { text: '连不上服务', code: 1 },
-};
+/**
+ * What `stop` says for a result, and its exit code. `stale`: the pid of the lock left behind (null: not known);
+ * `logFile`: the service's log, named while it is still starting.
+ */
+function stopMessage(result: StopResult, o: { stale: LockHolder | null; logFile: string }): { text: string; code: 0 | 1 } {
+  switch (result) {
+    case 'stopped':
+      return { text: '已停止', code: 0 };
+    case 'not-running':
+      return { text: '没有在运行', code: 0 };
+    case 'stale':
+      return { text: o.stale !== null ? `没有在运行（锁文件残留，进程号 ${o.stale.pid}）` : '没有在运行（锁文件残留）', code: 0 };
+    case 'starting':
+      return { text: `服务正在启动（可能在重建数据），稍后再试；日志：${o.logFile}`, code: 1 };
+    case 'timeout':
+      return { text: '服务没有在 30 秒内退出', code: 1 };
+    case 'old-version':
+      return { text: '服务在运行，但不能用这个命令停止（版本较旧）：请在它的终端里按 Ctrl+C', code: 1 };
+    case 'maintenance':
+      return { text: '正在重建数据 / 压缩数据库，做完会自己退出', code: 1 };
+    case 'unreachable':
+      return { text: '连不上服务', code: 1 };
+  }
+}
 
 interface Context extends ServiceCommandOptions {
   backend: ServiceBackend | null;
@@ -64,10 +79,18 @@ async function confirmed(c: Context, yes: boolean, refusal: string): Promise<boo
   return false;
 }
 
-/** Waits for the service just started to listen; prints its address, or where to look. */
+/**
+ * Waits for the service just started to listen; prints its address, or where to look. After the wait a service that
+ * holds the lock without a port yet (a rebuild after an upgrade can take minutes) did start: exit 0.
+ */
 async function reportStart(c: Context, def: ServiceDefinition, timeoutPrefix: string): Promise<number> {
   const holder = await waitForStart(def.dataDir, { timeoutMs: START_TIMEOUT_MS, sleep: c.system.sleep, now: c.system.now });
   if (holder === null) {
+    const starting = readLock(def.dataDir);
+    if (starting !== null && starting.command === 'start' && starting.port === null) {
+      c.io.out(`服务还在启动（可能在重建数据），看日志：${def.logFile}`);
+      return 0;
+    }
     c.io.err(`${timeoutPrefix}服务没有在 15 秒内起来，看日志：${def.logFile}`);
     return 1;
   }
@@ -154,7 +177,7 @@ async function uninstall(c: Context, args: string[]): Promise<number> {
 
   const stopped = await stopRunning(def.dataDir, { sleep: system.sleep });
   if (stopped === 'stopped') io.out('已停止服务');
-  else if (stopped !== 'not-running' && stopped !== 'stale') io.err(`没能停止服务：${STOP_MESSAGES[stopped].text}`);
+  else if (stopped !== 'not-running' && stopped !== 'stale') io.err(`没能停止服务：${stopMessage(stopped, { stale: null, logFile: def.logFile }).text}`);
   await backend.cancelRestart(def);
   await backend.unregister(def);
   io.out(`已取消登记：${backend.where}`);
@@ -215,8 +238,7 @@ async function stop(c: Context): Promise<number> {
   const result = await stopRunning(def.dataDir, { sleep: c.system.sleep });
   // A service that just crashed has no process, but the system would start it again in a moment.
   if (manifest !== null && c.backend !== null) await c.backend.cancelRestart(manifest);
-  const { code } = STOP_MESSAGES[result];
-  const text = result === 'stale' && stale !== null ? `没有在运行（锁文件残留，进程号 ${stale.pid}）` : STOP_MESSAGES[result].text;
+  const { text, code } = stopMessage(result, { stale, logFile: def.logFile });
   if (code === 0) c.io.out(text);
   else c.io.err(text);
   return code;

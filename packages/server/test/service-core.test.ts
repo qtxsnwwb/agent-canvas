@@ -215,9 +215,15 @@ describe('stopRunning', () => {
     expect(await stopRunning(dataDir)).toBe('old-version');
   });
 
-  test('a service with a port but no key file: old-version', async () => {
-    writeLock({ command: 'start', version: '0.4.0', service: true, port: await listeningPort() });
-    expect(await stopRunning(dataDir)).toBe('old-version');
+  test('a service with a version and a port but no key file yet: starting', async () => {
+    writeLock({ command: 'start', version: '0.5.0', service: true, port: await listeningPort() });
+    expect(await stopRunning(dataDir)).toBe('starting');
+  });
+
+  test('a service with a version but no port yet (opening the database, rebuilding): starting', async () => {
+    createControlKey(dataDir);
+    writeLock({ command: 'start', version: '0.5.0', service: true, port: null });
+    expect(await stopRunning(dataDir)).toBe('starting');
   });
 
   test.each(['compact', 'rebuild'])('a %s holder: maintenance', async (command) => {

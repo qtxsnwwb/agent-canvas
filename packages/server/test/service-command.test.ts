@@ -265,6 +265,27 @@ describe('service install', () => {
   });
 });
 
+test('install：15 秒后服务还在启动（锁里没有端口）：说还在启动，指向日志，退出 0', async () => {
+  let clock = 0;
+  system.now = () => clock;
+  system.sleep = async (ms) => void (clock += ms);
+  backend.startImpl = async (def) => holdLock({ command: 'start', version: '0.5.0', service: true, port: null }, def.dataDir);
+  expect(await run(['install', '--yes'])).toBe(0);
+  expect(calls).toEqual(['check', 'register', 'start']);
+  expect(out).toContain(`服务还在启动（可能在重建数据），看日志：${path.join(dataDir, 'logs', 'service.log')}`);
+  expect(err).toEqual([]);
+});
+
+test('start：15 秒后服务还在启动：说还在启动，退出 0', async () => {
+  let clock = 0;
+  system.now = () => clock;
+  system.sleep = async (ms) => void (clock += ms);
+  writeManifest(system, manifest());
+  backend.startImpl = async (def) => holdLock({ command: 'start', version: '0.5.0', service: true, port: null }, def.dataDir);
+  expect(await run(['start'])).toBe(0);
+  expect(out).toEqual([`服务还在启动（可能在重建数据），看日志：${path.join(dataDir, 'logs', 'service.log')}`]);
+});
+
 describe('service uninstall', () => {
   test('没装过：说没有安装，退出 0', async () => {
     expect(await run(['uninstall', '--yes'])).toBe(0);
@@ -369,8 +390,8 @@ describe('service stop', () => {
     expect(readLock(dataDir)).toBeNull();
   });
 
-  test('旧版本的服务：说明按 Ctrl+C，退出 1', async () => {
-    await holdLock({ command: 'start', version: '0.4.0', service: false, port: null });
+  test('旧版本的服务（锁里没有版本）：说明按 Ctrl+C，退出 1', async () => {
+    await holdLock({});
     expect(await run(['stop'])).toBe(1);
     expect(err).toEqual(['服务在运行，但不能用这个命令停止（版本较旧）：请在它的终端里按 Ctrl+C']);
   });
@@ -380,6 +401,12 @@ describe('service stop', () => {
     expect(await run(['stop'])).toBe(0);
     expect(out).toEqual([`没有在运行（锁文件残留，进程号 ${process.pid}）`]);
     expect(err).toEqual([]);
+  });
+
+  test('服务正在启动（锁里有版本、还没有端口）：稍后再试，指向日志，退出 1', async () => {
+    await holdLock({ command: 'start', version: '0.5.0', service: true, port: null });
+    expect(await run(['stop'])).toBe(1);
+    expect(err).toEqual([`服务正在启动（可能在重建数据），稍后再试；日志：${path.join(dataDir, 'logs', 'service.log')}`]);
   });
 
   test('正在重建 / 压缩：退出 1', async () => {
