@@ -1,8 +1,10 @@
+import { spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs/promises';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import { main, type MainDeps } from '../src/cli.js';
+import { main, start, type MainDeps, type Running } from '../src/cli.js';
 import { CONTROL_HEADER, CONTROL_KEY_FILE, readControlKey } from '../src/control.js';
 import { lockPath, readLock } from '../src/lock.js';
 import type { DeliveryStatus, NotificationMessage } from '../src/notify/desktop.js';
@@ -25,6 +27,8 @@ let tmp: string;
 let dataDir: string;
 let exits: number[];
 let deps: MainDeps;
+let children: ChildProcess[];
+let others: Running[];
 
 const exists = (file: string): Promise<boolean> => fs.stat(file).then(() => true, () => false);
 
@@ -83,6 +87,8 @@ beforeEach(async () => {
   vi.stubEnv('APPDATA', path.join(home, 'AppData', 'Roaming'));
   vi.stubEnv('LOCALAPPDATA', path.join(home, 'AppData', 'Local'));
   exits = [];
+  children = [];
+  others = [];
   deps = {
     exit: (code) => {
       exits.push(code);
@@ -91,6 +97,8 @@ beforeEach(async () => {
   };
 });
 afterEach(async () => {
+  for (const child of children) child.kill();
+  for (const other of others) await other.close().catch(() => undefined);
   // A test that failed half-way leaves its service running: stop it before removing its directory.
   const holder = readLock(dataDir);
   if (holder?.pid === process.pid && holder.port !== null) {
@@ -167,4 +175,63 @@ test('SIGTERM 和 Ctrl+C 一样收尾，以 0 退出；两个信号的监听都�
   await waitForShutdown();
   expect(process.listeners('SIGTERM')).toEqual(before.term);
   expect(process.listeners('SIGINT')).toEqual(before.int);
+});
+
+/** A live process that is not agent-canvas (a node child that sleeps): its pid stands for a reused one. */
+async function unrelatedPid(): Promise<number> {
+  const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
+  children.push(child);
+  await new Promise((resolve) => child.once('spawn', resolve));
+  return child.pid!;
+}
+
+/** A port nothing listens on (bound, then freed). */
+async function freePort(): Promise<number> {
+  const server = net.createServer();
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as net.AddressInfo).port;
+  await new Promise((resolve) => server.close(resolve));
+  return port;
+}
+
+/** A lock as a service that died without clean-up left it: another live process's pid, a port, its control key. */
+async function staleLock(pid: number, port: number): Promise<void> {
+  await fs.mkdir(dataDir, { recursive: true });
+  await fs.writeFile(lockPath(dataDir), JSON.stringify({ pid, startedAt: '2026-11-25T00:00:00.000Z', command: 'start', version: '0.5.0', service: true, port }));
+  await fs.writeFile(path.join(dataDir, CONTROL_KEY_FILE), 'a'.repeat(64));
+}
+
+test('--service：锁文件残留（进程号被别的进程占用、端口不应答）时接管并启动', async () => {
+  const pid = await unrelatedPid();
+  const port = await freePort();
+  await staleLock(pid, port);
+  const r = await runCaptured(['start', '--port', '0', '--service']);
+  expect(r.code).toBe(-1);
+  expect(r.stderr).toContain(`锁文件残留（进程号 ${pid} 没有在端口 ${port} 上应答），接管`);
+  const holder = readLock(dataDir);
+  expect(holder).toMatchObject({ pid: process.pid, command: 'start', service: true });
+  expect(holder?.port).toBeGreaterThan(0);
+  expect(readControlKey(dataDir)).not.toBe('a'.repeat(64));
+  const res = await requestStop();
+  expect(res.status).toBe(202);
+  await waitForShutdown();
+});
+
+test('--service：端口有服务应答时仍算在运行，以 0 退出、锁不动', async () => {
+  const pid = await unrelatedPid();
+  others.push(await start({ dataDir: path.join(tmp, 'other-data'), port: 0 }, { notifier: new FakeNotifier(), storage: false, searchIndex: false, statsWarmup: false }));
+  await staleLock(pid, others[0]!.address.port);
+  const r = await runCaptured(['start', '--port', '0', '--service']);
+  expect(r.code).toBe(0);
+  expect(r.stderr).toContain(`agent-canvas: 已有服务在运行（进程号 ${pid}），这次不启动`);
+  expect(readLock(dataDir)).toMatchObject({ pid, port: others[0]!.address.port });
+});
+
+test('不带 --service：锁文件残留时照旧报错（终端里的 start 不变）', async () => {
+  const pid = await unrelatedPid();
+  await staleLock(pid, await freePort());
+  const r = await runCaptured(['start', '--port', '0']);
+  expect(r.code).toBe(1);
+  expect(r.stderr).toContain('already running with this data directory');
+  expect(readLock(dataDir)?.pid).toBe(pid);
 });

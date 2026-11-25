@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -9,7 +10,7 @@ import { createControlKey } from '../src/control.js';
 import { lockPath, type LockHolder } from '../src/lock.js';
 import type { DeliveryStatus, NotificationMessage } from '../src/notify/desktop.js';
 import type { ServiceNotifier } from '../src/notify/service.js';
-import { formatUptime, statusLines, stopRunning, waitForStart } from '../src/service/client.js';
+import { formatUptime, readServiceLock, statusLines, stopRunning, waitForStart } from '../src/service/client.js';
 import { pickServiceEnv, serviceDefinition } from '../src/service/definition.js';
 import { manifestPath, readManifest, removeManifest, writeManifest, type ServiceManifest } from '../src/service/manifest.js';
 
@@ -30,6 +31,24 @@ let tmp: string;
 let dataDir: string;
 let running: Running | null;
 let stub: FastifyInstance | null;
+let servers: net.Server[];
+
+/** A port something accepts connections on (closed after the test). */
+async function listeningPort(): Promise<number> {
+  const server = net.createServer((socket) => socket.destroy());
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  servers.push(server);
+  return (server.address() as net.AddressInfo).port;
+}
+
+/** A port nothing listens on (bound, then freed). */
+async function freePort(): Promise<number> {
+  const server = net.createServer();
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as net.AddressInfo).port;
+  await new Promise((resolve) => server.close(resolve));
+  return port;
+}
 
 beforeEach(() => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-service-core-'));
@@ -37,10 +56,12 @@ beforeEach(() => {
   fs.mkdirSync(dataDir, { recursive: true });
   running = null;
   stub = null;
+  servers = [];
 });
 afterEach(async () => {
   await running?.close().catch(() => undefined);
   await stub?.close().catch(() => undefined);
+  for (const server of servers) await new Promise((resolve) => server.close(resolve));
   vi.unstubAllEnvs();
   fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 10 });
 });
@@ -195,7 +216,7 @@ describe('stopRunning', () => {
   });
 
   test('a service with a port but no key file: old-version', async () => {
-    writeLock({ command: 'start', version: '0.4.0', service: true, port: 4999 });
+    writeLock({ command: 'start', version: '0.4.0', service: true, port: await listeningPort() });
     expect(await stopRunning(dataDir)).toBe('old-version');
   });
 
@@ -204,13 +225,19 @@ describe('stopRunning', () => {
     expect(await stopRunning(dataDir)).toBe('maintenance');
   });
 
-  test('a port nothing listens on: unreachable', async () => {
-    const probe = Fastify();
-    await probe.listen({ port: 0, host: '127.0.0.1' });
-    const port = (probe.server.address() as { port: number }).port;
-    await probe.close(); // now free
+  test('a port nothing listens on (a lock left behind, its pid reused): stale', async () => {
     createControlKey(dataDir);
-    writeLock({ command: 'start', version: '0.5.0', service: true, port });
+    writeLock({ command: 'start', version: '0.5.0', service: true, port: await freePort() });
+    expect(await stopRunning(dataDir)).toBe('stale');
+    expect(fs.existsSync(lockPath(dataDir))).toBe(true); // left for the service's next start to take over
+  });
+
+  test('a service that refuses the request: unreachable', async () => {
+    stub = Fastify();
+    stub.post('/api/control/stop', async (_req, reply) => reply.code(403).send({}));
+    await stub.listen({ port: 0, host: '127.0.0.1' });
+    createControlKey(dataDir);
+    writeLock({ command: 'start', version: '0.5.0', service: true, port: (stub.server.address() as { port: number }).port });
     expect(await stopRunning(dataDir)).toBe('unreachable');
   });
 
@@ -239,7 +266,8 @@ describe('waitForStart', () => {
 
   test('ignores a holder without a port or a maintenance holder, then returns the listening one', async () => {
     let t = 0;
-    const steps: Array<Record<string, unknown>> = [{ command: 'start', port: null }, { command: 'compact', port: null }, { command: 'start', port: 4555, version: '0.5.0' }];
+    const port = await listeningPort();
+    const steps: Array<Record<string, unknown>> = [{ command: 'start', port: null }, { command: 'compact', port: null }, { command: 'start', port, version: '0.5.0' }];
     let i = 0;
     writeLock(steps[0]!);
     const holder = await waitForStart(dataDir, {
@@ -251,7 +279,37 @@ describe('waitForStart', () => {
       },
       now: () => t,
     });
-    expect(holder).toMatchObject({ command: 'start', port: 4555 });
+    expect(holder).toMatchObject({ command: 'start', port });
+  });
+
+  test('passes over a holder whose port does not answer (a lock left behind)', async () => {
+    let t = 0;
+    writeLock({ command: 'start', version: '0.5.0', service: true, port: await freePort() });
+    expect(await waitForStart(dataDir, { timeoutMs: 1000, sleep: async (ms) => void (t += ms), now: () => t })).toBeNull();
+  });
+});
+
+describe('readServiceLock', () => {
+  test('a start holder whose port answers is the holder', async () => {
+    writeLock({ command: 'start', version: '0.5.0', service: true, port: await listeningPort() });
+    const r = await readServiceLock(dataDir);
+    expect(r.holder).toMatchObject({ pid: process.pid, command: 'start' });
+    expect(r.stale).toBeNull();
+  });
+
+  test('a start holder whose port does not answer is stale, not running', async () => {
+    writeLock({ command: 'start', version: '0.5.0', service: true, port: await freePort() });
+    const r = await readServiceLock(dataDir);
+    expect(r.holder).toBeNull();
+    expect(r.stale).toMatchObject({ pid: process.pid, command: 'start' });
+  });
+
+  test('a start holder without a port and maintenance holders are kept as they are', async () => {
+    writeLock({ command: 'start', version: '0.5.0', service: true, port: null });
+    expect((await readServiceLock(dataDir)).holder).toMatchObject({ command: 'start', port: null });
+    writeLock({ command: 'rebuild', version: '0.5.0', service: false, port: null });
+    expect((await readServiceLock(dataDir)).holder).toMatchObject({ command: 'rebuild' });
+    expect(await readServiceLock(path.join(tmp, 'none'))).toEqual({ holder: null, stale: null });
   });
 });
 
@@ -276,6 +334,13 @@ describe('statusLines', () => {
     expect(statusLines({ ...base, holder: holder(), state: 'installed', where: 'Windows 启动项', kind: 'windows' })).toEqual({
       lines: ['服务：正在运行（进程号 18244，端口 4317，版本 0.5.0，已运行 2 小时 3 分）', '自动启动：已安装（Windows 启动项）', '日志：C:\\logs\\service.log'],
       code: 0,
+    });
+  });
+
+  test('a lock left behind: not running, naming its pid', () => {
+    expect(statusLines({ ...base, holder: null, stale: holder(), state: 'installed', where: 'w', kind: 'windows' })).toEqual({
+      lines: ['服务：没有运行（锁文件残留，进程号 18244）', '自动启动：已安装（w）', '日志：C:\\logs\\service.log'],
+      code: 3,
     });
   });
 

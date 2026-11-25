@@ -1,16 +1,27 @@
 import { CONTROL_HEADER, readControlKey } from '../control.js';
-import { readLock, type LockHolder } from '../lock.js';
+import { holderResponds, isStaleService, readLock, type LockHolder } from '../lock.js';
 import type { ServiceBackend } from './types.js';
 
-export type StopResult = 'stopped' | 'not-running' | 'timeout' | 'unreachable' | 'old-version' | 'maintenance';
+export type StopResult = 'stopped' | 'not-running' | 'stale' | 'timeout' | 'unreachable' | 'old-version' | 'maintenance';
 
 const POLL_MS = 200;
 const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
+ * The lock's holder as the service commands see it: a `start` holder left behind by a service that is gone (its port
+ * does not answer, lock.ts isStaleService) is not running; it is returned as `stale` instead.
+ */
+export async function readServiceLock(dataDir: string): Promise<{ holder: LockHolder | null; stale: LockHolder | null }> {
+  const holder = readLock(dataDir);
+  if (holder !== null && (await isStaleService(holder))) return { holder: null, stale: holder };
+  return { holder, stale: null };
+}
+
+/**
  * Asks the running service to stop (spec 5): `POST /api/control/stop` on the port in the lock, with the control key,
- * then waits until the lock is released. `old-version`: the holder is a service from before the stop request existed
- * (no port or no key file); `maintenance`: a rebuild or compaction holds the lock, which is not stopped from here.
+ * then waits until the lock is released. `stale`: the lock was left by a service that is gone (nothing to stop);
+ * `old-version`: the holder is a service from before the stop request existed (no port or no key file);
+ * `maintenance`: a rebuild or compaction holds the lock, which is not stopped from here.
  */
 export async function stopRunning(
   dataDir: string,
@@ -20,6 +31,7 @@ export async function stopRunning(
   const holder = readLock(dataDir);
   if (holder === null) return 'not-running';
   if (holder.command !== 'start') return 'maintenance';
+  if (await isStaleService(holder)) return 'stale';
   const key = readControlKey(dataDir);
   if (holder.port === null || key === null) return 'old-version';
   try {
@@ -39,15 +51,25 @@ export async function stopRunning(
   return 'timeout';
 }
 
-/** Polls until a `start` holder with a port shows up (the service is listening); null after `timeoutMs`. */
+/**
+ * Polls until a `start` holder with a port that answers shows up (the service is listening); null after `timeoutMs`.
+ * A holder whose port does not answer (a lock left behind) is checked once and then passed over.
+ */
 export async function waitForStart(
   dataDir: string,
   o: { timeoutMs: number; sleep: (ms: number) => Promise<void>; now: () => number },
 ): Promise<LockHolder | null> {
   const deadline = o.now() + o.timeoutMs;
+  let stale: string | null = null;
   for (;;) {
     const holder = readLock(dataDir);
-    if (holder !== null && holder.command === 'start' && holder.port !== null) return holder;
+    if (holder !== null && holder.command === 'start' && holder.port !== null) {
+      const id = `${holder.pid}/${holder.startedAt}/${holder.port}`;
+      if (id !== stale) {
+        if (await holderResponds(holder)) return holder;
+        stale = id;
+      }
+    }
     if (o.now() >= deadline) return null;
     await o.sleep(POLL_MS);
   }
@@ -63,9 +85,13 @@ export function formatUptime(ms: number): string {
   return `${Math.floor(hours / 24)} 天 ${hours % 24} 小时`;
 }
 
-/** The lines `service status` prints (spec 4) and its exit code: 0 while a service runs, 3 otherwise. */
+/**
+ * The lines `service status` prints (spec 4) and its exit code: 0 while a service runs, 3 otherwise. `stale`: a lock
+ * left behind by a service that is gone (readServiceLock), shown when there is no live holder.
+ */
 export function statusLines(o: {
   holder: LockHolder | null;
+  stale?: LockHolder | null;
   now: number;
   state: 'installed' | 'disabled' | 'absent' | 'unsupported';
   where: string | null;
@@ -76,7 +102,7 @@ export function statusLines(o: {
   let service: string;
   let code: 0 | 3 = 3;
   if (holder === null) {
-    service = '服务：没有运行';
+    service = o.stale != null ? `服务：没有运行（锁文件残留，进程号 ${o.stale.pid}）` : '服务：没有运行';
   } else if (holder.command === 'rebuild') {
     service = `服务：没有运行（正在重建数据，进程号 ${holder.pid}）`;
   } else if (holder.command === 'compact') {

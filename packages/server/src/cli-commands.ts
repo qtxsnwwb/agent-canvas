@@ -6,7 +6,7 @@ import type { AddressInfo } from 'node:net';
 import { AttentionSlot, buildServer, createAttentionService } from './api/server.js';
 import type { AttentionService } from './attention/service.js';
 import { loadConfig, type Config } from './config.js';
-import { createControlKey, removeControlKey } from './control.js';
+import { createControlKey, readControlKey, removeControlKey } from './control.js';
 import { runHookForward } from './hook-forward.js';
 import {
   confirmOnStreams,
@@ -21,7 +21,7 @@ import {
   runHooksUninstall,
   type HooksCliIo,
 } from './hooks-cli.js';
-import { acquireLock, LockHeldError } from './lock.js';
+import { acquireLock, isStaleService, LockHeldError, removeStaleLock } from './lock.js';
 import { captureProcessOutput, logCrashes, openLogFile, type LogFile } from './logfile.js';
 import { NORMALIZER_VERSION } from './normalize/version.js';
 import { DesktopNotifier } from './notify/desktop.js';
@@ -611,7 +611,8 @@ export interface MainDeps {
  * `--log-file`: everything the process prints goes to that file (logfile.ts) from the first line on, and so does a
  * crash (an uncaught exception or unhandled rejection), after which the process exits 1 to be restarted. `--service`
  * (recorded in the lock): when the lock is held, exit 0 if its holder is another service (the system must not keep
- * restarting this one), 1 if it is rebuild or compact (the system retries later, once the maintenance is done).
+ * restarting this one), 1 if it is rebuild or compact (the system retries later, once the maintenance is done); a
+ * `start` holder whose port does not answer is a lock left behind (lock.ts isStaleService) and is taken over.
  * Output is written to process.stdout / process.stderr directly (as console.log does), so --log-file catches it.
  */
 async function startCommand(args: string[], deps: MainDeps): Promise<number> {
@@ -668,13 +669,25 @@ async function startCommand(args: string[], deps: MainDeps): Promise<number> {
         },
       );
     };
-    app = await start(overrides, {
+    const startOptions: StartOptions = {
       ...deps.startOptions,
       service,
       log: out,
       progress: (done, total) => process.stderr.write(`rebuild: ${done}/${total} sessions\n`),
       onStop: shutdown,
-    });
+    };
+    try {
+      app = await start(overrides, startOptions);
+    } catch (e) {
+      // The background service takes over a lock left by a service that is gone (its pid now another process's).
+      if (!(service && e instanceof LockHeldError && (await isStaleService(e.holder)))) throw e;
+      err(`agent-canvas: 锁文件残留（进程号 ${e.holder.pid} 没有在端口 ${e.holder.port} 上应答），接管`);
+      removeStaleLock(e.file, e.holder);
+      const dir = path.dirname(e.file);
+      const staleKey = readControlKey(dir);
+      if (staleKey !== null) removeControlKey(dir, staleKey);
+      app = await start(overrides, startOptions);
+    }
     out(`agent-canvas listening on ${app.url}`);
     process.once('SIGINT', shutdown);
     process.once('SIGTERM', shutdown);

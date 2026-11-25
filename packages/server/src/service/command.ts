@@ -2,9 +2,8 @@ import { parseArgs } from 'node:util';
 import { isNpxPath, PACKAGE_NAME } from '../cli-commands.js';
 import { loadConfig } from '../config.js';
 import type { HooksCliIo } from '../hooks-cli.js';
-import { readLock } from '../lock.js';
 import { serviceBackend } from './backend.js';
-import { statusLines, stopRunning, waitForStart, type StopResult } from './client.js';
+import { readServiceLock, statusLines, stopRunning, waitForStart, type StopResult } from './client.js';
 import { serviceDefinition } from './definition.js';
 import { manifestPath, readManifest, removeManifest, writeManifest, type ServiceManifest } from './manifest.js';
 import type { ServiceBackend, ServiceDefinition, ServiceSystem } from './types.js';
@@ -27,10 +26,11 @@ const UNSUPPORTED = '这个系统不支持后台常驻（只支持 Windows、mac
 const NOT_INSTALLED_START = '还没有安装后台常驻：先运行 agent-canvas service install，或在终端里用 agent-canvas start';
 const START_TIMEOUT_MS = 15_000;
 
-/** What `stop` says for each result, and its exit code. */
+/** What `stop` says for each result, and its exit code (`stale`: see stopMessage). */
 const STOP_MESSAGES: Record<StopResult, { text: string; code: 0 | 1 }> = {
   stopped: { text: '已停止', code: 0 },
   'not-running': { text: '没有在运行', code: 0 },
+  stale: { text: '没有在运行（锁文件残留）', code: 0 },
   timeout: { text: '服务没有在 30 秒内退出', code: 1 },
   'old-version': { text: '服务在运行，但不能用这个命令停止（版本较旧）：请在它的终端里按 Ctrl+C', code: 1 },
   maintenance: { text: '正在重建数据 / 压缩数据库，做完会自己退出', code: 1 },
@@ -99,7 +99,7 @@ async function install(c: Context, args: string[]): Promise<number> {
   // The installed service runs on its own data dir: installing for another one would start a second service there.
   const previous = readManifest(system);
   if (previous !== null && previous.dataDir !== def.dataDir) {
-    const old = readLock(previous.dataDir);
+    const { holder: old } = await readServiceLock(previous.dataDir);
     if (old !== null && old.command === 'start') {
       io.err(`已有服务在运行（进程号 ${old.pid}，数据目录 ${previous.dataDir}）；先运行 agent-canvas service stop 停掉它，再重新安装`);
       return 1;
@@ -120,7 +120,7 @@ async function install(c: Context, args: string[]): Promise<number> {
   writeManifest(system, { ...def, version: 1, platform: system.platform, where: backend.where, installedAt: new Date(system.now()).toISOString() });
   io.out(`已登记：${backend.where}`);
   io.out(`已写入 ${file}`);
-  const holder = readLock(def.dataDir);
+  const { holder } = await readServiceLock(def.dataDir);
   if (holder !== null && holder.command === 'start') {
     io.out(`已有服务在运行（进程号 ${holder.pid}）；先停掉它，再运行 agent-canvas service start`);
     return 0;
@@ -154,7 +154,7 @@ async function uninstall(c: Context, args: string[]): Promise<number> {
 
   const stopped = await stopRunning(def.dataDir, { sleep: system.sleep });
   if (stopped === 'stopped') io.out('已停止服务');
-  else if (stopped !== 'not-running') io.err(`没能停止服务：${STOP_MESSAGES[stopped].text}`);
+  else if (stopped !== 'not-running' && stopped !== 'stale') io.err(`没能停止服务：${STOP_MESSAGES[stopped].text}`);
   await backend.cancelRestart(def);
   await backend.unregister(def);
   io.out(`已取消登记：${backend.where}`);
@@ -168,8 +168,10 @@ async function uninstall(c: Context, args: string[]): Promise<number> {
 async function status(c: Context): Promise<number> {
   const { def } = currentDefinition(c);
   const { backend } = c;
+  const { holder, stale } = await readServiceLock(def.dataDir);
   const { lines, code } = statusLines({
-    holder: readLock(def.dataDir),
+    holder,
+    stale,
     now: c.system.now(),
     state: backend === null ? 'unsupported' : await backend.state(def),
     where: backend?.where ?? null,
@@ -198,7 +200,7 @@ async function startService(c: Context): Promise<number> {
   const target = installed(c);
   if (target === null) return 1;
   const { manifest, backend } = target;
-  const holder = readLock(manifest.dataDir);
+  const { holder } = await readServiceLock(manifest.dataDir);
   if (holder !== null && holder.command === 'start') {
     c.io.out(`服务已在运行（进程号 ${holder.pid}${holder.port !== null ? `，http://127.0.0.1:${holder.port}` : ''}）`);
     return 0;
@@ -209,10 +211,12 @@ async function startService(c: Context): Promise<number> {
 
 async function stop(c: Context): Promise<number> {
   const { def, manifest } = currentDefinition(c);
+  const { stale } = await readServiceLock(def.dataDir);
   const result = await stopRunning(def.dataDir, { sleep: c.system.sleep });
   // A service that just crashed has no process, but the system would start it again in a moment.
   if (manifest !== null && c.backend !== null) await c.backend.cancelRestart(manifest);
-  const { text, code } = STOP_MESSAGES[result];
+  const { code } = STOP_MESSAGES[result];
+  const text = result === 'stale' && stale !== null ? `没有在运行（锁文件残留，进程号 ${stale.pid}）` : STOP_MESSAGES[result].text;
   if (code === 0) c.io.out(text);
   else c.io.err(text);
   return code;

@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
 import { removeSync } from './fs-remove.js';
 
@@ -34,10 +35,13 @@ export interface Lock {
 /** Thrown by acquireLock while another live process holds the lock. */
 export class LockHeldError extends Error {
   readonly holder: LockHolder;
+  /** The lock file. */
+  readonly file: string;
   constructor(holder: LockHolder, file: string) {
     super(`agent-canvas is already running with this data directory (pid ${holder.pid}); lock file: ${file}`);
     this.name = 'LockHeldError';
     this.holder = holder;
+    this.file = file;
   }
 }
 
@@ -149,4 +153,49 @@ export function acquireLock(dataDir: string, info: LockInfo): Lock {
     removeSync(file); // stale (holder gone) or unreadable: take it over
   }
   throw new Error(`could not take the lock file ${file}`);
+}
+
+/** Whether 127.0.0.1:<port> accepts a TCP connection within `timeoutMs`. */
+function connects(port: number, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: '127.0.0.1', port });
+    const done = (ok: boolean): void => {
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(ok);
+    };
+    const timer = setTimeout(() => done(false), timeoutMs);
+    socket.once('connect', () => done(true));
+    socket.once('error', () => done(false));
+  });
+}
+
+/**
+ * Whether the holder's port accepts a TCP connection on 127.0.0.1 (tried `attempts` times, each given `timeoutMs`);
+ * false when it records no port.
+ */
+export async function holderResponds(holder: LockHolder, o: { attempts?: number; timeoutMs?: number } = {}): Promise<boolean> {
+  const { attempts = 2, timeoutMs = 500 } = o;
+  if (holder.port === null) return false;
+  for (let i = 0; i < attempts; i++) {
+    if (await connects(holder.port, timeoutMs)) return true;
+  }
+  return false;
+}
+
+/**
+ * A lock left behind by a service that is gone (spec 2026-11-25-background-service-design.md 5): a `start` holder
+ * that records a port where nothing answers. Windows ends the service at logoff or shutdown without its clean-up, so
+ * the lock stays; once its pid belongs to another process, the holder reads as alive. Such a holder does not count
+ * as a running service. A holder without a port (still starting) and rebuild / compact holders are never stale.
+ */
+export async function isStaleService(holder: LockHolder): Promise<boolean> {
+  return holder.command === 'start' && holder.port !== null && !(await holderResponds(holder));
+}
+
+/** Removes the lock file `file` when it still names `holder` (same pid, start time and port): a newer lock stays. */
+export function removeStaleLock(file: string, holder: LockHolder): void {
+  const current = readHolder(file);
+  if (current === null || current.pid !== holder.pid || current.startedAt !== holder.startedAt || current.port !== holder.port) return;
+  removeSync(file);
 }

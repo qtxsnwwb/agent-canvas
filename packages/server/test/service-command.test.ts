@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
@@ -33,6 +34,24 @@ let out: string[];
 let err: string[];
 let io: HooksCliIo & { answer: boolean };
 let running: Running[];
+let servers: net.Server[];
+
+/** A port something accepts connections on, as a running service's (closed after the test). */
+async function listeningPort(): Promise<number> {
+  const server = net.createServer((socket) => socket.destroy());
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  servers.push(server);
+  return (server.address() as net.AddressInfo).port;
+}
+
+/** A port nothing listens on (bound, then freed): the port of a lock left behind. */
+async function freePort(): Promise<number> {
+  const server = net.createServer();
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as net.AddressInfo).port;
+  await new Promise((resolve) => server.close(resolve));
+  return port;
+}
 
 const CLI = path.join('C:', 'agent-canvas', 'dist', 'cli.js');
 
@@ -107,6 +126,7 @@ beforeEach(async () => {
   };
   calls = [];
   running = [];
+  servers = [];
   backend = {
     kind: 'windows',
     where: '假的启动项（测试）',
@@ -151,6 +171,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   for (const r of running) await r.close();
+  for (const server of servers) await new Promise((resolve) => server.close(resolve));
   vi.unstubAllEnvs();
   await fs.rm(tmp, { recursive: true, force: true, maxRetries: 10 });
 });
@@ -212,7 +233,7 @@ describe('service install', () => {
 
   test('已有服务在运行：照常登记、更新清单的端口，但不启动，提示先停掉', async () => {
     writeManifest(system, manifest({ port: 45004 }));
-    await holdLock({ command: 'start', version: '0.5.0', service: false, port: 45099 });
+    await holdLock({ command: 'start', version: '0.5.0', service: false, port: await listeningPort() });
     expect(await run(['install', '--port', '45005', '--yes'])).toBe(0);
     expect(calls).toEqual(['check', 'register']);
     expect(out).toContain('更新已有的安装');
@@ -224,7 +245,7 @@ describe('service install', () => {
     const other = path.join(tmp, 'service-data');
     writeManifest(system, manifest({ dataDir: other, port: 45008 }));
     const before = await fs.readFile(manifestPath(system), 'utf8');
-    await holdLock({ command: 'start', version: '0.5.0', service: true, port: 45008 }, other);
+    await holdLock({ command: 'start', version: '0.5.0', service: true, port: await listeningPort() }, other);
     expect(await run(['install', '--port', '45009', '--yes'])).toBe(1);
     expect(err).toEqual([`已有服务在运行（进程号 ${process.pid}，数据目录 ${other}）；先运行 agent-canvas service stop 停掉它，再重新安装`]);
     expect(out).toEqual([]);
@@ -275,18 +296,41 @@ describe('service status', () => {
     const other = path.join(tmp, 'service-data');
     writeManifest(system, manifest({ dataDir: other }));
     backend.stateResult = 'installed';
-    await holdLock({ command: 'start', version: '0.5.0', service: true, port: 45006 }, dataDir); // the shell's, not the service's
+    const port = await listeningPort();
+    await holdLock({ command: 'start', version: '0.5.0', service: true, port }, dataDir); // the shell's, not the service's
     expect(await run(['status'])).toBe(3);
     expect(out).toEqual(['服务：没有运行', `自动启动：已安装（${backend.where}）`, `日志：${path.join(other, 'logs', 'service.log')}`]);
 
     out.length = 0;
-    await holdLock({ command: 'start', version: '0.5.0', service: true, port: 45006 }, other);
+    await holdLock({ command: 'start', version: '0.5.0', service: true, port }, other);
     expect(await run(['status'])).toBe(0);
-    expect(out[0]).toMatch(new RegExp(`^服务：正在运行（进程号 ${process.pid}，端口 45006，版本 0\\.5\\.0`));
+    expect(out[0]).toMatch(new RegExp(`^服务：正在运行（进程号 ${process.pid}，端口 ${port}，版本 0\\.5\\.0`));
+  });
+});
+
+describe('service status: a lock left behind', () => {
+  test('锁文件残留（端口不应答）：没有运行，注明进程号，退出 3', async () => {
+    writeManifest(system, manifest());
+    await holdLock({ command: 'start', version: '0.5.0', service: true, port: await freePort() });
+    expect(await run(['status'])).toBe(3);
+    expect(out[0]).toBe(`服务：没有运行（锁文件残留，进程号 ${process.pid}）`);
   });
 });
 
 describe('service start', () => {
+  test('锁文件残留（端口不应答）：照常启动', async () => {
+    writeManifest(system, manifest());
+    await holdLock({ command: 'start', version: '0.5.0', service: true, port: await freePort() });
+    // As the service's `start --service` does (main takes the stale lock over), then runs.
+    backend.startImpl = async (def) => {
+      await fs.rm(lockPath(def.dataDir));
+      await launch(def);
+    };
+    expect(await run(['start'])).toBe(0);
+    expect(calls).toEqual(['start']);
+    expect(out).toContain(`已在后台启动：http://127.0.0.1:${readLock(dataDir)?.port}`);
+  });
+
   test('没装过：提示先 install，退出 1', async () => {
     expect(await run(['start'])).toBe(1);
     expect(err).toEqual(['还没有安装后台常驻：先运行 agent-canvas service install，或在终端里用 agent-canvas start']);
@@ -295,7 +339,7 @@ describe('service start', () => {
 
   test('已经在运行：说明，退出 0，不启动', async () => {
     writeManifest(system, manifest());
-    await holdLock({ command: 'start', version: '0.5.0', service: true, port: 45007 });
+    await holdLock({ command: 'start', version: '0.5.0', service: true, port: await listeningPort() });
     expect(await run(['start'])).toBe(0);
     expect(out.join('\n')).toContain(`进程号 ${process.pid}`);
     expect(calls).toEqual([]);
@@ -329,6 +373,13 @@ describe('service stop', () => {
     await holdLock({ command: 'start', version: '0.4.0', service: false, port: null });
     expect(await run(['stop'])).toBe(1);
     expect(err).toEqual(['服务在运行，但不能用这个命令停止（版本较旧）：请在它的终端里按 Ctrl+C']);
+  });
+
+  test('锁文件残留（端口不应答）：说没有在运行并注明残留，退出 0', async () => {
+    await holdLock({ command: 'start', version: '0.5.0', service: true, port: await freePort() });
+    expect(await run(['stop'])).toBe(0);
+    expect(out).toEqual([`没有在运行（锁文件残留，进程号 ${process.pid}）`]);
+    expect(err).toEqual([]);
   });
 
   test('正在重建 / 压缩：退出 1', async () => {
