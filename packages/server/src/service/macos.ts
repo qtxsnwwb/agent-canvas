@@ -132,13 +132,16 @@ export function macosBackend(system: ServiceSystem): ServiceBackend {
 
     async start() {
       const loaded = await system.run('launchctl', ['print', target()]);
-      if (loaded.code !== 0) await bootstrap();
+      // Not loaded: right after cancelRestart (stop, restart) the old job may still be exiting, as in register.
+      if (loaded.code !== 0) await bootstrapWithRetry();
       const result = await system.run('launchctl', ['kickstart', target()]);
       if (result.code !== 0) throw new Error(`launchctl kickstart 失败（退出码 ${result.code}）：${result.stderr.trim()}`);
     },
 
     async cancelRestart() {
       await bootout();
+      // bootout returns before the job has exited: a start right after must not find it half gone.
+      await waitUnloaded();
     },
 
     async state() {

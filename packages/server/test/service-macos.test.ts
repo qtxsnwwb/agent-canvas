@@ -221,12 +221,59 @@ describe('macosBackend', () => {
     expect(cmds()).toEqual([`launchctl print ${target}`, `launchctl bootstrap gui/501 ${plistFile()}`, `launchctl kickstart ${target}`]);
   });
 
+  test('start: not loaded and bootstrap fails once (the old job still exiting) -> retried, then kickstart', async () => {
+    let tries = 0;
+    answer = (c) => (c.args[0] === 'print' ? { code: 113 } : c.args[0] === 'bootstrap' ? { code: ++tries === 1 ? 5 : 0 } : { code: 0 });
+    await macosBackend(fakeSystem()).start(definition());
+    expect(cmds()).toEqual([
+      `launchctl print ${target}`,
+      `launchctl bootstrap gui/501 ${plistFile()}`,
+      `launchctl bootstrap gui/501 ${plistFile()}`,
+      `launchctl kickstart ${target}`,
+    ]);
+    expect(sleeps).toEqual([1000]);
+  });
+
+  test('start: throws after 3 failed bootstrap attempts, without kickstart', async () => {
+    answer = (c) => (c.args[0] === 'print' ? { code: 113 } : c.args[0] === 'bootstrap' ? { code: 37, stderr: 'Bootstrap failed' } : { code: 0 });
+    await expect(macosBackend(fakeSystem()).start(definition())).rejects.toThrow('launchctl bootstrap 失败（退出码 37）');
+    expect(cmds().filter((c) => c.includes('bootstrap'))).toHaveLength(3);
+    expect(cmds().some((c) => c.includes('kickstart'))).toBe(false);
+  });
+
   test('cancelRestart boots out, ignoring failure and a missing launchctl', async () => {
     answer = () => ({ code: 113 });
     await macosBackend(fakeSystem()).cancelRestart(definition());
     answer = () => 'enoent';
     await macosBackend(fakeSystem()).cancelRestart(definition());
-    expect(cmds()).toEqual([`launchctl bootout ${target}`, `launchctl bootout ${target}`]);
+    expect(cmds()).toEqual([`launchctl bootout ${target}`, `launchctl print ${target}`, `launchctl bootout ${target}`, `launchctl print ${target}`]);
+  });
+
+  test('cancelRestart waits (500 ms polls) until launchd no longer knows the job', async () => {
+    let prints = 0;
+    answer = (c) => (c.args[0] === 'print' ? { code: ++prints <= 2 ? 0 : 113 } : { code: 0 });
+    await macosBackend(fakeSystem()).cancelRestart(definition());
+    expect(cmds()).toEqual([`launchctl bootout ${target}`, `launchctl print ${target}`, `launchctl print ${target}`, `launchctl print ${target}`]);
+    expect(sleeps).toEqual([500, 500]);
+  });
+
+  test('cancelRestart gives up waiting after 15 s', async () => {
+    answer = () => ({ code: 0 });
+    await macosBackend(fakeSystem()).cancelRestart(definition());
+    expect(sleeps.reduce((a, b) => a + b, 0)).toBe(15000);
+  });
+
+  test('cancelRestart then start: start bootstraps only after the old job is gone', async () => {
+    // launchd still knows the job for two polls after bootout, then not.
+    let prints = 0;
+    answer = (c) => (c.args[0] === 'print' ? { code: ++prints <= 2 ? 0 : 113 } : { code: 0 });
+    const b = macosBackend(fakeSystem());
+    await b.cancelRestart(definition());
+    await b.start(definition());
+    const list = cmds();
+    expect(list.indexOf(`launchctl bootstrap gui/501 ${plistFile()}`)).toBeGreaterThan(list.lastIndexOf(`launchctl bootout ${target}`));
+    expect(list.slice(0, 4)).toEqual([`launchctl bootout ${target}`, `launchctl print ${target}`, `launchctl print ${target}`, `launchctl print ${target}`]);
+    expect(list.slice(4)).toEqual([`launchctl print ${target}`, `launchctl bootstrap gui/501 ${plistFile()}`, `launchctl kickstart ${target}`]);
   });
 
   test('unregister boots out, then deletes the plist', async () => {
