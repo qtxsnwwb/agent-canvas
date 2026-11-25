@@ -27,6 +27,8 @@ import { NORMALIZER_VERSION } from './normalize/version.js';
 import { DesktopNotifier } from './notify/desktop.js';
 import { NotificationService, type ServiceNotifier } from './notify/service.js';
 import { NORMALIZER_VERSION_KEY, Pipeline, REBUILD_FLAG } from './pipeline.js';
+import { serviceCommand } from './service/command.js';
+import { realServiceSystem, type ServiceBackend, type ServiceSystem } from './service/types.js';
 import { ClaudeFileSource } from './sources/claude.js';
 import { storeLookup } from './sources/codex/lookup.js';
 import { CodexFileSource } from './sources/codex/source.js';
@@ -98,6 +100,15 @@ const USAGE = `Usage:
                                      Remove them again
   agent-canvas hook-forward [--origin <claude|codex|cursor>] [--port <n>]
                                      Forward one hook payload from stdin to the server (run by Codex / Cursor)
+  agent-canvas service install [--port <n>] [--yes]
+                                     Run the service in the background from login on (Windows startup entry, macOS
+                                     LaunchAgent, systemd user service) and start it now
+  agent-canvas service uninstall [--yes]
+                                     Stop it and remove that registration (the data, logs and settings stay)
+  agent-canvas service status       Whether the service runs and starts at login, and its log (exit 3: not running)
+  agent-canvas service start        Start the installed background service
+  agent-canvas service stop         Stop the running service (also one started in a terminal)
+  agent-canvas service restart      Stop it, then start the installed background service
 `;
 
 /** This installation's cli.js (next to this module in dist/), as written into Codex's hook commands. */
@@ -589,6 +600,10 @@ export interface MainDeps {
   exit?: (code: number) => void;
   /** Tests: options passed on to start() (a fake notifier, no background jobs). */
   startOptions?: StartOptions;
+  /** The system `service` registers with (default: the real one); tests pass a fake with a temp home and env. */
+  serviceSystem?: ServiceSystem;
+  /** The backend `service` uses (default: the system's own); null: not supported. */
+  serviceBackend?: ServiceBackend | null;
 }
 
 /**
@@ -696,6 +711,16 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
   if (command === 'hook-forward') return runHookForward(rest, { stdin: deps.stdin ?? process.stdin });
   if (command === 'hooks') return hooksCommand(rest, deps.env ?? process.env, deps.hooksIo ?? terminalIo(), deps.cliPath ?? defaultCliPath());
   if (command === 'start') return startCommand(rest, deps);
+  if (command === 'service') {
+    return serviceCommand(rest, {
+      system: deps.serviceSystem ?? realServiceSystem(),
+      io: deps.hooksIo ?? terminalIo(),
+      cliPath: deps.cliPath ?? defaultCliPath(),
+      nodePath: process.execPath,
+      backend: deps.serviceBackend,
+      usage: USAGE,
+    });
+  }
   try {
     if (command === 'rebuild') {
       parseArgs({ args: rest, options: {}, allowPositionals: false });
