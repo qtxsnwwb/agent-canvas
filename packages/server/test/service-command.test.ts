@@ -293,12 +293,14 @@ describe('service uninstall', () => {
     expect(calls).toEqual([]);
   });
 
-  test('先停服务，再取消待定的重启、取消登记，最后删清单', async () => {
+  test('先取消待定的重启，再停服务、取消登记，最后删清单', async () => {
     writeManifest(system, manifest());
     await launch(manifest());
     expect(readLock(dataDir)).not.toBeNull();
     expect(await run(['uninstall', '--yes'])).toBe(0);
-    expect(calls).toEqual(['cancelRestart:not-running', 'unregister:manifest']);
+    expect(calls).toEqual(['cancelRestart:running', 'unregister:manifest']);
+    expect(out).toContain('已停止服务');
+    expect(readLock(dataDir)).toBeNull();
     expect(await exists(manifestPath(system))).toBe(false);
     expect(out).toContain(`已取消登记：${backend.where}`);
     expect(out).toContain(`已删除 ${manifestPath(system)}`);
@@ -382,6 +384,27 @@ describe('service stop', () => {
     expect(out).toEqual(['没有在运行']);
   });
 
+  test('装过时先取消待定的重启，再发停止请求', async () => {
+    writeManifest(system, manifest());
+    await launch(manifest());
+    expect(await run(['stop'])).toBe(0);
+    expect(calls).toEqual(['cancelRestart:running']);
+    expect(out).toEqual(['已停止']);
+    expect(readLock(dataDir)).toBeNull();
+  });
+
+  test('取消重启时系统已经把服务停了（launchctl bootout、systemctl stop）：仍说已停止', async () => {
+    writeManifest(system, manifest());
+    await launch(manifest());
+    backend.cancelRestart = async () => {
+      calls.push('cancelRestart');
+      await running.pop()!.close();
+    };
+    expect(await run(['stop'])).toBe(0);
+    expect(calls).toEqual(['cancelRestart']);
+    expect(out).toEqual(['已停止']);
+  });
+
   test('没装过时只停服务（例如终端里开的）', async () => {
     await launch(manifest());
     expect(await run(['stop'])).toBe(0);
@@ -422,7 +445,7 @@ describe('service restart', () => {
     await launch(manifest());
     const before = readLock(dataDir)?.port;
     expect(await run(['restart'])).toBe(0);
-    expect(calls).toEqual(['cancelRestart:not-running', 'start']);
+    expect(calls).toEqual(['cancelRestart:running', 'start']);
     expect(out[0]).toBe('已停止');
     const after = readLock(dataDir)?.port;
     expect(after).not.toBe(before);

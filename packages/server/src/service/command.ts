@@ -175,10 +175,9 @@ async function uninstall(c: Context, args: string[]): Promise<number> {
   io.out(`数据库、日志和设置都不动（${def.dataDir}）`);
   if (!(await confirmed(c, values.yes === true, '非交互终端下需要加 --yes 才会删除'))) return 1;
 
-  const stopped = await stopRunning(def.dataDir, { sleep: system.sleep });
+  const { result: stopped } = await stopService(c, def, def);
   if (stopped === 'stopped') io.out('已停止服务');
   else if (stopped !== 'not-running' && stopped !== 'stale') io.err(`没能停止服务：${stopMessage(stopped, { stale: null, logFile: def.logFile }).text}`);
-  await backend.cancelRestart(def);
   await backend.unregister(def);
   io.out(`已取消登记：${backend.where}`);
   if (manifest !== null) {
@@ -232,12 +231,24 @@ async function startService(c: Context): Promise<number> {
   return reportStart(c, manifest, '');
 }
 
+/**
+ * Stops the service of `def`'s data directory. First the system's side (`cancel`: the installed service, null when none
+ * is installed), so it does not run the service again: a service that just crashed has no process but would be back in
+ * a moment, and on Windows the launcher could start it again between its exit and the marker. On macOS and Linux this
+ * already stops a running service (bootout, systemctl stop). Then the stop request. A `start` holder that was there
+ * before and is gone afterwards counts as stopped.
+ */
+async function stopService(c: Context, def: ServiceDefinition, cancel: ServiceDefinition | null): Promise<{ result: StopResult; stale: LockHolder | null }> {
+  const { holder, stale } = await readServiceLock(def.dataDir);
+  if (cancel !== null && c.backend !== null) await c.backend.cancelRestart(cancel);
+  let result = await stopRunning(def.dataDir, { sleep: c.system.sleep });
+  if (holder !== null && holder.command === 'start' && (result === 'not-running' || result === 'stale')) result = 'stopped';
+  return { result, stale };
+}
+
 async function stop(c: Context): Promise<number> {
   const { def, manifest } = currentDefinition(c);
-  const { stale } = await readServiceLock(def.dataDir);
-  const result = await stopRunning(def.dataDir, { sleep: c.system.sleep });
-  // A service that just crashed has no process, but the system would start it again in a moment.
-  if (manifest !== null && c.backend !== null) await c.backend.cancelRestart(manifest);
+  const { result, stale } = await stopService(c, def, manifest);
   const { text, code } = stopMessage(result, { stale, logFile: def.logFile });
   if (code === 0) c.io.out(text);
   else c.io.err(text);
