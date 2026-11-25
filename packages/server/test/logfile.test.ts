@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, expect, it, test } from 'vitest';
-import { captureProcessOutput, LOG_MAX_BYTES, openLogFile } from '../src/logfile.js';
+import { captureProcessOutput, LOG_MAX_BYTES, logCrashes, openLogFile } from '../src/logfile.js';
 
 let tmp: string;
 const T = '2026-11-25T10:00:00.000Z';
@@ -105,4 +105,32 @@ test('captureProcessOutput 把 stdout / stderr 写进日志，restore 后复原'
   expect(await fs.readFile(file, 'utf8')).toBe(`${T} to stdout\n${T} to stderr\n`);
   await new Promise((r) => setImmediate(r));
   expect(called).toBe(1);
+});
+
+test('logCrashes：未捕获的异常和未处理的 rejection 带时间写进日志，以 1 退出；撤掉后不再监听', async () => {
+  const file = path.join(tmp, 'service.log');
+  const log = openLogFile(file, { now });
+  const exits: number[] = [];
+  const before = { exc: process.listeners('uncaughtException'), rej: process.listeners('unhandledRejection') };
+  const uninstall = logCrashes(log, (code) => void exits.push(code));
+  try {
+    const onException = process.listeners('uncaughtException').filter((l) => !before.exc.includes(l));
+    const onRejection = process.listeners('unhandledRejection').filter((l) => !before.rej.includes(l));
+    expect(onException).toHaveLength(1);
+    expect(onRejection).toHaveLength(1);
+    // Called directly: emitting on process would also reach the test runner's own handlers.
+    const boom = new Error('boom');
+    boom.stack = 'Error: boom\n    at here (x.js:1:1)';
+    (onException[0] as (e: unknown) => void)(boom);
+    (onRejection[0] as (r: unknown, p: Promise<unknown>) => void)('not an error', Promise.resolve());
+  } finally {
+    uninstall();
+  }
+  log.close();
+  expect(exits).toEqual([1, 1]);
+  expect(await fs.readFile(file, 'utf8')).toBe(
+    `${T} agent-canvas: uncaught exception: Error: boom\n${T}     at here (x.js:1:1)\n${T} agent-canvas: unhandled rejection: not an error\n`,
+  );
+  expect(process.listeners('uncaughtException')).toEqual(before.exc);
+  expect(process.listeners('unhandledRejection')).toEqual(before.rej);
 });

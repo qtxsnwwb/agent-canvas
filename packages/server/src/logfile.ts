@@ -82,6 +82,26 @@ export function openLogFile(file: string, opts: { maxBytes?: number; now?: () =>
   };
 }
 
+/**
+ * Writes a crash (an uncaught exception or unhandled rejection: what Node would print before dying) to `log`, then
+ * exits with code 1 so the service manager restarts the service. Returns the function that removes the handlers.
+ */
+export function logCrashes(log: LogFile, exit: (code: number) => void): () => void {
+  const crashed = (kind: string) => (reason: unknown): void => {
+    const detail = reason instanceof Error ? (reason.stack ?? `${reason.name}: ${reason.message}`) : String(reason);
+    log.write(`agent-canvas: ${kind}: ${detail}\n`);
+    exit(1);
+  };
+  const onException = crashed('uncaught exception');
+  const onRejection = crashed('unhandled rejection');
+  process.on('uncaughtException', onException);
+  process.on('unhandledRejection', onRejection);
+  return () => {
+    process.removeListener('uncaughtException', onException);
+    process.removeListener('unhandledRejection', onRejection);
+  };
+}
+
 type WriteFn = typeof process.stdout.write;
 
 /**

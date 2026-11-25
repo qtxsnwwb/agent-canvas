@@ -133,7 +133,10 @@ test('不带 --service：锁被占时照旧报错并以 1 退出', async () => {
 
 test('--log-file：输出写进日志（带时间）；停止请求让服务收尾，以 0 退出，锁和钥匙都删掉', async () => {
   const file = path.join(tmp, 'logs', 'service.log');
+  const crashListeners = (): number => process.listenerCount('uncaughtException') + process.listenerCount('unhandledRejection');
+  const before = crashListeners();
   expect(await main(['start', '--port', '0', '--log-file', file, '--service'], deps)).toBe(-1);
+  expect(crashListeners()).toBe(before + 2); // a crash goes to the log (logCrashes)
   const log = await fs.readFile(file, 'utf8');
   expect(log).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z agent-canvas listening on http:\/\/127\.0\.0\.1:\d+$/m);
   expect(readLock(dataDir)).toMatchObject({ pid: process.pid, command: 'start', service: true });
@@ -141,6 +144,7 @@ test('--log-file：输出写进日志（带时间）；停止请求让服务收�
   expect(res.status).toBe(202);
   expect(await res.json()).toEqual({ stopping: true });
   await waitForShutdown();
+  expect(crashListeners()).toBe(before);
 });
 
 test('SIGTERM 和 Ctrl+C 一样收尾，以 0 退出；两个信号的监听都撤掉', async () => {

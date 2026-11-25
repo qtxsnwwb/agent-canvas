@@ -22,7 +22,7 @@ import {
   type HooksCliIo,
 } from './hooks-cli.js';
 import { acquireLock, LockHeldError } from './lock.js';
-import { captureProcessOutput, openLogFile, type LogFile } from './logfile.js';
+import { captureProcessOutput, logCrashes, openLogFile, type LogFile } from './logfile.js';
 import { NORMALIZER_VERSION } from './normalize/version.js';
 import { DesktopNotifier } from './notify/desktop.js';
 import { NotificationService, type ServiceNotifier } from './notify/service.js';
@@ -593,7 +593,8 @@ export interface MainDeps {
 
 /**
  * `agent-canvas start`: runs the service until Ctrl+C, SIGTERM or a stop request, which all close it and exit 0.
- * `--log-file`: everything the process prints goes to that file (logfile.ts) from the first line on. `--service`
+ * `--log-file`: everything the process prints goes to that file (logfile.ts) from the first line on, and so does a
+ * crash (an uncaught exception or unhandled rejection), after which the process exits 1 to be restarted. `--service`
  * (recorded in the lock): when the lock is held, exit 0 if its holder is another service (the system must not keep
  * restarting this one), 1 if it is rebuild or compact (the system retries later, once the maintenance is done).
  * Output is written to process.stdout / process.stderr directly (as console.log does), so --log-file catches it.
@@ -604,7 +605,10 @@ async function startCommand(args: string[], deps: MainDeps): Promise<number> {
   const err = (line: string): void => void process.stderr.write(`${line}\n`);
   let log: LogFile | null = null;
   let restoreOutput: (() => void) | null = null;
+  let uninstallCrashLog: (() => void) | null = null;
   const stopLogging = (): void => {
+    uninstallCrashLog?.();
+    uninstallCrashLog = null;
     restoreOutput?.();
     restoreOutput = null;
     log?.close();
@@ -621,6 +625,8 @@ async function startCommand(args: string[], deps: MainDeps): Promise<number> {
     if (logFile !== undefined) {
       log = openLogFile(logFile);
       restoreOutput = captureProcessOutput(log);
+      // Node prints a crash straight to the terminal (not through process.stderr.write): put it in the log instead.
+      uninstallCrashLog = logCrashes(log, exit);
     }
     const overrides: Partial<Config> = {};
     if (values.port !== undefined) {
