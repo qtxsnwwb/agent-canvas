@@ -6,10 +6,24 @@ import path from 'node:path';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { main, start, type MainDeps, type Running } from '../src/cli.js';
 import { CONTROL_HEADER, CONTROL_KEY_FILE, readControlKey } from '../src/control.js';
-import { lockPath, readLock } from '../src/lock.js';
+import { lockPath, readLock, type LockHolder } from '../src/lock.js';
 import { openEarlyProcessLog } from '../src/logfile.js';
 import type { DeliveryStatus, NotificationMessage } from '../src/notify/desktop.js';
 import type { ServiceNotifier } from '../src/notify/service.js';
+
+/** Runs after main's stale-lock check (isStaleService) answers: lets a test act in the moment before the takeover. */
+const staleCheck = vi.hoisted(() => ({ after: null as null | ((holder: LockHolder, stale: boolean) => Promise<void>) }));
+vi.mock('../src/lock.js', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../src/lock.js')>();
+  return {
+    ...original,
+    isStaleService: async (holder: LockHolder): Promise<boolean> => {
+      const stale = await original.isStaleService(holder);
+      await staleCheck.after?.(holder, stale);
+      return stale;
+    },
+  };
+});
 
 /*
  * `main(['start', …])` as the background service runs it: temp data / projects / home directories (start() reads
@@ -88,6 +102,7 @@ beforeEach(async () => {
   vi.stubEnv('APPDATA', path.join(home, 'AppData', 'Roaming'));
   vi.stubEnv('LOCALAPPDATA', path.join(home, 'AppData', 'Local'));
   exits = [];
+  staleCheck.after = null;
   children = [];
   others = [];
   deps = {
@@ -284,4 +299,81 @@ test('--log-file：入口已经打开了同一个日志（载入命令之前）�
   expect(process.stdout.write).not.toBe(stdoutWrite); // restored
   const lines = (await fs.readFile(file, 'utf8')).split('\n').filter((l) => l.includes('agent-canvas listening on'));
   expect(lines).toHaveLength(1);
+});
+
+test('--service：两个进程同时接管同一个残留的锁，输的一方不删赢家新写的 control.key', async () => {
+  const pid = await unrelatedPid();
+  await staleLock(pid, await freePort());
+  // The winner (another live process, listening) takes the lock over between this process's check and its takeover.
+  const winnerPid = await unrelatedPid();
+  const server = net.createServer((socket) => socket.destroy());
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const winnerKey = 'b'.repeat(64);
+  staleCheck.after = async (_holder, stale) => {
+    if (!stale) return;
+    staleCheck.after = null;
+    const port = (server.address() as net.AddressInfo).port;
+    await fs.writeFile(lockPath(dataDir), JSON.stringify({ pid: winnerPid, startedAt: '2026-11-25T01:00:00.000Z', command: 'start', version: '0.5.0', service: true, port }));
+    await fs.writeFile(path.join(dataDir, CONTROL_KEY_FILE), winnerKey);
+  };
+  try {
+    const r = await runCaptured(['start', '--port', '0', '--service']);
+    expect(r.code).toBe(0);
+    expect(r.stderr).toContain(`agent-canvas: 已有服务在运行（进程号 ${winnerPid}），这次不启动`);
+    expect(readLock(dataDir)?.pid).toBe(winnerPid);
+    expect(readControlKey(dataDir)).toBe(winnerKey);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+/** startOptions whose notifier, read when main builds the options for start(), records our signal listeners then. */
+function listenersAtStart(before: { term: Function[]; int: Function[] }): { seen: { term: number; int: number } | null; options: MainDeps['startOptions'] } {
+  const probe: { seen: { term: number; int: number } | null; options: MainDeps['startOptions'] } = { seen: null, options: undefined };
+  probe.options = {
+    storage: false,
+    searchIndex: false,
+    get notifier(): ServiceNotifier {
+      probe.seen = {
+        term: process.listeners('SIGTERM').filter((l) => !before.term.includes(l)).length,
+        int: process.listeners('SIGINT').filter((l) => !before.int.includes(l)).length,
+      };
+      return new FakeNotifier();
+    },
+  };
+  return probe;
+}
+
+test('终端里的 start（不带 --service）：start() 返回前不装我们的信号处理（Ctrl+C 照常能打断重建），返回后才装', async () => {
+  const before = { term: process.listeners('SIGTERM'), int: process.listeners('SIGINT') };
+  const probe = listenersAtStart(before);
+  const spy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+  try {
+    expect(await main(['start', '--port', '0'], { ...deps, startOptions: probe.options })).toBe(-1);
+  } finally {
+    spy.mockRestore();
+  }
+  expect(probe.seen).toEqual({ term: 0, int: 0 });
+  const added = process.listeners('SIGTERM').filter((l) => !before.term.includes(l));
+  expect(added).toHaveLength(1);
+  (added[0] as () => void)();
+  await waitForShutdown();
+  expect(process.listeners('SIGTERM')).toEqual(before.term);
+  expect(process.listeners('SIGINT')).toEqual(before.int);
+});
+
+test('--service：start() 之前就装好信号处理', async () => {
+  const before = { term: process.listeners('SIGTERM'), int: process.listeners('SIGINT') };
+  const probe = listenersAtStart(before);
+  const spy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+  try {
+    expect(await main(['start', '--port', '0', '--service'], { ...deps, startOptions: probe.options })).toBe(-1);
+  } finally {
+    spy.mockRestore();
+  }
+  expect(probe.seen).toEqual({ term: 1, int: 1 });
+  const res = await requestStop();
+  expect(res.status).toBe(202);
+  await waitForShutdown();
+  expect(process.listeners('SIGTERM')).toEqual(before.term);
 });

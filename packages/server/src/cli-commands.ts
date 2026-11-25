@@ -6,7 +6,7 @@ import type { AddressInfo } from 'node:net';
 import { AttentionSlot, buildServer, createAttentionService } from './api/server.js';
 import type { AttentionService } from './attention/service.js';
 import { loadConfig, type Config } from './config.js';
-import { createControlKey, readControlKey, removeControlKey } from './control.js';
+import { createControlKey, removeControlKey } from './control.js';
 import { runHookForward } from './hook-forward.js';
 import {
   confirmOnStreams,
@@ -610,8 +610,8 @@ export interface MainDeps {
 }
 
 /**
- * `agent-canvas start`: runs the service until Ctrl+C, SIGTERM or a stop request, which all close it and exit 0 (a
- * signal during the start-up closes it once started).
+ * `agent-canvas start`: runs the service until Ctrl+C, SIGTERM or a stop request, which all close it and exit 0 (with
+ * `--service`, a signal during the start-up closes it once started).
  * `--log-file`: everything the process prints goes to that file (logfile.ts) from the first line on, and so does a
  * crash (an uncaught exception or unhandled rejection), after which the process exits 1 to be restarted. `--service`
  * (recorded in the lock): when the lock is held, exit 0 if its holder is another service (the system must not keep
@@ -675,11 +675,17 @@ async function startCommand(args: string[], deps: MainDeps): Promise<number> {
       process.removeListener('SIGINT', shutdown);
       process.removeListener('SIGTERM', shutdown);
     };
-    // Before start(): a signal during the start-up (a rebuild after an upgrade can take minutes; the signal is handled
-    // once the event loop is free) is recorded, and the service closes as soon as start() returns. With a handler
-    // installed, a POSIX signal no longer ends the process outright; `once`: a second one still does.
-    process.once('SIGINT', shutdown);
-    process.once('SIGTERM', shutdown);
+    const installSignalHandlers = (): void => {
+      process.once('SIGINT', shutdown);
+      process.once('SIGTERM', shutdown);
+    };
+    // The background service (--service) installs them before start(): a SIGTERM from the system during the start-up
+    // is recorded and the service closes as soon as start() returns. While start() runs synchronously (the rebuild
+    // after an upgrade can take minutes) no signal is handled and none ends the process: they wait until the event
+    // loop is free, and only then does the first one run `shutdown` (and a later one, after the `once` handler is gone,
+    // ends the process). A terminal start keeps the plain behaviour: no handler of ours until start() returns, so
+    // Ctrl+C ends a long start-up at once.
+    if (service) installSignalHandlers();
     const startOptions: StartOptions = {
       ...deps.startOptions,
       service,
@@ -693,13 +699,13 @@ async function startCommand(args: string[], deps: MainDeps): Promise<number> {
       // The background service takes over a lock left by a service that is gone (its pid now another process's).
       if (!(service && e instanceof LockHeldError && (await isStaleService(e.holder)))) throw e;
       err(`agent-canvas: 锁文件残留（进程号 ${e.holder.pid} 没有在端口 ${e.holder.port} 上应答），接管`);
+      // The stale control.key is left alone: start() replaces it. Removing it here could remove the key of another
+      // process that took the same stale lock over a moment earlier (it would then not be stoppable by command).
       removeStaleLock(e.file, e.holder);
-      const dir = path.dirname(e.file);
-      const staleKey = readControlKey(dir);
-      if (staleKey !== null) removeControlKey(dir, staleKey);
       app = await start(overrides, startOptions);
     }
     out(`agent-canvas listening on ${app.url}`);
+    if (!service) installSignalHandlers();
     if (stopRequested) shutdown();
     return -1; // keep running
   } catch (e) {
