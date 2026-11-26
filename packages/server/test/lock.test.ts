@@ -4,7 +4,10 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, expect, test } from 'vitest';
-import { acquireLock, holderResponds, isStaleService, LockHeldError, lockPath, readLock, removeStaleLock, type LockHolder } from '../src/lock.js';
+import {
+  acquireLock, holderResponds, isAlive, isStaleService, LockHeldError, lockPath, readLock, removeStaleLock, windowsListsPid, type AliveProbe,
+  type LockHolder,
+} from '../src/lock.js';
 
 let dataDir: string;
 
@@ -152,4 +155,52 @@ test('removeStaleLock 只删仍然写着这个持有者的锁文件', async () =
   removeStaleLock(lockPath(dataDir), holder);
   expect(readLock(dataDir)).toBeNull();
   removeStaleLock(lockPath(dataDir), holder); // already gone: fine
+});
+
+/** A probe whose signal-0 check fails with `code` (or succeeds with null) and whose process list answers `listed`. */
+function probe(platform: NodeJS.Platform, code: string | null, listed: boolean | null): AliveProbe & { listedCalls: number[] } {
+  const listedCalls: number[] = [];
+  return {
+    platform,
+    listedCalls,
+    signal(pid) {
+      if (code !== null) throw Object.assign(new Error(code), { code });
+      void pid;
+    },
+    listed(pid) {
+      listedCalls.push(pid);
+      return listed;
+    },
+  };
+}
+
+test('isAlive：信号检查成功为活，ESRCH 为不在，都不查进程列表', () => {
+  for (const platform of ['win32', 'linux'] as const) {
+    const ok = probe(platform, null, false);
+    expect(isAlive(4242, ok)).toBe(true);
+    const gone = probe(platform, 'ESRCH', true);
+    expect(isAlive(4242, gone)).toBe(false);
+    expect([...ok.listedCalls, ...gone.listedCalls]).toEqual([]);
+  }
+});
+
+test('isAlive：Windows 上 EPERM 再查进程列表，列表里没有（已退出、记录还没放掉）就算不在', () => {
+  const zombie = probe('win32', 'EPERM', false);
+  expect(isAlive(18244, zombie)).toBe(false);
+  expect(zombie.listedCalls).toEqual([18244]);
+  // Another user's or an elevated process: listed, so alive.
+  expect(isAlive(4, probe('win32', 'EPERM', true))).toBe(true);
+  // The list could not be read: as before, alive.
+  expect(isAlive(4, probe('win32', 'EPERM', null))).toBe(true);
+});
+
+test('isAlive：非 Windows 上 EPERM 就是活着，不查进程列表', () => {
+  const p = probe('linux', 'EPERM', false);
+  expect(isAlive(1, p)).toBe(true);
+  expect(p.listedCalls).toEqual([]);
+});
+
+test.runIf(process.platform === 'win32')('windowsListsPid：列出自己，不列已退出的进程', () => {
+  expect(windowsListsPid(process.pid)).toBe(true);
+  expect(windowsListsPid(deadPid())).toBe(false);
 });
