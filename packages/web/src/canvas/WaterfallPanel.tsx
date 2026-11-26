@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useSyncExternalStore, type CSSProperties, type MouseEvent } from 'react';
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type MouseEvent } from 'react';
 import type { Graph } from '@agent-canvas/shared';
 import type { SessionSource } from '../sessionSource';
 import { NODE_STATUS_LABEL } from '../labels';
@@ -6,7 +6,8 @@ import { useNow } from '../useNow';
 import { formatDuration } from './format';
 import { KIND_LABEL, nodeColor, UNFINISHED_LABEL } from './nodes';
 import {
-  barOf, buildWaterfall, durationPlacement, scopeKey, snapshotClock, stepTicking, waterfallClock, withNow, type WaterfallRow, type WaterfallScope,
+  barOf, buildWaterfall, durationPlacement, revealScrollTop, scopeKey, snapshotClock, stepTicking, visibleRows, waterfallClock, WF_ROW_PX,
+  WF_WINDOW_FROM, withNow, type WaterfallRow, type WaterfallScope,
 } from './waterfall';
 
 export interface WaterfallProps {
@@ -103,7 +104,8 @@ const Row = memo(function Row({ row, offset, place, selected, ticking, chain, on
  * The steps of one turn or one agent as a waterfall: one row per step in time order, its bar placed on a shared time
  * axis (parallel steps overlap in time on separate rows). A row click opens the step's detail. While a step is running
  * (and the session is progressing) the panel re-renders every second and, if the reader is at the bottom of the list,
- * keeps up with new rows.
+ * keeps up with new rows. A long list (WF_WINDOW_FROM rows or more) draws only the rows in sight (visibleRows), with
+ * empty space for the rest: drawing all of a 30,000-step turn made every second's update take most of a second.
  */
 export const Waterfall = memo(function Waterfall({
   graph, live: liveSession, scope, title, compact, selectedId, chainIds, directIds, onSelectRow, onOpenAgent, onClose,
@@ -124,28 +126,60 @@ export const Waterfall = memo(function Waterfall({
 
   const body = useRef<HTMLDivElement>(null);
   const stick = useRef(false);
+  // Where the list is scrolled and how much of it is in sight: decides which rows a long list draws.
+  const [view, setView] = useState({ top: 0, height: 0 });
+  const measure = (): void => {
+    const el = body.current;
+    if (el) setView((v) => (v.top === el.scrollTop && v.height === el.clientHeight ? v : { top: el.scrollTop, height: el.clientHeight }));
+  };
+  useLayoutEffect(() => {
+    const el = body.current;
+    if (!el) return;
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
   // A new scope starts at the top, or at the bottom when it is still running (the newest step is the interesting one).
   useEffect(() => {
     const el = body.current;
     if (!el) return;
     stick.current = live;
     el.scrollTop = live ? el.scrollHeight : 0;
+    measure();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
   const count = wf.rows.length;
+  const windowed = count >= WF_WINDOW_FROM;
   useEffect(() => {
     const el = body.current;
-    if (el && stick.current) el.scrollTop = el.scrollHeight;
+    if (el && stick.current) {
+      el.scrollTop = el.scrollHeight;
+      measure();
+    }
   }, [count]);
-  // The selected row is kept in sight (it may be picked from outside the panel, e.g. the file panel).
+  // The selected row is kept in sight (it may be picked from outside the panel, e.g. the file panel). In a long list it
+  // may not be drawn, so the scroll position comes from its index.
   useEffect(() => {
-    if (selectedId === null) return;
-    body.current?.querySelector(`[data-id="${CSS.escape(selectedId)}"]`)?.scrollIntoView({ block: 'nearest' });
+    const el = body.current;
+    if (selectedId === null || !el) return;
+    if (windowed) {
+      const index = wf.rows.findIndex((r) => r.id === selectedId);
+      if (index < 0) return;
+      el.scrollTop = revealScrollTop(index, el.scrollTop, el.clientHeight);
+      measure();
+    } else {
+      el.querySelector(`[data-id="${CSS.escape(selectedId)}"]`)?.scrollIntoView({ block: 'nearest' });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId, key]);
   const onScroll = (): void => {
     const el = body.current;
     if (el) stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < STICK_PX;
+    measure();
   };
+  const { first, last } = windowed ? visibleRows(count, view.top, view.height) : { first: 0, last: count };
 
   const span = wf.endMs - wf.startMs;
   return (
@@ -170,7 +204,8 @@ export const Waterfall = memo(function Waterfall({
       </div>
       <div className="cc-wf-body" ref={body} onScroll={onScroll} style={{ ['--span' as string]: span } as CSSProperties}>
         {count === 0 && <p className="cc-wf-empty">这一段还没有步骤</p>}
-        {wf.rows.map((row) => {
+        {first > 0 && <div aria-hidden="true" style={{ height: first * WF_ROW_PX }} />}
+        {(windowed ? wf.rows.slice(first, last) : wf.rows).map((row) => {
           const { left, width } = barOf(wf, row);
           return (
             <Row key={row.id} row={row} offset={row.startMs - wf.startMs} place={durationPlacement(left, width)}
@@ -179,6 +214,7 @@ export const Waterfall = memo(function Waterfall({
               onSelectRow={onSelectRow} onOpenAgent={onOpenAgent} />
           );
         })}
+        {last < count && <div aria-hidden="true" style={{ height: (count - last) * WF_ROW_PX }} />}
       </div>
     </section>
   );

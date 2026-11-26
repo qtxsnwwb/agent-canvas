@@ -177,6 +177,36 @@ export function barOf(w: Pick<Waterfall, 'startMs' | 'endMs'>, row: Pick<Waterfa
   return { left, width: right - left };
 }
 
+/** The height of one row in px (`.cc-wf-row` in canvas.css: border-box, the border inside). */
+export const WF_ROW_PX = 29;
+/** From this many rows on, the panel draws only the rows in sight (see visibleRows); a shorter list is drawn whole. */
+export const WF_WINDOW_FROM = 200;
+/** Rows drawn beyond each edge of the view, so a scroll shows drawn rows before the next render. */
+export const WF_OVERSCAN = 20;
+
+/**
+ * The rows to draw for a list of `count` rows scrolled to `scrollTop` with `viewportPx` in sight: [first, last), the
+ * rows at least partly in sight plus WF_OVERSCAN on each side. A scroll position past the end (the list has just
+ * shrunk) counts as the end. With nothing measured yet (0 px), only the overscan below the top row.
+ */
+export function visibleRows(count: number, scrollTop: number, viewportPx: number): { first: number; last: number } {
+  const top = Math.max(0, Math.min(scrollTop, count * WF_ROW_PX - viewportPx));
+  const firstInSight = Math.floor(top / WF_ROW_PX);
+  const endInSight = viewportPx > 0 ? Math.floor((top + viewportPx - 1) / WF_ROW_PX) + 1 : firstInSight;
+  return { first: Math.max(0, firstInSight - WF_OVERSCAN), last: Math.min(count, endInSight + WF_OVERSCAN) };
+}
+
+/**
+ * The scroll position that brings row `index` fully into sight with as little movement as possible (what
+ * scrollIntoView({ block: 'nearest' }) does for a drawn row): unchanged when it is in sight.
+ */
+export function revealScrollTop(index: number, scrollTop: number, viewportPx: number): number {
+  const rowTop = index * WF_ROW_PX;
+  if (rowTop < scrollTop) return rowTop;
+  if (rowTop + WF_ROW_PX > scrollTop + viewportPx) return rowTop + WF_ROW_PX - viewportPx;
+  return scrollTop;
+}
+
 const incomingIndex = new WeakMap<Graph, Map<string, string[]>>();
 /** Node id -> the nodes with an edge into it (any kind); built once per graph object. */
 function incomingOf(graph: Graph): Map<string, string[]> {
