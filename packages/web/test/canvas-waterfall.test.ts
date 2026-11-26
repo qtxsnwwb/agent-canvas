@@ -2,7 +2,8 @@ import { expect, test } from 'vitest';
 import type { Graph, GraphEdge, GraphNode, NodeKind } from '@agent-canvas/shared';
 import { buildView, turnKeyOf } from '../src/canvas/view';
 import {
-  barOf, buildWaterfall, durationPlacement, isBackgroundStep, QUIET_AFTER_MS, scopeKey, scopeOf, stepChain, stepTicking, waterfallClock, withNow,
+  barOf, buildWaterfall, durationPlacement, isBackgroundStep, QUIET_AFTER_MS, revealScrollTop, scopeKey, scopeOf, stepChain, stepTicking, visibleRows,
+  waterfallClock, WF_OVERSCAN, WF_ROW_PX, withNow,
 } from '../src/canvas/waterfall';
 
 const EPOCH = Date.parse('2026-01-01T00:00:00Z');
@@ -277,4 +278,34 @@ test('withNow moves only the open rows and keeps the other row objects', () => {
   const running: Graph = { ...g, nodes: { ...g.nodes, i1: { ...g.nodes.i1!, status: 'running', durationMs: null } } };
   const live = withNow(buildWaterfall(running, { type: 'agent', agentId: 'ag1' }, { compact: true, nowMs: 0 }), { nowMs: EPOCH + 50_000, backgroundNowMs: EPOCH + 90_000 });
   expect(live.rows.find((r) => r.id === 'i1')).toMatchObject({ open: true, endMs: EPOCH + 90_000 });
+});
+
+test('visibleRows: the rows in sight plus WF_OVERSCAN on each side, clamped to the list', () => {
+  expect(WF_ROW_PX).toBe(29);
+  expect(WF_OVERSCAN).toBe(20);
+  // At the top: 600 px shows rows 0..20 (21 rows), and 20 more below.
+  expect(visibleRows(30_000, 0, 600)).toEqual({ first: 0, last: 41 });
+  // Scrolled to row 1000: 20 above, the 21 in sight, 20 below.
+  expect(visibleRows(30_000, 1000 * 29, 600)).toEqual({ first: 980, last: 1041 });
+  // Part of a row in sight counts: 10 px into row 1000 still shows it, and row 1021 peeks in at the bottom.
+  expect(visibleRows(30_000, 1000 * 29 + 10, 600)).toEqual({ first: 980, last: 1042 });
+  // At the bottom (and past it, as a stale scroll position can be after the list shrank): the last rows.
+  expect(visibleRows(30_000, 30_000 * 29 - 600, 600)).toEqual({ first: 29_959, last: 30_000 });
+  expect(visibleRows(100, 1e9, 600)).toEqual({ first: 59, last: 100 });
+  // An empty list, and a viewport not measured yet (0 px): only the overscan.
+  expect(visibleRows(0, 0, 600)).toEqual({ first: 0, last: 0 });
+  expect(visibleRows(30_000, 0, 0)).toEqual({ first: 0, last: 20 });
+});
+
+test('revealScrollTop: scrolls just enough to bring a row fully into sight, like scrollIntoView nearest', () => {
+  // Already in sight: unchanged.
+  expect(revealScrollTop(10, 0, 600)).toBe(0);
+  expect(revealScrollTop(1000, 1000 * 29, 600)).toBe(1000 * 29);
+  // Above the view: its top at the top.
+  expect(revealScrollTop(5, 1000 * 29, 600)).toBe(5 * 29);
+  // Below the view: its bottom at the bottom.
+  expect(revealScrollTop(100, 0, 600)).toBe(101 * 29 - 600);
+  // Cut at the bottom edge counts as below; cut at the top edge as above.
+  expect(revealScrollTop(20, 0, 600)).toBe(21 * 29 - 600);
+  expect(revealScrollTop(1000, 1000 * 29 + 1, 600)).toBe(1000 * 29);
 });

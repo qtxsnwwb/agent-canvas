@@ -402,7 +402,8 @@ button.cc-reason:focus-visible, .cc-reason-current:focus-visible { outline: 3px 
 .cc-wf-tick { position: absolute; top: 3px; padding-left: 4px; border-left: 2px dashed var(--line); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .cc-wf-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-right: 14px; }
 .cc-wf-empty { margin: 18px 14px; color: var(--ink-faint); font-weight: 600; }
-.cc-wf-row { height: 28px; cursor: pointer; border-bottom: 1.5px dashed var(--line); content-visibility: auto; contain-intrinsic-size: auto 28px; }
+/* 29 px including the border, whatever the screen's scale (WF_ROW_PX: a long list places its rows by it). */
+.cc-wf-row { box-sizing: border-box; height: 29px; cursor: pointer; border-bottom: 1.5px dashed var(--line); content-visibility: auto; contain-intrinsic-size: auto 29px; }
 .cc-wf-row:hover { background: var(--paper); }
 .cc-wf-row.cc-wf-selected { background: #dff4fd; }
 .cc-wf-dot { flex: none; width: 10px; height: 10px; border-radius: 50%; box-shadow: 0 2px 0 rgba(63, 58, 90, 0.12); }
