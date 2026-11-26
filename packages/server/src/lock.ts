@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
@@ -49,12 +50,54 @@ export function lockPath(dataDir: string): string {
   return path.join(dataDir, 'agent-canvas.lock');
 }
 
-function isAlive(pid: number): boolean {
+/**
+ * Whether Windows' process list has `pid`: true or false from `tasklist`, null when it could not be run or read. A
+ * CSV row is `"<image>","<pid>",...`.
+ */
+export function windowsListsPid(pid: number): boolean | null {
   try {
-    process.kill(pid, 0);
+    const out = execFileSync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], {
+      encoding: 'latin1', // only the ASCII quotes, commas and digits are read
+      windowsHide: true,
+      timeout: 10_000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const row = new RegExp(`^"[^"]*","${pid}",`);
+    return out.split(/\r?\n/).some((line) => row.test(line));
+  } catch {
+    return null;
+  }
+}
+
+/** How isAlive looks at a process (tests replace it). */
+export interface AliveProbe {
+  platform: NodeJS.Platform;
+  /** process.kill(pid, 0): throws ESRCH when there is no such process, EPERM when it may not be signalled. */
+  signal(pid: number): void;
+  /** Windows: whether the process list has the pid; null when that is unknown. */
+  listed(pid: number): boolean | null;
+}
+
+const realProbe: AliveProbe = {
+  platform: process.platform,
+  signal: (pid) => void process.kill(pid, 0),
+  listed: windowsListsPid,
+};
+
+/**
+ * Whether `pid` is a running process. EPERM means it exists but is someone else's (another user, an elevated
+ * process). On Windows EPERM also comes back for a process that has exited while another process still holds a handle
+ * to it (a terminal or app that started it): it is no longer in the process list, and is not running. So on Windows an
+ * EPERM is checked against the list; when the list cannot be read, the process counts as running, as before.
+ */
+export function isAlive(pid: number, probe: AliveProbe = realProbe): boolean {
+  try {
+    probe.signal(pid);
     return true;
   } catch (err) {
-    return (err as NodeJS.ErrnoException).code === 'EPERM'; // exists, owned by someone else
+    if ((err as NodeJS.ErrnoException).code !== 'EPERM') return false;
+    if (probe.platform !== 'win32') return true;
+    return probe.listed(pid) !== false;
   }
 }
 
