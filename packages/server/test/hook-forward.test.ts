@@ -122,5 +122,7 @@ test('转发程序不依赖服务端其余代码：hook-forward.ts 只导入 nod
   for (const heavy of ['fastify', 'better-sqlite3', 'chokidar', './api/server.js', './pipeline.js', './store/store.js', './cli-commands.js']) {
     expect(cliImports).not.toContain(heavy);
   }
-  expect(cliImports.every((m) => m.startsWith('node:') || m === './hook-forward.js')).toBe(true);
+  // logfile.js: the background service's early log (before the commands are loaded); it only imports node built-ins.
+  expect(cliImports.every((m) => m.startsWith('node:') || m === './hook-forward.js' || m === './logfile.js')).toBe(true);
+  expect(importsOf('logfile.ts').every((m) => m.startsWith('node:'))).toBe(true);
 });

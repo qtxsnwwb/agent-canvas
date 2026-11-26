@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
+import { removeSync } from './fs-remove.js';
 import {
   HookCommandError,
   SettingsShapeError,
@@ -469,7 +470,7 @@ function writeAtomically(file: string, next: Record<string, unknown>, loaded: Lo
     }
     fs.renameSync(tmp, file);
   } catch (err) {
-    fs.rmSync(tmp, { force: true });
+    removeSync(tmp);
     throw err;
   }
 }

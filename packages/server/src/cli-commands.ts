@@ -6,6 +6,7 @@ import type { AddressInfo } from 'node:net';
 import { AttentionSlot, buildServer, createAttentionService } from './api/server.js';
 import type { AttentionService } from './attention/service.js';
 import { loadConfig, type Config } from './config.js';
+import { createControlKey, removeControlKey } from './control.js';
 import { runHookForward } from './hook-forward.js';
 import {
   confirmOnStreams,
@@ -20,11 +21,14 @@ import {
   runHooksUninstall,
   type HooksCliIo,
 } from './hooks-cli.js';
-import { acquireLock } from './lock.js';
+import { acquireLock, isStaleService, LockHeldError, removeStaleLock } from './lock.js';
+import { closeEarlyProcessLog, openProcessLog, takeProcessLog, type ProcessLog } from './logfile.js';
 import { NORMALIZER_VERSION } from './normalize/version.js';
 import { DesktopNotifier } from './notify/desktop.js';
 import { NotificationService, type ServiceNotifier } from './notify/service.js';
 import { NORMALIZER_VERSION_KEY, Pipeline, REBUILD_FLAG } from './pipeline.js';
+import { serviceCommand } from './service/command.js';
+import { realServiceSystem, type ServiceBackend, type ServiceSystem } from './service/types.js';
 import { ClaudeFileSource } from './sources/claude.js';
 import { storeLookup } from './sources/codex/lookup.js';
 import { CodexFileSource } from './sources/codex/source.js';
@@ -73,7 +77,10 @@ export interface Running {
 
 const USAGE = `Usage:
   agent-canvas [--port <n>]         Same as start
-  agent-canvas start [--port <n>]   Watch transcripts and serve the canvas
+  agent-canvas start [--port <n>] [--service] [--log-file <file>]
+                                     Watch transcripts and serve the canvas. --service: run as the background
+                                     service (another service already running: exit 0); --log-file: write the output
+                                     to this file instead, each line with its time (5 MB, then <file>.1)
   agent-canvas --version            Print the version
   agent-canvas rebuild              Re-derive the graph from the stored raw log
   agent-canvas compact [--force]    Compress the stored records still uncompressed and reclaim free space (VACUUM);
@@ -93,6 +100,16 @@ const USAGE = `Usage:
                                      Remove them again
   agent-canvas hook-forward [--origin <claude|codex|cursor>] [--port <n>]
                                      Forward one hook payload from stdin to the server (run by Codex / Cursor)
+  agent-canvas service install [--port <n>] [--yes]
+                                     Run the service in the background from login on (Windows startup entry, macOS
+                                     LaunchAgent, systemd user service) and start it now
+  agent-canvas service uninstall [--yes]
+                                     Stop it and remove that registration (the data, logs and settings stay)
+  agent-canvas service status       Whether the service runs and starts at login, and its log (exit 3: not running)
+  agent-canvas service start        Start the installed background service
+  agent-canvas service stop         Stop the running service; one started in a terminal too when it uses the same data
+                                     directory as the installed service (the current shell's when none is installed)
+  agent-canvas service restart      Stop it, then start the installed background service
 `;
 
 /** This installation's cli.js (next to this module in dist/), as written into Codex's hook commands. */
@@ -243,6 +260,13 @@ export interface StartOptions {
    * complete index; options for tests, false: never.
    */
   searchIndex?: SearchIndexBuildOptions | false;
+  /** Started as the background service (`--service`): recorded in the lock. */
+  service?: boolean;
+  /**
+   * What an accepted stop request (POST /api/control/stop with the control key) does, once its answer is sent; default:
+   * close(). The control key and that route are always on.
+   */
+  onStop?: () => void;
 }
 
 /** True while the database still needs the storage job (its migration or its VACUUM is not done). */
@@ -252,7 +276,15 @@ function storageWorkDue(store: Store): boolean {
 
 export async function start(overrides: Partial<Config> = {}, options: StartOptions = {}): Promise<Running> {
   const config = resolveConfig(overrides);
-  const lock = acquireLock(config.dataDir);
+  const lock = acquireLock(config.dataDir, { command: 'start', version: packageVersion(), service: options.service === true });
+  let controlKey: string | null = null;
+  /** The accepted stop request's action, set once start() has its Running; a request before that waits for it. */
+  let stop: (() => void) | null = null;
+  let stopPending = false;
+  const onStop = (): void => {
+    if (stop !== null) stop();
+    else stopPending = true;
+  };
   let store: Store | null = null;
   let app: ReturnType<typeof buildServer> | null = null;
   let watcher: ReturnType<typeof startWatcher> | null = null;
@@ -304,6 +336,7 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
     const storageJob = storage;
     const searchJobNow = searchBuild;
     const attentionSlot = new AttentionSlot();
+    controlKey = createControlKey(config.dataDir);
     app = buildServer({
       store,
       pipeline,
@@ -315,8 +348,10 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
       attention: attentionSlot,
       ...(storageJob !== null ? { storage: storageJob } : {}),
       ...(searchJobNow !== null ? { search: searchJobNow } : {}),
+      control: { key: controlKey, onStop },
     });
     await app.listen({ port: config.port, host: config.host });
+    lock.setPort((app.server.address() as AddressInfo).port);
     // After the (automatic) rebuild above, before the initial scan: its changes arrive while importing() holds.
     notifications.start(`http://${config.host}:${(app.server.address() as AddressInfo).port}`);
     // Once listening, before the initial scan, whose changes it follows. Its construction reads the store synchronously
@@ -354,6 +389,7 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
     await notifications?.close().catch(() => undefined);
     await app?.close().catch(() => undefined);
     store?.close();
+    if (controlKey !== null) removeControlKey(config.dataDir, controlKey);
     lock.release();
     throw err;
   }
@@ -370,7 +406,8 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
   const statsWarmup = warmup;
   const storageJob = storage;
   const searchJob = searchBuild;
-  return {
+  const key = controlKey!;
+  const running: Running = {
     url,
     address: { address: bound.address, port: bound.port },
     statsWarmup: statsWarmup?.done ?? null,
@@ -397,12 +434,16 @@ export async function start(overrides: Partial<Config> = {}, options: StartOptio
           await notificationsClosed;
           openedStore.close();
         } finally {
+          removeControlKey(config.dataDir, key);
           lock.release();
         }
       })();
       return closing;
     },
   };
+  stop = options.onStop ?? ((): void => void running.close().catch(() => undefined));
+  if (stopPending) setImmediate(stop);
+  return running;
 }
 
 /** Re-derives all graph data from the raw log with a fresh store and pipeline (no watcher, nothing pending). */
@@ -411,7 +452,7 @@ export function rebuild(
   options: { progress?: (done: number, total: number) => void; log?: (line: string) => void } = {},
 ): void {
   const config = resolveConfig(overrides);
-  const lock = acquireLock(config.dataDir);
+  const lock = acquireLock(config.dataDir, { command: 'rebuild', version: packageVersion() });
   try {
     // log: the one-time notices of opening the database (as for start).
     const store = openStore(config.dbPath, options.log ? { log: options.log } : {});
@@ -455,7 +496,7 @@ export interface CompactResult {
  */
 export async function compact(overrides: Partial<Config> = {}, options: CompactOptions = {}): Promise<CompactResult> {
   const config = resolveConfig(overrides);
-  const lock = acquireLock(config.dataDir);
+  const lock = acquireLock(config.dataDir, { command: 'compact', version: packageVersion() });
   try {
     const store = openStore(config.dbPath, options.log ? { log: options.log } : {});
     try {
@@ -556,6 +597,134 @@ export interface MainDeps {
   stdin?: NodeJS.ReadableStream;
   /** cli.js written into Codex's / Cursor's hook commands (default: this installation's). */
   cliPath?: string;
+  /** How `start` ends the process once the service has closed (Ctrl+C, SIGTERM, a stop request); default process.exit. */
+  exit?: (code: number) => void;
+  /** Tests: options passed on to start() (a fake notifier, no background jobs). */
+  startOptions?: StartOptions;
+  /** The system `service` registers with (default: the real one); tests pass a fake with a temp home and env. */
+  serviceSystem?: ServiceSystem;
+  /** The backend `service` uses (default: the system's own); null: not supported. */
+  serviceBackend?: ServiceBackend | null;
+  /** The node `service install` writes into the service's command line (default process.execPath). */
+  nodePath?: string;
+}
+
+/**
+ * `agent-canvas start`: runs the service until Ctrl+C, SIGTERM or a stop request, which all close it and exit 0 (with
+ * `--service`, a signal during the start-up closes it once started).
+ * `--log-file`: everything the process prints goes to that file (logfile.ts) from the first line on, and so does a
+ * crash (an uncaught exception or unhandled rejection), after which the process exits 1 to be restarted. `--service`
+ * (recorded in the lock): when the lock is held, exit 0 if its holder is another service (the system must not keep
+ * restarting this one), 1 if it is rebuild or compact (the system retries later, once the maintenance is done); a
+ * `start` holder whose port does not answer is a lock left behind (lock.ts isStaleService) and is taken over.
+ * Output is written to process.stdout / process.stderr directly (as console.log does), so --log-file catches it.
+ */
+async function startCommand(args: string[], deps: MainDeps): Promise<number> {
+  const exit = deps.exit ?? ((code: number): void => process.exit(code));
+  const out = (line: string): void => void process.stdout.write(`${line}\n`);
+  const err = (line: string): void => void process.stderr.write(`${line}\n`);
+  let processLog: ProcessLog | null = null;
+  const stopLogging = (): void => {
+    processLog?.stop();
+    processLog = null;
+    closeEarlyProcessLog(); // one the entry opened that was not taken over (the arguments were refused)
+  };
+  let service = false;
+  let removeSignalHandlers = (): void => undefined;
+  try {
+    const { values } = parseArgs({
+      args,
+      options: { port: { type: 'string' }, service: { type: 'boolean' }, 'log-file': { type: 'string' } },
+      allowPositionals: false,
+    });
+    service = values.service === true;
+    const logFile = values['log-file'];
+    // The entry (cli.ts) opens it before loading this module, so that a failure to load is logged too: taken over.
+    if (logFile !== undefined) processLog = takeProcessLog(logFile) ?? openProcessLog(logFile, exit);
+    const overrides: Partial<Config> = {};
+    if (values.port !== undefined) {
+      const port = Number(values.port);
+      if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error(`invalid --port: ${values.port}`);
+      overrides.port = port;
+    }
+    let app: Running | null = null;
+    let stopping = false;
+    /** A signal arrived before start() returned: shut down as soon as it does. */
+    let stopRequested = false;
+    const shutdown = (): void => {
+      if (stopping) return;
+      if (app === null) {
+        stopRequested = true;
+        return;
+      }
+      stopping = true;
+      removeSignalHandlers();
+      void app.close().then(
+        () => {
+          stopLogging();
+          exit(0);
+        },
+        (e: unknown) => {
+          err(e instanceof Error ? e.message : String(e));
+          stopLogging();
+          exit(1);
+        },
+      );
+    };
+    removeSignalHandlers = (): void => {
+      process.removeListener('SIGINT', shutdown);
+      process.removeListener('SIGTERM', shutdown);
+    };
+    const installSignalHandlers = (): void => {
+      process.once('SIGINT', shutdown);
+      process.once('SIGTERM', shutdown);
+    };
+    // The background service (--service) installs them before start(): a SIGTERM from the system during the start-up
+    // is recorded and the service closes as soon as start() returns. While start() runs synchronously (the rebuild
+    // after an upgrade can take minutes) no signal is handled and none ends the process: they wait until the event
+    // loop is free, and only then does the first one run `shutdown` (and a later one, after the `once` handler is gone,
+    // ends the process). A terminal start keeps the plain behaviour: no handler of ours until start() returns, so
+    // Ctrl+C ends a long start-up at once.
+    if (service) installSignalHandlers();
+    const startOptions: StartOptions = {
+      ...deps.startOptions,
+      service,
+      log: out,
+      progress: (done, total) => process.stderr.write(`rebuild: ${done}/${total} sessions\n`),
+      onStop: shutdown,
+    };
+    try {
+      app = await start(overrides, startOptions);
+    } catch (e) {
+      // The background service takes over a lock left by a service that is gone (its pid now another process's).
+      if (!(service && e instanceof LockHeldError && (await isStaleService(e.holder)))) throw e;
+      err(`agent-canvas: 锁文件残留（进程号 ${e.holder.pid} 没有在端口 ${e.holder.port} 上应答），接管`);
+      // The stale control.key is left alone: start() replaces it. Removing it here could remove the key of another
+      // process that took the same stale lock over a moment earlier (it would then not be stoppable by command).
+      removeStaleLock(e.file, e.holder);
+      app = await start(overrides, startOptions);
+    }
+    out(`agent-canvas listening on ${app.url}`);
+    if (!service) installSignalHandlers();
+    if (stopRequested) shutdown();
+    return -1; // keep running
+  } catch (e) {
+    removeSignalHandlers();
+    let code = 1;
+    if (service && e instanceof LockHeldError) {
+      const { pid, command } = e.holder;
+      if (command === 'start') {
+        err(`agent-canvas: 已有服务在运行（进程号 ${pid}），这次不启动`);
+        code = 0;
+      } else {
+        err(`agent-canvas: ${command === 'rebuild' ? '正在重建数据' : '正在压缩数据库'}（进程号 ${pid}），稍后重试`);
+      }
+    } else {
+      err(e instanceof Error ? e.message : String(e));
+    }
+    stopLogging();
+    return code;
+  }
 }
 
 export async function main(argv: string[], deps: MainDeps = {}): Promise<number> {
@@ -571,28 +740,18 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
   }
   if (command === 'hook-forward') return runHookForward(rest, { stdin: deps.stdin ?? process.stdin });
   if (command === 'hooks') return hooksCommand(rest, deps.env ?? process.env, deps.hooksIo ?? terminalIo(), deps.cliPath ?? defaultCliPath());
+  if (command === 'start') return startCommand(rest, deps);
+  if (command === 'service') {
+    return serviceCommand(rest, {
+      system: deps.serviceSystem ?? realServiceSystem(),
+      io: deps.hooksIo ?? terminalIo(),
+      cliPath: deps.cliPath ?? defaultCliPath(),
+      nodePath: deps.nodePath ?? process.execPath,
+      backend: deps.serviceBackend,
+      usage: USAGE,
+    });
+  }
   try {
-    if (command === 'start') {
-      const { values } = parseArgs({ args: rest, options: { port: { type: 'string' } }, allowPositionals: false });
-      const overrides: Partial<Config> = {};
-      if (values.port !== undefined) {
-        const port = Number(values.port);
-        if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error(`invalid --port: ${values.port}`);
-        overrides.port = port;
-      }
-      const app = await start(overrides, {
-        log: (line) => console.log(line),
-        progress: (done, total) => process.stderr.write(`rebuild: ${done}/${total} sessions\n`),
-      });
-      console.log(`agent-canvas listening on ${app.url}`);
-      process.once('SIGINT', () => {
-        void app.close().then(
-          () => process.exit(0),
-          () => process.exit(1),
-        );
-      });
-      return -1; // keep running
-    }
     if (command === 'rebuild') {
       parseArgs({ args: rest, options: {}, allowPositionals: false });
       rebuild({}, { log: (line) => console.log(line), progress: (done, total) => process.stderr.write(`rebuild: ${done}/${total} sessions\n`) });

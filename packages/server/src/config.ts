@@ -57,7 +57,36 @@ export interface Config {
 }
 
 /**
- * Where Cursor keeps its state database on `platform`: Windows `%APPDATA%\Cursor\User\globalStorage\state.vscdb`
+ * The environment variables that decide which directories the service reads (spec 2026-11-25-background-service-design.md
+ * 3.4): the service installer records those that are set, so the background service sees the same directories as a
+ * terminal does. Every directory variable `loadConfig` reads must be listed (a test scans this file for them);
+ * switches for tests and tuning (`AGENT_CANVAS_TIMING_SCALE`, `AGENT_CANVAS_STATS_WARMUP`) must not be.
+ */
+export const SERVICE_ENV_VARS: readonly string[] = [
+  'AGENT_CANVAS_DATA_DIR',
+  'AGENT_CANVAS_PROJECTS_DIR',
+  'AGENT_CANVAS_CODEX_DIR',
+  'AGENT_CANVAS_CURSOR_DB',
+  'AGENT_CANVAS_GEMINI_DIR',
+  'AGENT_CANVAS_GROK_DIR',
+  'AGENT_CANVAS_COPILOT_DIR',
+  'AGENT_CANVAS_DSH_DIR',
+  'AGENT_CANVAS_WORKBUDDY_DIR',
+  'AGENT_CANVAS_CODEBUDDY_DIR',
+  'AGENT_CANVAS_DOUBAO_DIR',
+  'AGENT_CANVAS_QWEN_DIR',
+  'GEMINI_CLI_HOME',
+  'GROK_HOME',
+  'COPILOT_HOME',
+  'DSH_HOME',
+  'WORKBUDDY_CONFIG_DIR',
+  'CODEBUDDY_CONFIG_DIR',
+  'QWEN_RUNTIME_DIR',
+  'QWEN_HOME',
+];
+
+/**
+ * Where Cursor keeps its state database: Windows `%APPDATA%\Cursor\User\globalStorage\state.vscdb`
  * (APPDATA unset: `<home>\AppData\Roaming`), macOS `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`,
  * elsewhere `~/.config/Cursor/User/globalStorage/state.vscdb`.
  */

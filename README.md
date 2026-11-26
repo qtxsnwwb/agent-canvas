@@ -123,11 +123,20 @@ agent-canvas --version
 
 按 `Ctrl+C` 停止。同一个数据目录同时只能运行一个服务。想装 Codex 或 Cursor 的 hooks 的话，需要用这种方式安装（见下）。
 
+想让它登录后自动在后台运行：`agent-canvas service install`（见[使用手册 · 后台常驻](./docs/manual.md#后台常驻)）。
+
 升级和卸载：
 
 ```bash
-npm install -g @qtxsnwwb/agent-canvas@latest   # 升级；路径不变，hooks 不用重装
-npm uninstall -g @qtxsnwwb/agent-canvas        # 卸载；装过 hooks 的话先运行 agent-canvas hooks uninstall
+npm install -g @qtxsnwwb/agent-canvas@latest   # 升级；路径不变，hooks 不用重装（装了后台常驻的话先 service stop，见手册）
+```
+
+卸载按这个顺序：
+
+```bash
+agent-canvas service uninstall                 # 1. 装过后台常驻的话：停掉服务、取消登录自动启动
+agent-canvas hooks uninstall                   # 2. 装过 hooks 的话（Codex / Cursor 的加 --codex / --cursor）
+npm uninstall -g @qtxsnwwb/agent-canvas        # 3. 卸载程序
 ```
 
 卸载不会删除数据目录 `~/.agent-canvas`，不再需要时手动删掉。

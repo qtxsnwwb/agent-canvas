@@ -59,7 +59,7 @@ function encOf(): Record<number, number> {
 }
 
 test('compact：服务在运行时拒绝（同一把锁）', async () => {
-  const lock = acquireLock(dataDir);
+  const lock = acquireLock(dataDir, { command: 'start', version: 'test' });
   try {
     await expect(compact({ projectsDir, dataDir })).rejects.toThrow(/already running/);
   } finally {
@@ -76,7 +76,7 @@ test('compact：做完剩下的迁移并 VACUUM，报告前后大小和进度；
   expect(r.after.fileBytes + r.after.walBytes).toBeLessThan((r.before.fileBytes + r.before.walBytes) / 2);
   expect(progress.at(-1)).toEqual([3000, 3000]);
   expect(encOf()).toEqual({ 1: 3000 });
-  acquireLock(dataDir).release();
+  acquireLock(dataDir, { command: 'start', version: 'test' }).release();
   const s = openStore(dbPath());
   try {
     expect(s.getMeta(STORAGE_META.migration)).toBe('done');

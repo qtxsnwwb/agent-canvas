@@ -52,20 +52,20 @@ afterEach(async () => {
 
 test('锁文件：同一数据目录只能有一个持有者，释放后可再取', async () => {
   await fs.mkdir(dataDir, { recursive: true });
-  const lock = acquireLock(dataDir);
+  const lock = acquireLock(dataDir, { command: 'start', version: 'test' });
   const content = JSON.parse(await fs.readFile(lockPath(dataDir), 'utf8')) as { pid: number; startedAt: string };
   expect(content.pid).toBe(process.pid);
   expect(typeof content.startedAt).toBe('string');
-  expect(() => acquireLock(dataDir)).toThrow(new RegExp(`already running.*pid ${process.pid}`));
+  expect(() => acquireLock(dataDir, { command: 'start', version: 'test' })).toThrow(new RegExp(`already running.*pid ${process.pid}`));
   lock.release();
   await expect(fs.stat(lockPath(dataDir))).rejects.toThrow();
-  acquireLock(dataDir).release();
+  acquireLock(dataDir, { command: 'start', version: 'test' }).release();
 });
 
 test('锁文件：持有者进程已不存在时接管', async () => {
   await fs.mkdir(dataDir, { recursive: true });
   await fs.writeFile(lockPath(dataDir), JSON.stringify({ pid: deadPid(), startedAt: '2026-01-01T00:00:00.000Z' }));
-  const lock = acquireLock(dataDir);
+  const lock = acquireLock(dataDir, { command: 'start', version: 'test' });
   expect(JSON.parse(await fs.readFile(lockPath(dataDir), 'utf8')).pid).toBe(process.pid);
   lock.release();
 });

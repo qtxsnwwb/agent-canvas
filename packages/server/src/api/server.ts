@@ -26,6 +26,7 @@ import {
 import { AttentionService } from '../attention/service.js';
 import { BookmarksService, type BookmarkResult } from '../bookmarks/service.js';
 import type { Config } from '../config.js';
+import { CONTROL_HEADER, keyMatches } from '../control.js';
 import { isForeignHookPayload } from '../hook-guard.js';
 import { ABORTED_NOTE } from '../normalize/cursor.js';
 import { cursorHookConversationId, cursorHookWorkspaceRoot, sanitizeCursorHookPayload } from '../normalize/cursor-hooks.js';
@@ -337,6 +338,8 @@ function parseClientMessage(raw: string): ClientMessage | null {
  * sessions-scope connection as `today` messages.
  * `bookmarks`: the service behind /api/bookmarks (default: one reading `store`); after each of its writes the sessions
  * whose bookmarks changed are pushed to every sessions-scope connection as a `bookmarks` message.
+ * `control`: the service's control key and what a stop request does (start()); without it there is no
+ * /api/control/stop.
  */
 export function buildServer(deps: {
   store: Store;
@@ -355,6 +358,7 @@ export function buildServer(deps: {
   attention?: AttentionService | AttentionSlot;
   today?: TodayService;
   bookmarks?: BookmarksService;
+  control?: { key: string; onStop(): void };
 }): FastifyInstance {
   const { store, pipeline, config, notifications } = deps;
   const stats = deps.stats ?? new StatsService(storeStatsSource(store));
@@ -879,6 +883,28 @@ export function buildServer(deps: {
       });
     });
   });
+
+  // ---- stop request (spec 2026-11-25-background-service-design.md 5), sent by `agent-canvas service stop`: it must carry
+  // the control key and no Origin (a web page always sends one, and cannot read the key file). onStop runs once the
+  // 202 has been sent, so the caller gets its answer before the server closes.
+  if (deps.control !== undefined) {
+    const control = deps.control;
+    app.post(
+      '/api/control/stop',
+      {
+        onResponse: async (_req, reply) => {
+          if (reply.statusCode === 202) control.onStop();
+        },
+      },
+      async (req, reply) => {
+        reply.header('cache-control', 'no-store');
+        if (req.headers.origin !== undefined || !keyMatches(control.key, req.headers[CONTROL_HEADER])) {
+          return reply.code(403).send({ error: '停止请求需要服务的控制密钥，且不能来自网页' });
+        }
+        return reply.code(202).send({ stopping: true });
+      },
+    );
+  }
 
   if (config.webDist !== null && fs.existsSync(config.webDist) && fs.statSync(config.webDist).isDirectory()) {
     void app.register(fastifyStatic, { root: config.webDist });
