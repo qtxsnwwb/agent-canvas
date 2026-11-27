@@ -43,7 +43,7 @@ function stopMessage(result: StopResult, o: { stale: LockHolder | null; logFile:
     case 'starting':
       return { text: `服务正在启动（可能在重建数据），稍后再试；日志：${o.logFile}`, code: 1 };
     case 'timeout':
-      return { text: '服务没有在 30 秒内退出', code: 1 };
+      return { text: `服务 30 秒内还没退出，还在收尾，收完会自己退出；稍后用 agent-canvas service status 查看；日志：${o.logFile}`, code: 1 };
     case 'old-version':
       return { text: '服务在运行，但不能用这个命令停止（版本较旧）：请在它的终端里按 Ctrl+C', code: 1 };
     case 'maintenance':

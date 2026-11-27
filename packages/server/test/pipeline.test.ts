@@ -13,7 +13,7 @@ import { openStore, type RawEvent, type Store, type StoredRawEvent } from '../sr
 import { indexLine, rollout, rolloutRel, sessionMetaLine, taskComplete, taskStarted } from './codex-rollout.js';
 import { assistantBlock, toolResult, userPrompt } from './fixtures.js';
 
-const reads = vi.hoisted(() => ({ active: 0, max: 0, calls: 0, failFor: null as string | null }));
+const reads = vi.hoisted(() => ({ active: 0, max: 0, calls: 0, failFor: null as string | null, afterRead: null as (() => void) | null }));
 vi.mock('../src/sources/transcript/reader.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../src/sources/transcript/reader.js')>();
   return {
@@ -27,6 +27,7 @@ vi.mock('../src/sources/transcript/reader.js', async (importOriginal) => {
         return await orig.readNewLines(...args);
       } finally {
         reads.active -= 1;
+        reads.afterRead?.();
       }
     },
   };
@@ -60,6 +61,7 @@ describe('pipeline', () => {
   });
   afterEach(async () => {
     reads.failFor = null;
+    reads.afterRead = null;
     store.close();
     await fs.rm(tmp, { recursive: true, force: true, maxRetries: 5 });
   });
@@ -103,6 +105,19 @@ describe('pipeline', () => {
     );
     await pipeline.scanAll();
     expect(store.getGraph('s1')!.edges).toContainEqual(expect.objectContaining({ from: 'tool:tu1', to: 's1u', kind: 'spawn' }));
+  });
+
+  test('close() 后首次补导不再读剩下的文件，下次启动补上', async () => {
+    for (let i = 0; i < 10; i++) await write(`proj/s${i}.jsonl`, [userPrompt(`u${i}`, null, 'x')]);
+    reads.afterRead = () => {
+      reads.afterRead = null;
+      void pipeline.close();
+    };
+    await pipeline.scanAll();
+    await pipeline.idle();
+    expect(store.listProjects(Date.now())).toEqual([expect.objectContaining({ id: 'proj', sessionCount: 1 })]);
+    await new Pipeline(store, config).scanAll();
+    expect(store.listProjects(Date.now())).toEqual([expect.objectContaining({ id: 'proj', sessionCount: 10 })]);
   });
 
   test('相同的 meta 内容在重启后也不会重复写入', async () => {
