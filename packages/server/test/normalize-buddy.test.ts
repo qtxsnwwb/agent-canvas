@@ -362,6 +362,16 @@ describe('tool calls and results (format reference 3.5, 3.6, 5)', () => {
     expect(f.details.get(nodeAt(ev, 7))?.output).toBe('legacy ok');
   });
 
+  test('a shell command that failed: status completed, but rawResponse.is_error (seen in a real WorkBuddy file, exit code 2)', () => {
+    const { ev, f } = run((c) => {
+      c.call('Bash', 'c1', { command: 'ls missing' }, 'r1');
+      c.result('Bash', 'c1', 'No such file', 'r1', { pd: { toolResult: { content: 'No such file', rawResponse: { exitCode: 2, is_error: true, error: 'Command failed with exit code 2' } } } });
+      c.call('Bash', 'c2', { command: 'ls' }, 'r2');
+      c.result('Bash', 'c2', 'a.txt', 'r2', { pd: { toolResult: { content: 'a.txt', rawResponse: { exitCode: 0, tool_error_code: '0' } } } });
+    });
+    expect([1, 3].map((i) => nodeOf(f, nodeAt(ev, i)).status)).toEqual(['failed', 'succeeded']);
+  });
+
   test('pairing: the nearest preceding call of the callId without a result; parallel results in any order; a reused callId is another call', () => {
     const { ev, f } = run((c) => {
       c.call('Read', 'x', { file_path: 'a' }, 'r1'); // 1
