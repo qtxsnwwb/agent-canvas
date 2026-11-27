@@ -1397,13 +1397,17 @@ export class BuddyNormalizer implements AgentNormalizer {
 
   /**
    * A result (format reference 3.6, 5): paired with the nearest preceding shown call of its callId that has no result;
-   * an orphan is dropped and counted. Failed when its status is not completed or it carries an error (D10).
+   * an orphan is dropped and counted. Failed when its status is not completed or it carries an error (D10), or when
+   * the tool's raw response says so: a shell command that exits non-zero is written with status `completed` and
+   * `toolResult.rawResponse.is_error: true` (a real WorkBuddy file, 2026-11-27).
    */
   private functionResult(state: SessionState, t: Thread, line: Line, i: number, rec: Obj, pd: Obj, ts: string | null, changes: Change[]): string | undefined {
     const callId = idOf(rec.callId);
     if (callId === null) return `${this.origin}:orphan-result`;
     const toolResult = isObject(pd.toolResult) ? pd.toolResult : {};
-    const failed = (typeof rec.status === 'string' && rec.status !== 'completed') || Boolean(pd.error) || Boolean(toolResult.error);
+    const rawResponse = isObject(toolResult.rawResponse) ? toolResult.rawResponse : {};
+    const failed =
+      (typeof rec.status === 'string' && rec.status !== 'completed') || Boolean(pd.error) || Boolean(toolResult.error) || rawResponse.is_error === true;
     const sub = isObject(toolResult.subAgent) ? toolResult.subAgent : null;
     const descriptor = sub !== null && isObject(sub.descriptor) ? sub.descriptor : {};
     const label = nonEmpty(descriptor.role) ?? nonEmpty(descriptor.agentNickname);

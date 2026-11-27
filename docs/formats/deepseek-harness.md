@@ -867,6 +867,28 @@ ordinary session.
 Not covered by that file: subagents, forks, compaction, a turn that fails or is interrupted,
 file-reading and file-writing tools, more than one turn, questions 2 and 8-12.
 
+## Checked again (2026-11-27)
+
+Same machine, nine days later; the same kind of check (a throwaway server reading only this
+directory, compared with the decoded rows by type, count, length and number).
+
+- **The 2026-11-18 session** had one row appended: an untagged `session/end-seed {}` (a restart
+  boundary, §"seeding"), now 49 rows. What the product shows for it did not change, and the
+  row is not reported as unrecognised.
+- **A new session with a failed turn.** One typed prompt, the same three injected
+  `user/message` rows (their `source` now carries `kind`, `form` and `sections` or
+  `entries`), a `fallback` title only, one `assistant/attempt` (a stream of one chunk, no
+  message), then `turn/end` with `reason: {kind: "error", error: {message, code:
+  "ACCOUNT_QUOTA", status: 402}}`: the account had run out of quota. No usage anywhere. The
+  product shows the prompt (only the typed text), then a `Turn failed` system node carrying the
+  error message, and the session idle. Nothing unrecognised.
+- In the old session, a call node's duration starts at the `assistant/message` row that carries
+  the tool call, so it is 1-3 ms longer than `tool/result.time - tool/call.time`.
+
+Still not covered: subagents, forks, compaction, an interrupted turn, file-reading and
+file-writing tools, more than one turn. With the account out of quota no further session could
+be run.
+
 ## Open questions that only a real file can settle
 
 1. Does `zlib.zstdDecompressSync(wholeFile)` / `createZstdDecompress()` on the installed Node
