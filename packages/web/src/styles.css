@@ -826,6 +826,10 @@ a.bookmark-link:hover .bookmark-note { text-decoration: underline; }
 .compare-turn-meta { display: block; color: var(--ink-soft); font-size: 12px; font-variant-numeric: tabular-nums; }
 .compare-path { font-family: var(--mono); font-weight: 500 !important; white-space: normal !important; overflow-wrap: anywhere; min-width: 12em; }
 .compare-mono { font-family: var(--mono); }
+.compare-category { white-space: normal !important; min-width: 8em; max-width: 22em; }
+.compare-category-names {
+  display: block; color: var(--ink-soft); font-family: var(--mono); font-size: 11px; font-weight: 500; overflow-wrap: anywhere;
+}
 .compare-group th { padding-top: 10px !important; color: var(--ink-soft) !important; font-size: 12px !important; }
 @media (max-width: 640px) {
   .compare-table th, .compare-table td { padding-right: 8px; }

@@ -84,8 +84,27 @@ function Body({ view }: { view: CompareView }) {
           </table>
         </div>
       </Section>
+      <Section id="compare-categories-h" title="按类别"
+        caption="不同工具对同一类操作叫法不一样（例如 Claude Code 的 Bash、Codex 的 exec_command、Cursor 的 run_terminal_command_v2 都是跑命令），这里先归类再对齐。每类下面是算进来的工具名。">
+        {view.categories.length === 0 ? <p className="muted stats-state">两边都没有调用工具</p> : (
+          <div className="stats-table-wrap">
+            <table className="stats-table compare-table">
+              <thead><tr><th scope="col">类别</th><th scope="col" className="num">左</th><th scope="col" className="num">右</th></tr></thead>
+              <tbody>
+                {view.categories.map((c) => (
+                  <tr key={c.key}>
+                    <th scope="row" className="compare-category">{c.label}<span className="compare-category-names">{c.names}</span></th>
+                    <td className="num"><Link cell={c.left} /></td>
+                    <td className="num"><Link cell={c.right} /></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Section>
       <Section id="compare-tools-h" title="按工具"
-        caption={`按工具名原样配对：不同工具的工具名不一样（例如 Claude Code 的 Bash、Codex 的 exec_command），这时多数行只有一边有数。最多列 ${COMPARE_TOOLS_MAX} 个。`}>
+        caption={`按工具名原样配对，两边叫法不同的工具各占一行（归类后的对比看上面）。最多列 ${COMPARE_TOOLS_MAX} 个。`}>
         {view.tools.length === 0 ? <p className="muted stats-state">两边都没有调用工具</p> : (
           <div className="stats-table-wrap">
             <table className="stats-table compare-table">

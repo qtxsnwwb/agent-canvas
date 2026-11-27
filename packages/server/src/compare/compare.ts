@@ -1,16 +1,20 @@
 import {
   COMPARE_FILES_MAX,
+  COMPARE_TOOL_CATEGORIES,
   COMPARE_TOOLS_MAX,
   COMPARE_TURNS_MAX,
   isWindowsStylePath,
   relativeToDir,
   samePath,
   sessionName,
+  toolCategory,
+  type CompareCategoryRow,
   type CompareFileCounts,
   type CompareFileRow,
   type CompareFiles,
   type CompareResponse,
   type CompareSide,
+  type CompareToolCategory,
   type CompareToolCounts,
   type CompareToolRow,
   type CompareTurnRow,
@@ -83,18 +87,46 @@ function toolCounts(side: Counted | undefined, clock: CompareClock): Map<string,
   return out;
 }
 
-function pairTools(left: Counted | undefined, right: Counted | undefined, clock: CompareClock): Pick<CompareResponse, 'tools' | 'otherTools'> {
+/**
+ * Every tool of both sides by category (toolCategory; COMPARE_TOOL_CATEGORIES order, used ones only): calls and
+ * failures summed per side, the names by (left + right calls) descending, then name.
+ */
+function pairCategories(l: Map<string, CompareToolCounts>, r: Map<string, CompareToolCounts>): CompareCategoryRow[] {
+  const add = (to: CompareToolCounts | null, c: CompareToolCounts | undefined): CompareToolCounts | null =>
+    c === undefined ? to : { calls: (to?.calls ?? 0) + c.calls, failed: (to?.failed ?? 0) + c.failed };
+  const byCategory = new Map<CompareToolCategory, CompareCategoryRow>();
+  const sums = new Map<string, number>();
+  for (const name of new Set([...l.keys(), ...r.keys()])) {
+    const category = toolCategory(name);
+    let row = byCategory.get(category);
+    if (row === undefined) byCategory.set(category, (row = { category, left: null, right: null, toolNames: [] }));
+    row.left = add(row.left, l.get(name));
+    row.right = add(row.right, r.get(name));
+    row.toolNames.push(name);
+    sums.set(name, (l.get(name)?.calls ?? 0) + (r.get(name)?.calls ?? 0));
+  }
+  return COMPARE_TOOL_CATEGORIES.flatMap(({ key }) => {
+    const row = byCategory.get(key);
+    if (row === undefined) return [];
+    row.toolNames.sort((a, b) => sums.get(b)! - sums.get(a)! || cmp(a, b));
+    return [row];
+  });
+}
+
+function pairTools(left: Counted | undefined, right: Counted | undefined, clock: CompareClock): Pick<CompareResponse, 'tools' | 'otherTools' | 'categories'> {
   const l = toolCounts(left, clock);
   const r = toolCounts(right, clock);
+  const categories = pairCategories(l, r);
   const names = new Set([...l.keys(), ...r.keys()]);
   const rows: CompareToolRow[] = [...names].map((toolName) => ({ toolName, left: l.get(toolName) ?? null, right: r.get(toolName) ?? null }));
   const sum = (row: CompareToolRow): number => (row.left?.calls ?? 0) + (row.right?.calls ?? 0);
   rows.sort((a, b) => sum(b) - sum(a) || cmp(a.toolName, b.toolName));
-  if (rows.length <= COMPARE_TOOLS_MAX) return { tools: rows, otherTools: null };
+  if (rows.length <= COMPARE_TOOLS_MAX) return { tools: rows, otherTools: null, categories };
   const rest = rows.slice(COMPARE_TOOLS_MAX);
   return {
     tools: rows.slice(0, COMPARE_TOOLS_MAX),
     otherTools: { left: rest.reduce((a, x) => a + (x.left?.calls ?? 0), 0), right: rest.reduce((a, x) => a + (x.right?.calls ?? 0), 0) },
+    categories,
   };
 }
 
