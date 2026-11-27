@@ -9,6 +9,7 @@ import type { CursorBubbleRecord, CursorComposerRecord } from '../src/sources/cu
 import { CursorSource, ORPHAN_PROBES_PER_ROUND, RECENT_MS, type CursorSourceOptions, type PollTimers } from '../src/sources/cursor/source.js';
 import { bubbleRecord, capUtf8, trimBubble, trimComposer } from '../src/sources/cursor/trim.js';
 import { CursorDbFixture, pageKey, T0, textBubble, thinkingBubble, toolBubble, userBubble, type ComposerSpec, type FixtureBubble } from './cursor-fixtures.js';
+import { removeTestPath } from './remove-test-path.js';
 
 // Temp dirs and a synthetic database only: the real Cursor database is never opened.
 
@@ -134,7 +135,7 @@ beforeEach(() => {
 afterEach(async () => {
   for (const s of sources) await s.stop();
   fx.close();
-  fs.rmSync(tmp, { recursive: true, force: true });
+  removeTestPath(tmp);
 });
 
 describe('trim', () => {
@@ -953,7 +954,7 @@ describe('robustness (fix round 2)', () => {
     sink.reset();
     const dir = path.dirname(fx.dbPath);
     fx.close();
-    for (const f of fs.readdirSync(dir)) fs.rmSync(path.join(dir, f));
+    for (const f of fs.readdirSync(dir)) removeTestPath(path.join(dir, f));
     await s.pollOnce(); // gone: Cursor "not installed", nothing marked
     expect(sink.calls).toEqual([]);
     expect(s.status().lastError).toBeNull();

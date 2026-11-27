@@ -14,6 +14,7 @@ import {
   windowsQuote,
 } from '../src/hooks-config.js';
 import { windowsShortPath } from '../src/win-short-path.js';
+import { removeTestPath } from './remove-test-path.js';
 
 /*
  * Codex runs a hook's commandWindows through PowerShell (`-NoProfile -Command <string>`), and through `cmd /C` only
@@ -271,7 +272,7 @@ describe('windowsShortPath', () => {
   beforeEach(() => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-short-path-'));
   });
-  afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
+  afterEach(() => removeTestPath(dir));
 
   /** A file under a directory with a space, and a hard link to it under a plain name (same file, other name). */
   function files(): { long: string; link: string; other: string } {

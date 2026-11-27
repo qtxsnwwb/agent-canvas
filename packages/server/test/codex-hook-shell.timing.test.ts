@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import { codexForwardCommands, cursorForwardCommand, windowsQuote } from '../src/hooks-config.js';
 import { windowsShortPath } from '../src/win-short-path.js';
+import { removeTestPath } from './remove-test-path.js';
 
 /*
  * The hook command strings the installer writes, run for real the way the tools run them on Windows — Codex:
@@ -117,7 +118,7 @@ describe.skipIf(SKIP_REASON !== '')('hook commands run through the shells the to
         fs.rmdirSync(junction!); // removes a junction itself, never its target's contents
       }
     }
-    if (tmp !== undefined) fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 10 });
+    if (tmp !== undefined) removeTestPath(tmp);
   }, 30_000);
 
   let n = 0;

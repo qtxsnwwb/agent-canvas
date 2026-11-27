@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { launcherSource } from '../src/service/windows.js';
+import { removeTestPath } from './remove-test-path.js';
 
 /*
  * The launcher under the real wscript.exe. Everything lives in a temp directory (with 张 三 and spaces in its path);
@@ -42,7 +43,7 @@ afterEach(() => {
   if (launcher?.pid !== undefined && launcher.exitCode === null && launcher.signalCode === null) {
     spawnSync('taskkill', ['/PID', String(launcher.pid), '/T', '/F'], { windowsHide: true });
   }
-  fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 10 });
+  removeTestPath(tmp);
 });
 
 const counter = () => path.join(dir, 'counter');

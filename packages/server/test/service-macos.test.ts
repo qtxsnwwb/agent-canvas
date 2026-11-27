@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { serviceBackend } from '../src/service/backend.js';
 import { LAUNCH_AGENT_LABEL, macosBackend, plistSource } from '../src/service/macos.js';
 import type { ServiceDefinition, ServiceSystem } from '../src/service/types.js';
+import { removeTestPath } from './remove-test-path.js';
 
 /* The macOS backend against a fake system: no real launchctl is ever run; files go to a temp home. Runs on every platform. */
 
@@ -66,7 +67,7 @@ beforeEach(() => {
   answer = () => ({ code: 0 });
 });
 afterEach(() => {
-  fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 10 });
+  removeTestPath(tmp);
 });
 
 const EXPECTED = `<?xml version="1.0" encoding="UTF-8"?>

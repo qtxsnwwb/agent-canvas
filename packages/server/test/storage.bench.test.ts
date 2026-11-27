@@ -10,6 +10,7 @@ import { Pipeline } from '../src/pipeline.js';
 import { migrateAll, startStorageMaintenance, vacuumIfDue } from '../src/store/migrate-storage.js';
 import { SEARCH_BUILD_BATCH_BYTES, SEARCH_BUILD_BATCH_ROWS } from '../src/store/search-index.js';
 import { openStore, type Store } from '../src/store/store.js';
+import { removeTestPath } from './remove-test-path.js';
 
 /*
  * Benchmark of compressed storage at the real shape, scaled down: Claude Code transcripts of tool calls (input 0.5-3 KB),
@@ -230,7 +231,7 @@ describe.skipIf(!BENCH)('storage benchmark', () => {
       const compTables = tableBytes(compFile);
       const compSize = fileBytes(compFile);
 
-      fs.rmSync(projectsDir, { recursive: true, force: true });
+      removeTestPath(projectsDir);
       // The plain database migrated in the background (as a service would), then VACUUM.
       const migFile = path.join(root, 'migrated.db');
       oldCopy(plainFile, migFile);
@@ -296,7 +297,7 @@ describe.skipIf(!BENCH)('storage benchmark', () => {
       expect(vacuum.value.outcome).toBe('done');
     } finally {
       await new Promise((r) => setTimeout(r, 1000)); // closed stores' checkpointer threads let go of their files
-      fs.rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 500 });
+      removeTestPath(root, { retries: 20, delayMs: 500 });
     }
   }, 3_600_000);
 
@@ -377,7 +378,7 @@ describe.skipIf(!BENCH)('storage benchmark', () => {
       console.log(`edges ${perSession * sessions.length}: edge table + its indexes ${MB(edgeBytes)} MB, ${(edgeBytes / (perSession * sessions.length)).toFixed(0)} bytes per edge (${Object.entries(t).filter(([k]) => k.includes('edge')).map(([k, v]) => `${k} ${MB(v)}`).join(', ')})`);
     } finally {
       await new Promise((r) => setTimeout(r, 1000)); // the closed store's checkpointer thread lets go of the file
-      fs.rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 500 });
+      removeTestPath(root, { retries: 20, delayMs: 500 });
     }
   }, 600_000);
 });

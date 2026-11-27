@@ -7,6 +7,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import ts from 'typescript';
 import { afterAll, afterEach, beforeAll, expect, test } from 'vitest';
+import { removeTestPath } from './remove-test-path.js';
 
 /*
  * The forwarder as a real process: hook-forward.ts (node built-ins only) is transpiled into a temp directory and run
@@ -27,7 +28,7 @@ beforeAll(() => {
     `import { hookForwardProcess } from ${JSON.stringify(pathToFileURL(path.join(dir, 'hook-forward.mjs')).href)};\nhookForwardProcess(process.argv.slice(2));\n`,
   );
 });
-afterAll(() => fs.rmSync(dir, { recursive: true, force: true }));
+afterAll(() => removeTestPath(dir));
 
 const servers: http.Server[] = [];
 afterEach(async () => {

@@ -13,6 +13,7 @@ import type { ServiceNotifier } from '../src/notify/service.js';
 import { formatUptime, readServiceLock, statusLines, stopRunning, waitForStart } from '../src/service/client.js';
 import { absoluteServiceEnv, pickServiceEnv, serviceDefinition } from '../src/service/definition.js';
 import { manifestPath, readManifest, removeManifest, writeManifest, type ServiceManifest } from '../src/service/manifest.js';
+import { removeTestPath } from './remove-test-path.js';
 
 /*
  * The service core: the environment list, the definition, the manifest, and the stop / status client. Temp
@@ -63,7 +64,7 @@ afterEach(async () => {
   await stub?.close().catch(() => undefined);
   for (const server of servers) await new Promise((resolve) => server.close(resolve));
   vi.unstubAllEnvs();
-  fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 10 });
+  removeTestPath(tmp);
 });
 
 const SPEC_LIST = [

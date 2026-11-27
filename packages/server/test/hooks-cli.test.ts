@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, test } from 'vitest';
 import { main } from '../src/cli.js';
 import { defaultSettingsFile, runHooksInstall, runHooksUninstall, type HooksCliIo } from '../src/hooks-cli.js';
 import { HOOK_EVENTS } from '../src/hooks-config.js';
+import { removeTestPath } from './remove-test-path.js';
 
 // Every test works inside a fresh temp directory; the real ~/.claude is never touched.
 let dir: string;
@@ -14,7 +15,7 @@ beforeEach(() => {
   file = path.join(dir, 'sub', 'settings.json');
 });
 afterEach(() => {
-  fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10 });
+  removeTestPath(dir);
 });
 
 const NOW = new Date(2026, 10, 10, 9, 5, 7); // local time

@@ -11,6 +11,7 @@ import { CursorSource } from '../src/sources/cursor/source.js';
 import type { PollTimers } from '../src/sources/cursor/source.js';
 import { openStore, type Store } from '../src/store/store.js';
 import { CursorDbFixture, T0, textBubble, userBubble } from './cursor-fixtures.js';
+import { removeTestPath } from './remove-test-path.js';
 
 // Temp dirs and a synthetic Cursor database only.
 
@@ -28,7 +29,7 @@ beforeEach(() => {
 afterEach(async () => {
   for (const app of apps.splice(0)) await app.close();
   fx.close();
-  fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  removeTestPath(tmp, { retries: 20, delayMs: 100 });
 });
 
 test('the test environment never points at the real Cursor database', () => {
@@ -101,7 +102,7 @@ test('start polls the configured database; rebuild does not need it', async () =
   // rebuild replays the stored events with the Cursor database gone
   fx.close();
   // A poll round may still hold the database file for a moment (Windows refuses to delete an open file).
-  fs.rmSync(path.join(tmp, 'Cursor'), { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  removeTestPath(path.join(tmp, 'Cursor'), { retries: 20, delayMs: 100 });
   fx = { close: () => undefined } as unknown as CursorDbFixture;
   expect(() => rebuild({ projectsDir: path.join(tmp, 'projects'), dataDir, codexSessionsDir: null, cursorDbPath: path.join(tmp, 'Cursor', 'gone.vscdb') })).not.toThrow();
 }, 30_000);

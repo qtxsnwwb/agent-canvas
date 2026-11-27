@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { loadConfig, type Config } from '../src/config.js';
 import { isExistingDir } from '../src/sources/dirs.js';
+import { removeTestPath } from './remove-test-path.js';
 
 // Only fake paths: nothing here is read or written except a temp dir for isExistingDir.
 interface Case {
@@ -52,7 +53,7 @@ describe('isExistingDir', () => {
   beforeEach(() => {
     tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-dirs-'));
   });
-  afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  afterEach(() => removeTestPath(tmp));
 
   test('true only for an existing directory', () => {
     const file = path.join(tmp, 'f.txt');

@@ -6,6 +6,7 @@ import { FILE_ONLY_ORIGINS, ORIGINS } from '@agent-canvas/shared';
 import { loadConfig, userPath } from '../src/config.js';
 import { KEY_PREFIXES, originOfKey } from '../src/sources/source.js';
 import { sourceDirsOf } from '../src/sources/dirs.js';
+import { removeTestPath } from './remove-test-path.js';
 
 // Resolution of Qwen Code's runtime base (spec qwen-code 2). Only fake paths: nothing here is read or written except a
 // temp dir checked to stay empty.
@@ -94,7 +95,7 @@ describe('nothing is created on disk', () => {
   beforeEach(() => {
     tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-config-qwen-'));
   });
-  afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  afterEach(() => removeTestPath(tmp));
 
   test('resolving every variable leaves the named directories absent', () => {
     const at = (n: string): string => path.join(tmp, n);
