@@ -3,10 +3,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, expect, test } from 'vitest';
 import { findViewerTemplate, VIEWER_TEMPLATE_FILE } from '../src/export/html.js';
+import { removeTestPath } from './remove-test-path.js';
 
 let dir: string;
 beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-export-lookup-')); });
-afterEach(() => { fs.rmSync(dir, { recursive: true, force: true }); });
+afterEach(() => { removeTestPath(dir); });
 
 const put = (...parts: string[]): string => {
   const file = path.join(dir, ...parts);

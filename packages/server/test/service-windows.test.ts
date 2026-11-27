@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import type { ServiceDefinition, ServiceSystem } from '../src/service/types.js';
 import { APPROVED_KEY, launcherSource, RUN_KEY, RUN_VALUE, runCommandLine, windowsBackend } from '../src/service/windows.js';
+import { removeTestPath } from './remove-test-path.js';
 
 /*
  * The Windows backend against a fake system: every `reg` and `wscript` call goes to a recording fake `run`, so no test
@@ -73,7 +74,7 @@ beforeEach(() => {
   answer = () => ({ code: 0 });
 });
 afterEach(() => {
-  fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 10 });
+  removeTestPath(tmp);
 });
 
 describe('runCommandLine', () => {

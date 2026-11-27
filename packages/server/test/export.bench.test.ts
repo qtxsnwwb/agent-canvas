@@ -8,6 +8,7 @@ import { LearnedValuesService } from '../src/export/learned.js';
 import { ExportService } from '../src/export/service.js';
 import { openStore } from '../src/store/store.js';
 import { FAKE_KEY, makeNode, makeSession } from './export-fixtures.js';
+import { removeTestPath } from './remove-test-path.js';
 
 /*
  * Benchmark of export and preview on a synthetic session of 170,000 nodes (turns of 37 nodes: a prompt, replies,
@@ -147,7 +148,7 @@ describe.skipIf(!BENCH)('export benchmark', () => {
       }
     } finally {
       store.close();
-      fs.rmSync(dir, { recursive: true, force: true });
+      removeTestPath(dir);
     }
   });
 });

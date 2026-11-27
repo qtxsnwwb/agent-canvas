@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, expect, test, vi } from 'vitest';
 import { isNpxPath, main, packageVersion, webDistCandidates } from '../src/cli-commands.js';
 import type { HooksCliIo } from '../src/hooks-cli.js';
+import { removeTestPath } from './remove-test-path.js';
 
 const dirs: string[] = [];
 function tmp(): string {
@@ -13,7 +14,7 @@ function tmp(): string {
 }
 afterEach(() => {
   vi.restoreAllMocks();
-  for (const d of dirs.splice(0)) fs.rmSync(d, { recursive: true, force: true });
+  for (const d of dirs.splice(0)) removeTestPath(d);
 });
 
 function fakeIo(): HooksCliIo & { outs: string[]; errs: string[] } {

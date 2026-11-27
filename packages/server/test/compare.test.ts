@@ -4,6 +4,7 @@ import {
   COMPARE_TOOLS_MAX,
   COMPARE_TURNS_MAX,
   ORIGINS,
+  toolCategory,
   type FileTouch,
   type GraphNode,
   type Origin,
@@ -175,6 +176,37 @@ describe('by tool', () => {
     const r = pair(withTools('a', left), withTools('b', []));
     expect(r.tools).toHaveLength(COMPARE_TOOLS_MAX);
     expect(r.otherTools).toBeNull();
+  });
+
+  test('categories: the same kind of tool under different names is paired; every tool counts, also past the row limit', () => {
+    const r = pair(
+      withTools('a', [['Bash', 12, 1], ['PowerShell', 3, 0], ['Read', 30, 0], ['Edit', 2, 0], ['mcp__notes__find', 4, 0], ['Skill', 1, 0]]),
+      withTools('b', [['exec_command', 5, 2], ['run_terminal_command_v2', 1, 0], ['read_file_v2', 7, 1], ['web_search', 2, 0]], { origin: 'codex' }),
+    );
+    expect(r.categories).toEqual([
+      { category: 'exec', left: { calls: 15, failed: 1 }, right: { calls: 6, failed: 2 }, toolNames: ['Bash', 'exec_command', 'PowerShell', 'run_terminal_command_v2'] },
+      { category: 'read', left: { calls: 30, failed: 0 }, right: { calls: 7, failed: 1 }, toolNames: ['Read', 'read_file_v2'] },
+      { category: 'edit', left: { calls: 2, failed: 0 }, right: null, toolNames: ['Edit'] },
+      { category: 'web', left: null, right: { calls: 2, failed: 0 }, toolNames: ['web_search'] },
+      { category: 'mcp', left: { calls: 4, failed: 0 }, right: null, toolNames: ['mcp__notes__find'] },
+      { category: 'other', left: { calls: 1, failed: 0 }, right: null, toolNames: ['Skill'] },
+    ]);
+    const many: [string, number, number][] = [];
+    for (let i = 0; i < COMPARE_TOOLS_MAX + 5; i++) many.push([`mcp__s__t${String(i).padStart(2, '0')}`, 1, 0]);
+    expect(pair(withTools('a', many), null).categories).toEqual([
+      { category: 'mcp', left: { calls: COMPARE_TOOLS_MAX + 5, failed: 0 }, right: null, toolNames: many.map(([name]) => name) },
+    ]);
+  });
+
+  test('toolCategory: names by agent, MCP prefixes, the rest other', () => {
+    expect(['Bash', 'exec', 'shell_command', 'run_shell_command', 'CommandExecution'].map(toolCategory)).toEqual(Array(5).fill('exec'));
+    expect(['Read', 'read_file', 'view', 'read_many_files'].map(toolCategory)).toEqual(Array(4).fill('read'));
+    expect(['Write', 'MultiEdit', 'apply_patch', 'edit_file_v2', 'delete_file', 'replace', 'str_replace'].map(toolCategory)).toEqual(Array(7).fill('edit'));
+    expect(['Grep', 'Glob', 'ripgrep_raw_search', 'glob_file_search', 'search_file_content', 'list_directory'].map(toolCategory)).toEqual(Array(6).fill('search'));
+    expect(['Agent', 'Task', 'task_v2', 'collaboration.spawn_agent', 'spawn_subagent'].map(toolCategory)).toEqual(Array(5).fill('subagent'));
+    expect(['WebFetch', 'WebSearch', 'web_fetch', 'google_web_search'].map(toolCategory)).toEqual(Array(4).fill('web'));
+    expect(['mcp__srv__do', 'mcp-cursor-ide-browser-browser_click', 'mcp_github_search'].map(toolCategory)).toEqual(Array(3).fill('mcp'));
+    expect(['Skill', 'TodoWrite', '(unknown)', 'mcp', 'bashful', 'toString', '__proto__'].map(toolCategory)).toEqual(Array(7).fill('other'));
   });
 
   test('a call without a tool name is paired under the stats page\'s (unknown)', () => {
@@ -353,7 +385,7 @@ describe('missing and same sessions', () => {
     });
     const none = pair(null, null);
     expect(none).toEqual({
-      left: null, right: null, sameSession: false, tools: [], otherTools: null, turns: [], turnsTruncated: false,
+      left: null, right: null, sameSession: false, tools: [], otherTools: null, categories: [], turns: [], turnsTruncated: false,
       files: { both: [], onlyLeft: [], onlyRight: [], more: { both: 0, onlyLeft: 0, onlyRight: 0 }, cwdsDiffer: false },
     });
   });

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { main } from '../src/cli.js';
 import { runHooksInstall, runHooksUninstall, type HooksCliIo } from '../src/hooks-cli.js';
 import { HOOK_EVENTS } from '../src/hooks-config.js';
+import { removeTestPath } from './remove-test-path.js';
 
 // Every test works inside a fresh temp directory; the real ~/.claude is never touched.
 let dir: string;
@@ -15,7 +16,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   vi.restoreAllMocks();
-  fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10 });
+  removeTestPath(dir);
 });
 
 interface FakeIo extends HooksCliIo {
@@ -51,7 +52,7 @@ const canSymlink = (() => {
   } catch {
     return false; // e.g. EPERM on Windows without privilege
   } finally {
-    fs.rmSync(t, { recursive: true, force: true });
+    removeTestPath(t);
   }
 })();
 
@@ -112,11 +113,11 @@ test('确认期间文件出现 / 消失也算被修改', async () => {
   expect(fs.readFileSync(file, 'utf8')).toBe('{"x":1}');
   expect(listDir()).toEqual(['settings.json']);
 
-  fs.rmSync(file);
+  removeTestPath(file);
   await runHooksInstall(opts(), fakeIo());
   const io2 = fakeIo(true);
   io2.confirm = async () => {
-    fs.rmSync(file);
+    removeTestPath(file);
     return true;
   };
   expect(await runHooksUninstall(opts({ yes: false }), io2)).toBe(1);

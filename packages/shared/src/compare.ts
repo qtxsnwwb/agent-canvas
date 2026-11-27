@@ -49,11 +49,80 @@ export interface CompareSide {
 
 export interface CompareToolCounts { calls: number; failed: number }
 
-/** One tool name (paired literally between the sides); a side without that tool (or without a session) is null. */
+/** One tool name (paired literally between the sides; categories pairs them by kind); a side without that tool (or without a session) is null. */
 export interface CompareToolRow {
   toolName: string;
   left: CompareToolCounts | null;
   right: CompareToolCounts | null;
+}
+
+/** What a tool call does, across agents that name the same kind of tool differently (toolCategory). */
+export type CompareToolCategory = 'exec' | 'read' | 'edit' | 'search' | 'subagent' | 'web' | 'mcp' | 'other';
+
+/** The categories in the order the page lists them, with their labels. */
+export const COMPARE_TOOL_CATEGORIES: readonly { key: CompareToolCategory; label: string }[] = [
+  { key: 'exec', label: '跑命令' },
+  { key: 'read', label: '读文件' },
+  { key: 'edit', label: '改写文件' },
+  { key: 'search', label: '搜索' },
+  { key: 'subagent', label: '子代理' },
+  { key: 'web', label: '联网' },
+  { key: 'mcp', label: 'MCP 工具' },
+  { key: 'other', label: '其他' },
+];
+
+/**
+ * Tool names by category: Claude Code, Codex, Cursor, Gemini CLI, Qwen Code, GitHub Copilot CLI, Grok Build, DeepSeek,
+ * WorkBuddy / CodeBuddy and Doubao, as their normalizers record them (the names the file view reads files from, plus
+ * their shell, search, subagent and web tools). A name two agents use for different things is not listed.
+ */
+const TOOL_CATEGORY_NAMES: Record<Exclude<CompareToolCategory, 'mcp' | 'other'>, readonly string[]> = {
+  exec: [
+    'Bash', 'BashOutput', 'KillShell', 'KillBash', 'PowerShell', 'bash', 'shell', 'exec', 'exec_command', 'local_shell',
+    'container.exec', 'shell_command', 'write_stdin', 'CommandExecution', 'run_terminal_command_v2', 'run_terminal_cmd',
+    'run_terminal_command', 'run_shell_command', 'execute_command', 'powershell',
+  ],
+  read: ['Read', 'NotebookRead', 'read_file_v2', 'read_file', 'read_many_files', 'read', 'view', 'ReadFile'],
+  edit: [
+    'Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'Delete', 'edit_file_v2', 'delete_file', 'write_file', 'replace',
+    'apply_patch', 'FileChange', 'create', 'edit', 'write', 'search_replace', 'edit_file', 'hashline_edit', 'multi_edit',
+    'str_replace', 'create_file', 'delete', 'remove_file', 'write_to_file', 'replace_in_file', 'WriteFile',
+  ],
+  search: [
+    'Grep', 'Glob', 'LS', 'ripgrep_raw_search', 'glob_file_search', 'codebase_search', 'file_search', 'grep_search',
+    'grep', 'glob', 'list_dir', 'list_directory', 'search_file_content', 'ls', 'search_files', 'list_files',
+  ],
+  subagent: [
+    'Agent', 'Task', 'task', 'task_v2', 'spawn_subagent', 'collaboration.spawn_agent', 'collaboration.send_message',
+    'collaboration.followup_task', 'collaboration.wait_agent', 'collaboration.list_agents', 'SendMessage',
+  ],
+  web: ['WebFetch', 'WebSearch', 'web_search', 'web_fetch', 'google_web_search', 'fetch', 'fetch_url'],
+};
+
+const TOOL_CATEGORY = new Map<string, CompareToolCategory>(
+  Object.entries(TOOL_CATEGORY_NAMES).flatMap(([category, names]) => names.map((n) => [n, category as CompareToolCategory] as const)),
+);
+
+/**
+ * The category of a tool name (as stats count it): the names above; an MCP tool by its prefix (Claude Code and Codex
+ * `mcp__server__tool`, Cursor `mcp-server-tool`, Gemini and Qwen `mcp_…`); anything else `other`.
+ */
+export function toolCategory(toolName: string): CompareToolCategory {
+  const known = TOOL_CATEGORY.get(toolName);
+  if (known !== undefined) return known;
+  if (/^mcp(__|-|_)/.test(toolName)) return 'mcp';
+  return 'other';
+}
+
+/**
+ * One category (toolCategory) of both sides' calls; a side without calls of it (or without a session) is null.
+ * `toolNames`: the names counted in it, either side's, by (left + right calls) descending, then name.
+ */
+export interface CompareCategoryRow {
+  category: CompareToolCategory;
+  left: CompareToolCounts | null;
+  right: CompareToolCounts | null;
+  toolNames: string[];
 }
 
 /** One side's turn: prompt node (null when the turn has none, e.g. a prelude), its head, duration, calls, tokens. */
@@ -112,6 +181,8 @@ export interface CompareResponse {
   tools: CompareToolRow[];
   /** Calls of the tools past COMPARE_TOOLS_MAX, per side (「其他」); null when every tool is listed. */
   otherTools: { left: number; right: number } | null;
+  /** Every tool's calls by category, in COMPARE_TOOL_CATEGORIES order; categories neither side used are left out. */
+  categories: CompareCategoryRow[];
   /** At most COMPARE_TURNS_MAX, from turn 1. */
   turns: CompareTurnRow[];
   /** Either side has more than COMPARE_TURNS_MAX turns. */

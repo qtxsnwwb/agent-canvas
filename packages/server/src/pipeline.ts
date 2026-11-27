@@ -597,15 +597,22 @@ export class Pipeline {
       const listed = new Set(files.map((f) => this.rel(f)));
       for (const key of [...this.readMtimes.keys()]) if (!listed.has(key)) this.readMtimes.delete(key);
     }
+    // A close() stops the scan before its next file (the first one after an install or a long break can take minutes):
+    // what is left is found by the next start's scan, by size, as any file changed while the service was off.
     for (const { sessionId, files: group, kinds } of groups.values()) {
       for (const [i, file] of group.entries()) {
+        if (this.closed) return;
         if (await this.unchanged(file, kinds[i])) continue;
         await this.safeIngest(file);
       }
       this.evictIfOld(sessionId);
     }
     // After every session file: the threads classified above are what an index's entries are placed by.
-    for (const file of indexes) if (await this.indexDue(file)) await this.safeIngest(file);
+    for (const file of indexes) {
+      if (this.closed) return;
+      if (await this.indexDue(file)) await this.safeIngest(file);
+    }
+    if (this.closed) return;
     await this.markDeletedSources(new Set(files.map((f) => this.rel(f))));
   }
 
@@ -624,6 +631,7 @@ export class Pipeline {
     }
     for (const key of this.failures.keys()) if (!isNonFileKey(key) && !this.isPollKey(key)) targets.add(key);
     for (const file of [...targets].sort()) {
+      if (this.closed) return;
       if (await this.unchanged(file)) continue;
       await this.safeIngest(file);
     }

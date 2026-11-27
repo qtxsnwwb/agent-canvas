@@ -8,6 +8,7 @@ import { embedJson, fillTemplate, findViewerTemplate, isUsableTemplate, viewerTe
 import { EXPORT_SETTINGS_FILE, loadExportSettings, saveExportSettings } from '../src/export/settings.js';
 import { homeUsersOf } from '../src/export/assemble.js';
 import { truncateUtf8 } from '../src/export/truncate.js';
+import { removeTestPath } from './remove-test-path.js';
 
 // ---- truncation ----
 
@@ -83,7 +84,7 @@ test('findViewerTemplate：按候选顺序找第一个存在的文件', () => {
     fs.writeFileSync(path.join(dir, 'packages', 'web', 'dist', 'viewer-template.html'), 'x');
     expect(findViewerTemplate(here)).toBe(path.join(dir, 'packages', 'web', 'dist', 'viewer-template.html'));
   } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
+    removeTestPath(dir);
   }
 });
 
@@ -126,7 +127,7 @@ beforeEach(() => {
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-export-settings-'));
 });
 afterEach(() => {
-  fs.rmSync(dataDir, { recursive: true, force: true });
+  removeTestPath(dataDir);
 });
 
 test('设置：没有文件时为空', () => {

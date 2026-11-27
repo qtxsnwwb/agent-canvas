@@ -5,6 +5,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, expect, test, vi } from 'vi
 import { main } from '../src/cli.js';
 import { defaultCursorHooksFile, runCursorHooksInstall, runCursorHooksUninstall, type HooksCliIo } from '../src/hooks-cli.js';
 import { CURSOR_HOOK_EVENTS, cursorForwardCommand } from '../src/hooks-config.js';
+import { removeTestPath } from './remove-test-path.js';
 
 // Every test works inside a fresh temp directory: the real ~/.cursor/hooks.json is never read or written. The guard at
 // the bottom records every path the fs functions used by the install code were called with during this file.
@@ -38,7 +39,7 @@ beforeEach(() => {
   file = path.join(cursorDir, 'hooks.json');
 });
 afterEach(() => {
-  fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10 });
+  removeTestPath(dir);
 });
 
 const NOW = new Date(2026, 10, 12, 9, 5, 7);

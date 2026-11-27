@@ -4,7 +4,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import type { CompareResponse, CompareSide, SearchHit, Session } from '@agent-canvas/shared';
 import {
-  ALL_PROJECTS_TEXT, COMPARE_BUTTON_TEXT, COMPARE_IDLE_POLL_MS, COMPARE_POLL_MS, FAILED_ONLY_TEXT, COMPARE_RETRY_MAX_MS, CWDS_DIFFER_TEXT, compareRetryDelay, isPlainClick, NOT_FOUND_TEXT, NO_TURN_TEXT, REFRESH_FAILED_TEXT,
+  ALL_PROJECTS_TEXT, CATEGORY_NAMES_MAX, COMPARE_BUTTON_TEXT, COMPARE_IDLE_POLL_MS, COMPARE_POLL_MS, FAILED_ONLY_TEXT, COMPARE_RETRY_MAX_MS, CWDS_DIFFER_TEXT, compareRetryDelay, isPlainClick, NOT_FOUND_TEXT, NO_TURN_TEXT, REFRESH_FAILED_TEXT,
   SAME_SESSION_TEXT, TURNS_TRUNCATED_TEXT, betterSide, compareView, createComparePoller, filterPickerRows, pickerList, pickerRows,
   searchPickerRows, shouldPoll, type CompareState,
 } from '../src/compare';
@@ -42,6 +42,10 @@ function response(o: Partial<CompareResponse> = {}): CompareResponse {
       { toolName: 'Read', left: { calls: 30, failed: 0 }, right: null },
     ],
     otherTools: null,
+    categories: [
+      { category: 'exec', left: { calls: 12, failed: 1 }, right: { calls: 61, failed: 6 }, toolNames: ['exec_command', 'Bash'] },
+      { category: 'read', left: { calls: 30, failed: 0 }, right: null, toolNames: ['Read'] },
+    ],
     turns: [
       {
         index: 1,
@@ -176,6 +180,30 @@ describe('the page view', () => {
     expect(v.tools[3]!.right.text).toBe('0');
   });
 
+  test('categories: the label, the tool names under it (at most CATEGORY_NAMES_MAX, then 「等 N 个」), cells as the tool rows', () => {
+    const r = response();
+    r.categories.push({
+      category: 'mcp', left: { calls: 9, failed: 0 }, right: null,
+      toolNames: Array.from({ length: CATEGORY_NAMES_MAX + 2 }, (_, i) => `mcp__s__t${i}`),
+    });
+    const v = compareView(r, IDS, IDENTITY_MASKER, NOW);
+    expect(v.categories.map((c) => [c.label, c.names])).toEqual([
+      ['跑命令', 'exec_command、Bash'],
+      ['读文件', 'Read'],
+      ['MCP 工具', `${Array.from({ length: CATEGORY_NAMES_MAX }, (_, i) => `mcp__s__t${i}`).join('、')} 等 ${CATEGORY_NAMES_MAX + 2} 个`],
+    ]);
+    expect(v.categories[0]!.left).toEqual({ text: '12（失败 1）', href: sessionHash('left-1') });
+    expect(v.categories[0]!.right).toEqual({ text: '61（失败 6）', href: sessionHash('right-1') });
+    expect(v.categories[1]!.right).toEqual({ text: '—', href: null });
+    const html = renderToStaticMarkup(createElement(ComparePageView, { view: v, failed: false, onSwap: () => {}, onChange: () => {} }));
+    expect(html).toContain('按类别');
+    expect(html).toContain('跑命令');
+    expect(html.indexOf('按类别')).toBeLessThan(html.indexOf('按工具'));
+    const none = compareView(response({ categories: [] }), IDS, IDENTITY_MASKER, NOW);
+    expect(renderToStaticMarkup(createElement(ComparePageView, { view: none, failed: false, onSwap: () => {}, onChange: () => {} })))
+      .toContain('两边都没有调用工具');
+  });
+
   test('turns: 第 N 轮, 「（无）」 for a missing turn, 「—」 for an undated one, links to the prompt (or the session)', () => {
     const v = compareView(response(), IDS, IDENTITY_MASKER, NOW);
     expect(v.turns.map((t) => t.label)).toEqual(['第 1 轮', '第 2 轮', '第 3 轮']);
@@ -247,6 +275,7 @@ describe('the page view', () => {
     r.left = { ...r.left!, title: '北极星 上线', cwd: 'D:\\北极星\\demo' };
     r.turns[0]!.left!.promptHead = '北极星 的 CI 坏了';
     r.files.both[0]!.path = 'src/北极星.yml';
+    r.categories[1]!.toolNames = ['mcp__北极星__find'];
     const v = compareView(r, IDS, m, NOW);
     const json = JSON.stringify(v);
     expect(json).not.toContain('北极星');
@@ -254,6 +283,7 @@ describe('the page view', () => {
     expect(v.heads[0]!.cwd).toContain('‹已遮蔽·');
     expect(v.turns[0]!.left!.head).toContain('‹已遮蔽·');
     expect(v.files.groups[0]!.rows[0]!.path).toContain('‹已遮蔽·');
+    expect(v.categories[1]!.names).toContain('‹已遮蔽·');
     const html = renderToStaticMarkup(createElement(ComparePageView, { view: v, failed: false, onSwap: () => {}, onChange: () => {} }));
     expect(html).not.toContain('北极星');
     expect(html).not.toContain(encodeURIComponent('北极星'));

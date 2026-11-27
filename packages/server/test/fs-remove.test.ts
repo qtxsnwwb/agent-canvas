@@ -66,18 +66,19 @@ describe('removeSync', () => {
   });
 });
 
-describe('the server source', () => {
-  test('never calls fs.rmSync (use removeSync)', () => {
-    const src = path.join(import.meta.dirname, '..', 'src');
+describe('the server source and its tests', () => {
+  test('never call fs.rmSync (use removeSync; tests: removeTestPath)', () => {
+    const self = path.join(import.meta.dirname, 'fs-remove.test.ts');
     const offenders: string[] = [];
     const walk = (dir: string): void => {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
         const p = path.join(dir, entry.name);
         if (entry.isDirectory()) walk(p);
-        else if (entry.name.endsWith('.ts') && fs.readFileSync(p, 'utf8').includes('rmSync(')) offenders.push(p);
+        else if (entry.name.endsWith('.ts') && p !== self && fs.readFileSync(p, 'utf8').includes('rmSync(')) offenders.push(p);
       }
     };
-    walk(src);
+    walk(path.join(import.meta.dirname, '..', 'src'));
+    walk(import.meta.dirname);
     expect(offenders).toEqual([]);
   });
 });

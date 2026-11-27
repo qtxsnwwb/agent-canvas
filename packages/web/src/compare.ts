@@ -4,7 +4,7 @@
  * the picker's lists. Pure: no React, no DOM (the page is pages/Compare.tsx, the picker ComparePicker.tsx).
  */
 import {
-  COMPARE_TURNS_MAX, SEARCH_MIN_CHARS, effectiveStatus, normalizeFilePath, sessionName,
+  COMPARE_TOOL_CATEGORIES, COMPARE_TURNS_MAX, SEARCH_MIN_CHARS, effectiveStatus, normalizeFilePath, sessionName,
   type CompareFileCounts, type CompareFileRow, type CompareResponse, type CompareSide, type CompareToolCounts, type CompareTurnSide,
   type Origin, type SearchHit, type Session,
 } from '@agent-canvas/shared';
@@ -25,6 +25,8 @@ export const NO_PROMPT_TEXT = '（没有提示）';
 export const TURNS_TRUNCATED_TEXT = `只列出前 ${COMPARE_TURNS_MAX} 轮`;
 export const CWDS_DIFFER_TEXT = '两边工作目录不同，按相对路径配对';
 export const OTHER_TOOLS_TEXT = '其他';
+/** Most tool names shown under a category; more: 「等 N 个」. */
+export const CATEGORY_NAMES_MAX = 6;
 export const REFRESH_FAILED_TEXT = '刷新失败，正在重试…';
 export const LOAD_FAILED_TEXT = '对比没能加载出来，正在重试…';
 export const ALL_PROJECTS_TEXT = '在所有项目里找';
@@ -94,6 +96,9 @@ export interface LinkCell { text: string; href: string | null }
 
 export interface ToolRowView { key: string; name: string; left: LinkCell; right: LinkCell }
 
+/** A category row: its label and the tool names counted in it (masked; CATEGORY_NAMES_MAX, then 「等 N 个」). */
+export interface CategoryRowView { key: string; label: string; names: string; left: LinkCell; right: LinkCell }
+
 export interface TurnCellView {
   /** The prompt's head (masked); '' when the turn has no prompt. */
   head: string;
@@ -115,6 +120,7 @@ export interface CompareView {
   /** A side is running or waiting for a permission: the numbers are refetched (shouldPoll). */
   live: boolean;
   totals: TotalRow[];
+  categories: CategoryRowView[];
   tools: ToolRowView[];
   turns: TurnRowView[];
   turnsTruncated: boolean;
@@ -229,6 +235,16 @@ export function compareView(r: CompareResponse, ids: { a: string; b: string }, m
       right: { text: rt === null ? NONE : formatCount(r.otherTools.right), href: null },
     });
   }
+  const categories = r.categories.map((c): CategoryRowView => {
+    const shown = c.toolNames.slice(0, CATEGORY_NAMES_MAX).map((name) => m.text(name)).join('、');
+    return {
+      key: c.category,
+      label: COMPARE_TOOL_CATEGORIES.find((x) => x.key === c.category)?.label ?? c.category,
+      names: c.toolNames.length > CATEGORY_NAMES_MAX ? `${shown} 等 ${c.toolNames.length} 个` : shown,
+      left: toolCell(c.left, l),
+      right: toolCell(c.right, rt),
+    };
+  });
   const fileRow = (f: CompareFileRow, i: number): FileRowView => ({
     key: `f${i}`, path: m.text(f.path), left: fileCell(f.left, f.path, l, m), right: fileCell(f.right, f.path, rt, m),
   });
@@ -240,6 +256,7 @@ export function compareView(r: CompareResponse, ids: { a: string; b: string }, m
     sameSession: r.sameSession,
     live: shouldPoll(r, nowMs),
     totals: totals(l, rt),
+    categories,
     tools,
     turns: r.turns.map((t) => ({ index: t.index, label: turnLabel(t.index), left: turnCell(t.left, l, m), right: turnCell(t.right, rt, m) })),
     turnsTruncated: r.turnsTruncated,

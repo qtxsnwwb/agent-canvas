@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { expect, test } from 'vitest';
 import { loadConfig } from '../src/config.js';
+import { removeTestPath } from './remove-test-path.js';
 
 // Guard: no test may reach the real directories of Gemini CLI, Grok, Copilot CLI, DeepSeek Harness, WorkBuddy, CodeBuddy
 // Code, Doubao Work or Qwen Code (plans more-sources, more-sources-cn and qwen-code, Global Constraints).
@@ -83,7 +84,7 @@ test('the release scripts start the CLI with every tool directory off and a temp
     for (const k of TOOL_KEYS) expect(Array.isArray(c[k]) ? c[k] : c[k] === null ? [] : [c[k]], k).toEqual([]);
     for (const p of [env.HOME, env.USERPROFILE, c.dataDir, c.projectsDir]) expect(path.resolve(p!).startsWith(path.resolve(tmp))).toBe(true);
   } finally {
-    fs.rmSync(tmp, { recursive: true, force: true });
+    removeTestPath(tmp);
   }
   // Every script that starts the CLI builds its environment with that helper.
   const scripts = path.join(repoRoot, 'scripts');

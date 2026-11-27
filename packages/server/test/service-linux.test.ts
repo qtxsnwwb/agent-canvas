@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { linuxBackend, UNIT_NAME, unitSource } from '../src/service/linux.js';
 import type { ServiceDefinition, ServiceSystem } from '../src/service/types.js';
+import { removeTestPath } from './remove-test-path.js';
 
 /* The Linux backend against a fake system: no real systemctl is ever run; files go to a temp home. Runs on every platform. */
 
@@ -57,7 +58,7 @@ beforeEach(() => {
   answer = () => ({ code: 0 });
 });
 afterEach(() => {
-  fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 10 });
+  removeTestPath(tmp);
 });
 
 const EXPECTED = `[Unit]
