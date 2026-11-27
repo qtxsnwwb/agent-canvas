@@ -565,3 +565,14 @@ WorkBuddy Desktop's embedded engine version is unknown; DSH derived the vocabula
 11. Whether `reasoning.rawContent` is populated for all model providers (encrypted/absent reasoning), and what `content` holds then.
 12. Which edition/version rule decides `~/.workbuddy` vs `~/.workbuddy-ai`, whether both can coexist, and which mechanism (env var vs product config) WorkBuddy uses to set the root; Linux build paths.
 13. Retention: whether WorkBuddy applies the CLI's `cleanupPeriodDays` deletion to transcripts.
+
+### Seen on one real install (2026-11-27)
+
+One Windows install of the international build, signed in, before any conversation was held in it. Only directory and file names, table names, column names and row counts were looked at:
+
+- `~/.workbuddy` holds only `logs/` (as 8.2 says); the data root is `~/.workbuddy-ai`.
+- There is **no `projects/` directory** under `~/.workbuddy-ai`, the place this reader looks for transcripts. There is an empty `sessions/` directory.
+- `~/.workbuddy-ai/workbuddy.db` (SQLite) has a `sessions` table with 0 rows. Its columns include `id`, `cwd`, `title`, `custom_title`, `status`, `model`, `project_id`, `transport`, `conversation_origin` and `last_activity_at`. There is also `session_usage` (`session_id`, `used`, `size`, `credit_json`), also empty.
+- Most of the root's 26k files are the app's own runtime (`binaries/`), plugins and connectors.
+
+So where this build writes a conversation is still open. Either `projects/<name>/<id>.jsonl` appears with the first conversation, or transcripts now go elsewhere, possibly into `sessions/` or the database. Questions 6 and 12 above stand. Holding one short conversation on such an install, then listing `~/.workbuddy-ai` again, would settle it.
