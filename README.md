@@ -26,7 +26,7 @@
 
 <p align="center">
   <a href="#-快速开始">快速开始</a> ·
-  <a href="#-五个视角">五个视角</a> ·
+  <a href="#-六个视角">六个视角</a> ·
   <a href="#-支持情况">支持情况</a> ·
   <a href="./docs/manual.md">使用手册</a>
 </p>
@@ -62,7 +62,13 @@ Claude Code、Codex、Cursor 的会话放在一起，Gemini CLI、Grok、Copilot
 记得某句回复、某条命令、某段报错，却忘了在哪个会话里？首页的检索能搜到会话里面的内容（提示、回复、命令、工具输出），中文、英文、路径都行，点结果直接跳到那一步。
 
 ### 📊 跨会话的统计
-时间花在哪、哪类工具调用最慢、哪些命令最常失败、token 用了多少，以及各工具在同一个项目上的差别，一页看全。可按时间范围、来源、项目筛选。
+时间花在哪、哪类工具调用最慢、哪些命令最常失败、token 用了多少，以及各工具在同一个项目上的差别，一页看全。可按时间范围、来源、项目筛选。每个页面的顶栏都有“今天”用了多少 token（新输入 + 输出，不含缓存读取），超过你设的提醒线时可以弹通知。
+
+### ⚖️ 两个会话并排比
+同一个任务换个做法、换个 agent 再做一遍，把两个会话放在一起比：总用时、工具调用、失败、token，按类别（跑命令、读文件、改写文件……）和按工具名的调用次数，每一轮，碰过哪些文件。
+
+### 🔖 书签
+值得回头找的会话和某一步，收藏起来，可以写一句备注；顶栏的“书签”列出全部，点一下回到那一步。
 
 ### 🚨 揪出不对劲的地方
 代理卡在循环里、一连串调用失败、同一个文件改个没完、某一轮消耗离谱——这些情况会被自动标出来，首页和画布上一眼可见，点一下定位到那一步。正在运行的会话原地打转时还能弹通知，让你及时打断。
@@ -73,6 +79,9 @@ Claude Code、Codex、Cursor 的会话放在一起，Gemini CLI、Grok、Copilot
 ### 🔔 需要你的时候叫你
 会话在等你确认权限、一轮跑完、出错中断、卡住很久时，在桌面上弹一条系统通知，点一下就打开那个会话。不用一直盯着页面。默认关着，在页面的“通知”里打开。
 顶栏的“[待处理](./docs/manual.md#待处理)”把此刻在等你的会话（等你批准、出错中断、卡住了、跑完了）列在一页，实时更新，看过的点“知道了”移走；不开通知也能用。
+
+### 🖥️ 后台常驻
+`agent-canvas service install` 之后，登录就在后台启动，不开终端窗口，意外退出会被拉起来；`service status`、`service stop`、`service uninstall` 查看、停止、卸载。Windows、macOS、Linux 都支持。
 
 ### 🔒 数据不出本机
 只监听 `127.0.0.1`，不联网、不上传。对会话文件只读，数据存在本地的 SQLite 里。
@@ -172,7 +181,7 @@ agent-canvas hooks install --cursor
 
 安装前会先列出要改的文件和内容并询问确认，改之前自动备份；`hooks uninstall`（加 `--codex` / `--cursor` 对应另外两个工具）可以原样移除。Cursor 的 hooks 只装观察类事件，不会拦住 Cursor 的任何操作，所以 Cursor 会话没有“等待权限确认”。细节见[使用手册 · Hooks](./docs/manual.md#hooks可选)。
 
-## 🖼️ 五个视角
+## 🖼️ 六个视角
 
 | 视角 | 看什么 | 适合 |
 |------|--------|------|
@@ -181,6 +190,7 @@ agent-canvas hooks install --cursor
 | **拓扑** | 隐藏思考和回复，只留提示、工具调用和子代理 | 看主线和子代理的分工 |
 | **因果** | 选中一个节点，高亮它上游的一整条链 | 追问“这一步是怎么来的” |
 | **复盘** | 拖动时间轴重放整个会话，带耗时和 token | 事后回顾、找瓶颈 |
+| **时间线** | 主线和每个子代理各一行，画在同一条时间轴上；每个子代理有“主线等它多久”和“它自己干了多久” | 看时间花在哪个子代理上 |
 
 画布按网格排版：轮次从左到右排，排满换行；一轮里步骤太多时折成并排的几列。会话再长，也不会变成一条拉不到头的竖线。
 
@@ -209,7 +219,7 @@ agent-canvas hooks install --cursor
 | “消耗异常高”检测 | ✅ | ⚠️ 只看有用量记录的会话 | ❌ 不参与 |
 | hooks、实时状态、等待权限确认 | ❌ 不做 | ❌ 不做 | ❌ 不做 |
 
-这三个工具的会话目录在服务启动之后才出现的（通常是装好后第一次使用时），要重启服务才会读取。显示不对时先看诊断页里该来源的“未识别的记录”。细节和各自的限制见[使用手册 · Gemini CLI、Grok、Copilot CLI](./docs/manual.md#gemini-cligrokcopilot-cli)。
+这三个工具的会话目录如果在服务启动之后才出现（通常是装好后第一次使用时），要重启服务才会读取；下面的 DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作、Qwen Code 也一样。装了后台常驻的话用 `agent-canvas service restart` 重启。显示不对时先看诊断页里该来源的“未识别的记录”。细节和各自的限制见[使用手册 · Gemini CLI、Grok、Copilot CLI](./docs/manual.md#gemini-cligrokcopilot-cli)。
 
 还有四个国内的工具，同样只读会话文件、**未经真实数据核对**（读法依据开源代码、安装包里的类型定义和第三方读取工具，依据写在 [`docs/formats/`](./docs/formats/) 里；DeepSeek Harness 在 2026-11-18 用一个真实会话核对过，范围见手册）：
 
@@ -250,7 +260,7 @@ flowchart LR
   B["Codex<br/>~/.codex/sessions"] -->|会话文件| S
   C["Cursor<br/>state.vscdb"] -->|只读轮询| S
   G["Gemini CLI · Grok · Copilot CLI<br/>~/.gemini · ~/.grok · ~/.copilot"] -->|会话文件| S
-  N["DeepSeek · WorkBuddy · CodeBuddy · 豆包<br/>~/.dsh · ~/.workbuddy · ~/.codebuddy · 豆包的数据目录"] -->|会话文件| S
+  N["DeepSeek · WorkBuddy · CodeBuddy · 豆包<br/>~/.dsh · ~/.workbuddy(-ai) · ~/.codebuddy · 豆包的数据目录"] -->|会话文件| S
   Q["Qwen Code<br/>~/.qwen/projects"] -->|会话文件| S
   A -.->|hooks（可选）| S
   B -.->|hooks（可选）| S
@@ -297,7 +307,13 @@ flowchart LR
 - [异常](./docs/manual.md#异常)：四类异常的判定规则、在哪里看、会误报的情况
 - [导出与分享](./docs/manual.md#导出与分享)：HTML 和 Markdown 两种格式、范围和内容选项、大小上限
 - [遮蔽敏感信息](./docs/manual.md#遮蔽敏感信息)：遮什么、已知会漏什么、页面上的遮蔽开关防的是什么
-- [通知](./docs/manual.md#通知)：六种提醒的判定、设置、各来源的差别
+- [后台常驻](./docs/manual.md#后台常驻)：登录后自动启动、停止、升级、日志、各系统怎么登记
+- [时间线](./docs/manual.md#时间线)：子代理的等待和各自用时怎么算
+- [今天的用量](./docs/manual.md#今天的用量)：顶栏“今天”的口径、提醒线
+- [对比两个会话](./docs/manual.md#对比两个会话)：怎么打开、每一块的口径、加粗表示什么
+- [书签](./docs/manual.md#书签)：收藏会话和步骤、备注、找不到的书签
+- [通知](./docs/manual.md#通知)：七种提醒的判定、设置、各来源的差别
+- [待处理](./docs/manual.md#待处理)：此刻在等你的会话怎么判定、“知道了”之后
 - [Gemini CLI、Grok、Copilot CLI](./docs/manual.md#gemini-cligrokcopilot-cli)：读哪里、显示什么、各自的限制（未经真实数据核对）
 - [DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作](./docs/manual.md#deepseek-harnessworkbuddycodebuddy-code豆包工作)：读哪里、显示什么、各自的限制、不支持的工具（未经真实数据核对）
 - [Qwen Code](./docs/manual.md#qwen-code)：读哪里（含改过输出目录时怎么指过去）、显示什么、限制（未经真实数据核对）
@@ -324,7 +340,7 @@ pnpm release                            # 在 release/ 里生成要发布到 npm
 
 每个 PR 和 `main` 上的每次推送都会在 Linux 和 Windows 上自动运行类型检查、构建、全套测试和发布包检查（`.github/workflows/ci.yml`）。
 
-发版：把根目录 `package.json` 的 `version` 改成新版本号并合并到 `main`，然后推送同名标签（版本 `0.3.0` 对应标签 `v0.3.0`）。`.github/workflows/release.yml` 会核对标签与版本号、重跑全部检查、发布到 npm，并在 GitHub 上建一个 Release。发布用的是 npm 的可信发布（OIDC），仓库里不保存任何 npm 令牌。
+发版：把四个 `package.json`（根目录和 `packages/` 下的三个）的 `version` 一起改成新版本号并合并到 `main`，然后推送同名标签（版本 `0.3.0` 对应标签 `v0.3.0`）。发布到 npm 的包用根目录的版本号，但从源码运行时 `agent-canvas --version` 显示的是 `packages/server/package.json` 的，所以四个要一起改。`.github/workflows/release.yml` 会核对标签与版本号、重跑全部检查、发布到 npm，并在 GitHub 上建一个 Release。发布用的是 npm 的可信发布（OIDC），仓库里不保存任何 npm 令牌。
 
 可信发布要在 npmjs.com 上这个包的 Settings → Trusted Publisher 里配置一次：选 GitHub Actions，填仓库 `qtxsnwwb/agent-canvas` 和工作流文件名 `release.yml`，并在 Allowed actions 里勾选 **Allow npm publish**。新建的可信发布者默认只允许暂存发布（`npm stage publish`），不勾这一项，工作流会在发布那一步报 `OIDC permission denied for this action`。
 
