@@ -6,7 +6,7 @@
 
 <p align="center">
   Agent Canvas 是一个跑在你本机的小服务。<br/>
-  它读取 Claude Code、OpenAI Codex、Cursor 的会话记录（Gemini CLI、Grok、GitHub Copilot CLI、DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作、Qwen Code 也能读，尚未经真实数据核对，其中 DeepSeek Harness 只核对过一个真实会话），在浏览器里实时画出每个会话的来龙去脉：<br/>
+  它读取 Claude Code、OpenAI Codex、Cursor 的会话记录（Gemini CLI、Grok、GitHub Copilot CLI、DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作、Qwen Code 也能读；其中 DeepSeek Harness 和 WorkBuddy 各用一个真实会话核对过，其余尚未经真实数据核对），在浏览器里实时画出每个会话的来龙去脉：<br/>
   问了什么、调了哪些工具、派了哪些子代理、哪一步慢、哪一步失败。
 </p>
 
@@ -19,7 +19,8 @@
   <img src="https://img.shields.io/badge/Codex-%E2%9C%93-5B6CFF" alt="Codex"/>
   <img src="https://img.shields.io/badge/Cursor-%E2%9C%93-14B8A6" alt="Cursor"/>
   <img src="https://img.shields.io/badge/Gemini%20CLI%20%C2%B7%20Grok%20%C2%B7%20Copilot%20CLI-%E6%9C%AA%E6%A0%B8%E5%AF%B9-lightgrey" alt="Gemini CLI · Grok · Copilot CLI：未核对"/>
-  <img src="https://img.shields.io/badge/DeepSeek%20%C2%B7%20WorkBuddy%20%C2%B7%20CodeBuddy%20%C2%B7%20%E8%B1%86%E5%8C%85-%E6%9C%AA%E6%A0%B8%E5%AF%B9-lightgrey" alt="DeepSeek · WorkBuddy · CodeBuddy · 豆包：未核对"/>
+  <img src="https://img.shields.io/badge/DeepSeek%20%C2%B7%20WorkBuddy-%E9%83%A8%E5%88%86%E6%A0%B8%E5%AF%B9-yellow" alt="DeepSeek · WorkBuddy：部分核对"/>
+  <img src="https://img.shields.io/badge/CodeBuddy%20%C2%B7%20%E8%B1%86%E5%8C%85-%E6%9C%AA%E6%A0%B8%E5%AF%B9-lightgrey" alt="CodeBuddy · 豆包：未核对"/>
   <img src="https://img.shields.io/badge/Qwen%20Code-%E6%9C%AA%E6%A0%B8%E5%AF%B9-lightgrey" alt="Qwen Code：未核对"/>
   <img src="https://img.shields.io/badge/%E6%95%B0%E6%8D%AE-%E5%8F%AA%E5%9C%A8%E6%9C%AC%E6%9C%BA-2EA44F" alt="数据只在本机"/>
 </p>
@@ -50,7 +51,7 @@
 主线派出的子代理挂在对应的轮次下面，可以展开看它内部的每一步；后台运行的子代理会一直跟到它真正结束。
 
 ### 🧩 多种工具，一个页面
-Claude Code、Codex、Cursor 的会话放在一起，Gemini CLI、Grok、Copilot CLI、DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作、Qwen Code 的也能放进来（这八个还没用真实数据核对过，见手册的 [Gemini CLI、Grok、Copilot CLI](./docs/manual.md#gemini-cligrokcopilot-cli)、[DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作](./docs/manual.md#deepseek-harnessworkbuddycodebuddy-code豆包工作) 和 [Qwen Code](./docs/manual.md#qwen-code)）。同一个工作目录下的会话归到同一个项目，每个会话带来源标记，首页可以按来源筛选。
+Claude Code、Codex、Cursor 的会话放在一起，Gemini CLI、Grok、Copilot CLI、DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作、Qwen Code 的也能放进来（这八个里只有 DeepSeek Harness 和 WorkBuddy 各用一个真实会话核对过，其余还没用真实数据核对过，见手册的 [Gemini CLI、Grok、Copilot CLI](./docs/manual.md#gemini-cligrokcopilot-cli)、[DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作](./docs/manual.md#deepseek-harnessworkbuddycodebuddy-code豆包工作) 和 [Qwen Code](./docs/manual.md#qwen-code)）。同一个工作目录下的会话归到同一个项目，每个会话带来源标记，首页可以按来源筛选。
 
 ### ⚡ 接近实时
 只靠会话文件就能工作，延迟几秒。装上 hooks 之后状态变化在 1 秒内到达，还能看到“正在等你确认权限”。
@@ -221,14 +222,14 @@ agent-canvas hooks install --cursor
 
 这三个工具的会话目录如果在服务启动之后才出现（通常是装好后第一次使用时），要重启服务才会读取；下面的 DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作、Qwen Code 也一样。装了后台常驻的话用 `agent-canvas service restart` 重启。显示不对时先看诊断页里该来源的“未识别的记录”。细节和各自的限制见[使用手册 · Gemini CLI、Grok、Copilot CLI](./docs/manual.md#gemini-cligrokcopilot-cli)。
 
-还有四个国内的工具，同样只读会话文件、**未经真实数据核对**（读法依据开源代码、安装包里的类型定义和第三方读取工具，依据写在 [`docs/formats/`](./docs/formats/) 里；DeepSeek Harness 在 2026-11-18 用一个真实会话核对过，范围见手册）：
+还有四个国内的工具，同样只读会话文件，**大部分未经真实数据核对**（读法依据开源代码、安装包里的类型定义和第三方读取工具，依据写在 [`docs/formats/`](./docs/formats/) 里；DeepSeek Harness 在 2026-11-18、WorkBuddy 在 2026-11-27 各用一个真实会话核对过，范围见手册）：
 
 | 能力 | DeepSeek Harness | WorkBuddy | CodeBuddy Code | 豆包工作 |
 |------|:----------------:|:---------:|:--------------:|:--------:|
-| 数据来源 | 会话文件 `~/.dsh/sessions`（只读第 4 版） | 会话文件 `~/.workbuddy`、`~/.workbuddy-ai` | 会话文件 `~/.codebuddy` | 客户端数据目录里的会话文件（Windows、macOS） |
-| 轮次、工具调用、回复、子代理 | ⚠️ 未核对 | ⚠️ 未核对，回退后只显示当前分支 | ⚠️ 同 WorkBuddy | ⚠️ 未核对 |
-| 思考、模型、工作目录 | ⚠️ 未核对 | ⚠️ 未核对 | ⚠️ 未核对 | ❌ 文件里没有；全部会话归入项目“豆包工作” |
-| token 用量 | ⚠️ 每次回复 | ⚠️ 换算是推测的 | ⚠️ 同 WorkBuddy | ❌ 文件里没有 |
+| 数据来源 | 会话文件 `~/.dsh/sessions`（只读第 4 版） | 会话文件 `~/.workbuddy`、`~/.workbuddy-ai`（国际版桌面应用核对过） | 会话文件 `~/.codebuddy` | 客户端数据目录里的会话文件（Windows、macOS） |
+| 轮次、工具调用、回复、子代理 | ⚠️ 轮次、工具调用、回复核对过；子代理未核对 | ⚠️ 轮次、工具调用、回复核对过；子代理未核对；回退后只显示当前分支 | ⚠️ 未核对，回退后只显示当前分支 | ⚠️ 未核对 |
+| 思考、模型、工作目录 | ⚠️ 思考、工作目录核对过；模型未核对 | ⚠️ 工作目录核对过（桌面应用每次对话一个新目录，各成一个项目）；思考、模型未核对 | ⚠️ 未核对 | ❌ 文件里没有；全部会话归入项目“豆包工作” |
+| token 用量 | ✅ 每次回复，核对过 | ✅ 每次模型请求，核对过 | ⚠️ 换算是推测的 | ❌ 文件里没有 |
 | “消耗异常高”检测 | ✅ | ✅ | ✅ | ❌ 不参与 |
 | hooks、实时状态、等待权限确认 | ❌ 不做 | ❌ 不做 | ❌ 不做 | ❌ 不做 |
 
@@ -315,7 +316,7 @@ flowchart LR
 - [通知](./docs/manual.md#通知)：七种提醒的判定、设置、各来源的差别
 - [待处理](./docs/manual.md#待处理)：此刻在等你的会话怎么判定、“知道了”之后
 - [Gemini CLI、Grok、Copilot CLI](./docs/manual.md#gemini-cligrokcopilot-cli)：读哪里、显示什么、各自的限制（未经真实数据核对）
-- [DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作](./docs/manual.md#deepseek-harnessworkbuddycodebuddy-code豆包工作)：读哪里、显示什么、各自的限制、不支持的工具（未经真实数据核对）
+- [DeepSeek Harness、WorkBuddy、CodeBuddy Code、豆包工作](./docs/manual.md#deepseek-harnessworkbuddycodebuddy-code豆包工作)：读哪里、显示什么、各自的限制、不支持的工具、核对过什么（DeepSeek Harness、WorkBuddy 各核对过一个真实会话，其余未核对）
 - [Qwen Code](./docs/manual.md#qwen-code)：读哪里（含改过输出目录时怎么指过去）、显示什么、限制（未经真实数据核对）
 - [格式说明](./docs/formats/)：后加的这些工具的会话文件格式和每条结论的出处
 - [诊断页](./docs/manual.md#诊断页)：页面右上角的“诊断”，看导入进度、hook 是否收到、未识别的记录

@@ -566,13 +566,31 @@ WorkBuddy Desktop's embedded engine version is unknown; DSH derived the vocabula
 12. Which edition/version rule decides `~/.workbuddy` vs `~/.workbuddy-ai`, whether both can coexist, and which mechanism (env var vs product config) WorkBuddy uses to set the root; Linux build paths.
 13. Retention: whether WorkBuddy applies the CLI's `cleanupPeriodDays` deletion to transcripts.
 
-### Seen on one real install (2026-11-27)
+### Checked against one real WorkBuddy session (2026-11-27)
 
-One Windows install of the international build, signed in, before any conversation was held in it. Only directory and file names, table names, column names and row counts were looked at:
+One Windows install of the international build. One conversation in the desktop app: a single turn, four `Bash` calls (one of them exiting with code 2), three replies. Only names, types, lengths, counts and numbers were looked at, never the text. Placeholders below stand for the user's own paths.
 
-- `~/.workbuddy` holds only `logs/` (as 8.2 says); the data root is `~/.workbuddy-ai`.
-- There is **no `projects/` directory** under `~/.workbuddy-ai`, the place this reader looks for transcripts. There is an empty `sessions/` directory.
-- `~/.workbuddy-ai/workbuddy.db` (SQLite) has a `sessions` table with 0 rows. Its columns include `id`, `cwd`, `title`, `custom_title`, `status`, `model`, `project_id`, `transport`, `conversation_origin` and `last_activity_at`. There is also `session_usage` (`session_id`, `used`, `size`, `credit_json`), also empty.
-- Most of the root's 26k files are the app's own runtime (`binaries/`), plugins and connectors.
+**Where it is written.** Before the first conversation the data root `~/.workbuddy-ai` had no `projects/` directory (an empty `sessions/`, and `workbuddy.db` with an empty `sessions` table). The first conversation created:
 
-So where this build writes a conversation is still open. Either `projects/<name>/<id>.jsonl` appears with the first conversation, or transcripts now go elsewhere, possibly into `sessions/` or the database. Questions 6 and 12 above stand. Holding one short conversation on such an install, then listing `~/.workbuddy-ai` again, would settle it.
+- `projects/<encoded cwd>/<sessionId>.jsonl`: the transcript (section 1's layout). The project directory is the conversation's working directory encoded, drive letter lower-cased (`c-Users-<user>-WorkBuddy AI-<YYYY-MM-DD-HH-MM-SS>`).
+- `projects/<encoded cwd>/<sessionId>.file-rollback.ndjson`, and `projects/<encoded cwd>/<sessionId>/tool-results/call_….txt` (a full tool output kept beside the transcript). Neither is read.
+- Also `sessions/<number>.json`, `traces/<encoded cwd>/trace_<hex>.jsonl`, `shell-snapshots/`, `file-tree-manifests/`, `workspace/<encoded cwd>/<sessionId>/` (file backups). None is read.
+
+**The working directory is a new folder per conversation.** `cwd` is `<home>\WorkBuddy AI\<YYYY-MM-DD-HH-MM-SS>`, the same on every line. Every desktop conversation therefore has its own working directory, and so its own project on the home page (open question 7, for the desktop app).
+
+**Records, in order:** `session-meta` twice (`meta["codebuddy.ai/hostKind"]`), the user `message` (one `input_text` part), `file-history-snapshot`, `ai-title`, then per model step a `function_call` and its `function_call_result`, or an assistant `message`. In steps 3 and 4 the assistant `message` and the `function_call` share one `providerData.messageId` and the message comes first. No `reasoning` lines (the model wrote none), no `turn-metrics`, no `acp-terminal-state`, no `model-usage`, no `custom-title`/`topic`.
+
+**Answers to the open questions above, for this build:**
+
+- 1: the lines are the shapes of sections 3 and 4: `providerData.conversationRequestId`, `messageId`, `stepSeq`, `model`, `agent`; `parentId` on every item line.
+- 2: `providerData.usage` and `providerData.rawUsage` are on the `function_call` of each step, and on the final assistant `message` (one pair per model request, five in all). `usage.inputTokensDetails` is an **array** `[{ cached_tokens }]`. In `rawUsage`, `prompt_tokens_details.cached_tokens` is 0, but `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` carry the real split. They equal `inputTokensDetails[0].cached_tokens` and the rest. No `message.usage`.
+- 3: there is an `ai-title` line; no `custom-title` or `topic`.
+- 5: the first user message is one `input_text` part: the typed text inside `<user_query>`, preceded by `<user_info>` and `<system-reminder>` blocks and a `Workspace Folder` line.
+- 7: see above: a per-conversation timestamp folder, unchanged within the file.
+- 12: the international build writes `~/.workbuddy-ai`; `projects/` appears with the first conversation.
+- Turn end: none of the optional end records is written by the desktop app, so the session stays running (section 6's "never written" case).
+- A failed shell command: the result has `status: "completed"` and `toolResult.rawResponse` = `{ exitCode: 2, is_error: true, error, tool_error_code, … }`. Successful ones have `exitCode: 0` and no `is_error`. The reader used to show the failed one as succeeded; it now fails a result whose `rawResponse.is_error` is true.
+
+**What the reader showed** (a throwaway server reading only this directory): one session, with its title and working directory. The prompt node showed only the 18 characters inside `<user_query>`, none of the wrapper. Four `Bash` calls showed their commands, durations equal to the result time minus the call time, and one failed (after the fix). Three replies. Token totals equal the five requests' sums: new input 37,275, cache read 134,912, output 1,040. There were no unrecognised records and no read failures.
+
+**Still unchecked with real data:** subagents, rewind and resend (branches), compaction, reasoning lines, file read / write tools (so the file view), MCP tools, a cancelled or errored turn, CodeBuddy Code, and the China build's `~/.workbuddy`.
